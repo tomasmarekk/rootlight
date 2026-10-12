@@ -47,7 +47,7 @@ use rootlight_operations::{
     OperationState as JournalState, RecoveryClass as JournalRecoveryClass, RepairAction,
     RepairPlan, plan_catalog_repair,
 };
-use rootlight_runtime::{PrivateOutputFile, RuntimeError, RuntimePaths};
+use rootlight_runtime::{PrivateOutputFile, RuntimeError, RuntimePaths, UpdateHealthProbeFailure};
 #[cfg(test)]
 use rootlight_service::CancellationReason;
 use rootlight_service::{
@@ -122,6 +122,12 @@ Discovery:
 
 fn main() -> ExitCode {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if is_update_health_probe(&arguments) {
+        return match execute_update_health_probe() {
+            Ok(result) => render_success(result),
+            Err(error) => ExitCode::from(render_update_health_probe_failure(error)),
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "web") {
         return match execute_web(&arguments[1..]) {
             Ok(exit) => exit,
@@ -136,6 +142,17 @@ fn main() -> ExitCode {
         Some(DiscoveryOutput::Json(result)) => render_success(*result),
         None => render_execution(run(arguments)),
     }
+}
+
+fn is_update_health_probe(arguments: &[std::ffi::OsString]) -> bool {
+    matches!(arguments, [argument] if argument == "--update-health-probe")
+}
+
+fn render_update_health_probe_failure(error: UpdateHealthProbeError) -> u8 {
+    // Keep the existing source-free envelope; only the exact parent-owned
+    // probe consumes the stage-specific status instead of public exit families.
+    let _ = render_failure(error.error);
+    error.failure.exit_code()
 }
 
 fn render_execution(result: Result<CommandResult, CliError>) -> ExitCode {
@@ -218,6 +235,9 @@ enum DiscoveryOutput {
 // Keep command execution separate from discovery rendering so help and version
 // remain available even when daemon state is absent or damaged.
 fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
+    if is_update_health_probe(&arguments) {
+        return execute_update_health_probe().map_err(|error| error.error);
+    }
     let mut arguments = arguments.into_iter();
     let first = arguments.next().ok_or(CliError::Usage)?;
     let (standalone, command) = if first == "--standalone" {
@@ -227,9 +247,6 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<CommandResult, CliError> {
     };
     let trailing = arguments.collect::<Vec<_>>();
 
-    if command == "--update-health-probe" && trailing.is_empty() && !standalone {
-        return execute_update_health_probe();
-    }
     if command == "first-slice-demo" {
         return execute_first_slice_demo(&trailing);
     }
@@ -881,28 +898,73 @@ fn classify_uninstall_daemon_probe(probe: Result<(), ClientError>) -> Result<(),
     }
 }
 
-fn execute_update_health_probe() -> Result<CommandResult, CliError> {
-    let temporary = update_health_state_tempdir()?;
-    let runtime = update_health_runtime_tempdir()?;
+#[derive(Debug)]
+struct UpdateHealthProbeError {
+    failure: UpdateHealthProbeFailure,
+    error: CliError,
+}
+
+impl UpdateHealthProbeError {
+    fn preparation(error: impl Into<CliError>) -> Self {
+        Self {
+            failure: UpdateHealthProbeFailure::PreparationFailed,
+            error: error.into(),
+        }
+    }
+
+    fn daemon_start(error: ClientError) -> Self {
+        let failure = match error {
+            ClientError::DaemonStartTimedOut => UpdateHealthProbeFailure::DaemonStartTimedOut,
+            _ => UpdateHealthProbeFailure::DaemonStartFailed,
+        };
+        Self {
+            failure,
+            error: error.into(),
+        }
+    }
+}
+
+fn execute_update_health_probe() -> Result<CommandResult, UpdateHealthProbeError> {
+    let temporary = update_health_state_tempdir().map_err(UpdateHealthProbeError::preparation)?;
+    let runtime = update_health_runtime_tempdir().map_err(UpdateHealthProbeError::preparation)?;
     let state_dir = env::var_os(UPDATE_HEALTH_STATE_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| temporary.path().join("state"));
     if !state_dir.is_absolute() {
-        return Err(CliError::InvalidUpdateInput);
+        return Err(UpdateHealthProbeError::preparation(
+            CliError::InvalidUpdateInput,
+        ));
     }
-    let paths = RuntimePaths::new(state_dir, runtime.path().to_path_buf())?;
-    paths.prepare_owner()?;
+    let paths = RuntimePaths::new(state_dir, runtime.path().to_path_buf())
+        .map_err(UpdateHealthProbeError::preparation)?;
+    paths
+        .prepare_owner()
+        .map_err(UpdateHealthProbeError::preparation)?;
     let mut identity = [0_u8; 16];
-    getrandom::fill(&mut identity).map_err(|_| CliError::RandomUnavailable)?;
+    getrandom::fill(&mut identity)
+        .map_err(|_| UpdateHealthProbeError::preparation(CliError::RandomUnavailable))?;
     let (client, owned) =
-        Client::connect_or_start_owned(&paths, identity, ConnectPolicy::StartIfMissing)?;
-    let health = client.health()?;
+        Client::connect_or_start_owned(&paths, identity, ConnectPolicy::StartIfMissing)
+            .map_err(UpdateHealthProbeError::daemon_start)?;
+    let health = client.health().map_err(|error| UpdateHealthProbeError {
+        failure: UpdateHealthProbeFailure::HealthRpcFailed,
+        error: error.into(),
+    })?;
     if !health.ready {
-        return Err(CliError::HealthProbeNotReady);
+        return Err(UpdateHealthProbeError {
+            failure: UpdateHealthProbeFailure::HealthNotReady,
+            error: CliError::HealthProbeNotReady,
+        });
     }
-    let owned = owned.ok_or(CliError::HealthProbeOwnership)?;
+    let owned = owned.ok_or(UpdateHealthProbeError {
+        failure: UpdateHealthProbeFailure::OwnershipMissing,
+        error: CliError::HealthProbeOwnership,
+    })?;
     drop(client);
-    owned.shutdown()?;
+    owned.shutdown().map_err(|error| UpdateHealthProbeError {
+        failure: UpdateHealthProbeFailure::ShutdownFailed,
+        error: error.into(),
+    })?;
     Ok(CommandResult::UpdateHealthProbe { ready: true })
 }
 
@@ -3333,6 +3395,129 @@ mod tests {
             web_entry_announcement(entry_url, true),
             "Rootlight Web UI: http://127.0.0.1:43127"
         );
+    }
+
+    #[test]
+    fn update_health_probe_requires_the_exact_private_invocation() {
+        assert!(is_update_health_probe(&arguments(&[
+            "--update-health-probe"
+        ])));
+        for values in [
+            vec![],
+            vec!["health"],
+            vec!["--standalone", "--update-health-probe"],
+            vec!["--update-health-probe", "--json"],
+            vec!["--asset-dir", "--update-health-probe"],
+        ] {
+            assert!(!is_update_health_probe(&arguments(&values)));
+        }
+    }
+
+    #[test]
+    fn update_probe_stages_survive_actual_child_exits_without_changing_public_errors() {
+        for (fixture, expected, public_exit) in [
+            (
+                "timeout",
+                UpdateHealthProbeFailure::DaemonStartTimedOut,
+                ExitFamily::Unavailable,
+            ),
+            (
+                "startup",
+                UpdateHealthProbeFailure::DaemonStartFailed,
+                ExitFamily::Internal,
+            ),
+            (
+                "health",
+                UpdateHealthProbeFailure::HealthRpcFailed,
+                ExitFamily::Internal,
+            ),
+            (
+                "not-ready",
+                UpdateHealthProbeFailure::HealthNotReady,
+                ExitFamily::Degraded,
+            ),
+            (
+                "ownership",
+                UpdateHealthProbeFailure::OwnershipMissing,
+                ExitFamily::SecurityPolicy,
+            ),
+            (
+                "shutdown",
+                UpdateHealthProbeFailure::ShutdownFailed,
+                ExitFamily::Internal,
+            ),
+            (
+                "preparation",
+                UpdateHealthProbeFailure::PreparationFailed,
+                ExitFamily::Usage,
+            ),
+        ] {
+            let output =
+                std::process::Command::new(env::current_exe().expect("test binary resolves"))
+                    .args([
+                        "--exact",
+                        "tests::update_health_probe_exit_fixture",
+                        "--nocapture",
+                    ])
+                    .env("ROOTLIGHT_TEST_UPDATE_PROBE_EXIT", fixture)
+                    .env(UPDATE_HEALTH_STATE_DIR_ENV, "relative-state")
+                    .output()
+                    .expect("update probe fixture exits");
+            assert_eq!(
+                output
+                    .status
+                    .code()
+                    .and_then(UpdateHealthProbeFailure::from_exit_code),
+                Some(expected),
+                "{fixture} preserves its stage"
+            );
+            let stderr = String::from_utf8(output.stderr).expect("error envelope is UTF-8");
+            let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+                .expect("private failure retains its public JSON envelope");
+            assert_eq!(
+                envelope["exit_family"],
+                serde_json::to_value(public_exit).expect("public exit family serializes"),
+                "{fixture} public exit is unchanged"
+            );
+            assert!(!stderr.contains("private-source-and-bootstrap-capability"));
+            assert!(!stderr.contains("relative-state"));
+        }
+    }
+
+    #[test]
+    fn update_health_probe_exit_fixture() {
+        let Ok(fixture) = env::var("ROOTLIGHT_TEST_UPDATE_PROBE_EXIT") else {
+            return;
+        };
+        let private_io = || {
+            ClientError::LaunchIo(std::io::Error::other(
+                "private-source-and-bootstrap-capability",
+            ))
+        };
+        let error = match fixture.as_str() {
+            "timeout" => UpdateHealthProbeError::daemon_start(ClientError::DaemonStartTimedOut),
+            "startup" => UpdateHealthProbeError::daemon_start(private_io()),
+            "health" => UpdateHealthProbeError {
+                failure: UpdateHealthProbeFailure::HealthRpcFailed,
+                error: ClientError::RequestTimedOut.into(),
+            },
+            "not-ready" => UpdateHealthProbeError {
+                failure: UpdateHealthProbeFailure::HealthNotReady,
+                error: CliError::HealthProbeNotReady,
+            },
+            "ownership" => UpdateHealthProbeError {
+                failure: UpdateHealthProbeFailure::OwnershipMissing,
+                error: CliError::HealthProbeOwnership,
+            },
+            "shutdown" => UpdateHealthProbeError {
+                failure: UpdateHealthProbeFailure::ShutdownFailed,
+                error: private_io().into(),
+            },
+            "preparation" => execute_update_health_probe()
+                .expect_err("relative state input fails before daemon startup"),
+            _ => panic!("update probe fixture is declared by its parent"),
+        };
+        std::process::exit(i32::from(render_update_health_probe_failure(error)));
     }
 
     #[test]

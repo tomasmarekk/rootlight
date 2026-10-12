@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 mod filesystem;
 
 pub use filesystem::{
-    ACTIVE_VERSION_FILE, CandidateHealthCheck, CandidateHealthError, FilesystemUpdateError,
-    FilesystemUpdateOutcome, INSTALL_MANIFEST_FILE, PackageInstallOutcome, PackageUninstallOutcome,
+    ACTIVE_VERSION_FILE, CandidateHealthCheck, CandidateHealthDiagnostic, CandidateHealthError,
+    FilesystemUpdateError, FilesystemUpdateOutcome, INSTALL_MANIFEST_FILE,
+    ObservedProcessCandidateHealthCheck, PackageInstallOutcome, PackageUninstallOutcome,
     ProcessCandidateHealthCheck, TrustedUpdatePolicy, UPDATE_HEALTH_STATE_DIR_ENV,
     UPDATE_LOCK_FILE, UPDATE_POLICY_FILE, UPDATE_TRANSACTION_FILE, UpdateInputPaths,
     UpdateRuntimeStatus, UpdateTransactionPhase, apply_update_package,

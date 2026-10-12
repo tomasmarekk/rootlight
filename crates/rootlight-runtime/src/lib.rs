@@ -90,6 +90,73 @@ impl WebServiceStartupFailure {
     }
 }
 
+/// Source-free failures returned by the exact `rootlight --update-health-probe` child.
+///
+/// Statuses 82 through 88 identify stages of this private probe only. Callers
+/// must treat all other statuses and signal termination as unclassified failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateHealthProbeFailure {
+    /// Coordinated daemon startup exceeded its existing readiness deadline.
+    DaemonStartTimedOut,
+    /// Daemon discovery, launch, or authentication failed before the health request.
+    DaemonStartFailed,
+    /// The started daemon did not complete the health request successfully.
+    HealthRpcFailed,
+    /// The health response reported that the daemon was not ready.
+    HealthNotReady,
+    /// The isolated probe did not own the daemon it contacted.
+    OwnershipMissing,
+    /// The owned daemon did not shut down successfully.
+    ShutdownFailed,
+    /// Private filesystem, runtime, or identity preparation failed.
+    PreparationFailed,
+}
+
+impl UpdateHealthProbeFailure {
+    /// Returns the private probe-child exit status.
+    #[must_use]
+    pub const fn exit_code(self) -> u8 {
+        match self {
+            Self::DaemonStartTimedOut => 82,
+            Self::DaemonStartFailed => 83,
+            Self::HealthRpcFailed => 84,
+            Self::HealthNotReady => 85,
+            Self::OwnershipMissing => 86,
+            Self::ShutdownFailed => 87,
+            Self::PreparationFailed => 88,
+        }
+    }
+
+    /// Decodes only the reserved private probe-child exit statuses.
+    #[must_use]
+    pub const fn from_exit_code(code: i32) -> Option<Self> {
+        match code {
+            82 => Some(Self::DaemonStartTimedOut),
+            83 => Some(Self::DaemonStartFailed),
+            84 => Some(Self::HealthRpcFailed),
+            85 => Some(Self::HealthNotReady),
+            86 => Some(Self::OwnershipMissing),
+            87 => Some(Self::ShutdownFailed),
+            88 => Some(Self::PreparationFailed),
+            _ => None,
+        }
+    }
+
+    /// Returns the closed diagnostic label without process or source data.
+    #[must_use]
+    pub const fn diagnostic_reason(self) -> &'static str {
+        match self {
+            Self::DaemonStartTimedOut => "daemon_start_timeout",
+            Self::DaemonStartFailed => "daemon_start_failed",
+            Self::HealthRpcFailed => "health_rpc_failed",
+            Self::HealthNotReady => "health_not_ready",
+            Self::OwnershipMissing => "ownership_missing",
+            Self::ShutdownFailed => "shutdown_failed",
+            Self::PreparationFailed => "preparation_failed",
+        }
+    }
+}
+
 /// Resolves an existing executable beneath the trusted Windows system root.
 ///
 /// The returned path is canonical, remains beneath the canonical `SystemRoot`,
@@ -1889,6 +1956,61 @@ pub enum RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_probe_statuses_reject_unreserved_and_other_private_codes() {
+        for (failure, code, reason) in [
+            (
+                UpdateHealthProbeFailure::DaemonStartTimedOut,
+                82,
+                "daemon_start_timeout",
+            ),
+            (
+                UpdateHealthProbeFailure::DaemonStartFailed,
+                83,
+                "daemon_start_failed",
+            ),
+            (
+                UpdateHealthProbeFailure::HealthRpcFailed,
+                84,
+                "health_rpc_failed",
+            ),
+            (
+                UpdateHealthProbeFailure::HealthNotReady,
+                85,
+                "health_not_ready",
+            ),
+            (
+                UpdateHealthProbeFailure::OwnershipMissing,
+                86,
+                "ownership_missing",
+            ),
+            (
+                UpdateHealthProbeFailure::ShutdownFailed,
+                87,
+                "shutdown_failed",
+            ),
+            (
+                UpdateHealthProbeFailure::PreparationFailed,
+                88,
+                "preparation_failed",
+            ),
+        ] {
+            assert_eq!(failure.exit_code(), code);
+            assert_eq!(failure.diagnostic_reason(), reason);
+            assert_eq!(
+                UpdateHealthProbeFailure::from_exit_code(i32::from(code)),
+                Some(failure)
+            );
+        }
+        for code in -1..=256 {
+            if !(82..=88).contains(&code) {
+                assert_eq!(UpdateHealthProbeFailure::from_exit_code(code), None);
+            }
+        }
+        assert_eq!(UpdateHealthProbeFailure::from_exit_code(i32::MIN), None);
+        assert_eq!(UpdateHealthProbeFailure::from_exit_code(i32::MAX), None);
+    }
 
     #[test]
     fn service_startup_statuses_reject_every_unreserved_exit_code() {

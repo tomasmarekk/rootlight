@@ -19,7 +19,8 @@ use std::{
 use ed25519_compact::{KeyPair, Seed};
 use rootlight_build::version::Version;
 use rootlight_client::{
-    ArtifactMetadata, CandidateHealthCheck, CandidateHealthError, PackageUninstallOutcome,
+    ArtifactMetadata, CandidateHealthCheck, CandidateHealthDiagnostic, CandidateHealthError,
+    FilesystemUpdateError, FilesystemUpdateOutcome, PackageUninstallOutcome,
     ProcessCandidateHealthCheck, ReproducibilityLevel, TrustedUpdatePolicy,
     UPDATE_METADATA_SCHEMA_VERSION, UpdateCompatibility, UpdateInputPaths, UpdateMetadata,
     UpdatePublicKey, UpdateRuntimeStatus, apply_update_package_with_policy,
@@ -1140,19 +1141,20 @@ fn exercise_install_lifecycle(
         return invalid_install("bootstrap outcome does not match the baseline archive");
     }
     verify_installed_web_payload(&install_root, &baseline_manifest)?;
-    let mut health = ProcessCandidateHealthCheck;
+    let mut health = ProcessCandidateHealthCheck::observed();
     let catalog_state = sandbox.path().join("catalog-state");
     fs::create_dir(&catalog_state).map_err(|error| PackageError::InputIo {
         path: catalog_state.clone(),
         error,
     })?;
-    let updated = apply_update_package_with_policy(
+    let update_result = apply_update_package_with_policy(
         &install_root,
         &catalog_state,
         &inputs,
         &policy,
         &mut health,
-    )?;
+    );
+    let updated = finish_candidate_update(update_result, health.failure(), &options.output)?;
     if updated.version != candidate_manifest.version
         || updated.previous_version != baseline_manifest.version
         || updated.artifact_sha256 != candidate_sha256
@@ -1277,6 +1279,61 @@ fn exercise_install_lifecycle(
         user_data_preserved: true,
         unowned_data_preserved: true,
     })
+}
+
+fn finish_candidate_update(
+    result: Result<FilesystemUpdateOutcome, FilesystemUpdateError>,
+    diagnostic: Option<CandidateHealthDiagnostic>,
+    lifecycle_output: &Path,
+) -> Result<FilesystemUpdateOutcome, PackageError> {
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            if let Some(diagnostic) = diagnostic {
+                eprintln!(
+                    "candidate health diagnostic: phase={} reason={} elapsed_ms={} timeout_ms={}",
+                    diagnostic.phase(),
+                    diagnostic.reason(),
+                    diagnostic.elapsed_ms(),
+                    diagnostic.timeout_ms(),
+                );
+                // Preserve the health failure even when the evidence directory
+                // cannot accept a receipt; the source-free log remains available.
+                if persist_candidate_health_failure(lifecycle_output, diagnostic).is_err() {
+                    eprintln!("candidate health failure receipt could not be retained");
+                }
+            }
+            Err(PackageError::FilesystemUpdate(error))
+        }
+    }
+}
+
+fn persist_candidate_health_failure(
+    lifecycle_output: &Path,
+    diagnostic: CandidateHealthDiagnostic,
+) -> Result<(), PackageError> {
+    #[derive(Serialize)]
+    struct FailureReceipt {
+        schema: &'static str,
+        diagnostic: CandidateHealthDiagnostic,
+    }
+
+    let mut bytes = serde_json::to_vec_pretty(&FailureReceipt {
+        schema: "rootlight.candidate-health-failure/1",
+        diagnostic,
+    })
+    .map_err(PackageError::SerializeManifest)?;
+    bytes.push(b'\n');
+    if bytes.len() > 1024 {
+        return Err(PackageError::ManifestTooLarge);
+    }
+    let output = lifecycle_output.with_extension("failure.json");
+    let parent = output.parent().ok_or_else(|| PackageError::InvalidInput {
+        path: output.clone(),
+        detail: "lifecycle output has no parent directory".to_owned(),
+    })?;
+    prepare_output_dir(parent)?;
+    persist_new_file(&output, &bytes)
 }
 
 fn verify_installed_web_payload(
@@ -2153,6 +2210,68 @@ mod tests {
     use zip::ZipArchive;
 
     use super::*;
+
+    #[test]
+    fn candidate_health_failure_receipt_survives_cleanup_without_private_inputs() {
+        let evidence = tempdir().expect("evidence directory exists");
+        let output = evidence.path().join("package.lifecycle.json");
+        let receipt = output.with_extension("failure.json");
+        {
+            let candidate = tempdir().expect("temporary candidate exists");
+            let root = candidate.path().join("private-candidate-path-and-token");
+            let mut health = ProcessCandidateHealthCheck::observed();
+            let error = health
+                .check(&root, candidate.path(), Duration::from_secs(30))
+                .expect_err("missing payload fails");
+            let result = finish_candidate_update(
+                Err(FilesystemUpdateError::Health(error)),
+                health.failure(),
+                &output,
+            );
+            assert!(matches!(
+                result,
+                Err(PackageError::FilesystemUpdate(
+                    FilesystemUpdateError::Health(CandidateHealthError)
+                )),
+            ));
+            assert!(receipt.is_file());
+            assert!(!output.exists());
+        }
+        let bytes = fs::read(&receipt).expect("failure receipt survives candidate cleanup");
+        assert!(bytes.len() <= 1024);
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-candidate"));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("receipt is JSON");
+        assert_eq!(value["schema"], "rootlight.candidate-health-failure/1");
+        assert_eq!(value["diagnostic"]["phase"], "payload_validation");
+        assert_eq!(value["diagnostic"]["reason"], "invalid_payload");
+        assert_eq!(value["diagnostic"]["timeout_ms"], 30_000);
+        assert!(value["diagnostic"]["elapsed_ms"].is_u64());
+        assert_eq!(value.as_object().unwrap().len(), 2);
+        assert_eq!(value["diagnostic"].as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn candidate_health_receipt_never_overwrites_or_replaces_the_original_failure() {
+        let evidence = tempdir().expect("evidence directory exists");
+        let output = evidence.path().join("package.lifecycle.json");
+        let receipt = output.with_extension("failure.json");
+        fs::write(&receipt, b"prior immutable evidence").expect("prior receipt writes");
+        let mut health = ProcessCandidateHealthCheck::observed();
+        let error = health
+            .check(evidence.path(), evidence.path(), Duration::from_secs(30))
+            .expect_err("missing payload fails");
+        assert!(matches!(
+            finish_candidate_update(
+                Err(FilesystemUpdateError::Health(error)),
+                health.failure(),
+                &output,
+            ),
+            Err(PackageError::FilesystemUpdate(
+                FilesystemUpdateError::Health(CandidateHealthError)
+            )),
+        ));
+        assert_eq!(fs::read(&receipt).unwrap(), b"prior immutable evidence");
+    }
 
     #[test]
     fn checked_spec_covers_every_required_platform() {

@@ -9,7 +9,7 @@ use std::{
     fs::{self, File},
     io::{self, Cursor, Read, Seek as _, SeekFrom, Write},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,6 +20,7 @@ use cap_std::{ambient_authority, fs::Dir};
 use rootlight_build::PRODUCT_VERSION;
 use rootlight_build::version::Version;
 use rootlight_crypto::Sha256;
+use rootlight_runtime::UpdateHealthProbeFailure;
 use rootlight_vfs::platform::{PlatformError, PrivateDirectory, PublishError};
 use serde::{Deserialize, Serialize};
 use zip::{CompressionMethod, ZipArchive};
@@ -256,6 +257,91 @@ pub trait CandidateHealthCheck {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProcessCandidateHealthCheck;
 
+impl ProcessCandidateHealthCheck {
+    /// Creates an equivalent checker that retains bounded failure diagnostics.
+    ///
+    /// Observation never captures child output or changes the health decision,
+    /// deadline, or the unit error returned by [`CandidateHealthCheck`].
+    #[must_use]
+    pub const fn observed() -> ObservedProcessCandidateHealthCheck {
+        ObservedProcessCandidateHealthCheck { failure: None }
+    }
+}
+
+/// Source-free failure observation from the most recent candidate health check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CandidateHealthDiagnostic {
+    phase: &'static str,
+    reason: &'static str,
+    elapsed_ms: u64,
+    timeout_ms: u64,
+}
+
+impl CandidateHealthDiagnostic {
+    /// Returns the closed phase label associated with this failure.
+    #[must_use]
+    pub const fn phase(self) -> &'static str {
+        self.phase
+    }
+
+    /// Returns a static reason without child output, paths, or source errors.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        self.reason
+    }
+
+    /// Returns observed milliseconds from validation through failure cleanup.
+    ///
+    /// Preparation precedes the process deadline, so this can exceed its budget.
+    #[must_use]
+    pub const fn elapsed_ms(self) -> u64 {
+        self.elapsed_ms
+    }
+
+    /// Returns the unchanged process deadline budget in milliseconds.
+    #[must_use]
+    pub const fn timeout_ms(self) -> u64 {
+        self.timeout_ms
+    }
+}
+
+/// Opt-in observation around the unchanged candidate health-check contract.
+#[derive(Debug, Default)]
+pub struct ObservedProcessCandidateHealthCheck {
+    failure: Option<CandidateHealthDiagnostic>,
+}
+
+impl ObservedProcessCandidateHealthCheck {
+    /// Returns the last failure, cleared at the start of every check.
+    #[must_use]
+    pub const fn failure(&self) -> Option<CandidateHealthDiagnostic> {
+        self.failure
+    }
+}
+
+impl CandidateHealthCheck for ObservedProcessCandidateHealthCheck {
+    fn check(
+        &mut self,
+        candidate_version_root: &Path,
+        catalog_state_root: &Path,
+        timeout: Duration,
+    ) -> Result<(), CandidateHealthError> {
+        self.failure = None;
+        let started = Instant::now();
+        candidate_health_check(candidate_version_root, catalog_state_root, timeout).map_err(
+            |failure| {
+                self.failure = Some(CandidateHealthDiagnostic {
+                    phase: failure.phase(),
+                    reason: failure.reason(),
+                    elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                });
+                CandidateHealthError
+            },
+        )
+    }
+}
+
 impl CandidateHealthCheck for ProcessCandidateHealthCheck {
     fn check(
         &mut self,
@@ -263,40 +349,116 @@ impl CandidateHealthCheck for ProcessCandidateHealthCheck {
         catalog_state_root: &Path,
         timeout: Duration,
     ) -> Result<(), CandidateHealthError> {
-        let binary = candidate_version_root
-            .join("bin")
-            .join(platform_executable_name("rootlight"));
-        validate_regular_payload(&binary).map_err(|_| CandidateHealthError)?;
-        let probe = candidate_health_tempdir()?;
-        let cloned_state = probe.path().join("state");
-        clone_candidate_state(catalog_state_root, &cloned_state)?;
-        let mut child = Command::new(binary)
-            .arg("--update-health-probe")
-            .env(UPDATE_HEALTH_STATE_DIR_ENV, &cloned_state)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| CandidateHealthError)?;
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or(CandidateHealthError)?;
-        loop {
-            if let Some(status) = child.try_wait().map_err(|_| CandidateHealthError)? {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(CandidateHealthError)
-                };
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                child.wait().map_err(|_| CandidateHealthError)?;
-                return Err(CandidateHealthError);
-            }
-            std::thread::sleep(HEALTH_POLL_INTERVAL);
+        candidate_health_check(candidate_version_root, catalog_state_root, timeout)
+            .map_err(|_| CandidateHealthError)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateHealthFailure {
+    InvalidPayload,
+    StatePreparation,
+    Spawn,
+    DeadlineSetup,
+    Wait,
+    Deadline,
+    Reap,
+    ChildFailed,
+    Probe(UpdateHealthProbeFailure),
+}
+
+impl CandidateHealthFailure {
+    const fn phase(self) -> &'static str {
+        match self {
+            Self::InvalidPayload => "payload_validation",
+            Self::StatePreparation => "state_preparation",
+            Self::Spawn => "spawn",
+            Self::DeadlineSetup => "deadline_setup",
+            Self::Wait | Self::Deadline => "wait",
+            Self::Reap => "cleanup",
+            Self::ChildFailed => "probe_exit",
+            Self::Probe(reason) => match reason {
+                UpdateHealthProbeFailure::DaemonStartTimedOut
+                | UpdateHealthProbeFailure::DaemonStartFailed => "daemon_startup",
+                UpdateHealthProbeFailure::HealthRpcFailed => "health_rpc",
+                UpdateHealthProbeFailure::HealthNotReady => "readiness",
+                UpdateHealthProbeFailure::OwnershipMissing => "ownership",
+                UpdateHealthProbeFailure::ShutdownFailed => "shutdown",
+                UpdateHealthProbeFailure::PreparationFailed => "probe_preparation",
+            },
         }
     }
+
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::InvalidPayload => "invalid_payload",
+            Self::StatePreparation => "state_preparation_failed",
+            Self::Spawn => "spawn_failed",
+            Self::DeadlineSetup => "invalid_deadline",
+            Self::Wait => "wait_failed",
+            Self::Deadline => "deadline_exceeded",
+            Self::Reap => "reap_failed",
+            Self::ChildFailed => "child_failed",
+            Self::Probe(reason) => reason.diagnostic_reason(),
+        }
+    }
+}
+
+fn candidate_health_check(
+    candidate_version_root: &Path,
+    catalog_state_root: &Path,
+    timeout: Duration,
+) -> Result<(), CandidateHealthFailure> {
+    let binary = candidate_version_root
+        .join("bin")
+        .join(platform_executable_name("rootlight"));
+    validate_regular_payload(&binary).map_err(|_| CandidateHealthFailure::InvalidPayload)?;
+    let probe = candidate_health_tempdir().map_err(|_| CandidateHealthFailure::StatePreparation)?;
+    let cloned_state = probe.path().join("state");
+    clone_candidate_state(catalog_state_root, &cloned_state)
+        .map_err(|_| CandidateHealthFailure::StatePreparation)?;
+    let mut child = Command::new(binary)
+        .arg("--update-health-probe")
+        .env(UPDATE_HEALTH_STATE_DIR_ENV, &cloned_state)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| CandidateHealthFailure::Spawn)?;
+    wait_candidate_health(&mut child, timeout)
+}
+
+fn wait_candidate_health(
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<(), CandidateHealthFailure> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(CandidateHealthFailure::DeadlineSetup)?;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|_| CandidateHealthFailure::Wait)? {
+            return candidate_health_exit(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            child.wait().map_err(|_| CandidateHealthFailure::Reap)?;
+            return Err(CandidateHealthFailure::Deadline);
+        }
+        std::thread::sleep(HEALTH_POLL_INTERVAL);
+    }
+}
+
+fn candidate_health_exit(status: ExitStatus) -> Result<(), CandidateHealthFailure> {
+    if status.success() {
+        return Ok(());
+    }
+    Err(status
+        .code()
+        .and_then(UpdateHealthProbeFailure::from_exit_code)
+        .map_or(
+            CandidateHealthFailure::ChildFailed,
+            CandidateHealthFailure::Probe,
+        ))
 }
 
 fn candidate_health_tempdir() -> Result<tempfile::TempDir, CandidateHealthError> {
@@ -3226,6 +3388,187 @@ mod tests {
     }
 
     struct PassingHealth;
+
+    fn candidate_health_fixture(mode: &str) -> Child {
+        Command::new(std::env::current_exe().expect("test executable exists"))
+            .args([
+                "--exact",
+                "update::filesystem::tests::candidate_health_process_fixture",
+                "--nocapture",
+            ])
+            .env("ROOTLIGHT_TEST_CANDIDATE_HEALTH", mode)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("health fixture starts")
+    }
+
+    #[test]
+    fn candidate_health_process_fixture() {
+        let Ok(mode) = std::env::var("ROOTLIGHT_TEST_CANDIDATE_HEALTH") else {
+            return;
+        };
+        println!("private-probe-output-and-token");
+        eprintln!("private-probe-error-and-path");
+        if mode == "wait" {
+            loop {
+                std::thread::park();
+            }
+        }
+        #[cfg(unix)]
+        if mode == "signal" {
+            rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
+                .expect("fixture terminates by signal");
+            unreachable!("termination signal is fatal");
+        }
+        std::process::exit(mode.parse::<i32>().expect("fixture mode is a status"));
+    }
+
+    #[test]
+    fn candidate_health_preserves_actual_private_child_statuses() {
+        for reason in [
+            UpdateHealthProbeFailure::DaemonStartTimedOut,
+            UpdateHealthProbeFailure::DaemonStartFailed,
+            UpdateHealthProbeFailure::HealthRpcFailed,
+            UpdateHealthProbeFailure::HealthNotReady,
+            UpdateHealthProbeFailure::OwnershipMissing,
+            UpdateHealthProbeFailure::ShutdownFailed,
+            UpdateHealthProbeFailure::PreparationFailed,
+        ] {
+            let mut child = candidate_health_fixture(&reason.exit_code().to_string());
+            assert_eq!(
+                wait_candidate_health(&mut child, Duration::from_secs(10)),
+                Err(CandidateHealthFailure::Probe(reason)),
+            );
+        }
+        for status in [1, 3, 6, 70, 80, 81, 101] {
+            let mut child = candidate_health_fixture(&status.to_string());
+            assert_eq!(
+                wait_candidate_health(&mut child, Duration::from_secs(10)),
+                Err(CandidateHealthFailure::ChildFailed),
+            );
+        }
+        let mut child = candidate_health_fixture("0");
+        assert_eq!(
+            wait_candidate_health(&mut child, Duration::from_secs(10)),
+            Ok(())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_health_signal_is_a_generic_child_failure() {
+        let mut child = candidate_health_fixture("signal");
+        assert_eq!(
+            wait_candidate_health(&mut child, Duration::from_secs(10)),
+            Err(CandidateHealthFailure::ChildFailed),
+        );
+        assert_eq!(
+            child.try_wait().expect("child is reaped").unwrap().code(),
+            None
+        );
+    }
+
+    #[test]
+    fn candidate_health_deadline_reaps_the_exact_child() {
+        let mut child = candidate_health_fixture("wait");
+        assert_eq!(
+            wait_candidate_health(&mut child, Duration::ZERO),
+            Err(CandidateHealthFailure::Deadline),
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("terminated child is reaped")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn candidate_health_observer_keeps_legacy_error_and_source_free_evidence() {
+        let root = tempfile::tempdir().expect("candidate root exists");
+        let candidate = root.path().join("private-probe-path-and-token");
+        let mut legacy = ProcessCandidateHealthCheck;
+        let mut observed = ProcessCandidateHealthCheck::observed();
+        let timeout = Duration::from_secs(7);
+        assert_eq!(
+            legacy.check(&candidate, root.path(), timeout),
+            Err(CandidateHealthError)
+        );
+        let started = Instant::now();
+        assert_eq!(
+            observed.check(&candidate, root.path(), timeout),
+            Err(CandidateHealthError)
+        );
+        let diagnostic = observed.failure().expect("failure is observed");
+        assert_eq!(diagnostic.phase(), "payload_validation");
+        assert_eq!(diagnostic.reason(), "invalid_payload");
+        assert_eq!(diagnostic.timeout_ms(), 7_000);
+        assert!(u128::from(diagnostic.elapsed_ms()) <= started.elapsed().as_millis());
+        let encoded = serde_json::to_string(&diagnostic).expect("diagnostic serializes");
+        assert!(encoded.len() < 512);
+        assert!(!encoded.contains("private-probe"));
+        assert_eq!(
+            CandidateHealthError.to_string(),
+            "candidate health check failed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_health_observer_records_real_failures_and_clears_success() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("candidate root exists");
+        let binary = root.path().join("bin/rootlight");
+        fs::create_dir(binary.parent().unwrap()).expect("binary directory exists");
+        fs::write(
+            &binary,
+            b"#!/bin/sh\necho private-probe-input >&2\nexit 82\n",
+        )
+        .expect("candidate executable writes");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("candidate is executable");
+        let state = root.path().join("state");
+        fs::write(&state, b"private-state-content").expect("invalid state writes");
+        let mut observed = ProcessCandidateHealthCheck::observed();
+        assert!(
+            observed
+                .check(root.path(), &state, Duration::from_secs(5))
+                .is_err()
+        );
+        assert_eq!(
+            observed.failure().unwrap().reason(),
+            "state_preparation_failed"
+        );
+        fs::remove_file(&state).expect("invalid state removes");
+        assert!(
+            observed
+                .check(root.path(), &state, Duration::from_secs(5))
+                .is_err()
+        );
+        let diagnostic = observed.failure().unwrap();
+        assert_eq!(diagnostic.phase(), "daemon_startup");
+        assert_eq!(diagnostic.reason(), "daemon_start_timeout");
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("private-probe")
+        );
+        fs::write(&binary, b"#!/bin/sh\nexit 0\n").expect("healthy candidate writes");
+        observed
+            .check(root.path(), &state, Duration::from_secs(5))
+            .expect("candidate succeeds");
+        assert_eq!(observed.failure(), None);
+        fs::write(&binary, b"invalid-executable-format").expect("invalid executable writes");
+        assert!(
+            observed
+                .check(root.path(), &state, Duration::from_secs(5))
+                .is_err()
+        );
+        assert_eq!(observed.failure().unwrap().reason(), "spawn_failed");
+    }
 
     impl CandidateHealthCheck for PassingHealth {
         fn check(
