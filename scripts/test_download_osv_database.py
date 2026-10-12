@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise checksum-pinned OSV acquisition without network access.
+"""Exercise checksum-pinned OSV staging without network access.
 
-The downloader copy uses a synthetic digest; curl is replaced, while filesystem
+The staging copy uses a synthetic digest; network attempts fail, while filesystem
 publication and SHA-256 verification use the real Linux tools used by CI.
 """
 
@@ -46,9 +46,13 @@ class DownloadOsvTests(unittest.TestCase):
             flags=re.MULTILINE,
         )
         self.assertEqual(count, 1)
-        self.script = self.root / "download.sh"
+        self.script = self.root / "scripts" / SCRIPT.name
+        self.script.parent.mkdir()
         self.script.write_text(source, encoding="utf-8")
-        self.payload = self.root / "payload"
+        generation = re.search(r'^generation="([0-9]+)"$', source, re.MULTILINE).group(1)
+        self.payload = (self.root / "source-inputs" / "advisory-databases" /
+                        f"osv-crates-io-{generation}.zip")
+        self.payload.parent.mkdir(parents=True)
         self.payload.write_bytes(PAYLOAD)
         self.calls = self.root / "curl-arguments.json"
         binary = self.root / "bin"
@@ -59,9 +63,7 @@ class DownloadOsvTests(unittest.TestCase):
             "import json, os, pathlib, sys\n"
             "args = sys.argv[1:]\n"
             "pathlib.Path(os.environ['CURL_CALLS']).write_text(json.dumps(args))\n"
-            "output = pathlib.Path(args[args.index('--output') + 1])\n"
-            "output.write_bytes(pathlib.Path(os.environ['CURL_PAYLOAD']).read_bytes())\n"
-            "sys.exit(int(os.environ.get('CURL_STATUS', '0')))\n",
+            "sys.exit(22)\n",
             encoding="utf-8",
         )
         curl.chmod(0o700)
@@ -69,8 +71,6 @@ class DownloadOsvTests(unittest.TestCase):
             **os.environ,
             "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
             "CURL_CALLS": str(self.calls),
-            "CURL_PAYLOAD": str(self.payload),
-            "CURL_STATUS": "0",
         }
 
     def run_download(self, *, default_destination: bool = False) -> subprocess.CompletedProcess:
@@ -83,6 +83,7 @@ class DownloadOsvTests(unittest.TestCase):
             text=True, capture_output=True, timeout=10, check=False,
         )
         self.assertEqual(list(self.directory.glob(".all.zip.*")), [])
+        self.assertFalse(self.calls.exists(), "staging must not attempt a network download")
         return result
 
     def assert_snapshot(self) -> None:
@@ -90,34 +91,27 @@ class DownloadOsvTests(unittest.TestCase):
         self.assertEqual(self.archive.read_bytes(), PAYLOAD)
         self.assertEqual(self.sidecar.read_text(), f"{DIGEST}  all.zip\n")
 
-    def test_download_publishes_only_verified_bytes(self) -> None:
+    def test_local_snapshot_publishes_only_verified_bytes(self) -> None:
         result = self.run_download()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot()
-        arguments = json.loads(self.calls.read_text())
-        self.assertEqual(arguments[arguments.index("--proto") + 1], "=https")
-        self.assertIn("--tlsv1.2", arguments)
-        self.assertEqual(arguments[arguments.index("--max-filesize") + 1], str(len(PAYLOAD)))
-        self.assertTrue(any("?generation=" in argument for argument in arguments))
 
     def test_valid_cache_is_reused_and_wrong_sidecar_repaired_without_network(self) -> None:
         self.archive.write_bytes(PAYLOAD)
         self.sidecar.write_text("wrong sidecar")
-        self.environment["CURL_STATUS"] = "22"
         result = self.run_download()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.calls.exists())
         self.assert_snapshot()
 
-    def test_invalid_cache_is_replaced_after_verified_download(self) -> None:
+    def test_invalid_cache_is_replaced_after_verified_local_copy(self) -> None:
         self.archive.write_bytes(b"old snapshot")
         result = self.run_download()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_snapshot()
 
-    def test_network_failure_does_not_publish_partial_bytes(self) -> None:
-        self.payload.write_bytes(b"partial response")
-        self.environment["CURL_STATUS"] = "22"
+    def test_missing_local_snapshot_does_not_publish_partial_bytes(self) -> None:
+        self.payload.unlink()
         result = self.run_download()
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.archive.exists())
@@ -126,11 +120,37 @@ class DownloadOsvTests(unittest.TestCase):
     def test_hash_mismatch_preserves_previous_cache_and_sidecar(self) -> None:
         self.archive.write_bytes(b"old snapshot")
         self.sidecar.write_text("old checksum")
-        self.payload.write_bytes(b"unreviewed snapshot")
+        self.payload.write_bytes(b"x" * len(PAYLOAD))
         result = self.run_download()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.archive.read_bytes(), b"old snapshot")
         self.assertEqual(self.sidecar.read_text(), "old checksum")
+
+    def test_truncated_source_is_rejected(self) -> None:
+        self.payload.write_bytes(PAYLOAD[:-1])
+        result = self.run_download()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.archive.exists())
+        self.assertFalse(self.sidecar.exists())
+
+    def test_source_symlink_is_rejected_without_touching_target(self) -> None:
+        outside = self.root / "outside-snapshot"
+        outside.write_bytes(PAYLOAD)
+        self.payload.unlink()
+        self.payload.symlink_to(outside)
+        result = self.run_download()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(outside.read_bytes(), PAYLOAD)
+        self.assertFalse(self.archive.exists())
+        self.assertFalse(self.sidecar.exists())
+
+    def test_valid_cache_does_not_mask_changed_local_snapshot(self) -> None:
+        self.archive.write_bytes(PAYLOAD)
+        self.sidecar.write_text(f"{DIGEST}  all.zip\n")
+        self.payload.write_bytes(b"x" * len(PAYLOAD))
+        result = self.run_download()
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_snapshot()
 
     def test_symlink_is_replaced_without_modifying_its_target(self) -> None:
         outside = self.root / "unrelated"
@@ -170,6 +190,21 @@ class DownloadOsvTests(unittest.TestCase):
         self.assertEqual((expected / "all.zip").read_bytes(), PAYLOAD)
         self.assertEqual((expected / "all.zip.sha256").read_text(), f"{DIGEST}  all.zip\n")
         self.assertEqual(list(expected.glob(".all.zip.*")), [])
+
+    def test_checked_in_snapshot_matches_staging_pins_and_provenance(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        directory = SCRIPT.parent.parent / "source-inputs" / "advisory-databases"
+        provenance = json.loads((directory / "PROVENANCE.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["schema"], "rootlight.advisory-data-snapshot/1")
+        for key in ("generation", "expected_sha256"):
+            value = re.search(rf'^{key}="([0-9a-f]+)"$', source, re.MULTILINE).group(1)
+            self.assertEqual(value, provenance["sha256" if key == "expected_sha256" else key])
+        size = int(re.search(r"^expected_bytes=([0-9]+)$", source, re.MULTILINE).group(1))
+        self.assertEqual(size, provenance["bytes"])
+        self.assertEqual(provenance["archive"], f"osv-crates-io-{provenance['generation']}.zip")
+        payload = (directory / provenance["archive"]).read_bytes()
+        self.assertEqual(len(payload), size)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), provenance["sha256"])
 
 
 if __name__ == "__main__":

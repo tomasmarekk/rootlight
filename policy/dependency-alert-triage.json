@@ -22,7 +22,7 @@
     },
     {
       "path": "fuzz/Cargo.lock",
-      "sha256": "88671decb8b9314d1568945739eeaed397723d9ec1ebb75e5b0c3ac50b67348a"
+      "sha256": "64dea7881dcdb2b742b63da482d0217fb68d8d778608770918e87d3cf7ec713c"
     },
     {
       "path": "source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/Cargo.lock",
@@ -678,9 +678,8 @@
     },
     {
       "active_versions": [
-        "1.13.0",
-        "1.13.1",
-        "1.11.1"
+        "1.11.1",
+        "1.13.0"
       ],
       "disposition": "nonexecuted_published_metadata",
       "ghsa_id": "GHSA-m5pq-gvj9-9vr8",

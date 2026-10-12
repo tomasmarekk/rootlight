@@ -1,0 +1,15 @@
+{
+  "advisory_records": 2901,
+  "archive": "osv-crates-io-1791796673905677.zip",
+  "archive_crc_verified": true,
+  "bytes": 3560422,
+  "generation": "1791796673905677",
+  "metadata_url": "https://storage.googleapis.com/storage/v1/b/osv-vulnerabilities/o/crates.io%2Fall.zip?generation=1791796673905677",
+  "purpose": "Reviewed advisory data for offline policy scans; not dependency implementation.",
+  "schema": "rootlight.advisory-data-snapshot/1",
+  "sha256": "be70cb6ddcf93003efa65fff3196f342c3fc5cbb2779f67404de8ae688c7a330",
+  "source_url": "https://storage.googleapis.com/download/storage/v1/b/osv-vulnerabilities/o/crates.io%2Fall.zip?generation=1791796673905677&alt=media",
+  "uncompressed_bytes": 7121868,
+  "upstream_md5_base64": "NrOsR6/7Kpw0b62DUe/liA==",
+  "upstream_updated": "2026-10-12T09:17:54.035Z"
+}

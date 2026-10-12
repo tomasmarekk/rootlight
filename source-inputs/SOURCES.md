@@ -12,6 +12,15 @@ native profile's `overlays/Cargo.lock`. `cargo/` contains
 their complete published file inventories and generated Cargo checksum manifests.
 Cargo resolves crates.io packages only through this local directory source.
 
+`historical-cargo-checksums.json` preserves checksum metadata for three retired
+packages whose exact digest exceptions are still needed when scanning Git
+history. Its derived representation reconstructs the original checksum bytes,
+binds their SHA-256 values and archive digests, and identifies the prior commit.
+It contains no dependency implementation and is not a Cargo source. The secret
+policy tests require these exact proofs for historical exceptions and reject
+missing hashes or changed members. Unreferenced package trees and archives are
+removed from the active source inventory when executable lockfiles change.
+
 `cargo-source-closure.json` binds package identities, original archive checksums,
 expanded file bytes, supplied license metadata, and executable intent. Verify it
 against the current lockfiles and original archives before exporting sources.
@@ -30,6 +39,17 @@ union for a separate preparation. `--destination <fresh-directory>` stages only
 Cargo inputs without replacing existing Rust, npm, or producer sources.
 `scripts/prepare_rust_source_bundle.py` exports already versioned inputs without
 consulting a dependency cache or fetching, resolving, or compiling code.
+
+## Advisory data
+
+`advisory-databases/` retains a reviewed crates.io OSV data snapshot and its
+official generation, source URL, archive digest, size, and record inventory in
+`PROVENANCE.json`. These are advisory records, not implementation sources.
+Upstream GCS generations expire, so `scripts/download-osv-database.sh` stages the
+versioned archive into the scanner cache without network access and rejects
+missing, truncated, linked, or changed source bytes. Updating this snapshot is a
+separate reviewed preparation step; the script pins and provenance must agree.
+The existing public advisory references remain inside the unchanged archive.
 
 ## Frontend distribution inputs
 

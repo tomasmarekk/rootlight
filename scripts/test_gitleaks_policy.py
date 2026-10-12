@@ -27,6 +27,29 @@ WEBSOCKET = "source-inputs/cargo/axum-0.8.9/src/extract/ws.rs"
 SQLITE = "source-inputs/cargo/libsqlite3-sys-0.37.0/sqlite3/sqlite3ext.h"
 LINUX = "source-inputs/cargo/linux-raw-sys-0.12.1/src/x86_64/netlink.rs"
 WINDOWS = "source-inputs/cargo/windows-0.61.3/src/Windows/Win32"
+HISTORICAL = "source-inputs/historical-cargo-checksums.json"
+
+
+def _historical_cargo_checksum(root: Path, name: str) -> dict:
+    evidence = json.loads((root / HISTORICAL).read_bytes())
+    if (evidence.get("schema") != "rootlight.historical-cargo-checksums/1"
+            or not re.fullmatch(r"[0-9a-f]{40}", evidence.get("retired_from_commit", ""))):
+        raise ValueError("invalid historical Cargo checksum provenance")
+    record = evidence.get("manifests", {}).get(name)
+    if not isinstance(record, dict):
+        raise ValueError("historical Cargo checksum evidence is missing")
+    expected = record.get("original_manifest_sha256", "")
+    if (not re.fullmatch(r"[0-9a-f]{64}", expected)
+            or not re.fullmatch(r"[0-9a-f]{64}", record.get("archive_sha256", ""))):
+        raise ValueError("historical Cargo checksum hash is missing or malformed")
+    files = {row["path"]: row["digest"] for row in record["files"]}
+    if len(files) != len(record["files"]):
+        raise ValueError("duplicate historical Cargo checksum member")
+    manifest = {"files": files, "package": record["archive_sha256"]}
+    encoded = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    if hashlib.sha256(encoded).hexdigest() != expected:
+        raise ValueError("historical Cargo checksum evidence hash differs")
+    return manifest
 
 
 class GitleaksPolicyTests(unittest.TestCase):
@@ -123,13 +146,44 @@ class GitleaksPolicyTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertFalse(self.scan(files, mode), "exact published metadata must scan clean")
 
-    def test_every_cargo_digest_exception_belongs_to_its_retained_checksum_manifest(self) -> None:
+    def test_every_cargo_digest_exception_belongs_to_authenticated_checksum_metadata(self) -> None:
         for name, digests in self.cargo_digest_exceptions().items():
             with self.subTest(path=name):
-                manifest = json.loads((ROOT / name).read_bytes())
+                path = ROOT / name
+                manifest = (json.loads(path.read_bytes()) if path.is_file()
+                            else _historical_cargo_checksum(ROOT, name))
                 authenticated_values = {manifest["package"], *manifest["files"].values()}
                 self.assertTrue(set(digests).issubset(authenticated_values),
-                                "checksum exception must name a retained published digest")
+                                "checksum exception must name an authenticated published digest")
+
+    def test_historical_checksums_are_hash_bound_and_required(self) -> None:
+        original = json.loads((ROOT / HISTORICAL).read_bytes())
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            proof = base / HISTORICAL
+            proof.parent.mkdir(parents=True)
+            for name in original["manifests"]:
+                self.assertFalse((ROOT / name).exists(), "historical evidence must describe retired inputs")
+                for change in ("missing_record", "missing_hash", "bad_hash", "changed_member"):
+                    with self.subTest(path=name, change=change):
+                        mutated = json.loads(json.dumps(original))
+                        if change == "missing_record":
+                            del mutated["manifests"][name]
+                        elif change == "missing_hash":
+                            del mutated["manifests"][name]["original_manifest_sha256"]
+                        elif change == "bad_hash":
+                            mutated["manifests"][name]["original_manifest_sha256"] = "0" * 64
+                        else:
+                            mutated["manifests"][name]["files"][0]["digest"] = "0" * 64
+                        proof.write_text(json.dumps(mutated), encoding="utf-8")
+                        with self.assertRaises(ValueError):
+                            _historical_cargo_checksum(base, name)
+            proof.unlink()
+            with self.assertRaises(FileNotFoundError):
+                _historical_cargo_checksum(base, next(iter(original["manifests"])))
+
+    def test_historical_checksum_evidence_scans_clean(self) -> None:
+        self.assertFalse(self.scan({HISTORICAL: (ROOT / HISTORICAL).read_bytes()}, "git"))
 
     def test_every_cargo_digest_path_detects_new_generic_and_typed_credentials(self) -> None:
         synthetic = hashlib.sha256(b"rootlight synthetic checksum negative control").hexdigest()

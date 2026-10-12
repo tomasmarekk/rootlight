@@ -10,6 +10,7 @@
 # Cargo inputs retain authenticated upstream bytes rather than local formatting.
 source-inputs/cargo/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 source-inputs/crates/*.crate binary
+source-inputs/advisory-databases/*.zip binary
 # npm archives retain their authenticated original or declared local bytes.
 source-inputs/npm/archives/*.tgz binary
 source-inputs/npm/local-distributions/*.tgz binary
