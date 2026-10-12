@@ -66,6 +66,7 @@ jobs:
           python scripts/test-validate-package-lifecycle.py
           python scripts/test_generate_release_sboms.py
           python scripts/test_download_osv_database.py
+          python scripts/test_audit_registry_status.py
           python scripts/test_orchestrate_release.py
           python scripts/test_release_signing_workflow.py
           python -B scripts/test_workflow_checkout_paths.py
@@ -794,18 +795,20 @@ jobs:
           path: artifacts/web-release
       - name: Acquire audit inputs
         run: |
-          cargo fetch --locked
+          python scripts/audit_registry_status.py acquire --output artifacts/registry-status
           bash scripts/download-rustsec-database.sh artifacts/rustsec-db
           bash scripts/download-osv-database.sh artifacts/osv-db
       - name: Dependency, license, source, and advisory policy
         run: |
           python scripts/test_cargo_deny_policy.py
           bash scripts/check-cargo-deny.sh
-          cargo audit --db artifacts/rustsec-db --no-fetch -D warnings
-          cargo audit --file tests/native-grammars/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
+          python scripts/audit_registry_status.py verify --input artifacts/registry-status
+          # Complete registry withdrawal checks above replace cargo-audit's cache-only lookups.
+          cargo audit --db artifacts/rustsec-db --no-fetch --no-yanked -D warnings
+          cargo audit --file tests/native-grammars/Cargo.lock --db artifacts/rustsec-db --no-fetch --no-yanked -D warnings
           cargo tree --manifest-path fuzz/Cargo.toml --locked --offline --depth 1
-          cargo audit --file fuzz/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
-          cargo audit --file source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
+          cargo audit --file fuzz/Cargo.lock --db artifacts/rustsec-db --no-fetch --no-yanked -D warnings
+          cargo audit --file source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/Cargo.lock --db artifacts/rustsec-db --no-fetch --no-yanked -D warnings
           OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/artifacts/osv-db" \
             osv-scanner scan source --offline --format json --lockfile Cargo.lock \
             --lockfile tests/native-grammars/Cargo.lock \
@@ -865,6 +868,16 @@ jobs:
         with:
           name: rootlight-release-sbom-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/release-sbom-first
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+      - name: Retain registry status audit inputs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rootlight-registry-status-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/registry-status
           if-no-files-found: warn
           retention-days: 7
           overwrite: false
