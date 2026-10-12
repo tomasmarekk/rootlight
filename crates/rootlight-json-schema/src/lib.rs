@@ -4,6 +4,8 @@
 //! rejects unsupported assertions so a future generator change cannot silently
 //! turn input or output validation into a permissive no-op.
 
+#![forbid(unsafe_code)]
+
 mod pattern;
 
 use std::{

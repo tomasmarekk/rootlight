@@ -4,6 +4,8 @@
 //! decompressed-block cache. Keys are `Copy`, so eviction cannot invoke a
 //! user-defined key destructor while the cache is being updated.
 
+#![forbid(unsafe_code)]
+
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::num::NonZeroUsize;

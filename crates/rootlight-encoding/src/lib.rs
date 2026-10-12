@@ -1,5 +1,7 @@
 //! First-party text encodings used at Rootlight's protocol boundaries.
 
+#![forbid(unsafe_code)]
+
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const BASE64URL_ALPHABET: &[u8; 64] =

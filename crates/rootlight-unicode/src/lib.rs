@@ -6,6 +6,8 @@
 //! first-party; checked-in character data
 //! retains its Unicode provenance and terms.
 
+#![forbid(unsafe_code)]
+
 use std::{iter, str::Chars};
 
 include!("case_folding.rs");

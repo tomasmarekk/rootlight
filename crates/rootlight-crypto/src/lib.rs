@@ -10,6 +10,8 @@
 //! assert_eq!(digest.len(), 32);
 //! ```
 
+#![forbid(unsafe_code)]
+
 /// An incremental SHA-256 hasher for byte-oriented messages.
 ///
 /// Input must contain fewer than 2^61 bytes, as required by FIPS 180-4's
