@@ -1,10 +1,102 @@
 //! SQL scanner snapshots must be complete, bounded and observational.
-//! This isolated FFI suite exercises hostile frames without executing SQL.
+//! Contextual batch tokens prove physical lines without changing dollar state;
+//! this isolated FFI suite never executes SQL or utility batch counts.
 
 use std::{
     ffi::{c_char, c_uint, c_void},
     ptr::NonNull,
 };
+
+#[repr(C)]
+struct Lexer {
+    lookahead: i32,
+    result_symbol: u16,
+    advance: unsafe extern "C" fn(*mut Lexer, bool),
+    mark_end: unsafe extern "C" fn(*mut Lexer),
+    get_column: unsafe extern "C" fn(*mut Lexer) -> u32,
+    is_at_included_range_start: unsafe extern "C" fn(*const Lexer) -> bool,
+    eof: unsafe extern "C" fn(*const Lexer) -> bool,
+    log: Option<unsafe extern "C" fn(*const Lexer, *const c_char, ...)>,
+}
+
+#[repr(C)]
+struct Input {
+    lexer: Lexer,
+    points: Vec<i32>,
+    offset: usize,
+    token_start: usize,
+    marked: usize,
+    column: u32,
+}
+
+impl Input {
+    fn new(text: &str, column: u32) -> Self {
+        let points: Vec<_> = text
+            .chars()
+            .map(|ch| i32::try_from(u32::from(ch)).unwrap())
+            .collect();
+        Self {
+            lexer: Lexer {
+                lookahead: points.first().copied().unwrap_or(0),
+                result_symbol: u16::MAX,
+                advance,
+                mark_end,
+                get_column,
+                is_at_included_range_start,
+                eof,
+                log: None,
+            },
+            points,
+            offset: 0,
+            token_start: 0,
+            marked: 0,
+            column,
+        }
+    }
+
+    fn token(&self) -> String {
+        self.points[self.token_start..self.marked]
+            .iter()
+            .map(|point| char::from_u32(u32::try_from(*point).unwrap()).unwrap())
+            .collect()
+    }
+}
+
+unsafe extern "C" fn advance(lexer: *mut Lexer, skip: bool) {
+    // SAFETY: The scanner receives the repr(C) first field of this exclusively live Input.
+    let input = unsafe { &mut *lexer.cast::<Input>() };
+    input.column = if input.lexer.lookahead == i32::from(b'\n') {
+        0
+    } else {
+        input.column.saturating_add(1)
+    };
+    input.offset = input.offset.saturating_add(1);
+    if skip {
+        input.token_start = input.offset;
+    }
+    input.lexer.lookahead = input.points.get(input.offset).copied().unwrap_or(0);
+}
+
+unsafe extern "C" fn mark_end(lexer: *mut Lexer) {
+    // SAFETY: The scanner supplies the first field of its still-live Input.
+    let input = unsafe { &mut *lexer.cast::<Input>() };
+    input.marked = input.offset;
+}
+
+unsafe extern "C" fn get_column(lexer: *mut Lexer) -> u32 {
+    // SAFETY: The callback only reads the exclusively borrowed live Input.
+    unsafe { &*lexer.cast::<Input>() }.column
+}
+
+unsafe extern "C" fn is_at_included_range_start(_lexer: *const Lexer) -> bool {
+    false
+}
+
+unsafe extern "C" fn eof(lexer: *const Lexer) -> bool {
+    // SAFETY: The scanner supplies the first field of its live Input; all points stay allocated.
+    let input = unsafe { &*lexer.cast::<Input>() };
+    input.offset >= input.points.len()
+}
 
 // SAFETY: Signatures match the pinned scanner; Scanner uniquely owns its allocation.
 unsafe extern "C" {
@@ -19,6 +111,11 @@ unsafe extern "C" {
         buffer: *const c_char,
         length: c_uint,
     );
+    fn tree_sitter_sql_external_scanner_scan(
+        payload: *mut c_void,
+        lexer: *mut Lexer,
+        valid_symbols: *const bool,
+    ) -> bool;
 }
 
 struct Scanner(NonNull<c_void>);
@@ -55,6 +152,18 @@ impl Scanner {
         assert_eq!(guarded[1025], 0xa5);
         assert!(length <= 1024);
         guarded[1..1 + usize::try_from(length).unwrap()].to_vec()
+    }
+
+    fn scan(&mut self, input: &mut Input, valid: [bool; 4]) -> bool {
+        // SAFETY: Scanner is uniquely live, Lexer exactly matches parser.h, all callback
+        // storage outlives the call, and four initialized bools match all external ordinals.
+        unsafe {
+            tree_sitter_sql_external_scanner_scan(
+                self.0.as_ptr(),
+                std::ptr::from_mut(input).cast::<Lexer>(),
+                valid.as_ptr(),
+            )
+        }
     }
 }
 
@@ -156,4 +265,83 @@ fn sql_hostile_snapshots_are_bounded_and_deterministic() {
             assert_eq!(scanner.bytes(), snapshot);
         }
     }
+}
+
+#[test]
+fn sql_go_tokens_prove_physical_lines_and_preserve_stateless_snapshots() {
+    let mut scanner = Scanner::new();
+    for (source, column, expected) in [
+        ("GO", 0, "GO"),
+        ("GO\n", 0, "GO"),
+        ("\r\nGO\r\n", 17, "GO"),
+        ("\n  gO\n", 13, "gO"),
+        ("\tGO 2 -- repeated batch\r\n", 0, "GO 2"),
+        ("GO 0002 -- EOF comment", 0, "GO 0002"),
+    ] {
+        let mut input = Input::new(source, column);
+        assert!(
+            scanner.scan(&mut input, [false, false, false, true]),
+            "{source:?}"
+        );
+        assert_eq!(input.lexer.result_symbol, 3);
+        assert_eq!(input.token(), expected);
+        assert!(scanner.bytes().is_empty());
+        assert!(input.offset <= input.points.len());
+    }
+}
+
+#[test]
+fn sql_go_rejects_invalid_context_counts_prefixes_and_block_comment_lines() {
+    let mut scanner = Scanner::new();
+    for (source, column) in [
+        (" GO\n", 8),
+        ("GO\n", 9),
+        ("GONE\n", 0),
+        ("GO2\n", 0),
+        ("GO 0\n", 0),
+        ("GO 000\n", 0),
+        ("GO -2\n", 0),
+        ("GO +2\n", 0),
+        ("GO;\n", 0),
+        ("GO 2 SELECT 1\n", 0),
+        ("GO /* comment */\n", 0),
+        ("/* comment */ GO\n", 0),
+        ("GO - comment\n", 0),
+        ("\u{c}GO\n", 0),
+        ("\u{b}GO\n", 0),
+    ] {
+        let mut input = Input::new(source, column);
+        assert!(
+            !scanner.scan(&mut input, [false, false, false, true]),
+            "{source:?}"
+        );
+        assert!(scanner.bytes().is_empty());
+        assert!(input.offset <= input.points.len());
+    }
+    let mut input = Input::new("GO\n", 0);
+    assert!(!scanner.scan(&mut input, [true, true, true, false]));
+    assert!(scanner.bytes().is_empty());
+}
+
+#[test]
+fn sql_batch_scanning_never_consumes_or_rewrites_live_dollar_state() {
+    let mut scanner = Scanner::new();
+    let mut start = Input::new("$outer$", 0);
+    assert!(scanner.scan(&mut start, [true, false, false, false]));
+    assert_eq!(start.lexer.result_symbol, 0);
+    let retained = scanner.bytes();
+    assert_eq!(retained, frame("$outer$"));
+    let mut go = Input::new("\nGO\n", 18);
+    assert!(!scanner.scan(&mut go, [false, false, false, true]));
+    assert_eq!(scanner.bytes(), retained);
+    assert_eq!(scanner.bytes(), retained);
+    let mut end = Input::new("$outer$", 0);
+    assert!(scanner.scan(&mut end, [false, true, false, false]));
+    assert_eq!(end.lexer.result_symbol, 1);
+    assert!(scanner.bytes().is_empty());
+    let mut literal = Input::new("$text$\nGO\n$text$", 0);
+    assert!(scanner.scan(&mut literal, [false, false, true, false]));
+    assert_eq!(literal.lexer.result_symbol, 2);
+    assert_eq!(literal.token(), "$text$\nGO\n$text$");
+    assert!(scanner.bytes().is_empty());
 }

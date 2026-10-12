@@ -1,6 +1,7 @@
 //! Apex source identities through the public analyzer and validated IR.
 //! Exact owners, headers and source bytes do not imply Salesforce compilation,
-//! inferred platform members, overload dispatch or resolved reference bindings.
+//! inferred platform members or overload dispatch. Only native-proven written
+//! parameters and ordinary block locals acquire exact lexical targets.
 
 use super::*;
 
@@ -143,13 +144,30 @@ fn assert_unqualified(result: &AnalysisOutput) {
         result.report().coverage().status(),
         CoverageStatus::Complete
     );
-    assert!(
-        result
+    for relation in &result.document().relations {
+        if relation.predicate == RelationPredicate::Contains {
+            continue;
+        }
+        assert_eq!(relation.predicate, RelationPredicate::RefersTo);
+        let RelationEndpoint::Occurrence(occurrence_id) = relation.subject else {
+            panic!("a lexical relation must start at an occurrence");
+        };
+        let occurrence = result
             .document()
-            .relations
+            .occurrences
             .iter()
-            .all(|relation| relation.predicate == RelationPredicate::Contains)
-    );
+            .find(|occurrence| occurrence.id == occurrence_id)
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+            panic!("a lexical relation must retain its proven target");
+        };
+        assert!(matches!(
+            occurrence.syntax_kind.as_str(),
+            "apex.formal_identifier.reference" | "apex.local_identifier.reference"
+        ));
+        assert_eq!(relation.object, RelationEndpoint::Entity(symbol));
+        assert_eq!(relation.evidence.source.as_ref(), Some(&occurrence.source));
+    }
     assert!(
         result
             .document()
@@ -157,14 +175,59 @@ fn assert_unqualified(result: &AnalysisOutput) {
             .iter()
             .all(|occurrence| occurrence.role != OccurrenceRole::CallSite)
     );
-    assert!(
-        result
+    for occurrence in result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role != OccurrenceRole::Definition)
+    {
+        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+            assert!(matches!(
+                occurrence.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            continue;
+        };
+        assert!(matches!(
+            occurrence.syntax_kind.as_str(),
+            "apex.formal_identifier.reference" | "apex.local_identifier.reference"
+        ));
+        assert_eq!(occurrence.role, OccurrenceRole::Reference);
+        let formal = result
             .document()
-            .occurrences
+            .entities
             .iter()
-            .filter(|occurrence| occurrence.role != OccurrenceRole::Definition)
-            .all(|occurrence| matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }))
-    );
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(
+            formal.kind,
+            if occurrence.syntax_kind == "apex.formal_identifier.reference" {
+                EntityKind::Parameter
+            } else {
+                EntityKind::Variable
+            }
+        );
+        assert_eq!(
+            formal.container,
+            Some(rootlight_ir::ContainerRef::Entity(lexical_callable(
+                result,
+                occurrence.enclosing.unwrap()
+            )))
+        );
+        let formal_source = formal.evidence.source.as_ref().unwrap();
+        assert_eq!(formal_source.repository(), occurrence.source.repository());
+        assert_eq!(formal_source.generation(), occurrence.source.generation());
+        assert_eq!(
+            formal_source.content_hash(),
+            occurrence.source.content_hash()
+        );
+        assert_eq!(formal_source.span().file(), occurrence.source.span().file());
+        assert!(result.document().relations.iter().any(|relation| {
+            relation.predicate == RelationPredicate::RefersTo
+                && relation.subject == RelationEndpoint::Occurrence(occurrence.id)
+                && relation.object == RelationEndpoint::Entity(symbol)
+        }));
+    }
     assert!(
         result
             .document()
@@ -172,6 +235,224 @@ fn assert_unqualified(result: &AnalysisOutput) {
             .iter()
             .any(|gap| gap.detail == "apex-compiler-and-platform-semantics-unavailable")
     );
+}
+
+fn lexical_callable(result: &AnalysisOutput, mut enclosing: SymbolId) -> SymbolId {
+    for _ in 0..result.document().entities.len() {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.id == enclosing)
+            .unwrap();
+        if matches!(entity.kind, EntityKind::Method | EntityKind::Constructor) {
+            return enclosing;
+        }
+        let Some(rootlight_ir::ContainerRef::Entity(parent)) = entity.container else {
+            panic!("a lexical use must remain callable-owned");
+        };
+        enclosing = parent;
+    }
+    panic!("a lexical owner chain must be acyclic");
+}
+
+fn lexical_uses(result: &AnalysisOutput) -> Vec<&rootlight_ir::OccurrenceRecord> {
+    result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.role != OccurrenceRole::Definition
+                && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+        })
+        .collect()
+}
+
+#[test]
+fn apex_formal_value_uses_bind_only_their_exact_callable() {
+    let source = "// λ preserves original UTF-8 offsets.\r\npublic class BindBox {\r\n\
+        private Integer Value;\r\n\
+        public BindBox(Integer Seed) { Value = Seed; }\r\n\
+        public Integer First(Integer Value) {\r\n\
+        Consume(Value); Value.compute(Value); /* Value */\r\n\
+        return Value.member + Value; }\r\n\
+        public Integer Second(Integer Value) { return Value; }\r\n\
+        public Integer Third() { return Value; }\r\n\
+        public class OtherBox { public Integer Third() { return Value; } }\r\n}";
+    let result = output(source);
+    assert!(
+        result.document().diagnostics.is_empty(),
+        "{:?}",
+        result.document().diagnostics
+    );
+    assert_unqualified(&result);
+    let uses = lexical_uses(&result);
+    assert_eq!(uses.len(), 7);
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for occurrence in uses {
+        let owner = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| Some(entity.id) == occurrence.enclosing)
+            .unwrap();
+        *counts.entry(&owner.canonical_name).or_default() += 1;
+        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+            unreachable!()
+        };
+        let target = result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(text(source, &occurrence.source), target.canonical_name);
+        assert_eq!(
+            occurrence.syntactic_text_hash,
+            content_hash(target.canonical_name.as_bytes())
+        );
+        let owner_source = owner.evidence.source.as_ref().unwrap();
+        assert!(owner_source.span().start_byte() <= occurrence.source.span().start_byte());
+        assert!(occurrence.source.span().end_byte() <= owner_source.span().end_byte());
+    }
+    assert_eq!(
+        counts,
+        BTreeMap::from([("BindBox", 1), ("First", 5), ("Second", 1)])
+    );
+    for occurrence in result.document().occurrences.iter().filter(|occurrence| {
+        matches!(
+            occurrence.syntax_kind.as_str(),
+            "apex.member.reference" | "apex.unproven_call.reference"
+        ) || (occurrence.role != OccurrenceRole::Definition
+            && text(source, &occurrence.source) == "Value"
+            && occurrence.enclosing.is_some_and(|owner| {
+                result
+                    .document()
+                    .entities
+                    .iter()
+                    .any(|entity| entity.id == owner && entity.canonical_name == "Third")
+            }))
+    }) {
+        assert!(matches!(
+            occurrence.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+    }
+}
+
+#[test]
+fn apex_omitted_shadow_bindings_and_case_varied_duplicates_decline_formal_proofs() {
+    for (parameters, body) in [
+        ("Integer Value", "Integer value = 1; return Value;"),
+        (
+            "Integer Value",
+            "try { Consume(Value); } catch (Exception value) { Consume(Value); } return Value;",
+        ),
+        (
+            "Integer Value",
+            "for (Integer value : Values) { Consume(Value); } return Value;",
+        ),
+        (
+            "Integer Value",
+            "for (Integer value = 0; value < 1; value++) { Consume(Value); } return Value;",
+        ),
+        ("Integer Value, Integer Value", "return Value;"),
+        ("Integer Value, Integer value", "return Value;"),
+        (
+            "Integer Value",
+            "switch on Value { when Account value { Consume(Value); } when else {} } return Value;",
+        ),
+    ] {
+        let source =
+            format!("public class ShadowBox {{ public Integer Read({parameters}) {{ {body} }} }}");
+        let result = output(&source);
+        assert_unqualified(&result);
+        assert!(lexical_uses(&result).is_empty(), "{parameters}: {body}");
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "apex-binding-and-dispatch-target-unavailable")
+        );
+    }
+}
+
+#[test]
+fn apex_query_names_and_constructor_property_names_are_not_formal_value_uses() {
+    let query = "public class QueryBox { public Object Read(String Value) {\
+        return [SELECT Value FROM Value WHERE Value = :Value]; } }";
+    let result = output(query);
+    assert!(
+        result.document().diagnostics.is_empty(),
+        "{:?}",
+        result.document().diagnostics
+    );
+    assert_unqualified(&result);
+    assert!(lexical_uses(&result).is_empty());
+
+    let source = "public class CreateBox { public Object Read(String Value) {\
+        return new Account(Value = Value); } }";
+    let result = output(source);
+    assert!(
+        result.document().diagnostics.is_empty(),
+        "{:?}",
+        result.document().diagnostics
+    );
+    assert_unqualified(&result);
+    let uses = lexical_uses(&result);
+    assert_eq!(uses.len(), 1);
+    assert_eq!(text(source, &uses[0].source), "Value");
+    assert_eq!(
+        usize::try_from(uses[0].source.span().start_byte()).unwrap(),
+        source.rfind("Value").unwrap()
+    );
+}
+
+#[test]
+fn apex_formal_binding_is_exact_spelling_and_does_not_guess_unicode_case_folding() {
+    for (formal, use_name) in [("Value", "value"), ("Ämount", "Ämount")] {
+        let source = format!(
+            "public class NameBox {{ public Integer Read(Integer {formal}) {{ return {use_name}; }} }}"
+        );
+        let result = output(&source);
+        assert_unqualified(&result);
+        assert!(lexical_uses(&result).is_empty());
+    }
+}
+
+#[test]
+fn apex_switch_label_expressions_do_not_become_formal_value_uses() {
+    let source = "public class LabelBox { public Integer Read(Integer Value) {\
+        switch on Value + 0 { when (Value + 1) { return Value; }\
+        when else { return Value; } } } }";
+    let result = output(source);
+    assert!(
+        result.document().diagnostics.is_empty(),
+        "{:?}",
+        result.document().diagnostics
+    );
+    assert_unqualified(&result);
+    assert_eq!(lexical_uses(&result).len(), 3);
+    let label_start = source.find("when (Value").unwrap() + "when (".len();
+    assert!(!result.document().occurrences.iter().any(|occurrence| {
+        usize::try_from(occurrence.source.span().start_byte()).unwrap() == label_start
+    }));
+}
+
+#[test]
+fn apex_unmodeled_trigger_scope_invalidates_the_containing_formal_proof() {
+    let source = "public class ScopeBox { public Integer Read(Integer Value) {\
+        trigger NestedHook on Account (before insert) { Consume(Value); }\
+        return Value; } }";
+    let result = output(source);
+    assert!(
+        result.document().diagnostics.is_empty(),
+        "{:?}",
+        result.document().diagnostics
+    );
+    assert_unqualified(&result);
+    assert!(lexical_uses(&result).is_empty());
 }
 
 #[test]
@@ -581,4 +862,210 @@ fn apex_body_only_edits_keep_declared_ids_but_update_all_source_generations() {
         );
     }
     assert_unqualified(&next);
+}
+
+#[test]
+fn apex_single_block_local_keeps_a_header_and_exact_lexical_reads() {
+    let source = "public class LocalBox { public Integer Read(Integer Input) {\
+        Integer Result = Input + 1; return Result; } }";
+    let result = output(source);
+    let local = named(&result, "Result", EntityKind::Variable);
+    assert_definition(&result, source, local);
+    assert_child(&result, named(&result, "Read", EntityKind::Method), local);
+    assert_eq!(
+        text(source, local.evidence.source.as_ref().unwrap()),
+        "Integer Result = Input + 1;"
+    );
+    assert_eq!(signatures(&result, source, local), ["Integer Result"]);
+    let uses = lexical_uses(&result);
+    assert_eq!(uses.len(), 2);
+    assert!(uses.iter().any(|occurrence| {
+        text(source, &occurrence.source) == "Result"
+            && occurrence.target == (OccurrenceTarget::Resolved { symbol: local.id })
+    }));
+    assert_unqualified(&result);
+    let formal = named(&result, "Input", EntityKind::Parameter);
+    assert!(uses.iter().any(|occurrence| {
+        text(source, &occurrence.source) == "Input"
+            && occurrence.target == (OccurrenceTarget::Resolved { symbol: formal.id })
+    }));
+}
+
+#[test]
+fn apex_unrelated_block_local_does_not_suppress_a_parameter_read() {
+    let source = "public class MixedBox { public Integer Read(Integer Value) {\
+        Integer Other = 1; Consume(Other); return Value; } }";
+    let result = output(source);
+    let parameter = named(&result, "Value", EntityKind::Parameter);
+    assert!(result.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::Reference
+            && text(source, &occurrence.source) == "Value"
+            && occurrence.target
+                == (OccurrenceTarget::Resolved {
+                    symbol: parameter.id,
+                })
+    }));
+    let local = named(&result, "Other", EntityKind::Variable);
+    assert!(result.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::Reference
+            && text(source, &occurrence.source) == "Other"
+            && occurrence.target == (OccurrenceTarget::Resolved { symbol: local.id })
+    }));
+    assert_unqualified(&result);
+}
+
+#[test]
+fn apex_nested_blocks_keep_outer_bindings_and_separate_same_name_siblings() {
+    let source = "public class BlockBox { public Integer Read(Integer Input) {\
+        Integer Outer = Input;\
+        { Integer Item = Outer; Consume(Item); Consume(Input); }\
+        { Integer Item = Outer; Consume(Item); } Consume(Item); return Outer; } }";
+    let result = output(source);
+    assert_unqualified(&result);
+    let siblings = result
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "Item")
+        .collect::<Vec<_>>();
+    assert_eq!(siblings.len(), 2);
+    assert_ne!(siblings[0].id, siblings[1].id);
+    assert_eq!(lexical_uses(&result).len(), 7);
+    let outside = source.rfind("Item").unwrap();
+    assert!(result.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::Reference
+            && usize::try_from(occurrence.source.span().start_byte()).unwrap() == outside
+            && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    }));
+    for sibling in siblings {
+        assert_definition(&result, source, sibling);
+        assert_eq!(signatures(&result, source, sibling), ["Integer Item"]);
+        assert!(
+            lexical_uses(&result)
+                .iter()
+                .any(|occurrence| occurrence.target
+                    == (OccurrenceTarget::Resolved { symbol: sibling.id }))
+        );
+    }
+}
+
+#[test]
+fn apex_local_reads_before_declaration_and_in_self_initializer_stay_unresolved() {
+    let source = "public class OrderBox { public Integer Read(Integer Input) {\
+        Consume(Ready); Integer Ready = Ready + Input; Consume(Ready); return Ready; } }";
+    let result = output(source);
+    assert_unqualified(&result);
+    let local = named(&result, "Ready", EntityKind::Variable);
+    let mut reads = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.role == OccurrenceRole::Reference
+                && text(source, &occurrence.source) == "Ready"
+        })
+        .collect::<Vec<_>>();
+    reads.sort_by_key(|occurrence| occurrence.source.span().start_byte());
+    assert_eq!(reads.len(), 4);
+    assert!(
+        reads
+            .iter()
+            .take(2)
+            .all(|occurrence| matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert!(
+        reads.iter().skip(2).all(
+            |occurrence| occurrence.target == (OccurrenceTarget::Resolved { symbol: local.id })
+        )
+    );
+    assert_eq!(lexical_uses(&result).len(), 3);
+}
+
+#[test]
+fn apex_unsupported_local_groups_block_only_their_written_names() {
+    let source = "public class GroupBox { public Integer Read(Integer Input, Integer Kept) {\
+        Integer Input = 1, Extra = 2; Consume(Input); return Kept; } }";
+    let result = output(source);
+    assert_unqualified(&result);
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Variable)
+    );
+    let uses = lexical_uses(&result);
+    assert_eq!(uses.len(), 1);
+    assert_eq!(text(source, &uses[0].source), "Kept");
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "apex-local-owner-and-binding-analysis-unavailable")
+    );
+}
+
+#[test]
+fn apex_local_initializer_edits_keep_variable_identity_and_header() {
+    let source = "public class EditBox { public Integer Read(Integer Input) {\
+        Integer Result = Input + 1; return Result; } }";
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, APEX);
+    let fixture = Fixture::new(APEX, source.as_bytes());
+    let budget = limits();
+    let first = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, APEX, &budget),
+        &ExtensionSupport::default(),
+    );
+    let bytes = source.replace("Input + 1", "Input + 27");
+    let changed = fixture.rewrite(bytes.as_bytes());
+    let next = analyze(
+        &analyzer,
+        &request(&changed.snapshot, &changed.source, APEX, &budget),
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(next.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+    let before = named(&first, "Result", EntityKind::Variable);
+    let after = named(&next, "Result", EntityKind::Variable);
+    assert_eq!(before.id, after.id);
+    assert_eq!(signatures(&first, source, before), ["Integer Result"]);
+    assert_eq!(signatures(&next, &bytes, after), ["Integer Result"]);
+    assert_ne!(
+        before.evidence.source.as_ref().unwrap().content_hash(),
+        after.evidence.source.as_ref().unwrap().content_hash()
+    );
+    assert_ne!(fixture.source.generation(), changed.source.generation());
+    for occurrence in lexical_uses(&next) {
+        assert_eq!(occurrence.source.generation(), changed.source.generation());
+        assert_eq!(
+            occurrence.source.content_hash(),
+            changed.source.content_hash()
+        );
+    }
+    assert_unqualified(&next);
+}
+
+#[test]
+fn apex_overlapping_same_name_local_scopes_and_case_aliases_stay_unresolved() {
+    for body in [
+        "Integer Value = 1; Integer Value = 2; return Value;",
+        "Integer Value = 1; Integer value = 2; return Value;",
+        "Integer Value = 1; { Integer value = 2; Consume(Value); } return Value;",
+    ] {
+        let source = format!("public class AliasBox {{ public Integer Read() {{ {body} }} }}");
+        let result = output(&source);
+        assert_unqualified(&result);
+        let resolved = lexical_uses(&result);
+        if body.contains('{') {
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(
+                usize::try_from(resolved[0].source.span().start_byte()).unwrap(),
+                source.rfind("Value").unwrap()
+            );
+        } else {
+            assert!(resolved.is_empty());
+        }
+    }
 }

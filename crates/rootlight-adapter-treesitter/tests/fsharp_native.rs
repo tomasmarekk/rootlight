@@ -924,7 +924,9 @@ fn admission_probe_utf16_ranges_and_both_byte_caps_are_original_source_bound() {
             let end = usize::try_from(witness.sample().span().end_byte()).unwrap();
             assert!(end <= 8192 && end < raw.len());
             let units: Vec<_> = raw[..end]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|unit| {
                     let bytes = [unit[0], unit[1]];
                     if encoding == "utf-16le" {

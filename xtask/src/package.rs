@@ -60,7 +60,7 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 30] = [
+const DISTRIBUTION_LICENSES: [&str; 32] = [
     "tree-sitter-xml-0.7.0-LICENSE",
     "tree-sitter-0.26.11-LICENSE",
     "tree-sitter-wgsl-0.0.9-LICENSE.md",
@@ -90,6 +90,8 @@ const DISTRIBUTION_LICENSES: [&str; 30] = [
     "tree-sitter-toml-ng-0.7.0-LICENSE",
     "tree-sitter-typescript-0.23.2-LICENSE",
     "tree-sitter-scheme-0.24.7-1-LICENSE",
+    "tree-sitter-pascal-0.10.2-LICENSE",
+    "tree-sitter-sas-0.4.2-LICENSE",
     "tree-sitter-ocaml-0.25.0-LICENSE",
 ];
 const EXPECTED_WEB_ASSET_TREE: &str = "rootlight-web-ui";
@@ -588,6 +590,12 @@ fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
     match filename {
         "tree-sitter-scheme-0.24.7-1-LICENSE" => {
             workspace.join("third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE")
+        }
+        "tree-sitter-pascal-0.10.2-LICENSE" => {
+            workspace.join("third_party/tree-sitter-pascal-0.10.2/LICENSE")
+        }
+        "tree-sitter-sas-0.4.2-LICENSE" => {
+            workspace.join("third_party/tree-sitter-sas-0.4.2/LICENSE")
         }
         "tree-sitter-ocaml-0.25.0-LICENSE" => {
             workspace.join("third_party/tree-sitter-ocaml-0.25.0/LICENSE")
@@ -2212,6 +2220,18 @@ mod tests {
                 "third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE",
                 1062,
                 "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7",
+            ),
+            (
+                "tree-sitter-pascal-0.10.2-LICENSE",
+                "third_party/tree-sitter-pascal-0.10.2/LICENSE",
+                1070,
+                "2e2fcc500eacb15b76c11fd2229aebf0a5b4c8ed476f068447c6dce778a17ac9",
+            ),
+            (
+                "tree-sitter-sas-0.4.2-LICENSE",
+                "third_party/tree-sitter-sas-0.4.2/LICENSE",
+                1059,
+                "67688037d5b69d8da2c2813785ec9496f4ef8e88c40ea0642538f30bfe568353",
             ),
         ] {
             assert!(DISTRIBUTION_LICENSES.contains(&filename));

@@ -521,7 +521,9 @@ fn decode_span(fixture: &Fixture, span: SourceSpan, encoding: SourceTextEncoding
         .unwrap();
     assert_eq!(raw.len() % 2, 0);
     let units: Vec<_> = raw
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| match encoding {
             SourceTextEncoding::Utf16Le => u16::from_le_bytes([pair[0], pair[1]]),
             SourceTextEncoding::Utf16Be => u16::from_be_bytes([pair[0], pair[1]]),

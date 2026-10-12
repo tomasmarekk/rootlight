@@ -1,0 +1,407 @@
+{
+  "schema": "rootlight.sas-source-provenance.v1",
+  "purpose": "complete pinned published-crate retention with a declared unpublished local Rust binding, byte-identical grammar regeneration and bounded native and public analyzer qualification",
+  "package": "tree-sitter-sas",
+  "version": "0.4.2",
+  "local_unpublished_binding": true,
+  "upstream_repository": "https://github.com/ix-infrastructure/tree-sitter-sas",
+  "upstream_commit_declared_by_published_metadata": "975034cc87a74447bfd49e2f4d208716c37850f2",
+  "upstream_commit_metadata_path": ".cargo_vcs_info.json",
+  "commit_object_identity_verified": false,
+  "upstream_git_tree_reconstruction_verified": false,
+  "signature_independently_verified": false,
+  "source_acquisition": "fixed immutable published-crate HTTPS archive; expected archive checksum checked before regular-file-only materialization",
+  "source_inventory_receipt_sha256": "34fda7222388938045e2664132f69937d1609f31dcbcee421ba90df48b3f411f",
+  "upstream_archive": {
+    "bytes": 98395,
+    "path": "upstream/tree-sitter-sas-0.4.2.crate",
+    "sha256": "cb4d6233b3cf8a9d495ecc6ed8fec7e6a29ec15a0c5808ef046504c28e52334c",
+    "url": "https://static.crates.io/crates/tree-sitter-sas/tree-sitter-sas-0.4.2.crate",
+    "expanded_tar_bytes": 1783296
+  },
+  "upstream_registry_archive_checksum": "cb4d6233b3cf8a9d495ecc6ed8fec7e6a29ec15a0c5808ef046504c28e52334c",
+  "upstream_archive_checksum_verified": true,
+  "local_registry_archive_checksum": null,
+  "modified_binding_registry_publication_verified": false,
+  "local_source_identity": {
+    "profile": "rootlight-vendored-source-v1",
+    "basis": "complete sorted relative-path and lowercase file-SHA-256 inventory enforced separately by the grammar lock",
+    "digest_embedded": false,
+    "includes_original_archive_and_retained_originals": true
+  },
+  "retention_scope": "all 19 original regular published-crate files, preserving archive-derived executable intent; replaced inputs retain exact .orig or .upstream copies; this is not a complete upstream repository-tree reconstruction",
+  "upstream_original_file_count": 19,
+  "upstream_original_bytes": 1768173,
+  "upstream_original_files": [
+    {
+      "archive_mode": 420,
+      "bytes": 94,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": ".cargo_vcs_info.json",
+      "sha256": "8b16b14281be39863c91dd7238a908ce398e4d6d18250134d1278f1800a985bf",
+      "retained_path": ".cargo_vcs_info.json"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 5623,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "Cargo.lock",
+      "sha256": "a8d99edd89895dc4e667e92daa1a0e9df5fdff78a531ead3d73777cddf3bdc20",
+      "retained_path": "Cargo.lock"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 1377,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "Cargo.toml",
+      "sha256": "81c59d319cd93271f1dbfad5fcb2dce0b72424e2a77a2818b957695e84347823",
+      "retained_path": "Cargo.toml.upstream"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 745,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "Cargo.toml.orig",
+      "sha256": "a9fd2d582f3f6ee9ba15cf6789f1aa0252fa31e1fde0936363f9362765060e54",
+      "retained_path": "Cargo.toml.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 1059,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "LICENSE",
+      "sha256": "67688037d5b69d8da2c2813785ec9496f4ef8e88c40ea0642538f30bfe568353",
+      "retained_path": "LICENSE"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 5226,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "README.md",
+      "sha256": "7579582fba285761e17639860a9b0427a7a87e705ff0b8bb194ec1d4f499ea86",
+      "retained_path": "README.md"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 2265,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "bindings/rust/build.rs",
+      "sha256": "d77eecdb2e3ba495bba3f1ee0023ca567e8473e1232841f982015f0ce90208a4",
+      "retained_path": "bindings/rust/build.rs.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 2045,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "bindings/rust/lib.rs",
+      "sha256": "7594b2f02415d4f723c2b7bb9da36e9bba5c48ffea2687d7be39956c9ccba317",
+      "retained_path": "bindings/rust/lib.rs.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 22984,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "grammar.js",
+      "sha256": "21009d0c6cff6081fbca01a438c0ad37c84e01a7ccb0cdc46c3a5fa6ebeaf644",
+      "retained_path": "grammar.js.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 812,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "queries/highlights.scm",
+      "sha256": "14c0991659d15055f56eb2051179c8130369bdf2dcc1ea0bc1be9a047094a24c",
+      "retained_path": "queries/highlights.scm"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 1692,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "queries/tags.scm",
+      "sha256": "1c71740a170f3d0295f8a0cd47649a484517c828c202a0fa99a17c24b6625f24",
+      "retained_path": "queries/tags.scm"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 47297,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "src/grammar.json",
+      "sha256": "3b3bf09274ffdb68b88ca1e3929b6933dc521366a1811d9e47856c81dc951440",
+      "retained_path": "src/grammar.json.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 23948,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "src/node-types.json",
+      "sha256": "a45e17acb2cfe3d58a434024ea0d56ea38500990ab42e60dce82a1302fc22939",
+      "retained_path": "src/node-types.json.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 1626303,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "src/parser.c",
+      "sha256": "559ea02d76ead98cf6c74932b0fa3341778f3d69e54c6c79092d12568150b1fd",
+      "retained_path": "src/parser.c.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 7346,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "src/scanner.c",
+      "sha256": "26f6979b733de848bdfb8b80af30e37e552f78355e560962028718b9143a1981",
+      "retained_path": "src/scanner.c"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 985,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "retained_path": "src/tree_sitter/alloc.h"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 10431,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "src/tree_sitter/array.h",
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "retained_path": "src/tree_sitter/array.h.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 7039,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "src/tree_sitter/parser.h",
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "retained_path": "src/tree_sitter/parser.h.orig"
+    },
+    {
+      "archive_mode": 420,
+      "bytes": 902,
+      "executable": false,
+      "materialized_mode": 420,
+      "path": "tree-sitter.json",
+      "sha256": "f5266fbc0564b2711d97e0cacfa048e79cd936dc25d338c027e2924efd2ac5dc",
+      "retained_path": "tree-sitter.json"
+    }
+  ],
+  "materializer_derived_checksum_is_original_archive_input": false,
+  "materializer_derived_checksum_retained": false,
+  "source_modifications": [
+    {
+      "path": "Cargo.toml",
+      "original_path": "Cargo.toml.upstream",
+      "original_sha256": "81c59d319cd93271f1dbfad5fcb2dce0b72424e2a77a2818b957695e84347823",
+      "local_sha256": "3243378abc3ee4240656dbd83f633a915cc337bdeb529c4334d09731eae6b294",
+      "local_bytes": 582,
+      "purpose": "unpublished local edition-2024 path binding with exact existing language-handle and C-build dependencies; the original normalized manifest and authored manifest remain separately retained",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "original_path": "bindings/rust/build.rs.orig",
+      "original_sha256": "d77eecdb2e3ba495bba3f1ee0023ca567e8473e1232841f982015f0ce90208a4",
+      "local_sha256": "c6132c600e8beb3d58f67ae49a417cb5c0db513caee0d0c4e671375dc05397b2",
+      "local_bytes": 670,
+      "purpose": "compile only the retained local parser and scanner C inputs with local headers; no source acquisition, grammar generation or upstream package hooks",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "original_path": "bindings/rust/lib.rs.orig",
+      "original_sha256": "7594b2f02415d4f723c2b7bb9da36e9bba5c48ffea2687d7be39956c9ccba317",
+      "local_sha256": "23853e76dbf6b7139a947604b54d01e2ebe157226cdf3447bccacc7661e8404e",
+      "local_bytes": 744,
+      "purpose": "minimal static LanguageFn factory and exact NODE_TYPES with edition-2024 extern safety; no SAS compiler, macro expansion or semantic query qualification",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "grammar.js",
+      "original_path": "grammar.js.orig",
+      "original_sha256": "21009d0c6cff6081fbca01a438c0ad37c84e01a7ccb0cdc46c3a5fa6ebeaf644",
+      "local_sha256": "f7ed33c8f68c19732a19445038786f4d51dacf64d5f2c7b80308496f7040f936",
+      "local_bytes": 28574,
+      "purpose": "written FCMP and macro boundaries, exact DATA operand leaves and opaque keyword expressions with comment-aware initial-word fencing; no execution, expansion or catalog identity claim",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "src/grammar.json",
+      "original_path": "src/grammar.json.orig",
+      "original_sha256": "3b3bf09274ffdb68b88ca1e3929b6933dc521366a1811d9e47856c81dc951440",
+      "local_sha256": "a81cfa623a7ea226e8758eeccb314fcc176d38aa219ab65b258cb0a64e4cf94b",
+      "local_bytes": 117010,
+      "purpose": "exact generated grammar metadata from two byte-identical preparations, qualified by bounded native and public analyzer controls",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "src/node-types.json",
+      "original_path": "src/node-types.json.orig",
+      "original_sha256": "a45e17acb2cfe3d58a434024ea0d56ea38500990ab42e60dce82a1302fc22939",
+      "local_sha256": "31ab6ec517d08c01c828dace6cebc60b4938539fcdbd3d689f067201e68a4029",
+      "local_bytes": 31308,
+      "purpose": "exact generated named-node and field metadata from the same grammar preparations; semantic query compilation is checked separately",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "src/parser.c",
+      "original_path": "src/parser.c.orig",
+      "original_sha256": "559ea02d76ead98cf6c74932b0fa3341778f3d69e54c6c79092d12568150b1fd",
+      "local_sha256": "0f71d657c3e1a971c8330f8ce7734db4d8c1bbe246f0154cc81fb9781ef63879",
+      "local_bytes": 4599037,
+      "purpose": "exact ABI-14 parser table from the same grammar preparations with unchanged external scanner ordering; bounded qualification does not establish full language conformance",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "original_path": "src/tree_sitter/array.h.orig",
+      "original_sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "local_sha256": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2",
+      "local_bytes": 13453,
+      "purpose": "exact generated array support header from the same selected reference lineage as the parser table",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "original_path": "src/tree_sitter/parser.h.orig",
+      "original_sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "local_sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "local_bytes": 7624,
+      "purpose": "exact generated parser support header from the same selected reference lineage; the published original remains separately retained",
+      "patch_document": "PATCHES.md",
+      "patch_document_sha256": "1ac3669a84daa258de5db42bba2b12347773445d7f3461bcdd92aec84c97e2fd"
+    }
+  ],
+  "local_generation": {
+    "status": "data_statement_fencing_regeneration_verified",
+    "preparation_only": true,
+    "preferred_grammar_sha256": "f7ed33c8f68c19732a19445038786f4d51dacf64d5f2c7b80308496f7040f936",
+    "preferred_grammar_bytes": 28574,
+    "selection_basis": "two complete independent preparations from one preferred grammar, with all generated outputs byte-identical and checked against the native and public analyzer fixtures",
+    "generator": {
+      "tree_sitter_cli_version": "0.27.1",
+      "tree_sitter_cli_executable_sha256": "53f61ab94c9fd52b0916f2e998172b46fcd7b646e27f4e9f803a350b624db4a8",
+      "node_version": "26.2.0",
+      "node_executable_sha256": "96f768b95e8e9d443f5eead1cb2d199744923320bb8240d2c3129362e7ae2a5d",
+      "argv": [
+        "generate",
+        "--abi",
+        "14",
+        "--js-runtime",
+        "node",
+        "grammar.js"
+      ]
+    },
+    "selected_outputs_hash_verified": true,
+    "independent_regeneration_count": 2,
+    "independent_regeneration_exit_codes": [
+      0,
+      0
+    ],
+    "independent_regeneration_stderr_bytes": [
+      0,
+      0
+    ],
+    "independent_regenerations_byte_identical": true,
+    "generated_output_sha256": {
+      "src/grammar.json": "a81cfa623a7ea226e8758eeccb314fcc176d38aa219ab65b258cb0a64e4cf94b",
+      "src/node-types.json": "31ab6ec517d08c01c828dace6cebc60b4938539fcdbd3d689f067201e68a4029",
+      "src/parser.c": "0f71d657c3e1a971c8330f8ce7734db4d8c1bbe246f0154cc81fb9781ef63879",
+      "src/tree_sitter/alloc.h": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "src/tree_sitter/array.h": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2",
+      "src/tree_sitter/parser.h": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    "generated_output_bytes": {
+      "src/grammar.json": 117010,
+      "src/node-types.json": 31308,
+      "src/parser.c": 4599037,
+      "src/tree_sitter/alloc.h": 985,
+      "src/tree_sitter/array.h": 13453,
+      "src/tree_sitter/parser.h": 7624
+    },
+    "original_generator_version_known": false,
+    "upstream_original_tables_reproduced": false,
+    "all_tree_behavioral_equivalence_proven": false,
+    "os_network_denial_verified": false,
+    "verification_basis": "two completed generator processes with zero exit codes and empty stderr; exact preferred source, tool and six generated-output hashes are recorded here"
+  },
+  "original_generated_parser_unchanged": false,
+  "preferred_grammar_unchanged": false,
+  "source_bytes_unmodified": false,
+  "source_basis": "retained exact original published inputs with a declared local Rust binding and byte-identical generated written-source replacements; native and public analyzer fixtures qualify bounded source behavior",
+  "native_factory": "tree_sitter_sas",
+  "original_generated_parser_language_abi": 14,
+  "original_generated_parser_external_token_count": 10,
+  "generated_parser_language_abi": 14,
+  "generated_parser_state_count": 1505,
+  "generated_parser_external_token_count": 10,
+  "supplied_license": "MIT",
+  "supplied_copyright": "Copyright (c) 2026 Ix",
+  "license_file_sha256": "67688037d5b69d8da2c2813785ec9496f4ef8e88c40ea0642538f30bfe568353",
+  "upstream_query_assets_retained": true,
+  "upstream_query_assets_compatibility_verified": false,
+  "upstream_query_assets_exported_by_local_binding": false,
+  "source_download_at_build_time": false,
+  "generation_at_build_time": false,
+  "upstream_metadata_and_package_hooks_executed": false,
+  "native_parser_execution_verified": true,
+  "bounded_qualification": {
+    "toolchains": [
+      "1.97.1",
+      "1.90.0"
+    ],
+    "native_test_source": "tests/native-grammars/tests/sas_syntax.rs",
+    "native_tests_passed_per_toolchain": 15,
+    "native_syntax_fixture_qualification_verified": true,
+    "query_registry_exact_test": "query_pack::tests::reviewed_packs_compile_with_the_exact_closed_capture_contract",
+    "query_registry_tests_passed_per_toolchain": 1,
+    "owner_cache_exact_test": "query_pack::sas::tests::owner_cache_reuses_proofs_obeys_capture_bound_and_checks_cancellation",
+    "owner_cache_tests_passed_per_toolchain": 1,
+    "analyzer_test_source": "crates/rootlight-adapter-treesitter/tests/analyzer_e2e/sas_native.rs",
+    "analyzer_tests_expected_per_toolchain": 10,
+    "analyzer_tests_passed_per_toolchain": 10,
+    "analyzer_tests_failed_per_toolchain": 0,
+    "production_analyzer_qualification_verified": true,
+    "remaining_structured_reference_gap": null,
+    "complete_source_retention_and_product_queries_verified": true,
+    "whole_language_coverage_qualified": false
+  },
+  "source_to_binary_reproduction_verified": false,
+  "complete_product_source_closure_proven": false,
+  "full_sas_conformance_proven": false,
+  "sas_compiler_acceptance_verified": false,
+  "macro_expansion_or_runtime_binding_verified": false,
+  "catalog_semantics_verified": false,
+  "legal_notice_completeness_verified": false,
+  "empty_dependency_cache_verified": false,
+  "os_network_denial_verified": false,
+  "build_and_packaging_acceptance_verified": false,
+  "installed_semantic_acceptance_verified": false
+}

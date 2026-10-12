@@ -10,6 +10,7 @@
 (function_body) @signature
 (tsql_procedure (tsql_procedure_header)) @signature
 (tsql_body) @signature
+(tsql_rejected_body) @expression
 (object_reference) @reference
 (literal) @string
 [(comment) (marginalia)] @comment @documentation

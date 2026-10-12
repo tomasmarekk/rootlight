@@ -90,7 +90,7 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 53] = [
+    let cases: [(&str, &str, &[u8]); 55] = [
         ("written.ml", "ocaml", b"let increment x = x + 1\n"),
         ("written.mli", "ocaml-interface", b"val increment : int -> int\n"),
         ("written.scm", "scheme", b"(define (measure value) (+ value 1))\n"),
@@ -101,7 +101,9 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
         ("written.glsl", "glsl", b"float Written(float Value) { return Value; }\n"),
         ("written.asm", "assembly", b"Written PROC\nnop\nWritten ENDP\n"),
         ("written.lisp", "common-lisp", b"(defun written (value) value)\n"),
+        ("Sample.pas", "pascal", b"unit Sample; interface procedure Measure(Value: Integer); implementation procedure Measure(Value: Integer); begin end; end.\n"),
         ("sample.cls", "apex", b"public class Written { public Integer Read(Integer Value) { return Value; } }\n"),
+        ("sample.sas", "sas", b"function Measure(Value); return Value; endsub;\n"),
         ("sample.pks", "plsql", b"create or replace package Sample as\nprocedure Adjust(Value in number);\nend Sample;\n/\n"),
         (
             "sample.f90",

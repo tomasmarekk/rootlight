@@ -126,6 +126,94 @@ fn glsl_written_uses_require_shader_owned_target_proof() {
 }
 
 #[test]
+fn apex_uses_require_adapter_proof_and_preserve_proven_targets() {
+    for (syntax, role, kind) in [
+        (
+            "apex.identifier.reference",
+            OccurrenceRole::Reference,
+            EntityKind::Parameter,
+        ),
+        (
+            "apex.formal_identifier.reference",
+            OccurrenceRole::Reference,
+            EntityKind::Parameter,
+        ),
+        (
+            "apex.local_identifier.reference",
+            OccurrenceRole::Reference,
+            EntityKind::Variable,
+        ),
+        (
+            "apex.member.reference",
+            OccurrenceRole::Read,
+            EntityKind::Field,
+        ),
+        (
+            "apex.unproven_call.reference",
+            OccurrenceRole::CallSite,
+            EntityKind::Method,
+        ),
+    ] {
+        for cross_file in [false, true] {
+            for resolved in [false, true] {
+                let mut fixture = Fixture::new();
+                let file = if cross_file {
+                    fixture.add_file(2, "src/other.cls")
+                } else {
+                    fixture.primary_file
+                };
+                let symbol = fixture.add_entity(10, "target", file, kind, None);
+                fixture.add_occurrence(20, "target", fixture.primary_file, role, None);
+                for record in &mut fixture.document.files {
+                    record.language = "apex".to_owned();
+                }
+                fixture.document.provenance[0].language = "apex".to_owned();
+                fixture.document.entities[0].language = "apex".to_owned();
+                fixture.document.entities[0].qualified_name = "target".to_owned();
+                let occurrence = &mut fixture.document.occurrences[0];
+                occurrence.syntax_kind = syntax.to_owned();
+                if resolved {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                }
+                let original = occurrence.clone();
+                fixture.validate();
+                let engine = ResolutionEngine::default();
+                let cancellation = Cancellation::new();
+                let estimate = engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap();
+                assert_eq!(
+                    estimate.required, 0,
+                    "{syntax}: cross_file={cross_file}, resolved={resolved}"
+                );
+                assert!(
+                    engine
+                        .resolve(&fixture.document, &cancellation)
+                        .unwrap()
+                        .decisions
+                        .is_empty()
+                );
+                let context = ResolverFactContext::new(fixture.content_hash);
+                let applied = engine
+                    .apply(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let streamed = engine
+                    .apply_document(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let (bounded, bounded_estimate) = engine
+                    .apply_document_bounded(fixture.document, context, &cancellation)
+                    .unwrap();
+                assert_eq!(bounded_estimate, estimate);
+                assert_eq!(bounded, streamed);
+                assert_eq!(streamed, applied.document);
+                assert_eq!(bounded.occurrences, [original]);
+                assert!(bounded.relations.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn hlsl_written_uses_require_shader_owned_target_proof() {
     shader_written_uses_require_owned_target_proof("hlsl");
 }

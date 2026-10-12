@@ -1,5 +1,5 @@
-/* Dollar-quoted SQL tokens with exact, bounded incremental scanner state.
- * A snapshot is observational: only accepted start/end tokens change context.
+/* Dollar-quoted SQL tokens and contextual, physical GO batch lines.
+ * A snapshot is observational: only accepted dollar tags change context.
  */
 #include "tree_sitter/parser.h"
 #include <stdlib.h>
@@ -8,7 +8,8 @@
 enum TokenType {
   DOLLAR_QUOTED_STRING_START_TAG,
   DOLLAR_QUOTED_STRING_END_TAG,
-  DOLLAR_QUOTED_STRING
+  DOLLAR_QUOTED_STRING,
+  TSQL_BATCH_SEPARATOR
 };
 
 enum { STATE_VERSION = 1, HEADER_SIZE = 3,
@@ -23,6 +24,46 @@ typedef struct { Tag tag; } LexerState;
 
 static bool space(int32_t c) {
   return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
+}
+
+static bool horizontal_space(int32_t c) {
+  return c == ' ' || c == '\t';
+}
+
+static bool scan_batch_separator(TSLexer *lexer) {
+  if (lexer->lookahead != 'G' && lexer->lookahead != 'g') return false;
+  lexer->advance(lexer, false);
+  if (lexer->lookahead != 'O' && lexer->lookahead != 'o') return false;
+  lexer->advance(lexer, false);
+  lexer->mark_end(lexer);
+  bool separated = false;
+  while (horizontal_space(lexer->lookahead)) {
+    separated = true;
+    lexer->advance(lexer, false);
+  }
+  if (lexer->lookahead >= '0' && lexer->lookahead <= '9') {
+    if (!separated) return false;
+    bool positive = false;
+    do {
+      positive = positive || lexer->lookahead != '0';
+      lexer->advance(lexer, false);
+    } while (lexer->lookahead >= '0' && lexer->lookahead <= '9');
+    if (!positive) return false;
+    lexer->mark_end(lexer);
+    while (horizontal_space(lexer->lookahead)) lexer->advance(lexer, false);
+  }
+  /* Only line comments are supported on the utility line. Block comments
+   * require a separate lexical proof and are not treated as a valid boundary. */
+  if (lexer->lookahead == '-') {
+    lexer->advance(lexer, false);
+    if (lexer->lookahead != '-') return false;
+    lexer->advance(lexer, false);
+    while (!lexer->eof(lexer) && lexer->lookahead != '\r' && lexer->lookahead != '\n')
+      lexer->advance(lexer, false);
+  }
+  if (!lexer->eof(lexer) && lexer->lookahead != '\r' && lexer->lookahead != '\n') return false;
+  lexer->result_symbol = TSQL_BATCH_SEPARATOR;
+  return true;
 }
 
 static bool tag_character(uint32_t c) {
@@ -120,9 +161,18 @@ void tree_sitter_sql_external_scanner_destroy(void *payload) {
 
 bool tree_sitter_sql_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
   LexerState *state = payload;
-  if (!state || (!valid_symbols[DOLLAR_QUOTED_STRING_START_TAG] &&
-                 !valid_symbols[DOLLAR_QUOTED_STRING_END_TAG] && !valid_symbols[DOLLAR_QUOTED_STRING])) return false;
-  while (space(lexer->lookahead) && !lexer->eof(lexer)) lexer->advance(lexer, true);
+  if (!state || !lexer || !valid_symbols || (!valid_symbols[DOLLAR_QUOTED_STRING_START_TAG] &&
+                 !valid_symbols[DOLLAR_QUOTED_STRING_END_TAG] && !valid_symbols[DOLLAR_QUOTED_STRING] &&
+                 !valid_symbols[TSQL_BATCH_SEPARATOR])) return false;
+  bool line_start = lexer->get_column(lexer) == 0;
+  while (space(lexer->lookahead) && !lexer->eof(lexer)) {
+    if (lexer->lookahead == '\r' || lexer->lookahead == '\n') line_start = true;
+    else if (!horizontal_space(lexer->lookahead)) line_start = false;
+    lexer->advance(lexer, true);
+  }
+  if (valid_symbols[TSQL_BATCH_SEPARATOR] && !state->tag.length && line_start &&
+      (lexer->lookahead == 'G' || lexer->lookahead == 'g'))
+    return scan_batch_separator(lexer);
   Tag candidate = {0};
   if (!scan_tag(lexer, &candidate)) return false;
   if (state->tag.length && equal(&candidate, &state->tag)) {

@@ -55,6 +55,19 @@ Original authored sources, archive and provenance remain in the versioned
 grammar package; the local binding version does not establish registry
 distribution equivalence.
 
+The local tree-sitter-pascal 0.10.2 binding and preferred-source spelling
+repairs retain the exact published MIT notice as
+licenses/tree-sitter-pascal-0.10.2-LICENSE. Original published inputs, archive,
+local modifications and provenance remain in the versioned grammar package;
+their published VCS association does not establish authored-tree equivalence.
+
+The unpublished local tree-sitter-sas 0.4.2 binding and written-source grammar
+retain the exact published MIT notice, including Copyright (c) 2026 Ix, as
+licenses/tree-sitter-sas-0.4.2-LICENSE. Original published files, archive and
+separately declared local modifications remain in the versioned source package.
+Local retention does not imply original authorship, published-distribution
+equivalence or full SAS compiler, macro-expansion or runtime semantics.
+
 The unpublished local tree-sitter-ocaml 0.25.0 binding retains separate OCaml
 implementation and interface factories, the original release archive and all
 published source inputs. Its exact MIT notice, including Copyright (c) 2020

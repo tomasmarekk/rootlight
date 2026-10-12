@@ -147,6 +147,10 @@ impl TreeSitterProvider {
     /// Returns [`RuntimeConfigError`] if built-in registry/capability metadata
     /// fails validation or process-local provider identities are exhausted.
     pub fn new(config: RuntimeConfig) -> Result<Self, RuntimeConfigError> {
+        #[allow(
+            deprecated,
+            reason = "try_update is unavailable on the supported Rust 1.90 minimum"
+        )]
         let provider_id = NEXT_PROVIDER_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)

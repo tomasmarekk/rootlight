@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "5e64cad8e05704a89cdbdeda96d66982c2e6bb051c23fc5ecc45bfa3a069218a";
+    "146833da8a4b2f0a02c10213c36bf6df29e80eb7354c1de265496e2156b19c31";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -217,7 +217,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 13] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 15] = [
+    (
+        "tree-sitter-sas",
+        "0.4.2",
+        "third_party/tree-sitter-sas-0.4.2",
+        "8d9e9235ecabaae7f012b1d1b654171cefc4d2ede9b5b994bcbaa582a4405e13",
+    ),
     (
         "tree-sitter-wgsl",
         "0.0.9",
@@ -265,6 +271,12 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 13] = [
         "0.25.0",
         "third_party/tree-sitter-ocaml-0.25.0",
         "544e58ed05a66a74ef293db0c2825003d94c6e8426c38aff5603e3743c183f10",
+    ),
+    (
+        "tree-sitter-pascal",
+        "0.10.2",
+        "third_party/tree-sitter-pascal-0.10.2",
+        "4ce8bf2245c875e3009bb978bc9888c558c5c17c740bdae89e78c3837e0be98a",
     ),
     (
         "tree-sitter-sfapex",
@@ -331,6 +343,16 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     )?;
     validate_local_license(
         root,
+        "third_party/tree-sitter-sfapex-3.0.1/LICENSE",
+        "c3d045abbc0a8dec1b00737c0668f6dbb028d248521b74e79778c726671925ed",
+    )?;
+    validate_local_license(
+        root,
+        "third_party/tree-sitter-sfapex-3.0.1/LICENSE-JAVA",
+        JAVA_LICENSE_SHA256,
+    )?;
+    validate_local_license(
+        root,
         "third_party/tree-sitter-hlsl-0.2.0/LICENSE",
         "dec735ccc031754dd05e6556dd9e959915eb367cf01cf009c77a1a38786932b1",
     )?;
@@ -346,13 +368,8 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     )?;
     validate_local_license(
         root,
-        "third_party/tree-sitter-sfapex-3.0.1/LICENSE",
-        "c3d045abbc0a8dec1b00737c0668f6dbb028d248521b74e79778c726671925ed",
-    )?;
-    validate_local_license(
-        root,
-        "third_party/tree-sitter-sfapex-3.0.1/LICENSE-JAVA",
-        JAVA_LICENSE_SHA256,
+        "third_party/tree-sitter-pascal-0.10.2/LICENSE",
+        "2e2fcc500eacb15b76c11fd2229aebf0a5b4c8ed476f068447c6dce778a17ac9",
     )?;
     validate_local_license(
         root,
@@ -489,7 +506,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 52 {
+    if manifest.grammars.len() != 54 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -548,6 +565,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "objective-c",
         "ocaml",
         "ocaml-interface",
+        "pascal",
         "perl",
         "plsql",
         "php",
@@ -559,6 +577,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "scheme",
         "ruby",
         "rust",
+        "sas",
         "swift",
         "toml",
         "xml",
@@ -826,6 +845,10 @@ fn validate_dependency_profile(
     version: &str,
     expected_path: Option<&Path>,
 ) -> Result<(), GrammarLockError> {
+    // The local Scheme binding keeps the public crate alias while its package
+    // identity distinguishes it from the retained upstream distribution.
+    let expected_rename =
+        (dependency.name == "tree-sitter-scheme-native-local").then_some("tree-sitter-scheme");
     let source_matches = match expected_path {
         Some(path) => dependency.source.is_none() && dependency.path.as_deref() == Some(path),
         None => {
@@ -842,7 +865,7 @@ fn validate_dependency_profile(
         || dependency.kind != DependencyKind::Normal
         || dependency.optional
         || dependency.uses_default_features
-        || dependency.rename.is_some()
+        || dependency.rename.as_deref() != expected_rename
         || dependency.target.is_some()
         || dependency.registry.is_some()
         || !source_matches
@@ -1259,7 +1282,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 52")]
+    #[error("grammar lock contains {0} grammars instead of 54")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1396,6 +1419,32 @@ mod tests {
         validate_vendored_tree(&directory, grammar, vendored)
             .expect("all source pins and the exact primary notice agree");
         assert_eq!(vendored.license_path.as_deref(), Some("LICENSE.md"));
+    }
+
+    #[test]
+    fn checked_in_scheme_vendor_binds_the_primary_notice() {
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "scheme")
+            .expect("Scheme source evidence is present");
+        let vendored = grammar.vendored.as_ref().expect("local source evidence");
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(&vendored.manifest_path)
+            .parent()
+            .unwrap()
+            .to_owned();
+        validate_vendored_tree(&directory, grammar, vendored)
+            .expect("all source pins and the exact primary notice agree");
+        assert_eq!(vendored.license_path.as_deref(), Some("upstream/LICENSE"));
+        assert_eq!(
+            vendored.parser_path.as_deref(),
+            Some("upstream/src/parser.c")
+        );
+        assert_eq!(grammar.scanner_sha256, "none");
     }
 
     #[test]
@@ -1733,32 +1782,6 @@ mod tests {
             xml_sources.files["notices/tree-sitter-MIT-LICENSE"],
             "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
         );
-    }
-
-    #[test]
-    fn checked_in_scheme_vendor_binds_the_primary_notice() {
-        let manifest: GrammarLock =
-            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
-        let grammar = manifest
-            .grammars
-            .iter()
-            .find(|grammar| grammar.language == "scheme")
-            .expect("Scheme source evidence is present");
-        let vendored = grammar.vendored.as_ref().expect("local source evidence");
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(&vendored.manifest_path)
-            .parent()
-            .unwrap()
-            .to_owned();
-        validate_vendored_tree(&directory, grammar, vendored)
-            .expect("all source pins and the exact primary notice agree");
-        assert_eq!(vendored.license_path.as_deref(), Some("upstream/LICENSE"));
-        assert_eq!(
-            vendored.parser_path.as_deref(),
-            Some("upstream/src/parser.c")
-        );
-        assert_eq!(grammar.scanner_sha256, "none");
     }
 
     #[test]
@@ -2914,6 +2937,138 @@ mod tests {
     }
 
     #[test]
+    fn pascal_retains_published_inputs_and_two_preferred_spelling_repairs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "pascal")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        let directory = root.join("third_party/tree-sitter-pascal-0.10.2");
+        assert!(grammar.crates_io_checksum.is_none());
+        assert_eq!(
+            grammar.vendored_source_sha256.as_deref(),
+            Some("4ce8bf2245c875e3009bb978bc9888c558c5c17c740bdae89e78c3837e0be98a")
+        );
+        assert_eq!(grammar.abi, 14);
+        assert_eq!(grammar.scanner_sha256, "none");
+        assert_eq!(sources.files.len(), 28);
+        assert_eq!(grammar.parser_sha256, sources.files["src/parser.c"]);
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../third_party/tree-sitter-pascal-0.10.2/UPSTREAM-INVENTORY.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            inventory["schema"],
+            "rootlight.vendored-published-archive-inventory/1"
+        );
+        assert_eq!(inventory["member_count"], 15);
+        assert_eq!(inventory["regular_file_count"], 15);
+        assert_eq!(inventory["regular_file_bytes"], 3_976_845);
+        let originals = inventory["original_members"].as_array().unwrap();
+        assert_eq!(originals.len(), 15);
+        let mut member_paths = BTreeSet::new();
+        let mut retained_paths = BTreeSet::new();
+        let mut original_bytes = 0u64;
+        for original in originals {
+            let path = original["path"].as_str().unwrap();
+            let retained = original["retained_path"].as_str().unwrap();
+            assert!(is_source_relative_path(path));
+            assert!(is_source_relative_path(retained));
+            assert!(member_paths.insert(path));
+            assert!(retained_paths.insert(retained));
+            assert_eq!(original["raw_mode"], 0o644);
+            let expected = original["sha256"].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(retained).map(String::as_str),
+                Some(expected)
+            );
+            let bytes = fs::read(directory.join(retained)).unwrap();
+            require_digest("retained Pascal original", &bytes, expected).unwrap();
+            assert_eq!(u64::try_from(bytes.len()).unwrap(), original["bytes"]);
+            original_bytes += u64::try_from(bytes.len()).unwrap();
+        }
+        assert_eq!(original_bytes, 3_976_845);
+        assert!(originals.iter().any(|row| {
+            row["path"] == "Cargo.toml" && row["retained_path"] == "Cargo.toml.published.orig"
+        }));
+        assert!(originals.iter().any(|row| {
+            row["path"] == "Cargo.toml.orig" && row["retained_path"] == "Cargo.toml.orig"
+        }));
+        assert_ne!(
+            sources.files["Cargo.toml.orig"],
+            sources.files["Cargo.toml.published.orig"]
+        );
+        for (path_field, bytes_field, hash_field) in [
+            (
+                "original_archive",
+                "original_archive_bytes",
+                "original_archive_sha256",
+            ),
+            (
+                "registry_metadata",
+                "registry_metadata_bytes",
+                "registry_metadata_sha256",
+            ),
+        ] {
+            let path = inventory[path_field].as_str().unwrap();
+            assert_eq!(
+                sources.files.get(path).map(String::as_str),
+                inventory[hash_field].as_str()
+            );
+            assert_eq!(
+                fs::metadata(directory.join(path)).unwrap().len(),
+                inventory[bytes_field]
+            );
+        }
+        for claim in [
+            "archive_signature_verified",
+            "authored_commit_equivalence_qualified",
+            "legal_notice_completeness_qualified",
+            "source_security_qualified",
+            "empty_dependency_cache_qualified",
+            "independently_blocked_network_build_qualified",
+        ] {
+            assert_eq!(inventory[claim], serde_json::Value::Bool(false), "{claim}");
+        }
+        let original_grammar = fs::read_to_string(directory.join("grammar.js.orig")).unwrap();
+        let preferred_grammar = fs::read_to_string(directory.join("grammar.js")).unwrap();
+        assert_eq!(original_grammar.matches("/seled/i").count(), 1);
+        assert_eq!(original_grammar.matches("/safecal/i").count(), 1);
+        assert_eq!(
+            preferred_grammar,
+            original_grammar
+                .replace("/seled/i", "/sealed/i")
+                .replace("/safecal/i", "/safecall/i")
+        );
+        let parser = fs::read_to_string(directory.join("src/parser.c")).unwrap();
+        for declaration in [
+            "#define LANGUAGE_VERSION 14",
+            "#define STATE_COUNT 2715",
+            "#define EXTERNAL_TOKEN_COUNT 0",
+        ] {
+            assert!(
+                parser.lines().any(|line| line == declaration),
+                "{declaration}"
+            );
+        }
+        assert!(!sources.files.contains_key("src/scanner.c"));
+        assert_eq!(
+            sources
+                .files
+                .keys()
+                .map(|path| fs::metadata(directory.join(path)).unwrap().len())
+                .sum::<u64>(),
+            8_031_546
+        );
+        validate_vendored_tree(&directory, grammar, sources)
+            .expect("all original Pascal inputs and local static tables remain authenticated");
+    }
+
+    #[test]
     fn local_source_identity_requires_exactly_one_provenance_and_a_live_tree() {
         let (directory, mut grammar) = vendored_fixture();
         grammar.crates_io_checksum = None;
@@ -3645,10 +3800,38 @@ mod tests {
                         let mut dependency =
                             dependency_fixture_with_source(name, version, &[], None, None);
                         dependency.path = Some(format!("/workspace/{directory}").into());
+                        if *name == "tree-sitter-scheme-native-local" {
+                            dependency.rename = Some("tree-sitter-scheme".into());
+                        }
                         dependency
                     }),
             )
             .collect()
+    }
+
+    #[test]
+    fn scheme_dependency_requires_its_reviewed_alias_without_default_features() {
+        let dependencies = audited_dependency_fixtures();
+        let baseline = dependencies
+            .iter()
+            .find(|dependency| dependency.name == "tree-sitter-scheme-native-local")
+            .unwrap();
+        let path = Path::new("/workspace/third_party/tree-sitter-scheme-0.24.7-1");
+        validate_dependency_profile(baseline, "0.24.7-1", Some(path)).unwrap();
+        for alias in [None, Some("unreviewed")] {
+            let mut dependency = baseline.clone();
+            dependency.rename = alias.map(str::to_owned);
+            assert!(matches!(
+                validate_dependency_profile(&dependency, "0.24.7-1", Some(path)),
+                Err(GrammarLockError::DependencyProfile { .. })
+            ));
+        }
+        let mut dependency = baseline.clone();
+        dependency.uses_default_features = true;
+        assert!(matches!(
+            validate_dependency_profile(&dependency, "0.24.7-1", Some(path)),
+            Err(GrammarLockError::DependencyProfile { .. })
+        ));
     }
 
     #[test]

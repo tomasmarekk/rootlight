@@ -2253,15 +2253,6 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             matlab_native::MATLAB,
             perl_native::PERL,
             groovy_native::GROOVY,
-            LanguageCase {
-                name: "scheme",
-                path: "src/definitions.scm",
-                frontend: "tree-sitter-scheme-native-local-0.24.7-1",
-                source: "(define (measure value) (+ value 1))\n",
-                generated: false,
-                body_before: "value 1",
-                body_after: "value 2",
-            },
             vba_native::VBA,
             LanguageCase {
                 name: "apex",
@@ -2291,6 +2282,15 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
                 body_after: "value 2",
             },
             LanguageCase {
+                name: "dtd",
+                path: "src/written.dtd",
+                frontend: "tree-sitter-xml-dtd-0.7.0",
+                source: "<!ELEMENT root EMPTY>",
+                generated: false,
+                body_before: "EMPTY",
+                body_after: "ANY",
+            },
+            LanguageCase {
                 name: "fortran",
                 path: "src/Example.f90",
                 frontend: "tree-sitter-fortran-0.6.0",
@@ -2318,6 +2318,15 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
                 body_after: "Value  + 2.0",
             },
             LanguageCase {
+                name: "pascal",
+                path: "src/definitions.pas",
+                frontend: "tree-sitter-pascal-0.10.2",
+                source: "procedure Adjust(Value: Integer); begin Value := Value+1; end;\n",
+                generated: false,
+                body_before: "Value+1",
+                body_after: "Value+2",
+            },
+            LanguageCase {
                 name: "plsql",
                 path: "src/Example.pkb",
                 frontend: "tree-sitter-plsql-0.0.1",
@@ -2327,6 +2336,24 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
                 body_after: "null; null;",
             },
             LanguageCase {
+                name: "sas",
+                path: "src/definitions.sas",
+                frontend: "tree-sitter-sas-0.4.2",
+                source: "function Convert(Value); return Value+1; endsub;\n",
+                generated: false,
+                body_before: "Value+1",
+                body_after: "Value+2",
+            },
+            LanguageCase {
+                name: "scheme",
+                path: "src/definitions.scm",
+                frontend: "tree-sitter-scheme-native-local-0.24.7-1",
+                source: "(define (measure value) (+ value 1))\n",
+                generated: false,
+                body_before: "value 1",
+                body_after: "value 2",
+            },
+            LanguageCase {
                 name: "wgsl",
                 path: "src/written.wgsl",
                 frontend: "tree-sitter-wgsl-0.0.9",
@@ -2334,6 +2361,15 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
                 generated: false,
                 body_before: "counter = local",
                 body_after: "counter  = local",
+            },
+            LanguageCase {
+                name: "xml",
+                path: "src/written.xml",
+                frontend: "tree-sitter-xml-0.7.0",
+                source: "<root><item value=\"plain\"/><item value='other'>text</item></root>",
+                generated: false,
+                body_before: "text",
+                body_after: "changed text",
             },
             LanguageCase {
                 name: "haskell",
@@ -2423,6 +2459,7 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
         expected_languages
     );
     for case in cases {
+        eprintln!("checking fenced definitions for {}", case.name);
         let fixture = Fixture::new(case, case.source.as_bytes());
         let standalone = analyze(
             &analyzer(&provider, case),
@@ -2469,8 +2506,64 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             values
         };
         let expected = definitions(&standalone, case.source);
-        assert!(!expected.is_empty(), "{}", case.name);
-        assert_eq!(definitions(&embedded, &source), expected, "{}", case.name);
+        let embedded_definitions = definitions(&embedded, &source);
+        assert_eq!(embedded_definitions, expected, "{}", case.name);
+        if case.name == "dtd" {
+            assert!(expected.is_empty());
+            assert!(embedded_definitions.is_empty());
+            let body_start = source.find(case.source).unwrap();
+            for (result, text, start) in [
+                (&standalone, case.source, 0),
+                (&embedded, source.as_str(), body_start),
+            ] {
+                let document = result.document();
+                assert_eq!(document.files.len(), 1);
+                let file = &document.files[0];
+                assert_eq!(file.content_hash, content_hash(text.as_bytes()));
+                assert_eq!(file.byte_length, u64::try_from(text.len()).unwrap());
+                let physical_source = file.evidence.source.as_ref().unwrap();
+                assert_eq!(physical_source.repository(), document.repository);
+                assert_eq!(physical_source.generation(), document.generation);
+                assert_eq!(physical_source.span().file(), file.id);
+                assert_eq!(physical_source.content_hash(), file.content_hash);
+                assert_eq!(physical_source.span().start_byte(), 0);
+                assert_eq!(physical_source.span().end_byte(), file.byte_length);
+                let gaps: Vec<_> = document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| {
+                        gap.domain == FactDomain::Entities
+                            && gap.detail == "dtd-structural-declaration-kind-unavailable"
+                    })
+                    .collect();
+                assert_eq!(gaps.len(), 1);
+                let gap = gaps[0];
+                assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+                assert_eq!(gap.source.repository(), document.repository);
+                assert_eq!(gap.source.generation(), document.generation);
+                assert_eq!(gap.source.span().file(), file.id);
+                assert_eq!(gap.source.content_hash(), file.content_hash);
+                assert_eq!(
+                    gap.source.span().start_byte(),
+                    u64::try_from(start).unwrap()
+                );
+                assert_eq!(
+                    gap.source.span().end_byte(),
+                    u64::try_from(start + case.source.len()).unwrap()
+                );
+                assert_eq!(
+                    text.get(start..start + case.source.len()),
+                    Some(case.source)
+                );
+                assert!(document.occurrences.iter().any(|occurrence| {
+                    occurrence.role == OccurrenceRole::StringEvidence
+                        && occurrence.source == gap.source
+                        && occurrence.syntactic_text_hash == content_hash(case.source.as_bytes())
+                }));
+            }
+        } else {
+            assert!(!expected.is_empty(), "{}", case.name);
+        }
     }
 }
 

@@ -81,12 +81,16 @@ mod nix_native;
 mod objective_c_native;
 #[path = "analyzer_e2e/ocaml_native.rs"]
 mod ocaml_native;
+#[path = "analyzer_e2e/pascal_native.rs"]
+mod pascal_native;
 #[path = "analyzer_e2e/perl_native.rs"]
 mod perl_native;
 #[path = "analyzer_e2e/powershell_native.rs"]
 mod powershell_native;
 #[path = "analyzer_e2e/r_native.rs"]
 mod r_native;
+#[path = "analyzer_e2e/sas_native.rs"]
+mod sas_native;
 #[path = "analyzer_e2e/scala_native.rs"]
 mod scala_native;
 #[path = "analyzer_e2e/scheme_native.rs"]

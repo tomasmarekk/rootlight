@@ -17,7 +17,7 @@ pub(super) fn procedure_header(procedure: Node<'_>) -> Option<Node<'_>> {
         return None;
     }
     let body = procedure.child_by_field_name("body")?;
-    if body.is_missing() || body.has_error() {
+    if body.kind() != "tsql_body" || body.is_missing() || body.has_error() {
         return None;
     }
     // Header tokens and body delimiters must be physical, not recovery insertions.
