@@ -27382,7 +27382,8 @@ mod tests {
         let completed = AtomicUsize::new(0);
         let result = run_recovery_load_batch::<()>(&cancellations, &stopping, &parent, |index| {
             if index == 1 {
-                panic!("injected recovery load failure");
+                // Panic-hook diagnostics must not consume the sibling's cancellation deadline.
+                std::panic::resume_unwind(Box::new("injected recovery load failure"));
             }
             loop {
                 if let Some(reason) = cancellations[index].reason() {
