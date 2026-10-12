@@ -258,17 +258,34 @@ impl SourceQuoteBounds {
         include_snippets: bool,
     ) -> Option<BudgetCharge> {
         let prefix = self.prefixes.get(items.checked_sub(1)?)?;
-        let signature = u64::from(SIGNATURE_BYTES.min(max_bytes));
-        let represented = if include_snippets {
+        let text = if include_snippets {
             u64::from(max_bytes)
-                .checked_add(signature)?
-                .checked_add(SOURCE_LANGUAGE_BYTES)?
         } else {
-            signature
+            u64::from(SIGNATURE_BYTES.min(max_bytes))
         };
-        let presentation = u64::try_from(items).ok()?.checked_mul(represented)?;
-        let json = presentation
+        let language = if include_snippets {
+            SOURCE_LANGUAGE_BYTES
+        } else {
+            0
+        };
+        let items = u64::try_from(items).ok()?;
+        // Provider material can still own the validated duplicate signature
+        // until shaping returns, even though the response omits that field.
+        let temporary_signature = if include_snippets {
+            u64::from(SIGNATURE_BYTES.min(max_bytes))
+        } else {
+            0
+        };
+        let presentation = items.checked_mul(
+            text.checked_add(language)?
+                .checked_add(temporary_signature)?,
+        )?;
+        // Language labels reject control characters; only quotes and
+        // backslashes expand in JSON, by at most two bytes per input byte.
+        let json = text
             .checked_mul(JSON_ESCAPE_EXPANSION)?
+            .checked_add(language.checked_mul(2)?)?
+            .checked_mul(items)?
             .checked_add(prefix.shaping_json)?;
         Some(BudgetCharge {
             tokens: json,
@@ -377,7 +394,8 @@ fn checked_completeness(
 #[derive(Serialize)]
 struct ShapingMetadata<'a> {
     source_ref: &'a SourceRef,
-    signature: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<&'static str>,
     snippet: Option<rootlight_mcp_contract::context::RepositorySnippet>,
 }
 
@@ -387,7 +405,7 @@ pub(super) fn shaping_fixed(
 ) -> Result<BudgetCharge, ContextEvidenceCollectionError> {
     let metadata = ShapingMetadata {
         source_ref: reference,
-        signature: "",
+        signature: (!include_snippets).then_some(""),
         snippet: include_snippets.then(|| rootlight_mcp_contract::context::RepositorySnippet {
             source_ref: reference.clone(),
             content: String::new(),
@@ -713,7 +731,7 @@ pub(super) mod tests {
             let reference = &request.targets[0].source_ref;
             let expected = serde_json::to_vec(&ShapingMetadata {
                 source_ref: reference,
-                signature: "",
+                signature: (!snippets).then_some(""),
                 snippet: snippets.then(|| rootlight_mcp_contract::context::RepositorySnippet {
                     source_ref: reference.clone(),
                     content: String::new(),

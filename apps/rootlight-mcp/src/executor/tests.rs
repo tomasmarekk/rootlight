@@ -107,6 +107,9 @@ mod source_budget_tests;
 #[path = "context_interruption_tests.rs"]
 mod context_interruption_tests;
 
+#[path = "context_relationship_tests.rs"]
+mod context_relationship_tests;
+
 #[path = "source_metadata_quote_tests.rs"]
 mod source_metadata_quote_tests;
 
@@ -177,6 +180,10 @@ enum FakeOutcome {
         locate: CodeLocatePortResponse,
         started: Arc<Notify>,
         dropped: Arc<AtomicBool>,
+    },
+    ContextRelationshipEvidence {
+        relationships: SymbolRelationshipsPortResponse,
+        explanation: SymbolExplainPortResponse,
     },
     SourcePrefixThenPending {
         responses: Arc<Mutex<VecDeque<client::SourceTextPrefixReadResult>>>,
@@ -636,6 +643,7 @@ impl FirstSliceClientPort for FakePort {
             }),
             FakeOutcome::BatchContextPack { explain, .. } => explain.clone(),
             FakeOutcome::SourceReadSymbolResolution { explain, .. } => explain.clone(),
+            FakeOutcome::ContextRelationshipEvidence { explanation, .. } => Ok(explanation.clone()),
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -911,6 +919,9 @@ impl FirstSliceClientPort for FakePort {
         ));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolRelationships(outcome) => outcome.clone(),
+            FakeOutcome::ContextRelationshipEvidence { relationships, .. } => {
+                Ok(relationships.clone())
+            }
             FakeOutcome::SymbolRelationshipsSequence(outcomes) => outcomes
                 .lock()
                 .expect("fake relationships sequence is not poisoned")
@@ -8095,6 +8106,7 @@ async fn context_pack_accepts_source_within_its_provider_byte_reservation() {
                 "seeds": {"symbols": [symbol()]},
                 "sections": ["definitions", "source"],
                 "source_policy": "references_only",
+                "response_profile": "compact",
                 "token_budget": 4000
             }),
         )
@@ -8115,7 +8127,11 @@ async fn context_pack_accepts_source_within_its_provider_byte_reservation() {
                 && omission.reason.as_str() == "selection_diversity"
                 && omission.count == 1
                 && omission.resumable
-                && omission.continuation.is_some()
+                && omission.continuation.is_none()
+        }));
+        let cursor = pack.next_cursor.0.as_ref().expect("omitted source resumes");
+        assert!(pack.data.followups.iter().any(|followup| {
+            followup.tool == "context.pack" && followup.continuation.as_ref() == Some(cursor)
         }));
         assert_eq!(pack.usage.source_bytes, u64::try_from(bytes).unwrap());
         assert!(pack.usage.estimated_tokens <= 4000);

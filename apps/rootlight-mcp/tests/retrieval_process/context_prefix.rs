@@ -119,11 +119,8 @@ fn context_pack_lossless_prefixes_cross_real_process_boundaries() {
                 item["source_ref"],
                 serde_json::to_value(&definition).unwrap()
             );
-            let signature = item["signature"].as_str().unwrap();
-            assert!(!signature.is_empty());
-            assert!(signature.len() <= 1_024);
-            assert!(signature.contains('\u{10400}'));
             if source_policy == "focused_snippets" {
+                assert!(item.get("signature").is_none());
                 let snippet = &item["snippet"];
                 assert_eq!(
                     snippet["source_ref"],
@@ -152,6 +149,10 @@ fn context_pack_lossless_prefixes_cross_real_process_boundaries() {
                 );
             } else {
                 assert!(item.get("snippet").is_none());
+                let signature = item["signature"].as_str().unwrap();
+                assert!(!signature.is_empty());
+                assert!(signature.len() <= 1_024);
+                assert!(signature.contains('\u{10400}'));
                 assert!(declaration.starts_with(signature));
                 assert!(signature.len() < declaration.len());
             }

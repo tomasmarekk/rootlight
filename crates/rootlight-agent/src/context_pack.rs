@@ -592,146 +592,159 @@ impl DefaultContextPackPlanner {
         budget
             .charge(planned.usage)
             .map_err(ContextPackPlanningError::from)?;
-        let quote_request = ContextSourceMetadataQuoteRequest {
-            repository: request.repository(),
-            generation: request.generation(),
-            source_policy: request.source_policy(),
-            include_snippets,
-            targets: selected
-                .iter()
-                .map(|selected| selected.target.clone())
-                .collect(),
-        };
-        let quoted_bounds = match source_metadata::quote_bounds(
-            port,
-            quote_request,
-            &mut budget,
-            cancellation.clone(),
-            deadline,
-        )
-        .await?
-        {
-            source_metadata::QuoteBoundsOutcome::Complete(bounds) => bounds,
-            source_metadata::QuoteBoundsOutcome::Omitted(label, completeness) => {
-                mark_source_omission(&mut planned, label, selected.len(), completeness)?;
-                planned.usage = budget.consumed();
-                return Ok(planned);
-            }
-        };
-        let materialization = quoted_bounds.affordable(
-            budget.remaining(),
-            configured_max_bytes_per_snippet,
-            include_snippets,
-        );
-        if materialization.target_count < selected.len() {
-            mark_source_omission(
-                &mut planned,
-                "source_budget",
-                selected.len().saturating_sub(materialization.target_count),
-                source_completeness(ContextEvidencePortErrorKind::Unavailable, true)?,
-            )?;
-            selected.truncate(materialization.target_count);
-        }
-        if selected.is_empty() {
-            planned.usage = budget.consumed();
-            return Ok(planned);
-        }
-        let provider_reservation = quoted_bounds
-            .provider(selected.len(), materialization.max_bytes_per_snippet)
-            .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
-        let combined_reservation = quoted_bounds
-            .combined(
-                selected.len(),
-                materialization.max_bytes_per_snippet,
+        // A conservative quote can fit fewer targets than their eventual
+        // receipts. Requote the remaining prefix after each charged batch;
+        // every successful iteration removes at least one selected target.
+        loop {
+            let quote_request = ContextSourceMetadataQuoteRequest {
+                repository: request.repository(),
+                generation: request.generation(),
+                source_policy: request.source_policy(),
                 include_snippets,
+                targets: selected
+                    .iter()
+                    .map(|selected| selected.target.clone())
+                    .collect(),
+            };
+            let quoted_bounds = match source_metadata::quote_bounds(
+                port,
+                quote_request,
+                &mut budget,
+                cancellation.clone(),
+                deadline,
             )
-            .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
-        let reservation = budget
-            .reserve(combined_reservation)
-            .map_err(ContextPackPlanningError::from)?;
-        let source_request = ContextSourceRequest {
-            repository: request.repository(),
-            generation: request.generation(),
-            source_policy: request.source_policy(),
-            include_snippets,
-            max_bytes_per_snippet: materialization.max_bytes_per_snippet,
-            targets: selected
-                .iter()
-                .map(|target| target.target.clone())
-                .collect(),
-        };
-        let output = port
-            .materialize_source(
-                source_request.clone(),
-                crate::context_evidence::ContextEvidenceCallContext::new(
-                    cancellation.clone(),
-                    deadline,
-                    provider_reservation,
-                ),
-            )
-            .await;
-        // Receipt admission does not authorize using unvalidated source material.
-        let usage = match &output {
-            Ok(output) => output.usage,
-            Err(error) => error.usage,
-        };
-        reservation
-            .commit(usage)
-            .map_err(ContextPackPlanningError::from)?;
-        if cancellation.is_cancelled() {
-            return Err(ContextEvidenceCollectionError::Cancelled.into());
-        }
-        if Instant::now() >= deadline {
-            return Err(ContextEvidenceCollectionError::DeadlineExceeded.into());
-        }
-
-        match output {
-            Ok(output) => {
-                validate_source_output(&source_request, &output)?;
-                let shaping = apply_source_materials(&mut planned, &selected, &output.materials)?;
-                budget
-                    .charge(shaping)
-                    .map_err(ContextPackPlanningError::from)?;
-                merge_source_completeness(&mut planned, &output.completeness)?;
-                if output.materials.iter().any(|material| {
-                    material
-                        .snippet
-                        .as_ref()
-                        .is_some_and(|snippet| snippet.truncated)
-                }) {
-                    mark_source_omission(
-                        &mut planned,
-                        "source_truncated",
-                        1,
-                        snippet_truncation_completeness()?,
-                    )?;
+            .await?
+            {
+                source_metadata::QuoteBoundsOutcome::Complete(bounds) => bounds,
+                source_metadata::QuoteBoundsOutcome::Omitted(label, completeness) => {
+                    mark_source_omission(&mut planned, label, selected.len(), completeness)?;
+                    planned.usage = budget.consumed();
+                    return Ok(planned);
                 }
+            };
+            let materialization = quoted_bounds.affordable(
+                budget.remaining(),
+                configured_max_bytes_per_snippet,
+                include_snippets,
+            );
+            if materialization.target_count == 0 {
+                mark_source_omission(
+                    &mut planned,
+                    "source_budget",
+                    selected.len(),
+                    source_completeness(ContextEvidencePortErrorKind::Unavailable, true)?,
+                )?;
+                break;
             }
-            Err(error) => match error.kind {
-                ContextEvidencePortErrorKind::Cancelled => {
-                    return Err(ContextEvidenceCollectionError::Cancelled.into());
+            let remaining = selected.split_off(materialization.target_count);
+            let provider_reservation = quoted_bounds
+                .provider(selected.len(), materialization.max_bytes_per_snippet)
+                .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
+            let combined_reservation = quoted_bounds
+                .combined(
+                    selected.len(),
+                    materialization.max_bytes_per_snippet,
+                    include_snippets,
+                )
+                .ok_or(ContextEvidenceCollectionError::InvalidProviderResponse)?;
+            let reservation = budget
+                .reserve(combined_reservation)
+                .map_err(ContextPackPlanningError::from)?;
+            let source_request = ContextSourceRequest {
+                repository: request.repository(),
+                generation: request.generation(),
+                source_policy: request.source_policy(),
+                include_snippets,
+                max_bytes_per_snippet: materialization.max_bytes_per_snippet,
+                targets: selected
+                    .iter()
+                    .map(|target| target.target.clone())
+                    .collect(),
+            };
+            let output = port
+                .materialize_source(
+                    source_request.clone(),
+                    crate::context_evidence::ContextEvidenceCallContext::new(
+                        cancellation.clone(),
+                        deadline,
+                        provider_reservation,
+                    ),
+                )
+                .await;
+            // Receipt admission does not authorize using unvalidated source material.
+            let usage = match &output {
+                Ok(output) => output.usage,
+                Err(error) => error.usage,
+            };
+            reservation
+                .commit(usage)
+                .map_err(ContextPackPlanningError::from)?;
+            if cancellation.is_cancelled() {
+                return Err(ContextEvidenceCollectionError::Cancelled.into());
+            }
+            if Instant::now() >= deadline {
+                return Err(ContextEvidenceCollectionError::DeadlineExceeded.into());
+            }
+
+            match output {
+                Ok(output) => {
+                    validate_source_output(&source_request, &output)?;
+                    let shaping =
+                        apply_source_materials(&mut planned, &selected, &output.materials)?;
+                    budget
+                        .charge(shaping)
+                        .map_err(ContextPackPlanningError::from)?;
+                    merge_source_completeness(&mut planned, &output.completeness)?;
+                    let truncated_sources = output
+                        .materials
+                        .iter()
+                        .filter(|material| {
+                            material
+                                .snippet
+                                .as_ref()
+                                .is_some_and(|snippet| snippet.truncated)
+                        })
+                        .count();
+                    if truncated_sources != 0 {
+                        mark_source_omission(
+                            &mut planned,
+                            "source_truncated",
+                            truncated_sources,
+                            snippet_truncation_completeness()?,
+                        )?;
+                    }
                 }
-                ContextEvidencePortErrorKind::DeadlineExceeded => {
-                    return Err(ContextEvidenceCollectionError::DeadlineExceeded.into());
-                }
-                ContextEvidencePortErrorKind::InvalidResponse => {
-                    return Err(ContextEvidenceCollectionError::InvalidProviderResponse.into());
-                }
-                ContextEvidencePortErrorKind::Unsupported
-                | ContextEvidencePortErrorKind::Unavailable => {
-                    let label = if error.kind == ContextEvidencePortErrorKind::Unsupported {
-                        "source_unsupported"
-                    } else {
-                        "source_unavailable"
-                    };
-                    mark_source_omission(
-                        &mut planned,
-                        label,
-                        selected.len(),
-                        source_completeness(error.kind, false)?,
-                    )?;
-                }
-            },
+                Err(error) => match error.kind {
+                    ContextEvidencePortErrorKind::Cancelled => {
+                        return Err(ContextEvidenceCollectionError::Cancelled.into());
+                    }
+                    ContextEvidencePortErrorKind::DeadlineExceeded => {
+                        return Err(ContextEvidenceCollectionError::DeadlineExceeded.into());
+                    }
+                    ContextEvidencePortErrorKind::InvalidResponse => {
+                        return Err(ContextEvidenceCollectionError::InvalidProviderResponse.into());
+                    }
+                    ContextEvidencePortErrorKind::Unsupported
+                    | ContextEvidencePortErrorKind::Unavailable => {
+                        let label = if error.kind == ContextEvidencePortErrorKind::Unsupported {
+                            "source_unsupported"
+                        } else {
+                            "source_unavailable"
+                        };
+                        mark_source_omission(
+                            &mut planned,
+                            label,
+                            selected.len().saturating_add(remaining.len()),
+                            source_completeness(error.kind, false)?,
+                        )?;
+                        break;
+                    }
+                },
+            }
+            selected = remaining;
+            if selected.is_empty() {
+                break;
+            }
         }
         planned.usage = budget.consumed();
         Ok(planned)
@@ -915,7 +928,7 @@ fn selected_source_targets(
     planned: &PlannedContextPack,
     corpus: &ContextEvidenceCorpus,
 ) -> Vec<SelectedSourceTarget> {
-    planned
+    let selected = planned
         .data
         .items
         .iter()
@@ -934,7 +947,23 @@ fn selected_source_targets(
                 },
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Spend a bounded source prefix on distinct evidence before repeating the
+    // same source for another role. Item order and presentation charges stay
+    // unchanged; later duplicates still receive material when capacity permits.
+    let mut distinct = Vec::with_capacity(selected.len());
+    let mut repeated = Vec::new();
+    for target in selected {
+        if distinct.iter().any(|previous: &SelectedSourceTarget| {
+            previous.target.source_ref == target.target.source_ref
+        }) {
+            repeated.push(target);
+        } else {
+            distinct.push(target);
+        }
+    }
+    distinct.extend(repeated);
+    distinct
 }
 
 fn explicit_symbol_anchor_ids(
@@ -1295,7 +1324,13 @@ fn apply_source_materials(
             continue;
         };
         let item = &mut planned.data.items[selected.item_index];
-        item.signature = material.signature.clone();
+        // Validated snippets already contain the selected declaration. Keep
+        // the signature only when it is the sole source presentation.
+        item.signature = if material.snippet.is_none() {
+            material.signature.clone()
+        } else {
+            None
+        };
         item.snippet = material.snippet.as_ref().map(|snippet| RepositorySnippet {
             source_ref: material.source_ref.clone(),
             content: snippet.content.clone(),
@@ -1304,7 +1339,7 @@ fn apply_source_materials(
             truncated: snippet.truncated,
             trust: TrustClassification::UntrustedRepositoryData,
         });
-        let represented_bytes = material
+        let represented_bytes = item
             .signature
             .as_ref()
             .map_or(0, |text| json_string_content_bytes(text))
@@ -1414,16 +1449,29 @@ fn mark_source_omission(
     completeness: ResultCompleteness,
 ) -> Result<(), ContextPackPlanningError> {
     if let Ok(reason) = SafeLabel::parse(label) {
-        planned.data.omitted.push(OmissionSummary {
-            role: None,
-            reason,
-            provider: SafeLabel::parse("source_read").ok(),
-            count: u32::try_from(count).unwrap_or(u32::MAX),
-            limiting_resources: completeness.limiting_resources.clone(),
-            resumable: false,
-            continuation: None,
-        });
-        planned.data.omitted.truncate(MAX_OMISSIONS);
+        let provider = SafeLabel::parse("source_read").ok();
+        if let Some(previous) = planned.data.omitted.iter_mut().find(|omission| {
+            omission.reason == reason
+                && omission.role.is_none()
+                && omission.provider == provider
+                && omission.limiting_resources == completeness.limiting_resources
+                && !omission.resumable
+        }) {
+            previous.count = previous
+                .count
+                .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+        } else {
+            planned.data.omitted.push(OmissionSummary {
+                role: None,
+                reason,
+                provider,
+                count: u32::try_from(count).unwrap_or(u32::MAX),
+                limiting_resources: completeness.limiting_resources.clone(),
+                resumable: false,
+                continuation: None,
+            });
+            planned.data.omitted.truncate(MAX_OMISSIONS);
+        }
     }
     merge_source_completeness(planned, &completeness)
 }
@@ -1659,7 +1707,7 @@ impl ContextPackService {
                 .transpose()?;
             let mut data = planned.data.clone();
             if let Some(cursor) = &next_cursor {
-                attach_context_cursor(&mut data, cursor);
+                attach_context_cursor(&mut data, cursor, canonical.response_profile());
             }
             let completeness = if next_cursor.is_some() {
                 resumable_completeness(&planned.completeness)
@@ -2807,10 +2855,15 @@ fn context_pack_data(
 fn attach_context_cursor(
     data: &mut ContextPackData,
     cursor: &rootlight_mcp_contract::vertical::ContinuationCursor,
+    profile: ResponseProfile,
 ) {
-    for omission in &mut data.omitted {
-        if omission.resumable {
-            omission.continuation = Some(cursor.clone());
+    // Compact pages retain the actionable follow-up and envelope cursor without
+    // repeating the same authenticated handle in every omission category.
+    if profile != ResponseProfile::Compact {
+        for omission in &mut data.omitted {
+            if omission.resumable {
+                omission.continuation = Some(cursor.clone());
+            }
         }
     }
     if let Ok(reason) =
@@ -3417,6 +3470,7 @@ mod tests {
         source_calls: Arc<AtomicUsize>,
         failed_response: bool,
         overage: bool,
+        interrupt_after: usize,
     }
 
     impl ContextEvidencePort<SourceReceiptCancellation> for InterruptedSourcePort {
@@ -3434,7 +3488,26 @@ mod tests {
             invocation: EvidenceProviderInvocation,
             context: ContextEvidenceCallContext<SourceReceiptCancellation>,
         ) -> AgentPortFuture<Result<EvidenceProviderOutput, ContextEvidencePortError>> {
-            ProfileSourcePort.retrieve(invocation, context)
+            if self.interrupt_after == 1 {
+                return ProfileSourcePort.retrieve(invocation, context);
+            }
+            let role = invocation.role();
+            let file_byte = role.priority().saturating_add(20);
+            let source = SourceRef::new(
+                invocation.repository(),
+                invocation.generation(),
+                SourceSpan::new(FileId::from_bytes([file_byte; 20]), 0, 8_192).unwrap(),
+                ContentHash::from_bytes([file_byte; 32]),
+                None,
+            );
+            let response = ProfileSourcePort.retrieve(invocation, context);
+            Box::pin(async move {
+                let mut output = response.await?;
+                for observation in &mut output.observations {
+                    observation.source_refs = vec![source.clone()];
+                }
+                Ok(output)
+            })
         }
 
         fn materialize_source(
@@ -3442,7 +3515,8 @@ mod tests {
             request: ContextSourceRequest,
             context: ContextEvidenceCallContext<SourceReceiptCancellation>,
         ) -> AgentPortFuture<Result<ContextSourceOutput, ContextEvidencePortError>> {
-            self.source_calls.fetch_add(1, Ordering::SeqCst);
+            let interrupt =
+                self.source_calls.fetch_add(1, Ordering::SeqCst) + 1 == self.interrupt_after;
             let reserved_rows = context.reservation().rows;
             let response = ProfileSourcePort.materialize_source(request, context);
             let cancellation = self.cancellation.clone();
@@ -3450,6 +3524,9 @@ mod tests {
             let overage = self.overage;
             Box::pin(async move {
                 let mut output = response.await?;
+                if !interrupt {
+                    return Ok(output);
+                }
                 if overage {
                     output.usage.rows = reserved_rows + 1;
                 }
@@ -3766,6 +3843,7 @@ mod tests {
                 source_calls: Arc::clone(&source_calls),
                 failed_response,
                 overage: true,
+                interrupt_after: 1,
             };
 
             let result = DefaultContextPackPlanner
@@ -3808,6 +3886,7 @@ mod tests {
                 source_calls: Arc::clone(&source_calls),
                 failed_response,
                 overage: false,
+                interrupt_after: 1,
             };
 
             let result = DefaultContextPackPlanner
@@ -3826,6 +3905,51 @@ mod tests {
                 )),
             );
             assert_eq!(source_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn second_source_batch_admits_receipt_before_preserving_cancellation() {
+        for (failed_response, overage) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut input = context_input(SymbolId::from_bytes([3; 20]));
+            input.token_budget = 8_000;
+            input.source_policy = Some(SourcePolicy::Signatures);
+            let request = CanonicalContextPackRequest::new(
+                &input,
+                RepositoryId::from_bytes([1; 16]),
+                GenerationId::from_bytes([2; 20]),
+            )
+            .unwrap();
+            let cancellation = SourceReceiptCancellation::default();
+            let source_calls = Arc::new(AtomicUsize::new(0));
+            let port = InterruptedSourcePort {
+                cancellation: cancellation.clone(),
+                source_calls: Arc::clone(&source_calls),
+                failed_response,
+                overage,
+                interrupt_after: 2,
+            };
+            let result = DefaultContextPackPlanner
+                .collect_and_plan(
+                    &port,
+                    &request,
+                    cancellation,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await;
+            let expected = if overage {
+                ContextEvidencePlanningError::Planning(ContextPackPlanningError::Policy(
+                    ExecutionPolicyError::BudgetExceeded {
+                        resource: BudgetResource::Rows,
+                    },
+                ))
+            } else {
+                ContextEvidencePlanningError::Collection(ContextEvidenceCollectionError::Cancelled)
+            };
+            assert_eq!(result, Err(expected));
+            assert_eq!(source_calls.load(Ordering::SeqCst), 2);
         }
     }
 
@@ -4867,10 +4991,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             shaping.json_bytes,
-            (2_048 + u64::from(super::SIGNATURE_BYTES) + super::SOURCE_LANGUAGE_BYTES)
-                * super::JSON_ESCAPE_EXPANSION
+            2_048 * super::JSON_ESCAPE_EXPANSION
+                + 2 * super::SOURCE_LANGUAGE_BYTES
                 + metadata.json_bytes,
-            "the serialized snippet, signature, language, and metadata are all reserved"
+            "the full snippet, control-free language, and metadata are all reserved"
         );
         let provider = bounds.provider(1, 2_048).unwrap();
         assert_eq!(
@@ -5110,6 +5234,27 @@ mod tests {
     }
 
     #[test]
+    fn source_language_bounds_cover_escaped_labels_and_reject_controls() {
+        let (request, output) = projection_fixture("fn sample();", None, "escaped-language");
+        for language in [
+            "\"".repeat(64),
+            "\\".repeat(64),
+            "λ".repeat(32),
+            "🧭".repeat(16),
+        ] {
+            let mut candidate = output.clone();
+            candidate.materials[0].snippet.as_mut().unwrap().language = language.clone();
+            assert!(validate_source_output(&request, &candidate).is_ok());
+            assert!(serde_json::to_vec(&language).unwrap().len() - 2 <= 2 * language.len());
+        }
+        for language in ["\0", "\n", "\t", "\u{7f}", "\u{85}"] {
+            let mut candidate = output.clone();
+            candidate.materials[0].snippet.as_mut().unwrap().language = language.to_owned();
+            assert!(validate_source_output(&request, &candidate).is_err());
+        }
+    }
+
+    #[test]
     fn source_projection_signature_only_preserves_codec_and_text_bounds() {
         for encoding in [
             None,
@@ -5292,11 +5437,11 @@ mod tests {
         // selected reference rather than guessing a path or metadata width.
         let target = before_source.data.items[0].source_ref.as_ref().unwrap();
         let metadata = super::source_metadata::shaping_fixed(target, true).unwrap();
-        let fixed_tokens = 2048 + 6 * super::SOURCE_LANGUAGE_BYTES + metadata.json_bytes;
+        let fixed_tokens = 2048 + 2 * super::SOURCE_LANGUAGE_BYTES + metadata.json_bytes;
         let remaining_tokens = 20_000 - before_source.usage.tokens - 1;
-        let expected_bytes = (remaining_tokens - fixed_tokens) / 18;
-        assert!((64..1_024).contains(&expected_bytes));
-        assert!(18 * (expected_bytes + 1) + fixed_tokens > remaining_tokens);
+        let expected_bytes = (remaining_tokens - fixed_tokens) / 12;
+        assert!((64..4_096).contains(&expected_bytes));
+        assert!(12 * (expected_bytes + 1) + fixed_tokens > remaining_tokens);
         assert_eq!(
             source_materialization_limits(SourcePolicy::EvidenceHeavy, ResponseProfile::Standard),
             (true, 4_096)
@@ -5367,6 +5512,15 @@ mod tests {
         assert_eq!(evidence.data.items[0].tokens, standard.data.items[0].tokens);
         for planned in [&standard, &evidence] {
             assert!(planned.data.items[0].snippet.as_ref().unwrap().truncated);
+            assert!(planned.data.items[0].signature.is_none());
+            assert!(
+                planned.data.items[0]
+                    .snippet
+                    .as_ref()
+                    .unwrap()
+                    .content
+                    .starts_with("fn profile_fixture()")
+            );
             assert_eq!(
                 planned.data.items[0]
                     .source_ref
@@ -5380,6 +5534,15 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn control_free_language_labels_fit_two_byte_json_expansion(
+            scalars in proptest::collection::vec(any::<char>().prop_filter("language labels reject controls", |scalar| !scalar.is_control()), 1..=16),
+        ) {
+            let language = scalars.into_iter().collect::<String>();
+            let encoded = serde_json::to_vec(&language).unwrap();
+            prop_assert!(encoded.len() - 2 <= language.len() * 2);
+        }
+
         #[test]
         fn removing_any_required_selected_role_cannot_leave_complete(
             objective_index in 0usize..5,

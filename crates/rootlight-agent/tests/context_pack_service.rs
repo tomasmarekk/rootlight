@@ -88,6 +88,7 @@ struct FakePort {
     encoded_source: Option<(String, SourceTextEncoding)>,
     source_requests: Mutex<Vec<ContextSourceRequest>>,
     support_all_providers: bool,
+    shared_definition_source: bool,
 }
 
 impl FakePort {
@@ -107,6 +108,7 @@ impl FakePort {
             encoded_source: None,
             source_requests: Mutex::new(Vec::new()),
             support_all_providers: false,
+            shared_definition_source: false,
         }
     }
 
@@ -186,6 +188,21 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
                 })
             });
         }
+        if self.shared_definition_source
+            && !matches!(
+                invocation.role(),
+                rootlight_agent::context_pack::EvidenceRole::Definition
+                    | rootlight_agent::context_pack::EvidenceRole::Implementation
+                    | rootlight_agent::context_pack::EvidenceRole::Caller
+            )
+        {
+            return Box::pin(async {
+                Err(ContextEvidencePortError {
+                    kind: ContextEvidencePortErrorKind::Unsupported,
+                    usage: BudgetCharge::default(),
+                })
+            });
+        }
         let candidate_count = self
             .definition_candidates
             .min(usize::from(invocation.max_candidates()));
@@ -193,7 +210,17 @@ impl ContextEvidencePort<TestCancellation> for FakePort {
             .map(|index| {
                 let mut hasher =
                     blake3::Hasher::new_derive_key("rootlight.context-service-fixture.v1");
-                hasher.update(invocation.id().as_str().as_bytes());
+                if self.shared_definition_source
+                    && matches!(
+                        invocation.role(),
+                        rootlight_agent::context_pack::EvidenceRole::Definition
+                            | rootlight_agent::context_pack::EvidenceRole::Implementation
+                    )
+                {
+                    hasher.update(b"shared-definition");
+                } else {
+                    hasher.update(invocation.id().as_str().as_bytes());
+                }
                 hasher.update(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
                 let digest = *hasher.finalize().as_bytes();
                 let mut symbol_bytes = [0; 20];
@@ -1318,6 +1345,171 @@ async fn authenticated_continuation_resumes_without_duplicates_and_preserves_par
             )
             .await,
         Err(ContextPackServiceError::InvalidContinuation)
+    );
+}
+
+#[tokio::test]
+async fn compact_continuation_remains_actionable_without_repeated_omission_handles() {
+    for profile in [
+        ResponseProfile::Compact,
+        ResponseProfile::Standard,
+        ResponseProfile::Evidence,
+    ] {
+        let mut request = continuation_input(generation(2));
+        request.token_budget = 1_550;
+        request.response_profile = Some(profile);
+        let first = ContextPackService
+            .execute(
+                Arc::new(FakePort::paged(
+                    Ok(identity(generation(2))),
+                    2,
+                    900,
+                    vec![1],
+                )),
+                request.clone(),
+                repository(),
+                TestCancellation(false),
+            )
+            .await
+            .expect("bounded first page succeeds");
+        let cursor = first
+            .next_cursor
+            .0
+            .clone()
+            .expect("page has a continuation");
+        let followup = first
+            .data
+            .followups
+            .iter()
+            .find(|item| item.tool == "context.pack")
+            .expect("every profile retains an actionable follow-up");
+        assert_eq!(followup.continuation.as_ref(), Some(&cursor));
+        let resumable = first
+            .data
+            .omitted
+            .iter()
+            .filter(|item| item.resumable)
+            .collect::<Vec<_>>();
+        assert!(!resumable.is_empty());
+        for omission in resumable {
+            assert_eq!(
+                omission.continuation.as_ref(),
+                (profile != ResponseProfile::Compact).then_some(&cursor),
+            );
+        }
+        assert!(first.usage.estimated_tokens <= u64::from(request.token_budget));
+        request.continuation = followup.continuation.clone();
+        let second = ContextPackService
+            .execute(
+                Arc::new(FakePort::paged(
+                    Ok(identity(generation(2))),
+                    2,
+                    900,
+                    vec![1],
+                )),
+                request,
+                repository(),
+                TestCancellation(false),
+            )
+            .await
+            .expect("the retained follow-up resumes the exact request");
+        assert!(!second.data.items.is_empty());
+        assert!(second.next_cursor.0.is_none());
+        assert!(second.data.items.iter().all(|item| {
+            !first
+                .data
+                .items
+                .iter()
+                .any(|previous| previous.symbol_id == item.symbol_id)
+        }));
+    }
+}
+
+#[tokio::test]
+async fn bounded_source_materialization_prioritizes_distinct_caller_over_repeated_definition() {
+    let mut fixture = FakePort::complete(Ok(identity(generation(2))));
+    fixture.shared_definition_source = true;
+    let port = Arc::new(fixture);
+    let mut request = input(generation(2));
+    request.task = "fix the caller of the selected definition".to_owned();
+    request.token_budget = 8_000;
+    request.source_policy = Some(SourcePolicy::FocusedSnippets);
+    request.response_profile = Some(ResponseProfile::Evidence);
+    request.sections = Some(vec![
+        ContextSection::Definitions,
+        ContextSection::Source,
+        ContextSection::Callers,
+    ]);
+    let output = ContextPackService
+        .execute(
+            Arc::clone(&port),
+            request,
+            repository(),
+            TestCancellation(false),
+        )
+        .await
+        .expect("bounded source pack succeeds");
+    let definition = output
+        .data
+        .items
+        .iter()
+        .find(|item| item.role == EvidenceRole::Definition)
+        .unwrap();
+    let implementation = output
+        .data
+        .items
+        .iter()
+        .find(|item| item.role == EvidenceRole::Implementation)
+        .unwrap();
+    let caller = output
+        .data
+        .items
+        .iter()
+        .find(|item| item.role == EvidenceRole::Caller)
+        .unwrap();
+    assert_eq!(definition.source_ref, implementation.source_ref);
+    assert_ne!(caller.source_ref, definition.source_ref);
+    assert!(definition.snippet.is_some());
+    assert!(
+        caller.snippet.is_some(),
+        "a repeated role must not crowd out distinct caller source"
+    );
+    assert!(implementation.snippet.is_some());
+    let requests = port.source_requests.lock().unwrap();
+    assert!(
+        requests.len() > 1,
+        "unused reservations admit later source batches"
+    );
+    let targets = requests
+        .iter()
+        .flat_map(|request| &request.targets)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 3);
+    assert_ne!(targets[0].source_ref, targets[1].source_ref);
+    assert_eq!(targets[0].source_ref, targets[2].source_ref);
+    assert_eq!(
+        output.usage.source_bytes, 3,
+        "every source read stays charged, including repeated material"
+    );
+    assert!(output.usage.estimated_tokens <= 8_000);
+    let truncated = output
+        .data
+        .omitted
+        .iter()
+        .filter(|item| item.reason.as_str() == "source_truncated")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        truncated.len(),
+        1,
+        "batch omissions coalesce before the summary cap"
+    );
+    assert_eq!(truncated[0].count, 3);
+    assert!(
+        !output
+            .data
+            .omitted
+            .iter()
+            .any(|item| item.reason.as_str() == "source_budget")
     );
 }
 

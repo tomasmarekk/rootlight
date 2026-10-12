@@ -1729,6 +1729,7 @@ where
     related_symbols.sort_unstable();
     related_symbols.dedup();
     let mut task_relevance = std::collections::BTreeMap::new();
+    let mut definitions = std::collections::BTreeMap::new();
     if !related_symbols.is_empty() {
         let explained = explain_context_symbols_within_budget(
             Arc::clone(&port),
@@ -1745,12 +1746,19 @@ where
             if task_mentions_identifier(invocation.task(), &explanation.display_name) {
                 task_relevance.insert(explanation.symbol, 1_000);
             }
+            definitions.insert(explanation.symbol, explanation.definition);
         }
     }
     let mut observations = Vec::new();
     for group in response.result.groups {
         for item in group.items {
-            let source_refs = context_source_refs(&item.source_refs)?;
+            // The candidate represents the related symbol. Edge references may
+            // cover only the callee's name, so prefer its explained definition.
+            let source_refs = context_source_refs(
+                definitions
+                    .get(&item.symbol)
+                    .map_or(item.source_refs.as_slice(), std::slice::from_ref),
+            )?;
             let relevance = task_relevance
                 .get(&item.symbol)
                 .copied()
