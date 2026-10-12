@@ -598,7 +598,7 @@ fn macos_verification_failure(fallback: ProcessError, stderr: &mut ChildStderr) 
     fallback
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn known_macos_failure_code(code: &str) -> Option<&'static str> {
     [
         "hard-limit-replacement",
@@ -620,6 +620,8 @@ fn known_macos_failure_code(code: &str) -> Option<&'static str> {
         "launcher-contract",
         "unsupported-platform",
         "launcher-deadline",
+        "launcher-cancelled",
+        "launcher-resource-unavailable",
     ]
     .into_iter()
     .find(|known| *known == code)
@@ -1362,6 +1364,22 @@ mod tests {
         assert!(matches!(error, ProcessError::Cancelled(cancelled)
             if cancelled.reason() == CancellationReason::Shutdown));
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn macos_launcher_terminal_reason_codes_are_closed() {
+        for code in ["launcher-cancelled", "launcher-resource-unavailable"] {
+            assert_eq!(known_macos_failure_code(code), Some(code));
+        }
+        for unreviewed in [
+            "launcher-cancelled-private-detail",
+            "launcher-resource-unavailable/private-path",
+            "launcher-cancelled\nprivate detail",
+            "unknown-stage",
+            "",
+        ] {
+            assert_eq!(known_macos_failure_code(unreviewed), None);
+        }
     }
 
     #[cfg(target_os = "macos")]

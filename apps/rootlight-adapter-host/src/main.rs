@@ -24,7 +24,7 @@ use rootlight_adapter_host::{
     run_authenticated_project_session, run_project_session,
 };
 use rootlight_sandbox::AuthenticatedAdapterExecutable;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use rootlight_sandbox::ProcessError;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use rootlight_sandbox::enter_isolated_adapter_launcher;
@@ -68,7 +68,7 @@ fn main() -> ExitCode {
     dispatch(arguments.into_iter(), authenticated_executable)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn macos_launcher_failure_code(error: &ProcessError) -> &'static str {
     match error {
         ProcessError::Io { operation, .. } => match *operation {
@@ -91,6 +91,7 @@ fn macos_launcher_failure_code(error: &ProcessError) -> &'static str {
             "write isolation handshake" => "handshake-write",
             _ => "launcher-io",
         },
+        ProcessError::Cancelled(_) => "launcher-cancelled",
         ProcessError::InvalidInput(_) => "launcher-contract",
         ProcessError::UnsupportedPlatform => "unsupported-platform",
         ProcessError::Deadline { .. } => "launcher-deadline",
@@ -368,5 +369,66 @@ fn wait_for_exit(
             return Err(());
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::macos_launcher_failure_code;
+    use rootlight_cancel::{Cancellation, CancellationReason};
+    use rootlight_sandbox::ProcessError;
+
+    #[test]
+    fn macos_launcher_cancellation_has_a_distinct_closed_reason() {
+        for reason in [
+            CancellationReason::ClientRequest,
+            CancellationReason::ParentCancelled,
+            CancellationReason::DeadlineExceeded,
+            CancellationReason::Shutdown,
+            CancellationReason::ResourceLimit,
+        ] {
+            let cancellation = Cancellation::new();
+            assert!(cancellation.cancel(reason));
+            let error = ProcessError::from(cancellation.check().unwrap_err());
+            assert_eq!(macos_launcher_failure_code(&error), "launcher-cancelled");
+        }
+        assert_eq!(
+            macos_launcher_failure_code(&ProcessError::Deadline {
+                operation: "private operation detail",
+            }),
+            "launcher-deadline"
+        );
+    }
+
+    #[test]
+    fn macos_launcher_diagnostics_do_not_expose_source_details() {
+        for (error, expected) in [
+            (
+                ProcessError::Io {
+                    operation: "set adapter CPU limit",
+                    source: std::io::Error::other("private source detail"),
+                },
+                "cpu-limit",
+            ),
+            (
+                ProcessError::Io {
+                    operation: "private operation detail",
+                    source: std::io::Error::other("private source detail"),
+                },
+                "launcher-io",
+            ),
+            (
+                ProcessError::InvalidInput("private argument detail".to_owned()),
+                "launcher-contract",
+            ),
+            (
+                ProcessError::ResourceUnavailable {
+                    resource: "private resource detail",
+                },
+                "launcher-resource-unavailable",
+            ),
+        ] {
+            assert_eq!(macos_launcher_failure_code(&error), expected);
+        }
     }
 }
