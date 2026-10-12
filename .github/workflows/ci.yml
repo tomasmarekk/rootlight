@@ -416,9 +416,9 @@ jobs:
   platform:
     name: platform / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Cold Windows builds and the complete process suite exceed 75 minutes;
-    # Intel macOS also needs room for validation and cache compression/upload.
-    timeout-minutes: ${{ matrix.os == 'windows-2025' && 120 || matrix.os == 'macos-15-intel' && 90 || 75 }}
+    # Cold Windows builds and the complete process suite exceed 75 minutes.
+    # Intel macOS exceeds 90 before finishing service tests and native grammars.
+    timeout-minutes: ${{ matrix.os == 'windows-2025' && 120 || matrix.os == 'macos-15-intel' && 150 || 75 }}
     strategy:
       fail-fast: false
       matrix:
