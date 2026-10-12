@@ -797,7 +797,8 @@ jobs:
           bash scripts/download-osv-database.sh artifacts/osv-db
       - name: Dependency, license, source, and advisory policy
         run: |
-          cargo deny check bans licenses sources
+          python scripts/test_cargo_deny_policy.py
+          bash scripts/check-cargo-deny.sh
           cargo audit --db artifacts/rustsec-db --no-fetch -D warnings
           cargo audit --file tests/native-grammars/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
           cargo tree --manifest-path fuzz/Cargo.toml --locked --offline --depth 1
