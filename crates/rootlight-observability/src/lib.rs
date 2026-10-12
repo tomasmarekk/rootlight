@@ -1872,6 +1872,10 @@ impl Telemetry {
     }
 
     fn next_sequence(&self) -> Option<u64> {
+        #[allow(
+            deprecated,
+            reason = "try_update is unavailable on the supported Rust 1.90 minimum"
+        )]
         let allocated =
             self.sequence
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -1988,6 +1992,10 @@ fn saturating_increment(value: &AtomicU64) {
     saturating_add(value, 1);
 }
 
+#[allow(
+    deprecated,
+    reason = "try_update is unavailable on the supported Rust 1.90 minimum"
+)]
 fn saturating_add(value: &AtomicU64, addition: u64) {
     let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(addition))

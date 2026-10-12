@@ -864,7 +864,7 @@ fn assert_default_work_compilation_bindings(
             );
         } else {
             assert_eq!(inventory.branches.len(), COMPILATION_WORK_GROUPS * 2);
-            for alternatives in inventory.branches.chunks_exact(2) {
+            for alternatives in inventory.branches.as_chunks::<2>().0 {
                 assert_eq!(alternatives[0].group, alternatives[1].group);
                 assert_eq!(
                     alternatives[0].activity,

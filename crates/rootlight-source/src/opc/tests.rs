@@ -123,7 +123,9 @@ fn utf16_endianness_surrogates_and_attribute_normalization_keep_raw_offsets() {
         );
         let raw = &bytes[record.media_type().original_range()];
         let units: Vec<_> = raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 if little {
                     u16::from_le_bytes([pair[0], pair[1]])

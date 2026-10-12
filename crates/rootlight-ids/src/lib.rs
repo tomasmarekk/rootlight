@@ -546,20 +546,16 @@ fn base32_reference_decode(input: &[u8]) -> Option<Vec<u8>> {
         let value = BASE32_ALPHABET.iter().position(|&letter| letter == byte)?;
         bits.extend((0..5).rev().map(|shift| (value >> shift) & 1));
     }
-    let mut chunks = bits.chunks_exact(8);
+    let (chunks, remainder) = bits.as_chunks::<8>();
     let decoded = chunks
-        .by_ref()
+        .iter()
         .map(|chunk| {
             chunk
                 .iter()
                 .fold(0_u8, |value, bit| (value << 1) | u8::from(*bit != 0))
         })
         .collect();
-    chunks
-        .remainder()
-        .iter()
-        .all(|bit| *bit == 0)
-        .then_some(decoded)
+    remainder.iter().all(|bit| *bit == 0).then_some(decoded)
 }
 
 fn decode_text<const N: usize>(

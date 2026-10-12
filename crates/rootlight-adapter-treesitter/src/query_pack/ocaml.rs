@@ -367,9 +367,9 @@ fn owner_proof(
                 return Ok(None);
             };
             if selected.kind() != "value_pattern"
-                || !cache
+                || cache
                     .owner(parent, language, source, cancellation)?
-                    .is_some_and(|owner| owner.kind == "function")
+                    .is_none_or(|owner| owner.kind != "function")
             {
                 return Ok(None);
             }

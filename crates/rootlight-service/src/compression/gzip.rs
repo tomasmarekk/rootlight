@@ -45,11 +45,8 @@ fn update_crc(mut crc: u32, bytes: &[u8], cancellation: &Cancellation) -> io::Re
     let tables = &*CRC_TABLES;
     for chunk in bytes.chunks(4096) {
         cancellation.check().map_err(io::Error::other)?;
-        let mut words = chunk.chunks_exact(8);
-        for word in &mut words {
-            let &[a, b, c, d, e, f, g, h] = word else {
-                return Err(invalid());
-            };
+        let (words, remainder) = chunk.as_chunks::<8>();
+        for &[a, b, c, d, e, f, g, h] in words {
             let [a, b, c, d] = (u32::from_le_bytes([a, b, c, d]) ^ crc).to_le_bytes();
             // Independent word contributions avoid eight serial CRC dependency steps.
             crc = 0;
@@ -57,7 +54,7 @@ fn update_crc(mut crc: u32, bytes: &[u8], cancellation: &Cancellation) -> io::Re
                 crc ^= table.get(usize::from(byte)).ok_or_else(invalid)?;
             }
         }
-        for byte in words.remainder() {
+        for byte in remainder {
             let [low, ..] = crc.to_le_bytes();
             crc = (crc >> 8)
                 ^ tables

@@ -199,8 +199,7 @@ fn compress_pages(values: &[u16]) -> Result<(Vec<u16>, Vec<[u16; 256]>), Box<dyn
     let mut pages = vec![[0_u16; 256]];
     page_ids.insert([0_u16; 256], 0_u16);
     let mut map = Vec::with_capacity(values.len() / 256);
-    for chunk in values.chunks_exact(256) {
-        let page = <[u16; 256]>::try_from(chunk)?;
+    for &page in values.as_chunks::<256>().0 {
         let id = if let Some(&id) = page_ids.get(&page) {
             id
         } else {

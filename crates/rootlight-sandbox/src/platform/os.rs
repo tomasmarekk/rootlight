@@ -1916,7 +1916,6 @@ fn owned_handle(handle: HANDLE) -> OwnedHandle {
 mod tests {
     use std::{
         ffi::OsString,
-        io::Read as _,
         os::windows::ffi::OsStringExt as _,
         path::{Path, PathBuf},
         sync::mpsc,

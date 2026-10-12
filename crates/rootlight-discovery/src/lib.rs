@@ -2409,7 +2409,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &["delphi", "object-pascal"],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "perl",
@@ -2497,7 +2497,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "sass",
@@ -6313,7 +6313,7 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.suffixes, &[".sas"]);
         assert_eq!(capability.detectors, &["extension"]);
         assert_eq!(capability.maximum_tier, "tier_d");
-        assert_eq!(capability.analyzers, &["source-fallback"]);
+        assert_eq!(capability.analyzers, &["treesitter"]);
     }
 
     #[test]
@@ -6354,7 +6354,7 @@ max_source_file_bytes = 2097152
         assert_eq!(capability.aliases, ["delphi", "object-pascal"]);
         assert_eq!(capability.detectors, ["extension", "configuration"]);
         assert_eq!(capability.maximum_tier, "tier_d");
-        assert_eq!(capability.analyzers, ["source-fallback"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
     }
 
     #[test]

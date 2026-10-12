@@ -1222,7 +1222,10 @@ fn office_modules_preserve_exact_sources_and_origins_across_processes() {
 fn assert_exact_base64(expected: &[u8], encoded: &str) {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     assert_eq!(encoded.len(), expected.len().div_ceil(3) * 4);
-    for (input, output) in expected.chunks(3).zip(encoded.as_bytes().chunks_exact(4)) {
+    for (input, output) in expected
+        .chunks(3)
+        .zip(encoded.as_bytes().as_chunks::<4>().0)
+    {
         let mut padded = [0_u8; 3];
         padded[..input.len()].copy_from_slice(input);
         let bits =

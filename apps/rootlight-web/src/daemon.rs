@@ -1066,6 +1066,10 @@ mod tests {
         );
     }
 
+    #[allow(
+        deprecated,
+        reason = "try_update is unavailable on the supported Rust 1.90 minimum"
+    )]
     fn take_failure(counter: &AtomicUsize) -> bool {
         counter
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

@@ -153,7 +153,7 @@ impl ParseProvider for ScssParseProvider {
                 .and_then(|value| value.checked_add(2))
                 .ok_or_else(|| failure("scss-syntax-node-limit"))?;
             let name = source_span(file, declaration.name_start, declaration.name_end)?;
-            let parent = declaration.scope.map(&scope_id).transpose()?.unwrap_or(1);
+            let parent = declaration.scope.map(scope_id).transpose()?.unwrap_or(1);
             let depth = declaration.depth;
             facts.push(SyntaxFact::new(
                 local_id,
@@ -206,7 +206,7 @@ impl ParseProvider for ScssParseProvider {
         let first_call_id = scope_id(declarations.scopes.len())?;
         for (index, call) in declarations.calls.iter().enumerate() {
             cancellation.check()?;
-            let parent = call.scope.map(&scope_id).transpose()?.unwrap_or(1);
+            let parent = call.scope.map(scope_id).transpose()?.unwrap_or(1);
             let local_id = first_call_id
                 .checked_add(u64::try_from(index).map_err(|_| failure("scss-syntax-node-limit"))?)
                 .ok_or_else(|| failure("scss-syntax-node-limit"))?;
@@ -227,7 +227,7 @@ impl ParseProvider for ScssParseProvider {
             .ok_or_else(|| failure("scss-syntax-node-limit"))?;
         for (index, import) in declarations.imports.iter().enumerate() {
             cancellation.check()?;
-            let parent = import.scope.map(&scope_id).transpose()?.unwrap_or(1);
+            let parent = import.scope.map(scope_id).transpose()?.unwrap_or(1);
             let local_id = first_import_id
                 .checked_add(u64::try_from(index).map_err(|_| failure("scss-syntax-node-limit"))?)
                 .ok_or_else(|| failure("scss-syntax-node-limit"))?;
@@ -248,7 +248,7 @@ impl ParseProvider for ScssParseProvider {
             .ok_or_else(|| failure("scss-syntax-node-limit"))?;
         for (index, extend) in declarations.extends.iter().enumerate() {
             cancellation.check()?;
-            let parent = extend.scope.map(&scope_id).transpose()?.unwrap_or(1);
+            let parent = extend.scope.map(scope_id).transpose()?.unwrap_or(1);
             let local_id = first_extend_id
                 .checked_add(u64::try_from(index).map_err(|_| failure("scss-syntax-node-limit"))?)
                 .ok_or_else(|| failure("scss-syntax-node-limit"))?;

@@ -4575,6 +4575,10 @@ impl WorkerDeadline {
         }
         #[cfg(test)]
         if let Some(remaining_checks) = self.remaining_checks.as_ref() {
+            #[allow(
+                deprecated,
+                reason = "try_update is unavailable on the supported Rust 1.90 minimum"
+            )]
             let available = remaining_checks
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |checks| {
                     checks.checked_sub(1)

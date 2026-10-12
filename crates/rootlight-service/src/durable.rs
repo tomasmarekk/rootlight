@@ -4011,6 +4011,10 @@ impl DurablePreparedGeneration {
         self.account_staging_bytes(bytes)
     }
 
+    #[allow(
+        deprecated,
+        reason = "try_update is unavailable on the supported Rust 1.90 minimum"
+    )]
     fn account_staging_bytes(&self, bytes: u64) -> Result<(), FirstSliceError> {
         self.accounted_bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -4030,6 +4034,10 @@ impl DurablePreparedGeneration {
         Ok(())
     }
 
+    #[allow(
+        deprecated,
+        reason = "try_update is unavailable on the supported Rust 1.90 minimum"
+    )]
     fn release_staging_bytes(&self) {
         let bytes = self.accounted_bytes.swap(0, Ordering::AcqRel);
         let _ = self

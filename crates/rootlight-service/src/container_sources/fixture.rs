@@ -106,8 +106,7 @@ fn compress_literals(bytes: &[u8]) -> Vec<u8> {
 
 fn compress_module_source(bytes: &[u8]) -> Vec<u8> {
     assert!(!bytes.is_empty());
-    let chunks = bytes.chunks_exact(4096);
-    let tail = chunks.remainder();
+    let (chunks, tail) = bytes.as_chunks::<4096>();
     // Short raw chunks are invalid. Literal-only tails deliberately retain the
     // small fixture contract instead of encoding a payload beyond its header.
     assert!(

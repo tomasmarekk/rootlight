@@ -91,14 +91,14 @@ fn encode_hex(input: &[u8]) -> String {
 }
 
 fn decode_hex(input: &[u8], permissive: bool) -> Result<Vec<u8>, DecodeError> {
-    let mut chunks = input.chunks_exact(2);
+    let (chunks, remainder) = input.as_chunks::<2>();
     let mut output = Vec::with_capacity(input.len() / 2);
-    for pair in chunks.by_ref() {
+    for pair in chunks {
         let high = hex_digit(pair[0], permissive)?;
         let low = hex_digit(pair[1], permissive)?;
         output.push((high << 4) | low);
     }
-    if !chunks.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err(DecodeError);
     }
     Ok(output)

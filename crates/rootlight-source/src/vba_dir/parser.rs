@@ -176,12 +176,12 @@ impl<'a> Reader<'a, '_> {
         }
         let start = self.position;
         let bytes = self.take(size)?;
-        let units = bytes.chunks_exact(2).map(|pair| {
-            let [low, high] = pair else {
-                unreachable!("chunks_exact yields two bytes")
-            };
-            u16::from_le_bytes([*low, *high])
-        });
+        let units = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes);
         for scalar in char::decode_utf16(units) {
             self.cancellation.check()?;
             if !matches!(scalar, Ok(character) if character != '\0') {

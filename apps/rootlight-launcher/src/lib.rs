@@ -1532,6 +1532,7 @@ pub enum LauncherError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
     use std::io::Write as _;
 
     use super::*;
