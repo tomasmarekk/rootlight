@@ -1,0 +1,42 @@
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#define C_H 10
+
+enum C_E
+#if __STDC_VERSION__ >= 202311L
+  : uint8_t
+#endif // __STDC_VERSION__ >= 202311L
+ {
+  x = 0,
+  y = 1,
+};
+#if __STDC_VERSION__ >= 202311L
+typedef enum C_E C_E;
+#else
+typedef uint8_t C_E;
+#endif // __STDC_VERSION__ >= 202311L
+
+struct C_A;
+
+struct C_C;
+
+struct C_AwesomeB {
+  int32_t x;
+  float y;
+};
+
+union C_D {
+  int32_t x;
+  float y;
+};
+
+typedef struct C_A C_F;
+
+#define C_I (intptr_t)(C_F*)10
+
+extern const int32_t G;
+
+void root(const struct C_A *a, struct C_AwesomeB b, struct C_C c, union C_D d, C_E e, C_F f);

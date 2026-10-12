@@ -16,6 +16,7 @@ import stat
 import sys
 
 import verify_lightning_yarn_sources as yarn
+import verify_lightning_security_sources as security
 
 
 MAX_ENTRIES = yarn.MAX_TOTAL_MEMBERS
@@ -40,7 +41,10 @@ def _require(condition, message):
 
 
 def _stamp(metadata):
-    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+    # Directory allocation size is unstable on Windows even without byte changes.
+    # Exact child inventories, file sizes and all remaining identity fields stay bound.
+    size = 0 if stat.S_ISDIR(metadata.st_mode) else metadata.st_size
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, size,
             metadata.st_mtime_ns, metadata.st_ctime_ns,
             getattr(metadata, "st_file_attributes", 0), getattr(metadata, "st_reparse_tag", 0))
 
@@ -77,7 +81,7 @@ def _projection(proof):
 
 
 def _helper_rows(helper_root):
-    modules = (yarn, yarn.yarn, yarn.producer, yarn.original,
+    modules = (yarn, security, yarn.yarn, yarn.producer, yarn.original,
                yarn.producer.local, yarn.producer.local.fixture)
     _require(yarn.original is yarn.producer.local.original, "mixed npm verifier modules")
     rows = []
@@ -461,20 +465,22 @@ def observe(source_root: Path, producer_root: Path, *, helper_root: Path | None 
                                           directory=True)
     helpers = _helper_rows(helper_root)
     source_ancestors = _ancestor_ids(source_root)
-    verified = yarn.verify_bundle(source_root)
+    verified = security.verify_bundle(source_root)
     observer = None
     try:
         report_bytes = yarn.producer.read_bytes(source_root / yarn.PRODUCER_PATH / "source-tree.json",
                                                yarn.MAX_REPORT)
         _require(hashlib.sha256(report_bytes).hexdigest()
                  == verified["producer"]["source_tree_report"]["sha256"], "producer report changed")
-        manifest_bytes = yarn.producer.read_bytes(source_root / yarn.PRODUCER_PATH / "tree/package.json",
-                                                 yarn.MAX_MANIFEST)
-        observer = _Observer(producer_root, verified, json.loads(report_bytes), json.loads(manifest_bytes))
+        producer_report, overlays = security.effective_producer(source_root, verified, json.loads(report_bytes))
+        manifest_bytes = (overlays["package.json"] if "package.json" in overlays else
+                          yarn.producer.read_bytes(source_root / yarn.PRODUCER_PATH / "tree/package.json",
+                                                   yarn.MAX_MANIFEST))
+        observer = _Observer(producer_root, verified, producer_report, json.loads(manifest_bytes))
         result = observer.run()
     finally:
         try:
-            _require(yarn.verify_bundle(source_root) == verified, "authenticated source inputs changed")
+            _require(security.verify_bundle(source_root) == verified, "authenticated source inputs changed")
             _require(_helper_rows(helper_root) == helpers, "helper bytes changed")
             _require(_ancestor_ids(source_root) == source_ancestors, "source-root ancestor identity changed")
         finally:

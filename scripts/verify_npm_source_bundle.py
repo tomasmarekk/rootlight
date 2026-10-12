@@ -483,6 +483,11 @@ def _file_stamp(metadata: os.stat_result) -> tuple[int, int, int, int]:
 
 
 def _same_path_stamp(first: os.stat_result, second: os.stat_result) -> bool:
+    if stat.S_ISDIR(first.st_mode) and stat.S_ISDIR(second.st_mode):
+        # Windows may expose a directory allocation size as 0 or 4096 after
+        # enumeration; identity/timestamps/mode and callers' exact names remain strict.
+        return ((first.st_dev, first.st_ino, first.st_mode, first.st_mtime_ns, first.st_ctime_ns)
+                == (second.st_dev, second.st_ino, second.st_mode, second.st_mtime_ns, second.st_ctime_ns))
     return _file_stamp(first) == _file_stamp(second) and first.st_ctime_ns == second.st_ctime_ns
 
 

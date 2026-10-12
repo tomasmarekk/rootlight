@@ -64,6 +64,9 @@ class FrontendArchiveInstallationTests(unittest.TestCase):
         (self.frontend / ".npmrc").write_bytes(b"engine-strict=true\nfund=false\npackage-lock=true\n")
         (self.frontend / "src").mkdir()
         (self.frontend / "src/main.ts").write_bytes(b"export const value = 1;\n")
+        guard = self.source / install.BUILD_GUARD
+        guard.parent.mkdir()
+        guard.write_bytes(b"// Synthetic authenticated frontend build guard.\n")
         self.freeze()
         self.calls = []
 
@@ -247,6 +250,62 @@ class FrontendArchiveInstallationTests(unittest.TestCase):
             self.assertFalse(any(argument.startswith(("https:", "http:", "git:")) for argument in arguments))
         self.assertEqual(self.calls[-1][0][2], "ci")
         self.assertEqual(self.calls[-1][0][-3:], ["--include=dev", "--include=optional", "--include=peer"])
+
+    def test_build_guard_retains_its_authenticated_bytes_and_relative_location(self) -> None:
+        """The package's root-relative preloader resolves inside the staged project."""
+        source = self.source / install.BUILD_GUARD
+        (source.parent / "unrelated.cjs").write_bytes(b"// Unrelated tracked script.\n")
+        self.freeze()
+        manifest = json.loads((self.source / install.MANIFEST).read_bytes())
+        expected = next(record for record in manifest["project_sources"] if record["path"] == install.BUILD_GUARD)
+        self.invoke()
+        staged = (self.staged_frontend / "../../../scripts/check_lightning_frontend_boundary.cjs").resolve()
+        self.assertEqual(staged, self.work / install.BUILD_GUARD)
+        self.assertEqual(staged.read_bytes(), source.read_bytes())
+        self.assertEqual(hashlib.sha256(staged.read_bytes()).hexdigest(), expected["sha256"])
+        self.assertFalse((staged.parent / "unrelated.cjs").exists())
+
+    def test_missing_unlisted_or_tampered_build_guard_rejects_before_staging(self) -> None:
+        """A missing or unauthenticated preloader cannot produce an installed tree."""
+        for failure in ("missing", "unlisted", "tampered"):
+            with self.subTest(failure=failure):
+                fixture = FrontendArchiveInstallationTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                guard = fixture.source / install.BUILD_GUARD
+                if failure == "missing":
+                    guard.unlink()
+                    pattern = "check_lightning_frontend_boundary"
+                elif failure == "unlisted":
+                    manifest_path = fixture.source / install.MANIFEST
+                    manifest = json.loads(manifest_path.read_bytes())
+                    manifest["project_sources"] = [record for record in manifest["project_sources"]
+                                                   if record["path"] != install.BUILD_GUARD]
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                    pattern = "omits required frontend inputs"
+                else:
+                    guard.write_bytes(b"changed guard")
+                    pattern = "source differs from manifest"
+                fixture.rejected_before_process(pattern)
+                self.assertEqual(list(fixture.work.iterdir()), [])
+                self.assertEqual(list(fixture.cache.iterdir()), [])
+
+    def test_build_guard_mutation_after_a_child_phase_rejects(self) -> None:
+        """Both the immutable helper and its staged copy stay bound during installation."""
+        for location, pattern in (("source", "immutable source changed"), ("work", "staged authored source changed")):
+            with self.subTest(location=location):
+                fixture = FrontendArchiveInstallationTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+
+                def mutate(arguments, **options):
+                    result = fixture.process(arguments, **options)
+                    (getattr(fixture, location) / install.BUILD_GUARD).write_bytes(b"changed guard")
+                    return result
+
+                with self.assertRaisesRegex(ValueError, pattern):
+                    fixture.invoke(process=mutate)
+                self.assertEqual(len(fixture.calls), 1)
 
     def test_untracked_sources_and_generated_files_are_not_staged(self) -> None:
         """Only authenticated authored files are selected from the exported frontend."""

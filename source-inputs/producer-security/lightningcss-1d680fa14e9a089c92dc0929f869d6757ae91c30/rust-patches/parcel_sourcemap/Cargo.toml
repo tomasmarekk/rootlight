@@ -1,0 +1,52 @@
+# Reviewed security derivative of the published parcel_sourcemap 2.1.1 crate.
+# PATCHES.md describes the checked archive format migration; Cargo.toml.orig
+# retains the original authored dependency declarations as provenance.
+
+[package]
+edition = "2018"
+name = "parcel_sourcemap"
+version = "2.1.1"
+authors = ["Jasper De Moor <jasperdemoor@gmail.com>"]
+description = "Parcel Source Map Library"
+keywords = [
+    "sourcemap",
+    "Node",
+    "Parcel",
+]
+license = "MIT"
+repository = "https://github.com/parcel-bundler/source-map"
+
+[dependencies.base64-simd]
+version = "0.7"
+optional = true
+
+[dependencies.data-url]
+version = "0.1.1"
+optional = true
+
+[dependencies.rkyv]
+version = "=0.8.18"
+default-features = false
+features = ["std", "bytecheck", "little_endian", "aligned", "pointer_width_32"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+
+[dependencies.serde_json]
+version = "1"
+optional = true
+
+[dependencies.vlq]
+version = "0.5.1"
+
+[features]
+json = [
+    "serde",
+    "serde_json",
+    "base64-simd",
+    "data-url",
+]
+
+[workspace]

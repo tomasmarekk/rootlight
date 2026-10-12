@@ -30,6 +30,10 @@ from verify_lightning_yarn_sources import (
     BUNDLE_PATH as LIGHTNING_YARN_PATH, REPORT_NAME as LIGHTNING_YARN_REPORT_NAME,
     verify_bundle as verify_lightning_yarn_bundle,
 )
+from verify_lightning_security_sources import (
+    BUNDLE_PATH as LIGHTNING_NATIVE_PATH, REPORT_NAME as LIGHTNING_NATIVE_REPORT_NAME,
+    verify_bundle as verify_lightning_native_bundle,
+)
 from verify_local_npm_sources import (
     CANONICAL_LOCK, LOCAL_DISTRIBUTIONS as NPM_LOCAL_DISTRIBUTIONS,
     ORIGINAL_ARCHIVES as NPM_ORIGINAL_ARCHIVES, verify_local_bundle,
@@ -47,6 +51,7 @@ LIGHTNING_PRODUCER_PATH = f"{PRODUCERS_PATH}/{LIGHTNING_PACKAGE}-{LIGHTNING_COMM
 LIGHTNING_LOCK_PATH = f"{LIGHTNING_PRODUCER_PATH}/tree/Cargo.lock"
 PRODUCER_DEPENDENCIES_PATH = "source-inputs/producer-dependencies"
 LIGHTNING_YARN_PRODUCER_PATH = f"{PRODUCER_DEPENDENCIES_PATH}/{LIGHTNING_PACKAGE}-{LIGHTNING_COMMIT}"
+LIGHTNING_NATIVE_LOCK_PATH = f"{LIGHTNING_NATIVE_PATH}/overlays/Cargo.lock"
 FRONTEND_PATHS = ("apps/rootlight-web/frontend/package.json", CANONICAL_LOCK,
                   "apps/rootlight-web/frontend/.npmrc")
 VERIFICATION_SCRIPT_PATHS = (
@@ -55,6 +60,7 @@ VERIFICATION_SCRIPT_PATHS = (
     "scripts/lightning_yarn_pins.py", "scripts/patch_npm_source_fixture.py",
     "scripts/prepare_rust_source_bundle.py", "scripts/verify_cargo_source_bundle.py",
     "scripts/verify_lightning_producer_sources.py", "scripts/verify_lightning_yarn_sources.py",
+    "scripts/verify_lightning_security_sources.py",
     "scripts/verify_local_npm_sources.py", "scripts/verify_npm_source_bundle.py",
 )
 BUNDLE_SCOPE = "rust_workspace_native_grammars_fuzz_and_local_npm_inputs"
@@ -317,6 +323,38 @@ def _yarn_source_inputs(root: Path) -> tuple[dict | None, dict[str, int], dict[s
     return report, dict(sorted(modes.items())), dict(sorted(hashes.items())), directories
 
 
+def _native_source_inputs(root: Path) -> tuple[dict | None, dict[str, int], dict[str, str], set[str]]:
+    """Authenticate complete native overlays and archives, including local Rust patches.
+
+    Absence supports earlier project exports. A present namespace must contain
+    exactly the declared profile, whose inventory fails closed on partial data.
+    """
+    parent = root / "source-inputs/producer-security"
+    if any(linked_path(path) for path in (parent, *parent.parents)):
+        raise ValueError("linked native source namespace")
+    if not parent.exists():
+        return None, {}, {}, set()
+    bundle = root / LIGHTNING_NATIVE_PATH
+    if (not parent.is_dir() or {item.name for item in parent.iterdir()} != {bundle.name}
+        or linked_path(bundle) or not bundle.is_dir()):
+        raise ValueError("native source namespace inventory differs")
+    report = verify_lightning_native_bundle(root)
+    hashes = {f"{LIGHTNING_NATIVE_PATH}/{name}": row["sha256"]
+              for name, row in report["inputs"].items()}
+    encoded = (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+    report_path = f"{LIGHTNING_NATIVE_PATH}/{LIGHTNING_NATIVE_REPORT_NAME}"
+    if regular_source(root, report_path).read_bytes() != encoded:
+        raise ValueError("native source report differs from verified inputs")
+    hashes[report_path] = hashlib.sha256(encoded).hexdigest()
+    directories = {"source-inputs/producer-security", LIGHTNING_NATIVE_PATH}
+    for name, checksum in hashes.items():
+        if digest(regular_source(root, name)) != checksum:
+            raise ValueError("native source inputs changed before export")
+        directories.update(str(path) for path in PurePosixPath(name).parents
+                           if str(path).startswith("source-inputs/producer-security/"))
+    return report, {name: 0o644 for name in sorted(hashes)}, dict(sorted(hashes.items())), directories
+
+
 def _source_input_empty_directories(root: Path, source_directories: set[str]) -> dict[str, int]:
     """Retain only verified empty source directories with canonical transport modes.
 
@@ -412,7 +450,10 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     bundle_cargo_config(config.read_text(encoding="utf-8"))
     producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
     yarn_inputs, yarn_modes, yarn_hashes, yarn_directories = _yarn_source_inputs(root)
+    native_inputs, native_modes, native_hashes, native_directories = _native_source_inputs(root)
     lock_paths = (*LOCK_PATHS, LIGHTNING_LOCK_PATH) if producer_inputs is not None else LOCK_PATHS
+    if native_inputs is not None:
+        lock_paths = (*lock_paths, LIGHTNING_NATIVE_LOCK_PATH)
     closure, cargo_modes = _versioned_closure(root, lock_paths=lock_paths)
     missing = sorted(set(cargo_modes) - names)
     if missing:
@@ -424,7 +465,9 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         raise ValueError("untracked producer source inputs")
     if not set(yarn_hashes).issubset(names):
         raise ValueError("untracked Yarn source inputs")
-    source_directories = producer_directories | yarn_directories
+    if not set(native_hashes).issubset(names):
+        raise ValueError("untracked native source inputs")
+    source_directories = producer_directories | yarn_directories | native_directories
     empty_directories = _source_input_empty_directories(root, source_directories)
     source_hashes = {name: digest(regular_source(root, name)) for name, _executable in inventory}
     if any(source_hashes[name] != checksum for name, checksum in npm_hashes.items()):
@@ -433,6 +476,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         raise ValueError("producer source inputs changed before export")
     if any(source_hashes[name] != checksum for name, checksum in yarn_hashes.items()):
         raise ValueError("Yarn source inputs changed before export")
+    if any(source_hashes[name] != checksum for name, checksum in native_hashes.items()):
+        raise ValueError("native source inputs changed before export")
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True,
     ).strip()
@@ -455,6 +500,7 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         # Original archive intent survives Windows Git modes and host chmod.
         mode = yarn_modes.get(name, producer_modes.get(name, npm_modes.get(name, cargo_modes.get(
             name, 0o644 if name == CLOSURE_PATH else (0o755 if executable else 0o644)))))
+        mode = native_modes.get(name, mode)
         executable = bool(mode & 0o111)
         target.chmod(mode)
         checksum = digest(target)
@@ -476,6 +522,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
             raise ValueError("producer source inputs changed during export")
         if _yarn_source_inputs(check_root) != (yarn_inputs, yarn_modes, yarn_hashes, yarn_directories):
             raise ValueError("Yarn source inputs changed during export")
+        if _native_source_inputs(check_root) != (native_inputs, native_modes, native_hashes, native_directories):
+            raise ValueError("native source inputs changed during export")
         if _source_input_empty_directories(check_root, source_directories) != empty_directories:
             raise ValueError("source input empty directories changed during export")
     manifest = {
@@ -493,6 +541,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         "lightning_producer_inputs_verified": producer_inputs is not None,
         "lightning_yarn_inputs": yarn_inputs,
         "lightning_yarn_inputs_verified": yarn_inputs is not None,
+        "lightning_native_inputs": native_inputs,
+        "lightning_native_inputs_verified": native_inputs is not None,
         "source_input_empty_directories": empty_directories,
         "frontend_external_source_closure_verified": False,
     }
@@ -542,7 +592,10 @@ def verify_project_bundle(root: Path) -> dict:
                 raise ValueError(f"unmanifested project source: {relative}")
     producer_inputs, producer_modes, producer_hashes, producer_directories = _producer_source_inputs(root)
     yarn_inputs, yarn_modes, yarn_hashes, yarn_directories = _yarn_source_inputs(root)
+    native_inputs, native_modes, native_hashes, native_directories = _native_source_inputs(root)
     lock_paths = (*LOCK_PATHS, LIGHTNING_LOCK_PATH) if producer_inputs is not None else LOCK_PATHS
+    if native_inputs is not None:
+        lock_paths = (*lock_paths, LIGHTNING_NATIVE_LOCK_PATH)
     closure, cargo_modes = _versioned_closure(root, lock_paths=lock_paths)
     if closure != manifest["cargo_source_closure"]:
         raise ValueError("Cargo source closure differs from bundle manifest")
@@ -566,7 +619,14 @@ def verify_project_bundle(root: Path) -> dict:
         or json.dumps(yarn_inputs, sort_keys=True, allow_nan=False)
         != json.dumps(manifest["lightning_yarn_inputs"], sort_keys=True, allow_nan=False)):
         raise ValueError("Yarn source inputs differ from bundle manifest")
-    empty_directories = _source_input_empty_directories(root, producer_directories | yarn_directories)
+    if not set(native_hashes).issubset(expected):
+        raise ValueError("bundle manifest omits required native sources")
+    if ("lightning_native_inputs" not in manifest
+        or manifest.get("lightning_native_inputs_verified") is not (native_inputs is not None)
+        or json.dumps(native_inputs, sort_keys=True, allow_nan=False)
+        != json.dumps(manifest["lightning_native_inputs"], sort_keys=True, allow_nan=False)):
+        raise ValueError("native source inputs differ from bundle manifest")
+    empty_directories = _source_input_empty_directories(root, producer_directories | yarn_directories | native_directories)
     if ("source_input_empty_directories" not in manifest
         or json.dumps(empty_directories, sort_keys=True, allow_nan=False)
         != json.dumps(manifest["source_input_empty_directories"], sort_keys=True, allow_nan=False)):
@@ -581,6 +641,8 @@ def verify_project_bundle(root: Path) -> dict:
         raise ValueError("project executable modes differ from authenticated producer inputs")
     if any(modes.get(name) != mode for name, mode in yarn_modes.items()):
         raise ValueError("project executable modes differ from authenticated Yarn inputs")
+    if any(modes.get(name) != mode for name, mode in native_modes.items()):
+        raise ValueError("project executable modes differ from authenticated native inputs")
     if modes != manifest["file_modes"]:
         raise ValueError("bundle executable modes differ from authoritative source inputs")
     if os.name != "nt":

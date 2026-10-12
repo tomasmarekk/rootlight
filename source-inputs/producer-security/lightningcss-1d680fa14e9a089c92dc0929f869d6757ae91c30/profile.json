@@ -1,0 +1,127 @@
+{
+  "overlays": [
+    {
+      "path": "c/Cargo.toml",
+      "sha256": "d7ea56729bce0c3eead22b82b2bd2f39b188809b615acf5359b865225258d99c",
+      "source": "overlays/c/Cargo.toml",
+      "upstream_sha256": "1b2b78e7707168d43f5354076f622b1d1524f56c154c7f6083a734ba994f8fa1"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "82d8ae9c2330c479f1e231d8fb9863e10f1708904db76e5d29465472791ae426",
+      "source": "overlays/Cargo.lock",
+      "upstream_sha256": "907581b789997511b0e60ec6eea0e9e42f29cea5705bf641c5b7a112b2731794"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "b186979c52b1bfae7be3595b4012fd458b6ebfb972b705ebfb54efa0d2fd85a3",
+      "source": "overlays/Cargo.toml",
+      "upstream_sha256": "bafcab91216086bb6147d5be2930b803ee5795a9a3045af1fb3516e72193bd2b"
+    },
+    {
+      "path": "package.json",
+      "sha256": "921c27dbdfe12493ecb1c8141a5fb98ecb483d05fd6e9012aa134b9537011da6",
+      "source": "overlays/package.json",
+      "upstream_sha256": "f964aa23ab45a046d05b56124eb052fe380b40110c04674efb4acdb0ad8a6279"
+    },
+    {
+      "path": "src/main.rs",
+      "sha256": "48e6c076ed725a3b5e6edd5295c762927c8f14d06dc6adf87e9da588459d56ad",
+      "source": "overlays/src/main.rs",
+      "upstream_sha256": "f1c998ee62dbdbd6d1c1880fa4a7b41e80bf03b7a2c6f49a146822946809c1d4"
+    },
+    {
+      "path": "tests/cli_integration_tests.rs",
+      "sha256": "7c8f024acfe2a67d1fd6850e51db5aa8aade41585604a1d398332073ab5bac1e",
+      "source": "overlays/tests/cli_integration_tests.rs",
+      "upstream_sha256": "f4a411abcb9fd2b2bbe53a97f45bd1a58b1cfa9c209f3a46a28375b24559eed7"
+    },
+    {
+      "path": "yarn.lock",
+      "sha256": "b3173c3f416c5af47442b513fc991411ff17678043d2bc725c16b00ff445e992",
+      "source": "overlays/yarn.lock",
+      "upstream_sha256": "9930d898407018bbe5119271d90bd05c106aa4699081f8108bdc1c1edab82165"
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/.cargo_vcs_info.json",
+      "sha256": "4df511a7e321c35e1fa79d2a898733d25cf4dae5fede4e0c7dd78ecf0e873455",
+      "source": "rust-patches/parcel_sourcemap/.cargo_vcs_info.json",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/Cargo.toml",
+      "sha256": "a91f6caf34249744721b613779f62e3ca64df8ddd0a5432c56d7c7fe0d9476cf",
+      "source": "rust-patches/parcel_sourcemap/Cargo.toml",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/Cargo.toml.orig",
+      "sha256": "aaa388dbe4866c71599c36caef491fd71a3b7606e4294681f1e28fb46587ab31",
+      "source": "rust-patches/parcel_sourcemap/Cargo.toml.orig",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/DERIVATION.json",
+      "sha256": "eafa573b61c452884e77f66cf8b1e4270598fd76aad057002e81e4525235185c",
+      "source": "rust-patches/parcel_sourcemap/DERIVATION.json",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/PATCHES.md",
+      "sha256": "39b98b525d4366e8b7f23fa36011afa731021786104e366e6b189dc2f3583b4c",
+      "source": "rust-patches/parcel_sourcemap/PATCHES.md",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/security-migration.patch",
+      "sha256": "fa078bd49dbe6f8591364f6bc76f3597a1684847f18a98db87649ef16b4cc492",
+      "source": "rust-patches/parcel_sourcemap/security-migration.patch",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/src/lib.rs",
+      "sha256": "24f51cd7366678d7e0ac897c5c8e405a40f29de930695e746a12231b3d6862e8",
+      "source": "rust-patches/parcel_sourcemap/src/lib.rs",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/src/mapping.rs",
+      "sha256": "2a7414a28f156372f598d054f6dcbf24e67dfa793a2a13b0f30067ee6dc28506",
+      "source": "rust-patches/parcel_sourcemap/src/mapping.rs",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/src/mapping_line.rs",
+      "sha256": "e60740559542a77949215f18ad0a38f81cb4562924dfe579b849c4850a8689dc",
+      "source": "rust-patches/parcel_sourcemap/src/mapping_line.rs",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/src/sourcemap_error.rs",
+      "sha256": "719ec278bb8d99e8cf38914bd744d63f76f3fdda7c8e2bfdae114728d8dc3573",
+      "source": "rust-patches/parcel_sourcemap/src/sourcemap_error.rs",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/src/utils.rs",
+      "sha256": "9dc369efa1dec1646672020e7767b1ec415efc15065c7a8fe45998a917f30094",
+      "source": "rust-patches/parcel_sourcemap/src/utils.rs",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/src/vlq_utils.rs",
+      "sha256": "b840122fd15b2410447a3f449d0a143a6b5a58ae47c1965dba301425b7590895",
+      "source": "rust-patches/parcel_sourcemap/src/vlq_utils.rs",
+      "upstream_sha256": null
+    },
+    {
+      "path": "rootlight-patches/parcel_sourcemap/tests/archive_validation.rs",
+      "sha256": "654f7dcad46e1c9bc676cc798476cb87a91aeb5419d66e30e5dcf2f50cd3ce3f",
+      "source": "rust-patches/parcel_sourcemap/tests/archive_validation.rs",
+      "upstream_sha256": null
+    }
+  ],
+  "schema": "rootlight.lightning-native-profile/1",
+  "scope": "native binding build, Flow declarations, TypeScript checking and native binding tests",
+  "upstream_commit": "1d680fa14e9a089c92dc0929f869d6757ae91c30"
+}

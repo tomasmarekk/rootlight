@@ -42,7 +42,8 @@ jobs:
       - name: Fetch locked dependencies
         run: cargo fetch --locked
       - name: Format
-        run: cargo fmt --all -- --check
+        # Workspace targets are checked; authenticated upstream bindings retain their bytes.
+        run: cargo fmt -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Tests
@@ -84,11 +85,15 @@ jobs:
           python -B scripts/test_restore_lightning_source_inputs.py
           python -B scripts/test_install_lightning_from_archives.py
           python -B scripts/test_verify_lightning_installed_placements.py
+          python -B scripts/test_verify_lightning_security_sources.py
+          python -B scripts/test_audit_npm_dependencies.py
+          python -B scripts/test_directory_conservation.py
           python -B scripts/restore_lightning_source_inputs.py --project . --restore-file-modes
           python -B scripts/verify_lightning_producer_sources.py \
             --project . \
             --bundle source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30
           python -B scripts/verify_lightning_yarn_sources.py --project .
+          python -B scripts/verify_lightning_security_sources.py --project .
           python -B scripts/test_install_frontend_from_archives.py
           python -B scripts/verify_local_npm_sources.py \
             --project-root . \
@@ -220,9 +225,11 @@ jobs:
       - name: Install and validate the locked web dependency graph
         run: |
           node --test scripts/verify-local-dependency-origins.test.mjs
+          node --test scripts/read-regular-file.test.mjs
           npm ci --ignore-scripts --offline --audit=false --fund=false
+          node --test ../../../scripts/test_lightning_frontend_boundary.cjs
           npm run release:dependencies
-          npm audit --omit=dev --audit-level=moderate
+          python ../../../scripts/audit_npm_dependencies.py --project ../../..
       - name: Build and verify target-neutral web assets
         env:
           RELEASE_VERSION: 0.0.0
@@ -791,6 +798,7 @@ jobs:
         run: |
           cargo deny check bans licenses sources
           cargo audit --db artifacts/rustsec-db --no-fetch -D warnings
+          cargo audit --file source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/Cargo.lock --db artifacts/rustsec-db --no-fetch -D warnings
           OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/artifacts/osv-db" \
             osv-scanner scan source --offline --format json --lockfile Cargo.lock \
             > artifacts/osv-report.json

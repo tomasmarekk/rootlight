@@ -7,7 +7,8 @@ are permitted; compilation and packaging must not acquire source code.
 
 `crates/` retains the original archives authenticated by the union of `Cargo.lock`,
 `tests/native-grammars/Cargo.lock`, and `fuzz/Cargo.lock`, plus the producer's
-authored Cargo lock when its complete reviewed tree is present. `cargo/` contains
+authored Cargo lock when its complete reviewed tree is present, and the effective
+native profile's `overlays/Cargo.lock`. `cargo/` contains
 their complete published file inventories and generated Cargo checksum manifests.
 Cargo resolves crates.io packages only through this local directory source.
 
@@ -195,10 +196,10 @@ networking, or full-product build and packaging acceptance.
 
 `scripts/install_lightning_from_archives.py` stages strictly authenticated
 producer bytes and original Yarn archives from immutable source inputs into a
-separate fresh work tree and a genuinely empty dependency cache. It preserves the
-authored manifest, raw lock, selectors, integrity pins and local `link:.` associations
-without URL or lock rewriting. An exact archive-derived offline mirror supplies
-the original distributions; mirror collisions, missing inputs, tool mismatch,
+separate fresh work tree and a genuinely empty dependency cache. It requires the
+reviewed native security profile described below, applies its declared manifest,
+lock and Rust source overlays, and preserves the resulting frozen Yarn pins.
+An exact archive-derived offline mirror supplies the authenticated distributions; mirror collisions, missing inputs, tool mismatch,
 source drift, nonzero child results and output reuse reject. The work root and
 every ancestor must contain no entry named `package.json` or `yarn.json`.
 No source acquisition, lifecycle hooks, cleanup or native build is performed.
@@ -214,8 +215,8 @@ that boundary remains a separate caller responsibility and an unqualified claim.
 
 `scripts/verify_lightning_installed_placements.py` is a separate read-only
 observer for a closed, stable installed producer root and authenticated source
-inputs. It checks every original producer member and observed registry package
-member's exact bytes, nonoptional ordinary-root and lock-stanza bindings, and
+inputs. It checks every effective producer member (original bytes plus the
+explicit security overlays) and observed registry package member's exact bytes, nonoptional ordinary-root and lock-stanza bindings, and
 only the graph-declared local producer-root roles. Dependency lookup stops at the
 nearest existing candidate; an archive's distinct stanza-edge obligations are
 retained. Published fixture node_modules payloads remain ordinary archive bytes,
@@ -232,6 +233,60 @@ not qualify the whole installed tree, preferred-source completeness, legal-notic
 completeness, provenance signatures, lifecycle/native rebuild, independently
 OS-denied networking, or full-product build and packaging acceptance. Those
 broader claims remain false in installation and observation evidence.
+
+### Effective native security profile
+
+`producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/`
+contains the executable profile used by the controlled installer. The complete
+original upstream tree and historical locks remain immutable provenance. They
+are not the installer's fallback when the security profile is absent or invalid.
+The profile supports native binding builds, Flow declarations, TypeScript checks,
+and native binding tests. Website publishing, benchmarks, WASM packaging and AST
+regeneration remain preserved upstream material outside this supported profile.
+Their historical dependency locks must not be used as an executable build plan.
+
+The native JavaScript roots are `@napi-rs/cli`, `flowgen`, `typescript`, `uvu` and
+the authored runtime dependency `detect-libc`. All 48 pinned transitive archives
+are retained with SHA-512 integrity, URL-bound SHA-1 and exact member hashes.
+The effective Cargo lock replaces vulnerable transitive versions and uses a
+reviewed local `parcel_sourcemap` derivative pinned to checked `rkyv` 0.8.18.
+CLI overlays also migrate clap argument groups and normalize the Windows project
+root, preserving the existing command behavior under clap 4. The derivative's
+`DERIVATION.json` binds the original registry archive, exact original and
+derived source inventories, license boundary, replayable patch, and the binary
+format change. Legacy rkyv 0.7 buffers are rejected; no existing producer caller
+uses that serialization API. The original registry crate remains unchanged.
+
+`scripts/verify_lightning_security_sources.py --project .` authenticates this
+profile, its declared overlays and original archives. Installation projects an
+offline Cargo directory-source configuration into the staged source tree, using
+this invocation's authenticated local Cargo inputs. Local absolute paths occur
+only in generated work-tree data. Export and restored-bundle verification bind
+both original and effective Cargo locks, every derivative file and every archive.
+
+`scripts/audit_npm_dependencies.py --project .` audits all 331 distinct pinned
+frontend/native npm versions, including development and optional dependencies,
+using npm's documented bulk advisory endpoint. It submits only registry package
+names and exact versions; any advisory, malformed response or network error
+fails the check. No package source is downloaded or executed. Counts can change
+when reviewed locks change. Cargo audits separately check the three product/test
+locks and the effective producer lock; historical metadata is reviewed through
+`policy/dependency-alert-triage.json`.
+
+The regular frontend `npm run build` preloads
+`scripts/check_lightning_frontend_boundary.cjs`. It binds the selected native
+artifact to its authenticated archive member and permits only the currently
+reviewed CSS `transform` minification options. Bundling, visitors and source maps
+require a new explicit review; the guard fails before calling those native paths.
+`node --test scripts/test_lightning_frontend_boundary.cjs` checks this boundary
+against the installed platform artifact. The retained binaries are unchanged;
+the advisory review records interface reachability and the absence of a
+source-to-binary or embedded-dependency attestation.
+
+Original provenance verification, effective input authentication and offline
+installation are distinct from full source-to-binary reproduction. The profile
+does not claim complete preferred sources, independent network-denial acceptance
+or full-product native rebuilding merely because its source checks pass.
 
 ## Acceptance boundaries
 

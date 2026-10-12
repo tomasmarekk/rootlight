@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Stage the authenticated Lightning CSS producer and install its Yarn originals.
+"""Stage the reviewed Lightning native profile and install authenticated archives.
 
-An offline mirror preserves the authored lock instead of rewriting its resolutions.
+An offline mirror preserves the security profile lock and its exact resolutions.
 This is an installer boundary, not lifecycle execution or OS-denied build acceptance.
 """
 
@@ -19,6 +19,7 @@ import sys
 from typing import Any
 
 import verify_lightning_yarn_sources as yarn
+import verify_lightning_security_sources as security
 
 
 NODE_VERSION = "v24.11.1"
@@ -47,7 +48,10 @@ def _digest(payload: bytes) -> str:
 
 def _stamp(path: Path) -> tuple[int, int, int, int, int]:
     metadata = path.stat()
-    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, stat.S_IMODE(metadata.st_mode)
+    # Windows directory allocation sizes can change from 0 to 4096 after read-only
+    # enumeration. Child inventory and identity, mode and timestamps bind dirs.
+    size = 0 if stat.S_ISDIR(metadata.st_mode) else metadata.st_size
+    return metadata.st_dev, metadata.st_ino, size, metadata.st_mtime_ns, stat.S_IMODE(metadata.st_mode)
 
 
 def _relative(value: str) -> PurePosixPath:
@@ -130,8 +134,8 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
     """Install verified published distributions with an empty external Yarn cache.
 
     Args:
-        source_root: Project containing the strict producer, npm association and
-            complete authenticated Yarn originals accepted by verify_bundle.
+        source_root: Project containing strict original provenance, npm association
+            and the complete authenticated native security profile.
         work: Existing empty, unlinked output directory outside source_root, with
             no package.json or yarn.json entries in it or any ancestor directory.
         cache: Separate existing empty, unlinked dependency-cache directory.
@@ -145,8 +149,8 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
 
     Returns:
         Input/tool hashes, graph counts and successful Yarn invocation evidence.
-        The staged producer remains in work/producer and original lock bytes,
-        selectors, integrity values and local root associations are unchanged.
+        The staged producer remains in work/producer. Declared security overlays
+        replace the original manifests and locks; effective pins stay unchanged.
         Installed-tree identity, preferred sources and build acceptance are false.
 
     Raises:
@@ -192,15 +196,15 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
             or not isinstance(metadata, dict) or metadata.get("name") != "yarn" or metadata.get("version") != YARN_VERSION):
         raise LightningInstallationError("pinned Yarn tool bytes or metadata differ")
 
-    verified = yarn.verify_bundle(source_root)
-    if verified.get("schema") != "rootlight.lightning-yarn-source-closure/1" or not verified.get("original_archives_verified"):
+    verified = security.verify_bundle(source_root)
+    if verified.get("schema") not in (security.SCHEMA, "rootlight.lightning-yarn-source-closure/1") or not verified.get("original_archives_verified"):
         raise LightningInstallationError("unexpected authenticated Yarn evidence")
     source_tree = source_root / yarn.PRODUCER_PATH / "tree"
     report_path = source_root / yarn.PRODUCER_PATH / "source-tree.json"
     source_report_bytes = _read(report_path)
     if _digest(source_report_bytes) != verified["producer"]["source_tree_report"]["sha256"]:
         raise LightningInstallationError("authenticated producer report changed")
-    source_report = json.loads(source_report_bytes)
+    source_report, source_overlays = security.effective_producer(source_root, verified, json.loads(source_report_bytes))
     producer_files, producer_directories = {}, set()
     for member in source_report["source_inventory"]["members"]:
         if member["path"] == yarn.producer.ROOT:
@@ -228,6 +232,7 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
         if relative != "archives/" + pin["archive_filename"]:
             raise LightningInstallationError("archive does not match authenticated pin")
         mirror_rows.append({"filename": filename, "archive_path": relative,
+                            "source_path": package.get("source_path", yarn.BUNDLE_PATH + "/" + relative),
                             "sha256": verified["files"][relative]["sha256"],
                             "resolved": pin["resolved"], "integrity": pin["integrity"]})
     if not mirror_rows or len(mirror_rows) != verified["archive_count"]:
@@ -237,6 +242,9 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
                               node.parent, yarn_cli.parent])
     immutable_roots = [source_root / yarn.PRODUCER_PATH, source_root / yarn.BUNDLE_PATH,
                        source_root / "source-inputs/npm", source_root / yarn.producer.local.CANONICAL_LOCK]
+    if verified["schema"] == security.SCHEMA:
+        immutable_roots.append(source_root / security.BUNDLE_PATH)
+        parents.update(_directory_ids([source_root / security.BUNDLE_PATH]))
     immutable_inventory = _inventory(immutable_roots)
     staged: dict[Path, tuple[str, tuple[int, int, int, int, int]]] = {}
 
@@ -271,12 +279,13 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
     for relative in sorted(producer_directories):
         (producer / relative).mkdir(parents=True, exist_ok=True)
     for relative, member in sorted(producer_files.items()):
-        stage(producer / relative, _read(source_tree / relative), member["sha256"],
+        payload = source_overlays[relative] if relative in source_overlays else _read(source_tree / relative)
+        stage(producer / relative, payload, member["sha256"],
               executable=bool(member["archive_mode"] & 0o111))
     mirror = work / MIRROR_DIRECTORY
     mirror.mkdir()
     for row in mirror_rows:
-        stage(mirror / row["filename"], _read(source_root / yarn.BUNDLE_PATH / row["archive_path"]), row["sha256"])
+        stage(mirror / row["filename"], _read(source_root / row["source_path"]), row["sha256"])
     environment = _environment(work, node)
     for directory in ("global", "links"):
         (work / directory).mkdir()
@@ -329,7 +338,7 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
         run([str(node), str(yarn_cli), "install", *policy], "yarn-install")
     finally:
         try:
-            if yarn.verify_bundle(source_root) != verified:
+            if security.verify_bundle(source_root) != verified:
                 raise LightningInstallationError("authenticated source inputs changed at final qualification")
         finally:
             unchanged()
@@ -347,6 +356,7 @@ def install_lightning(source_root: Path, work: Path, cache: Path, node: Path, ya
         "selector_count": graph["selector_count"], "dependency_edge_count": graph["dependency_edge_count"],
         "local_root_associations": graph["local_associations"], "producer_subdirectory": PRODUCER_DIRECTORY,
         "dependency_cache_initially_empty": True, "lock_rewritten": False, "yarn_install_completed": True,
+        "security_profile_applied": verified["schema"] == security.SCHEMA,
         "strict_source_reverification_completed": True, "child_logs": log_records,
         "phase_timeouts_seconds": {"version_probe": VERSION_TIMEOUT_SECONDS,
                                    "yarn_install": install_timeout_seconds},

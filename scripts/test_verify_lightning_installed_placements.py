@@ -29,6 +29,9 @@ class PlacementObservationTests(unittest.TestCase):
     """Exercise exact payload, mandatory resolution and declared-root boundaries."""
 
     def setUp(self):
+        verifier = patch.object(observer.security, "verify_bundle", side_effect=lambda project: observer.yarn.verify_bundle(project))
+        verifier.start()
+        self.addCleanup(verifier.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)

@@ -5,6 +5,7 @@
     "source-inputs/npm/archives/010d3818587ca705ceb039d2d4209b9f8c8472421b284d66e3fadca06e96a6ba.tgz",
     "source-inputs/npm/archives/0280264227e0570a355b7019d089efbf6f03d96b0d28d57b72b9c8bb9c21ed84.tgz",
     "source-inputs/npm/archives/03fad9f6a5c360d0aaa98623ce86e1faf49799a8d622be4f766b7cfeb191aa88.tgz",
+    "source-inputs/npm/archives/0421525ed4c64f0230ed9cc213db0e12177329a9308a4f31c9d9f766b32dafc6.tgz",
     "source-inputs/npm/archives/06b87f446259d5bb470127744ad84cfc76d17500f7947bf658368a89d7a9204f.tgz",
     "source-inputs/npm/archives/077736c195809fb0d44289444ab5c257640f605c7bf1f3d3a9d5e9b03ec170be.tgz",
     "source-inputs/npm/archives/08a5a3bcd5a7bb91adfdf85764d0498116a79498e4d79e2b20e82d8d50a0ad13.tgz",
@@ -36,7 +37,6 @@
     "source-inputs/npm/archives/1aabc8b6282461d4c675a1125b1cde2768dc18a73d02534310b5d242df53c9fa.tgz",
     "source-inputs/npm/archives/1c9fcda3b5504a2abd5a35c12b5ee93ed00accb81cd78a13cee37c74f070ec07.tgz",
     "source-inputs/npm/archives/1d745da6bea7dfc755b751dc63c0c73fa793f19cfd5a9fae256d307816cbc345.tgz",
-    "source-inputs/npm/archives/1f28c3431ddd7e5f466a78a7af8e85271efbb6f9afbd105da3161aaded3ff47f.tgz",
     "source-inputs/npm/archives/2006b1009c6c57b1dba87455b53f5890d4a623a18769f6bd4180d8eafb3e147d.tgz",
     "source-inputs/npm/archives/20086cdd9509b3b0de979fa66e28d702bf31b863c3c305b0ed0232762804124f.tgz",
     "source-inputs/npm/archives/209754582428438670a45aed502b1eaecf46aa6a9ba8b8dd6545c91a1ddd5933.tgz",
@@ -91,6 +91,7 @@
     "source-inputs/npm/archives/5259c6592f6e90949c7f3bd6306c5f918c6ddfab902dae1e737f8a31f74e97b0.tgz",
     "source-inputs/npm/archives/52b40634e05fdbd9cc15494bdd4b93349904467ea7a9d05195ea3afbdd871f19.tgz",
     "source-inputs/npm/archives/534fabf1062b3431e6bbd80eecb56ca436d369709a6ac86889f06e95036f4f65.tgz",
+    "source-inputs/npm/archives/53929e5386e20780a4fb1cf32034d3fd54f6e889dd8ca1bb3963aa40c3b373ee.tgz",
     "source-inputs/npm/archives/53ee7a8a0dfa7afd005fa034e77b94c755cfa548bc2a3979a4374f5387ff0af6.tgz",
     "source-inputs/npm/archives/5424b29dcbe39788d6b102bca58d5da80a26283ba19d4daedf2c372a8d6432bc.tgz",
     "source-inputs/npm/archives/548e504f6abddf48e9622d1b09ce15d218c86426b72504f77c62d8bc9c05a651.tgz",
@@ -180,7 +181,6 @@
     "source-inputs/npm/archives/a3f76f7c93ac886e11554b7903ffa1e1310464e67cebbde3f1d63dcb4dd047b0.tgz",
     "source-inputs/npm/archives/a496f3b0767ecca1f666510ec4f7a35de206f734be75465e3215772722c5ad7b.tgz",
     "source-inputs/npm/archives/a4fb0aea126214d34c7a6bd7b89dd58e62f6f3d907c09cc09973db7739ec9e0a.tgz",
-    "source-inputs/npm/archives/a64553710f4526aa809810b00c4f0112f9cfd83e67e037258bb5c0f865131062.tgz",
     "source-inputs/npm/archives/a65925664798d61c1d29a37d8793ce92de02b53762dbea75e627086def23652e.tgz",
     "source-inputs/npm/archives/a6c0df43e4c7ed8e25d90b38c67b0b1566f866e9da64175bc38f8939a9a7a1ed.tgz",
     "source-inputs/npm/archives/a6ef1dc594fca17e915091014a13963f512c56a687f8b724a6b1a9747b308020.tgz",
@@ -211,6 +211,7 @@
     "source-inputs/npm/archives/c031722b962ec9c5fa040290437def2ff69a0fc58e9a2f91a984b23265211776.tgz",
     "source-inputs/npm/archives/c11f472dbb89a47a242029dc2aa5ada8515a74cb8fa4d871094d98ed38a67101.tgz",
     "source-inputs/npm/archives/c26a5b0c28c8aa7385891c803a42e5ad72ca2f311b8cd3ef2e962385e065bb09.tgz",
+    "source-inputs/npm/archives/c3ce90365059397e785ab418325342310778511524a20ff55ddd15fee48e6768.tgz",
     "source-inputs/npm/archives/c44df73089d93f2e07a29dc72e269620919178b082796741a433332490240eeb.tgz",
     "source-inputs/npm/archives/c4d7054b4b7246510cbd901c5425b17dfcc0d20a8f9f8f85dfe8921e5fa18e2d.tgz",
     "source-inputs/npm/archives/c8f90202160445d82a68a953494fc640aa31971e2a6743751908b7d307fb0905.tgz",
@@ -243,7 +244,6 @@
     "source-inputs/npm/archives/de1a74e6dafb8613e9bde5e8f2eadc7e6919ba8f4cb004ca3e15f772a30e4ea9.tgz",
     "source-inputs/npm/archives/df1f3f064d6974a5bd59a5df76d02cbb9d6cc7b1adfbe2bf9fb473eec955ea4a.tgz",
     "source-inputs/npm/archives/df9ed5b60018ddf2949e4a3b56ba2ef2773659e3759436a256900ef5a5dd89f2.tgz",
-    "source-inputs/npm/archives/e0208c845069faa25937d57ef44f49ac5e85282e7800482ce4c8ee6f725355b0.tgz",
     "source-inputs/npm/archives/e12b4b1e798f7d2706e7d60fdfb5b1fabbd748bc9f77f39ddb1a36c4c07c491a.tgz",
     "source-inputs/npm/archives/e139267cb5b71a23cf4928ad1abc233bf21123261042e3b4e24162504317fe32.tgz",
     "source-inputs/npm/archives/e1fc7672cacea1c85f667da163a853775ca752734e089a0797faebc6130c0da9.tgz",
@@ -299,7 +299,7 @@
   "input_files": [
     {
       "path": "apps/rootlight-web/frontend/package-lock.json",
-      "sha256": "3ed0f994967acaedb3dcb6db4ef93e74b881ea25afc5afff2be4507475c51ce0"
+      "sha256": "a429c1876066deb789aa12d1a3150165f8ca88242434a7695be8fbe217c89f46"
     },
     {
       "path": "source-inputs/npm/archives/000ec49ac4651c68bd8a06a317da9869e7cd1cc37a3a3bfbe2f67e674381bb9c.tgz",
@@ -316,6 +316,10 @@
     {
       "path": "source-inputs/npm/archives/03fad9f6a5c360d0aaa98623ce86e1faf49799a8d622be4f766b7cfeb191aa88.tgz",
       "sha256": "ba8fe0ce86fdb471bdb3556541019b8a77a74273d415103df944d7d6b54a85fd"
+    },
+    {
+      "path": "source-inputs/npm/archives/0421525ed4c64f0230ed9cc213db0e12177329a9308a4f31c9d9f766b32dafc6.tgz",
+      "sha256": "ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4"
     },
     {
       "path": "source-inputs/npm/archives/06b87f446259d5bb470127744ad84cfc76d17500f7947bf658368a89d7a9204f.tgz",
@@ -440,10 +444,6 @@
     {
       "path": "source-inputs/npm/archives/1d745da6bea7dfc755b751dc63c0c73fa793f19cfd5a9fae256d307816cbc345.tgz",
       "sha256": "ff1a36cb0eceeb0f4f67d853d773c82c335010f50950f42693434227829e2ded"
-    },
-    {
-      "path": "source-inputs/npm/archives/1f28c3431ddd7e5f466a78a7af8e85271efbb6f9afbd105da3161aaded3ff47f.tgz",
-      "sha256": "f126a6f9fca487a43219d8cb8c3a955279187a966119d548eb5cd47e999d4853"
     },
     {
       "path": "source-inputs/npm/archives/2006b1009c6c57b1dba87455b53f5890d4a623a18769f6bd4180d8eafb3e147d.tgz",
@@ -660,6 +660,10 @@
     {
       "path": "source-inputs/npm/archives/534fabf1062b3431e6bbd80eecb56ca436d369709a6ac86889f06e95036f4f65.tgz",
       "sha256": "ef659501577ff45b9468b3ad21adbefb38dd835663f44881083b7567d77a4c3d"
+    },
+    {
+      "path": "source-inputs/npm/archives/53929e5386e20780a4fb1cf32034d3fd54f6e889dd8ca1bb3963aa40c3b373ee.tgz",
+      "sha256": "afa0d7be8598012c601fff7ed0fdea01868184f5a223a6f656a4fce1da077819"
     },
     {
       "path": "source-inputs/npm/archives/53ee7a8a0dfa7afd005fa034e77b94c755cfa548bc2a3979a4374f5387ff0af6.tgz",
@@ -1018,10 +1022,6 @@
       "sha256": "1e2df822c43e0a2b448e5df79bf8e6d3e085c86e30456cd383a2f96215fd1687"
     },
     {
-      "path": "source-inputs/npm/archives/a64553710f4526aa809810b00c4f0112f9cfd83e67e037258bb5c0f865131062.tgz",
-      "sha256": "ec2005d822734765fc08c3ee5d50b1f720bf1c3fc6235ab028e5cc61c85a3a70"
-    },
-    {
       "path": "source-inputs/npm/archives/a65925664798d61c1d29a37d8793ce92de02b53762dbea75e627086def23652e.tgz",
       "sha256": "6bafda00d4356a4df5d0463b4e4ad45ebc9f438bfede793e218a9f9f7c6844c3"
     },
@@ -1140,6 +1140,10 @@
     {
       "path": "source-inputs/npm/archives/c26a5b0c28c8aa7385891c803a42e5ad72ca2f311b8cd3ef2e962385e065bb09.tgz",
       "sha256": "20f1459b23066ba65d0dec68ee59ff5e2284c72fe22f98a7153a6cccef903c80"
+    },
+    {
+      "path": "source-inputs/npm/archives/c3ce90365059397e785ab418325342310778511524a20ff55ddd15fee48e6768.tgz",
+      "sha256": "05c8cf8e7c3a6b56cada7668fe9342b10f4b625efc92aba9ba05b9e8fe4d71a3"
     },
     {
       "path": "source-inputs/npm/archives/c44df73089d93f2e07a29dc72e269620919178b082796741a433332490240eeb.tgz",
@@ -1268,10 +1272,6 @@
     {
       "path": "source-inputs/npm/archives/df9ed5b60018ddf2949e4a3b56ba2ef2773659e3759436a256900ef5a5dd89f2.tgz",
       "sha256": "2a0e5f4b79ecb1cc854b49cb3368e14a2d2d36782f54b03b84f0a1349585c2f2"
-    },
-    {
-      "path": "source-inputs/npm/archives/e0208c845069faa25937d57ef44f49ac5e85282e7800482ce4c8ee6f725355b0.tgz",
-      "sha256": "5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf"
     },
     {
       "path": "source-inputs/npm/archives/e12b4b1e798f7d2706e7d60fdfb5b1fabbd748bc9f77f39ddb1a36c4c07c491a.tgz",
@@ -1459,11 +1459,11 @@
     },
     {
       "path": "source-inputs/npm/local-distributions.json",
-      "sha256": "af691f84058f50d3d78f315fc52d9c6559d03842a81dde59fc385a2354a00086"
+      "sha256": "d43057da50e1640341869f1d2868d8d837bb9cf64304496ffc9dc7d6985c9360"
     },
     {
       "path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.provenance.json",
-      "sha256": "942a519402c8fb6eca492cdb5402136ee23a553a99ecf48f27843f93a318a2e6"
+      "sha256": "f6295962b7c542b501aba8f87c69f7fdb772805b931f379517443f9e98a2b37a"
     },
     {
       "path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.tgz",
@@ -1471,15 +1471,15 @@
     },
     {
       "path": "source-inputs/npm/upstream-package-lock.json",
-      "sha256": "c139c7833948f86e196d0a7f04905ac09bf3dc9164528c694e2e2d0c8eb66cfb"
+      "sha256": "dffb32a4f14e2a52a029d4c514d85a51b1fd5def05782feb883a565562a3287d"
     }
   ],
   "installation_verified": false,
   "licensing_scope": "supplied metadata and preserved files; not legal completeness or authorship evidence",
   "local_distribution_count": 1,
-  "local_distributions_sha256": "af691f84058f50d3d78f315fc52d9c6559d03842a81dde59fc385a2354a00086",
+  "local_distributions_sha256": "d43057da50e1640341869f1d2868d8d837bb9cf64304496ffc9dc7d6985c9360",
   "lock_record_count": 291,
-  "lockfile_sha256": "3ed0f994967acaedb3dcb6db4ef93e74b881ea25afc5afff2be4507475c51ce0",
+  "lockfile_sha256": "a429c1876066deb789aa12d1a3150165f8ca88242434a7695be8fbe217c89f46",
   "original_archive_count": 289,
   "os_denied_acceptance_verified": false,
   "packages": [
@@ -37238,16 +37238,16 @@
     },
     {
       "archive": {
-        "bytes": 10834,
-        "sha256": "5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf",
-        "sha512": "49c43822ebc8105d533253fb66dfaf8c9ffff7394f6f64837315b13376e4f2ceade8619d27b28ed5d09c4e274e3c929e3d6df42c4ff6713ef00b23e1a3dfd6c6",
+        "bytes": 12620,
+        "sha256": "ef8448ec78f20b692f04fa6d01f39b5ab34c66404bea3429f5a39c6c9e0be8b4",
+        "sha512": "628bd0debce168b308ac38cd0cc90d4b4d6d79af77aa11211b9c72f1febe47497e770dca8bee6c0a822823de368ae2d94c75a881692d830543854d3d88d12299",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "e0208c845069faa25937d57ef44f49ac5e85282e7800482ce4c8ee6f725355b0.tgz",
-      "archive_path": "source-inputs/npm/archives/e0208c845069faa25937d57ef44f49ac5e85282e7800482ce4c8ee6f725355b0.tgz",
+      "archive_filename": "0421525ed4c64f0230ed9cc213db0e12177329a9308a4f31c9d9f766b32dafc6.tgz",
+      "archive_path": "source-inputs/npm/archives/0421525ed4c64f0230ed9cc213db0e12177329a9308a4f31c9d9f766b32dafc6.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==",
+      "integrity": "sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -37288,31 +37288,31 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 304,
+          "bytes": 454,
           "kind": "file",
           "path": "package/dist/commonjs/index.d.ts",
-          "sha256": "0b4d0e7e8998ac3219939db9646bbcb4757f134d62a3226e5686b1e19a1fec3e"
+          "sha256": "b74929b2e5433150c0c7f6a3e7bcd1aadff6b82305584b25754ab38273ea731d"
         },
         {
           "archive_mode": 420,
-          "bytes": 337,
+          "bytes": 465,
           "kind": "file",
           "path": "package/dist/commonjs/index.d.ts.map",
-          "sha256": "b3be0847ad40bba64997b91b4d4542d7a2d8365cfb4e74eaa572b90c1276c342"
+          "sha256": "4081276536fa8a61b8ecf72c1b3cb65d354aa9f42b9952aa7c7aa3df69b76224"
         },
         {
           "archive_mode": 420,
-          "bytes": 11238,
+          "bytes": 13985,
           "kind": "file",
           "path": "package/dist/commonjs/index.js",
-          "sha256": "8d1ea713e1dd03f52783bbceea9d85815a3587134d1936ea16257dea83884f15"
+          "sha256": "e0ede97c712339a70bae2c96c675b1ffd30052bdf57f37f5a97b5945c40a9ae6"
         },
         {
           "archive_mode": 420,
-          "bytes": 20811,
+          "bytes": 24935,
           "kind": "file",
           "path": "package/dist/commonjs/index.js.map",
-          "sha256": "8c37d1ed63deea88fe6dd44dafd68cf1dc3eb007d60108edc5db68958ca9ecdc"
+          "sha256": "030adad11afc034a17f6c008f25a3779e3988f56d067016cee00948725b00d24"
         },
         {
           "archive_mode": 420,
@@ -37323,31 +37323,31 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 304,
+          "bytes": 454,
           "kind": "file",
           "path": "package/dist/esm/index.d.ts",
-          "sha256": "0b4d0e7e8998ac3219939db9646bbcb4757f134d62a3226e5686b1e19a1fec3e"
+          "sha256": "b74929b2e5433150c0c7f6a3e7bcd1aadff6b82305584b25754ab38273ea731d"
         },
         {
           "archive_mode": 420,
-          "bytes": 337,
+          "bytes": 465,
           "kind": "file",
           "path": "package/dist/esm/index.d.ts.map",
-          "sha256": "b3be0847ad40bba64997b91b4d4542d7a2d8365cfb4e74eaa572b90c1276c342"
+          "sha256": "4081276536fa8a61b8ecf72c1b3cb65d354aa9f42b9952aa7c7aa3df69b76224"
         },
         {
           "archive_mode": 420,
-          "bytes": 11021,
+          "bytes": 13699,
           "kind": "file",
           "path": "package/dist/esm/index.js",
-          "sha256": "af0e6438163b5ef866c52680ec58756bcf00cff330729c0d6a3a44ee57bde9d1"
+          "sha256": "eea9a18920e1cde68f0068c36c040541ad6e93b0bb89eaab38c8ab49925b90a8"
         },
         {
           "archive_mode": 420,
-          "bytes": 20835,
+          "bytes": 24979,
           "kind": "file",
           "path": "package/dist/esm/index.js.map",
-          "sha256": "8acbba04cfba8e5ef1db9bd6fd182d9fccd4f53eb1e9be784f36584251a4701a"
+          "sha256": "181bf3ff0deaaedfcf28b02c260ab5316cb2a012d89070ad44d298dcfd7166dc"
         },
         {
           "archive_mode": 420,
@@ -37358,27 +37358,27 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 1551,
+          "bytes": 1594,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "f8a0e0d0a6cbb58106ce6832205e0939a00b9583637011bf8ef4167f4a52fbda"
+          "sha256": "8af7dc0916002266f3b01459ef691d9f834d8ecdb0e021263280a50b913d85fa"
         }
       ],
-      "members_sha256": "21fff3761145f20f1941f828708f9c9485a6fa5c2af2509848ca92164bbe211e",
+      "members_sha256": "0c2b74da2c660209f59c7a2b7d246f623d155691b2efe0104e1e5b45d5b7da14",
       "name": "brace-expansion",
       "native_binary_files": [],
-      "package_json_sha256": "f8a0e0d0a6cbb58106ce6832205e0939a00b9583637011bf8ef4167f4a52fbda",
+      "package_json_sha256": "8af7dc0916002266f3b01459ef691d9f834d8ecdb0e021263280a50b913d85fa",
       "provenance_metadata": {
         "repository": {
           "type": "git",
           "url": "git+https://github.com/juliangruber/brace-expansion.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/e0208c845069faa25937d57ef44f49ac5e85282e7800482ce4c8ee6f725355b0.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/0421525ed4c64f0230ed9cc213db0e12177329a9308a4f31c9d9f766b32dafc6.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "e0208c845069faa25937d57ef44f49ac5e85282e7800482ce4c8ee6f725355b0.tgz",
-        "integrity": "sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==",
+        "archive_filename": "0421525ed4c64f0230ed9cc213db0e12177329a9308a4f31c9d9f766b32dafc6.tgz",
+        "integrity": "sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==",
         "lock_paths": [
           "node_modules/brace-expansion"
         ],
@@ -37390,10 +37390,10 @@
           }
         ],
         "name": "brace-expansion",
-        "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz",
-        "version": "5.0.9"
+        "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.12.tgz",
+        "version": "5.0.12"
       },
-      "version": "5.0.9"
+      "version": "5.0.12"
     },
     {
       "archive": {
@@ -76703,16 +76703,16 @@
     },
     {
       "archive": {
-        "bytes": 35340,
-        "sha256": "f126a6f9fca487a43219d8cb8c3a955279187a966119d548eb5cd47e999d4853",
-        "sha512": "51758c2a12cec1529bef6f0852d40f5f17d853ebac7726ed52b2bff2e184f0240cbeb84ea70bf30c1c23d108522fb31073bbc8b084811bc550f3e203431a5f40",
+        "bytes": 36349,
+        "sha256": "05c8cf8e7c3a6b56cada7668fe9342b10f4b625efc92aba9ba05b9e8fe4d71a3",
+        "sha512": "2868fff18e37c77e5a6550edb7e27898ad61a0b18750b3187d290e0c93508cd0c2de85b53ea3e8c4cc28d292d4b1633f5041b338dfcdc5e1f2c047cd5cd3f757",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "1f28c3431ddd7e5f466a78a7af8e85271efbb6f9afbd105da3161aaded3ff47f.tgz",
-      "archive_path": "source-inputs/npm/archives/1f28c3431ddd7e5f466a78a7af8e85271efbb6f9afbd105da3161aaded3ff47f.tgz",
+      "archive_filename": "c3ce90365059397e785ab418325342310778511524a20ff55ddd15fee48e6768.tgz",
+      "archive_path": "source-inputs/npm/archives/c3ce90365059397e785ab418325342310778511524a20ff55ddd15fee48e6768.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==",
+      "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -76788,10 +76788,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 4068,
+          "bytes": 4244,
           "kind": "file",
           "path": "package/lib/quick-sort.js",
-          "sha256": "72ed4911cdc72232cac53cac995e28e865cd4302186173bba74ff6436c089915"
+          "sha256": "1e2857cc4f6c9c36b764ce529f39b9243bed27aed809e895d7cec04c8a869266"
         },
         {
           "archive_mode": 420,
@@ -76802,10 +76802,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 41580,
+          "bytes": 43611,
           "kind": "file",
           "path": "package/lib/source-map-consumer.js",
-          "sha256": "78f7a8f6d20f51a99a9cbd8d552321b1a72de9b9fb9c39dbeb27dc84eb2eade5"
+          "sha256": "9ad10db386da13c1f95e6a680d6298dbb306c77f57a9a3539e4595b723a7654b"
         },
         {
           "archive_mode": 420,
@@ -76816,10 +76816,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 14933,
+          "bytes": 15205,
           "kind": "file",
           "path": "package/lib/source-map-generator.js",
-          "sha256": "645482e8d23fd49cd025a0ad07c2e2beb173995138370d6a73e596e18e889bd8"
+          "sha256": "07894c9ea1e674263e2e7694d43d4fb935e98549b93946205b9536c1420696c0"
         },
         {
           "archive_mode": 420,
@@ -76830,10 +76830,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 13808,
+          "bytes": 14180,
           "kind": "file",
           "path": "package/lib/source-node.js",
-          "sha256": "b45db8183550ca1e6259976f6ceee89f6764360c56cf206701bd2f7471144e31"
+          "sha256": "d1a0ef136bf0e974ba956506c88e91fef5d8681bbf10c486ff9566a7d6d76f3c"
         },
         {
           "archive_mode": 420,
@@ -76847,7 +76847,7 @@
           "bytes": 2548,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "58f8e94a461a5e461e0cb2bb2be681cbd89b9181989fd26fceb858e67711469a"
+          "sha256": "9f1ea63b1661d0f6e5fcd50b625d86cddd77de870a0019b23262360987b487f5"
         },
         {
           "archive_mode": 420,
@@ -76864,19 +76864,19 @@
           "sha256": "dc098456c2d9ab90a4c0a17cca9be16665b9813df20906553a98b0088a157be7"
         }
       ],
-      "members_sha256": "89e2e3fead957e0965c96478771710f569dfa6241640e5351d3a51a2de5ef68d",
+      "members_sha256": "9ebeac9e02279dab0c761d09dcf30403b424f199ca6f8f76489bdb09c754503b",
       "name": "source-map-js",
       "native_binary_files": [],
-      "package_json_sha256": "58f8e94a461a5e461e0cb2bb2be681cbd89b9181989fd26fceb858e67711469a",
+      "package_json_sha256": "9f1ea63b1661d0f6e5fcd50b625d86cddd77de870a0019b23262360987b487f5",
       "provenance_metadata": {
         "homepage": "https://github.com/7rulnik/source-map-js",
         "repository": "7rulnik/source-map-js"
       },
-      "resolved": "file:../../../source-inputs/npm/archives/1f28c3431ddd7e5f466a78a7af8e85271efbb6f9afbd105da3161aaded3ff47f.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/c3ce90365059397e785ab418325342310778511524a20ff55ddd15fee48e6768.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "1f28c3431ddd7e5f466a78a7af8e85271efbb6f9afbd105da3161aaded3ff47f.tgz",
-        "integrity": "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==",
+        "archive_filename": "c3ce90365059397e785ab418325342310778511524a20ff55ddd15fee48e6768.tgz",
+        "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
         "lock_paths": [
           "node_modules/source-map-js"
         ],
@@ -76888,10 +76888,10 @@
           }
         ],
         "name": "source-map-js",
-        "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.1.tgz",
-        "version": "1.2.1"
+        "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+        "version": "1.2.2"
       },
-      "version": "1.2.1"
+      "version": "1.2.2"
     },
     {
       "archive": {
@@ -80538,16 +80538,16 @@
     },
     {
       "archive": {
-        "bytes": 397276,
-        "sha256": "ec2005d822734765fc08c3ee5d50b1f720bf1c3fc6235ab028e5cc61c85a3a70",
-        "sha512": "203c5f95e2e699b4ac91f5925004e23759df9f6ac3baf9cc3aa6f909647dda221fa2303451dfae94e000110e7b2cfafdad69acade5327f9970c9aa3eec634d57",
+        "bytes": 401782,
+        "sha256": "afa0d7be8598012c601fff7ed0fdea01868184f5a223a6f656a4fce1da077819",
+        "sha512": "764ad05de1d26a86a69c8b6561b9b31b4c0562b3346700f108883403b68a8d3cb2861f6cbd1cc234513357e566d39ff27a18c2ce30d9df52977c6123612ced0d",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "a64553710f4526aa809810b00c4f0112f9cfd83e67e037258bb5c0f865131062.tgz",
-      "archive_path": "source-inputs/npm/archives/a64553710f4526aa809810b00c4f0112f9cfd83e67e037258bb5c0f865131062.tgz",
+      "archive_filename": "53929e5386e20780a4fb1cf32034d3fd54f6e889dd8ca1bb3963aa40c3b373ee.tgz",
+      "archive_path": "source-inputs/npm/archives/53929e5386e20780a4fb1cf32034d3fd54f6e889dd8ca1bb3963aa40c3b373ee.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==",
+      "integrity": "sha512-dkrQXeHSaoamnItlYbmzG0wFYrM0ZwDxCIg0A7aKjTyyhh9svRzCNFEzV+Vm05/yehjCzjDZ31KXfGEjYSztDQ==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -80665,17 +80665,17 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 10856,
+          "bytes": 11038,
           "kind": "file",
           "path": "package/docs/docs/api/DiagnosticsChannel.md",
-          "sha256": "05abea1e0a52c7210305c6cf5ce67ee770c88b6150e81b92778746529ace894c"
+          "sha256": "770d93dfd812f62037c29059ff91753a4aab0b97d865a8009a3c7d3b278d5179"
         },
         {
           "archive_mode": 420,
-          "bytes": 46185,
+          "bytes": 46320,
           "kind": "file",
           "path": "package/docs/docs/api/Dispatcher.md",
-          "sha256": "c256be3b23d8b10e192eb63b0390cc05f10cd45db0f0f0c91694b4a33828359c"
+          "sha256": "0ab6e9a16ac733bb2e2c6021d68cc6eaedda6b59155d68af734d83d6d0e3cb3d"
         },
         {
           "archive_mode": 420,
@@ -81008,10 +81008,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 12828,
+          "bytes": 13390,
           "kind": "file",
           "path": "package/lib/core/request.js",
-          "sha256": "64a41db4ad51b780bd70174ef4de95b797aec4c724023f8fb82ae570adcebd85"
+          "sha256": "3352c955f070baa991c4c7bd648c63732b120ebddd10cae01b2ee848cd172bbb"
         },
         {
           "archive_mode": 420,
@@ -81057,31 +81057,31 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 5719,
+          "bytes": 5881,
           "kind": "file",
           "path": "package/lib/dispatcher/balanced-pool.js",
-          "sha256": "978f7b86cf4af168f8657cff48d0fb0d093d43715385c1f386b92d053d92af63"
+          "sha256": "90989fe532a02854d88c5f4af9c8bbec33f24d2318d3b4534f1128e273e5463d"
         },
         {
           "archive_mode": 420,
-          "bytes": 44537,
+          "bytes": 45347,
           "kind": "file",
           "path": "package/lib/dispatcher/client-h1.js",
-          "sha256": "9e257ac16377baa107d3e4fd41b1af00677cd02133547f483e069c5c7119c4ed"
+          "sha256": "ff9200c5dcb081afc63cff840792099d06b659f1a3430871f967c70c3bc95edd"
         },
         {
           "archive_mode": 420,
-          "bytes": 27712,
+          "bytes": 30100,
           "kind": "file",
           "path": "package/lib/dispatcher/client-h2.js",
-          "sha256": "7556231de2b76ffbca9e34a8af2034d4022799721ee7026c223ad84836b01da2"
+          "sha256": "ed7f9b02ad63d3200062ae214d6f3dd0b7fd3e29271d0eee5b441a0599996ffa"
         },
         {
           "archive_mode": 420,
-          "bytes": 19035,
+          "bytes": 19117,
           "kind": "file",
           "path": "package/lib/dispatcher/client.js",
-          "sha256": "923945cc690e25d8cb7f33319fc0b2f98396a3a9b42be3d7c85cb69db95cf4e3"
+          "sha256": "07529b464fb6be9b42bd4a34d2ea0e090812b237ec3a1f047ab94df052fa428f"
         },
         {
           "archive_mode": 420,
@@ -81176,10 +81176,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 23279,
+          "bytes": 23732,
           "kind": "file",
           "path": "package/lib/handler/cache-handler.js",
-          "sha256": "f7478ce35f15c5b0bfc8c95ea9b3e9306d0a540bd32b60a30059121f83092673"
+          "sha256": "328fdf6d0b5302d1f6d61aeab7700884e8a5bc1c372359c952a7bbdb2930ca65"
         },
         {
           "archive_mode": 420,
@@ -81211,10 +81211,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 11647,
+          "bytes": 14426,
           "kind": "file",
           "path": "package/lib/handler/retry-handler.js",
-          "sha256": "f20fba50098505550e15b24f91200dba76c85a1a21c8b4d18bda66ef96dba3bc"
+          "sha256": "7ca077f088a84e4e4c1bb3bdc6524808b90e4aa21ec36382a03cb14080f727a8"
         },
         {
           "archive_mode": 420,
@@ -81232,17 +81232,17 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 18500,
+          "bytes": 19207,
           "kind": "file",
           "path": "package/lib/interceptor/cache.js",
-          "sha256": "a995f88879cc1eb3d6fefac272884f9483b2d312da6b49a907027da414a6f838"
+          "sha256": "cb7c1a724c51b1a1834a9e8fe2e6f1bd84312e55a4e7c7099b941085b2d6ff62"
         },
         {
           "archive_mode": 420,
-          "bytes": 8194,
+          "bytes": 15774,
           "kind": "file",
           "path": "package/lib/interceptor/decompress.js",
-          "sha256": "16fa1f3cf8634560abf93a21597762a06a74feaa101ebf46d26e34fef31e3c37"
+          "sha256": "e8d5ac020de639a88f5a890b6b4a7a64d44ac6941761cb1413da4201ad259c34"
         },
         {
           "archive_mode": 420,
@@ -81260,10 +81260,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 2609,
+          "bytes": 2416,
           "kind": "file",
           "path": "package/lib/interceptor/dump.js",
-          "sha256": "bf3e5e8ea954de99bf2431bc89327bb99bc4820ddcfd72b55482e3ddd2abf12e"
+          "sha256": "30d035bae71552ef4cd19b264728482abb9a7b5f82af47ffb9ad81e2541ea4bc"
         },
         {
           "archive_mode": 420,
@@ -81512,10 +81512,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 11731,
+          "bytes": 12061,
           "kind": "file",
           "path": "package/lib/web/eventsource/eventsource-stream.js",
-          "sha256": "2f6d67b03c4fbb4a4937f234cf859dde197f9bc31cdacb146c5b48d753c34ad4"
+          "sha256": "fe7a94fe87999a6f1e489ca02d4069ae099800166954d32b080fe1282545e511"
         },
         {
           "archive_mode": 420,
@@ -81645,10 +81645,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 14171,
+          "bytes": 14594,
           "kind": "file",
           "path": "package/lib/web/websocket/connection.js",
-          "sha256": "02638ae58cbc702b6feed269d46976385de2ef8ae69da7d6289aaa8ae77e38dc"
+          "sha256": "97657a119b4e6c47ac97c34752af8400ddb2584f3dea60b2ce51410f1b4e6def"
         },
         {
           "archive_mode": 420,
@@ -81673,10 +81673,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 2757,
+          "bytes": 3104,
           "kind": "file",
           "path": "package/lib/web/websocket/permessage-deflate.js",
-          "sha256": "808e4fc2eb52ac7e0140cc37a0efe0ed2b13f4bd0119133c569030d3fab05f25"
+          "sha256": "da8d8dc29515bce2ba4def5c3f811f8644eeb5d4819bc521d5811fbbdda4afb7"
         },
         {
           "archive_mode": 420,
@@ -81701,10 +81701,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 17980,
+          "bytes": 17959,
           "kind": "file",
           "path": "package/lib/web/websocket/stream/websocketstream.js",
-          "sha256": "ac9c3a2b1de296925df72243ddaddc0ae30c5bbdb8de1cfab7f74156d36c009d"
+          "sha256": "b059a716dc53fccde7443ed89567dfbcf0ffa019e41d5f71a09fe98e0e33430d"
         },
         {
           "archive_mode": 420,
@@ -81725,7 +81725,7 @@
           "bytes": 6333,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "d2fb5736b5adad6a74c3fba9345d756258e1e953a3a2a13c03fca1bd6c9f6c52"
+          "sha256": "aa69335f22e3b6b3e8dd3e6122914a197da41609b5ff37cfa765af5a855288ac"
         },
         {
           "archive_mode": 420,
@@ -81904,10 +81904,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 3594,
+          "bytes": 3714,
           "kind": "file",
           "path": "package/types/interceptors.d.ts",
-          "sha256": "4dc59f6e1dbf3d5f66660fceabe6c174d3261b37b696ae1854f0dbaf255fc753"
+          "sha256": "1d5e86e300d9fdeb1e3e88aa4f24d780f045195fcb2dbc24b68bf49c9f816c5e"
         },
         {
           "archive_mode": 420,
@@ -82050,10 +82050,10 @@
           "sha256": "436d7b4543b340b0f3eef4310d524242e41369b9652aa9c70428767c4dcac455"
         }
       ],
-      "members_sha256": "f6ade0a7aa0006596df7ca57082fa2f29a62eeeaef1c1a5741211c9ab7b6b62d",
+      "members_sha256": "569eac2d2afe73d4e9b79be31334629e6c77bd4fb1f3c1b9249ad00561f987b9",
       "name": "undici",
       "native_binary_files": [],
-      "package_json_sha256": "d2fb5736b5adad6a74c3fba9345d756258e1e953a3a2a13c03fca1bd6c9f6c52",
+      "package_json_sha256": "aa69335f22e3b6b3e8dd3e6122914a197da41609b5ff37cfa765af5a855288ac",
       "provenance_metadata": {
         "homepage": "https://undici.nodejs.org",
         "repository": {
@@ -82061,11 +82061,11 @@
           "url": "git+https://github.com/nodejs/undici.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/a64553710f4526aa809810b00c4f0112f9cfd83e67e037258bb5c0f865131062.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/53929e5386e20780a4fb1cf32034d3fd54f6e889dd8ca1bb3963aa40c3b373ee.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "a64553710f4526aa809810b00c4f0112f9cfd83e67e037258bb5c0f865131062.tgz",
-        "integrity": "sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==",
+        "archive_filename": "53929e5386e20780a4fb1cf32034d3fd54f6e889dd8ca1bb3963aa40c3b373ee.tgz",
+        "integrity": "sha512-dkrQXeHSaoamnItlYbmzG0wFYrM0ZwDxCIg0A7aKjTyyhh9svRzCNFEzV+Vm05/yehjCzjDZ31KXfGEjYSztDQ==",
         "lock_paths": [
           "node_modules/undici"
         ],
@@ -82077,10 +82077,10 @@
           }
         ],
         "name": "undici",
-        "resolved": "https://registry.npmjs.org/undici/-/undici-7.29.0.tgz",
-        "version": "7.29.0"
+        "resolved": "https://registry.npmjs.org/undici/-/undici-7.30.0.tgz",
+        "version": "7.30.0"
       },
-      "version": "7.29.0"
+      "version": "7.30.0"
     },
     {
       "archive": {
@@ -90607,7 +90607,7 @@
         }
       },
       "provenance_path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.provenance.json",
-      "provenance_sha256": "942a519402c8fb6eca492cdb5402136ee23a553a99ecf48f27843f93a318a2e6",
+      "provenance_sha256": "f6295962b7c542b501aba8f87c69f7fdb772805b931f379517443f9e98a2b37a",
       "resolved": "file:../../../source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.tgz",
       "upstream_original_sri_recomputed": false,
       "upstream_pin": {
@@ -90817,7 +90817,7 @@
   "provenance_signatures_verified": false,
   "schema": "rootlight.npm-local-archive-bundle/1",
   "source_scope": "retained npm distributions only; preferred native, WASI and bundled transitive sources remain unproven",
-  "upstream_lockfile_sha256": "c139c7833948f86e196d0a7f04905ac09bf3dc9164528c694e2e2d0c8eb66cfb",
+  "upstream_lockfile_sha256": "dffb32a4f14e2a52a029d4c514d85a51b1fd5def05782feb883a565562a3287d",
   "upstream_original_sri_recomputed": false,
   "verification_scope": "exact local lock projection and every retained original or declared modified distribution"
 }

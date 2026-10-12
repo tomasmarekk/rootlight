@@ -115,3 +115,7 @@ adapters/licenses/dekobon-tree-sitter-groovy-0.2.0-LICENSE-APACHE whitespace=-bl
 crates/rootlight-unicode/data/CaseFolding-9.0.0.txt whitespace=-blank-at-eol
 # Preserve the published Unicode 17 composition exclusions byte-for-byte.
 crates/rootlight-unicode/data/CompositionExclusions-17.0.0.txt whitespace=-blank-at-eol
+
+# Native producer overlays and authenticated original archives retain exact bytes.
+source-inputs/producer-security/** -text whitespace=-blank-at-eof,-blank-at-eol
+source-inputs/producer-security/**/*.tgz binary

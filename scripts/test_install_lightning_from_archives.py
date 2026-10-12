@@ -30,6 +30,9 @@ class LightningArchiveInstallationTests(unittest.TestCase):
     def setUp(self) -> None:
         """Create synthetic inputs and model absent manifests above the owned fixture root."""
         temporary = tempfile.TemporaryDirectory()
+        security_verifier = mock.patch.object(install.security, "verify_bundle", side_effect=lambda project: install.yarn.verify_bundle(project))
+        security_verifier.start()
+        self.addCleanup(security_verifier.stop)
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
         host_manifests = {ancestor / name for ancestor in self.root.parents

@@ -21,6 +21,7 @@ from verify_local_npm_sources import verify_local_bundle
 
 
 FRONTEND = "apps/rootlight-web/frontend/"
+BUILD_GUARD = "scripts/check_lightning_frontend_boundary.cjs"
 MANIFEST = "rust-source-bundle.json"
 REPORT = "source-inputs/npm/npm-source-closure.json"
 ARCHIVES = "source-inputs/npm/archives"
@@ -164,7 +165,7 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
     Args:
         source_root: Immutable exported project with its source manifest, canonical
             frontend inputs, local archive projection, upstream lock, modification
-            provenance, and exact versioned npm report.
+            provenance, root build guard, and exact versioned npm report.
         work: Existing empty non-linked directory outside the exported sources.
         cache: Separate existing empty non-linked external npm cache directory.
         node: Explicit declared Node executable; only its exact version is accepted.
@@ -211,8 +212,8 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
         if name in records or not isinstance(record.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) or type(record.get("executable")) is not bool:
             raise FrontendInstallationError("invalid or duplicate source manifest identity")
         records[name] = record
-    selected = sorted(name for name in records if _frontend_source(name))
-    required = {FRONTEND + name for name in ("package.json", "package-lock.json", ".npmrc")}
+    selected = sorted(name for name in records if _frontend_source(name) or name == BUILD_GUARD)
+    required = {BUILD_GUARD, *(FRONTEND + name for name in ("package.json", "package-lock.json", ".npmrc"))}
     if not required.issubset(selected) or not {REPORT, UPSTREAM_LOCK, LOCAL_MANIFEST}.issubset(records):
         raise FrontendInstallationError("source manifest omits required frontend inputs")
     original = {}

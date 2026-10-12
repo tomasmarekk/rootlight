@@ -1,0 +1,130 @@
+#if 0
+''' '
+#endif
+
+// FIXME: Mis-generated in C mode with enum.prefix_with_name = false, and in
+// C++ mode with it set to true...
+#if defined(__cplusplus) && !defined(CBINDGEN_CPP_COMPAT)
+
+
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#define AXIS_SHIFT 3
+
+#define SELF_WM_SHIFT 6
+
+#define SELF_WM (1 << 6)
+
+/**
+ * Specifies which tracks(s) on the axis that the position-area span occupies.
+ * Represented as 3 bits: start, center, end track.
+ */
+enum PositionAreaTrack
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint8_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  /**
+   * First track
+   */
+  Start = 1,
+  /**
+   * First and center.
+   */
+  SpanStart = 3,
+  /**
+   * Last track.
+   */
+  End = 4,
+  /**
+   * Last and center.
+   */
+  SpanEnd = 6,
+  /**
+   * Center track.
+   */
+  Center = 2,
+  /**
+   * All tracks
+   */
+  SpanAll = 7,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum PositionAreaTrack PositionAreaTrack;
+#else
+typedef uint8_t PositionAreaTrack;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * A three-bit value that represents the axis in which position-area operates on.
+ * Represented as 3 bits: axis type (physical or logical), direction type (physical or logical),
+ * axis value.
+ */
+enum PositionAreaAxis
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint8_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  Horizontal = 0,
+  Vertical = 1,
+  X = 2,
+  Y = 3,
+  Inline = 6,
+  Block = 7,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum PositionAreaAxis PositionAreaAxis;
+#else
+typedef uint8_t PositionAreaAxis;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+/**
+ * Possible values for the `position-area` property's keywords.
+ * Represented by [0z xxx yyy], where z means "self wm resolution", xxx is the type (as in
+ * PositionAreaAxis and yyy is the PositionAreaTrack
+ * https://drafts.csswg.org/css-anchor-position-1/#propdef-position-area
+ */
+enum PositionAreaKeyword
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint8_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  None = 0,
+  Center = (uint8_t)Center,
+  SpanAll = (uint8_t)SpanAll,
+  Start = (uint8_t)Start,
+  End = (uint8_t)End,
+  SpanStart = (uint8_t)SpanStart,
+  SpanEnd = (uint8_t)SpanEnd,
+  Top = (((uint8_t)Vertical << AXIS_SHIFT) | (uint8_t)Start),
+  Bottom = (((uint8_t)Vertical << AXIS_SHIFT) | (uint8_t)End),
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum PositionAreaKeyword PositionAreaKeyword;
+#else
+typedef uint8_t PositionAreaKeyword;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+void root(PositionAreaKeyword, PositionAreaTrack, PositionAreaAxis);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
+
+#endif
+#if 0
+' '''
+#endif

@@ -214,7 +214,8 @@ def _pin(name, version, fields):
     except ValueError as error:
         raise YarnPinError("unsafe_archive_url") from error
     _require(re.fullmatch(r"[0-9a-f]{40}", parsed.fragment)
-             and resolved == f"https://registry.yarnpkg.com/{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz#{parsed.fragment}",
+             and parsed.netloc in {"registry.yarnpkg.com", "registry.npmjs.org"}
+             and resolved == f"https://{parsed.netloc}/{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz#{parsed.fragment}",
              "archive_url_identity_mismatch")
     _require(integrity.startswith("sha512-"), "unsupported_archive_integrity")
     try:
@@ -238,7 +239,7 @@ def parse_yarn_lock(lock_bytes: bytes, manifest_bytes: bytes) -> dict:
         Source-ordered stanzas, exact raw selector/field/dependency tokens and byte
         spans, all manifest/dependency edges, complete iterative reachability and
         unique archive identities usable by the existing pure _verify_archive.
-        Authored URLs retain registry.yarnpkg.com and their SHA-1 fragments; the
+        Authored URLs retain the npm or Yarn registry and their SHA-1 fragments; the
         SHA-512 SRI, not a host rewrite or weaker fragment, authenticates archives.
         Local link:. placeholder stanzas are bound to the root manifest resolution,
         never presented as registry archives or evaluated package versions.
