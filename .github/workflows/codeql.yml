@@ -140,7 +140,7 @@ jobs:
 
   codeql-required:
     name: codeql-required
-    if: always()
+    if: ${{ always() && !cancelled() }}
     needs: [analyze-upload, analyze-pull-request]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

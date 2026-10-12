@@ -2366,7 +2366,7 @@ jobs:
 
   ci-required:
     name: ci-required
-    if: always()
+    if: ${{ always() && !cancelled() }}
     needs: [fast, web-build, web-e2e, msrv, current-stable, platform, daemon-lifecycle, vertical-slice, durability-platform, durability-evidence, incident-evidence, dataset-evidence, supply-chain, unsafe-inventory-windows, unsafe-inventory-macos, offline, parser-evidence, semantic-evidence, language-workspace-evidence, capability-evidence, adapter-isolation, budget-evidence, agent-workflow-quality, installed-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
