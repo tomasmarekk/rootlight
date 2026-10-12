@@ -1,4 +1,4 @@
-//! Apex captures retain direct written declarations and unresolved source uses.
+//! Apex captures retain direct written declarations and conservative source uses.
 //! Shared field types remain separate source evidence; owner proofs are bounded
 //! to one immutable scan and never turn parser recovery into class membership.
 
@@ -17,19 +17,42 @@ struct OwnerProof {
     declarators: usize,
 }
 
+struct FormalProof {
+    body: Range<usize>,
+    bindings: Vec<BindingProof>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BindingKind {
+    Formal,
+    Local,
+    Barrier,
+}
+
+struct BindingProof {
+    name: Range<usize>,
+    scope: Range<usize>,
+    available: usize,
+    kind: BindingKind,
+}
+
 /// Per-scan native owner evidence shares the existing query capture ceiling.
 pub(super) struct CaptureCache {
     owners: HashMap<usize, Option<OwnerProof>>,
+    formals: HashMap<usize, Option<FormalProof>>,
     maximum_entries: usize,
+    remaining_body_nodes: usize,
     exhausted: bool,
 }
 
 impl CaptureCache {
     /// Creates an empty bounded cache without reserving input-sized storage.
-    pub(super) fn new(maximum_entries: usize) -> Self {
+    pub(super) fn new(maximum_entries: usize, maximum_body_nodes: usize) -> Self {
         Self {
             owners: HashMap::new(),
+            formals: HashMap::new(),
             maximum_entries,
+            remaining_body_nodes: maximum_body_nodes,
             exhausted: false,
         }
     }
@@ -49,16 +72,343 @@ impl CaptureCache {
         if let Some(proof) = self.owners.get(&node.id()) {
             return Ok(proof.clone());
         }
-        if self.owners.len() >= self.maximum_entries {
+        if self.owners.len().saturating_add(self.formals.len()) >= self.maximum_entries {
             self.exhausted = true;
             return Ok(None);
         }
-        let proof = owner_proof(node, source, cancellation)?;
+        let proof = if node.kind() == "local_variable_declaration"
+            && !self.local_position(node, cancellation)?
+        {
+            None
+        } else {
+            owner_proof(node, source, cancellation)?
+        };
         self.owners
             .try_reserve(1)
             .map_err(|_| SinkError::AllocationFailed)?;
         self.owners.insert(node.id(), proof.clone());
         Ok(proof)
+    }
+
+    fn visit_body_node(&mut self, cancellation: &Cancellation) -> Result<bool, AdapterError> {
+        cancellation.check()?;
+        let Some(remaining) = self.remaining_body_nodes.checked_sub(1) else {
+            self.exhausted = true;
+            return Ok(false);
+        };
+        self.remaining_body_nodes = remaining;
+        Ok(true)
+    }
+
+    fn local_position(
+        &mut self,
+        node: Node<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        let Some(scope) = node
+            .parent()
+            .filter(|parent| matches!(parent.kind(), "block" | "constructor_body"))
+        else {
+            return Ok(false);
+        };
+        let mut ancestor = Some(scope);
+        while let Some(parent) = ancestor {
+            if !self.visit_body_node(cancellation)? {
+                return Ok(false);
+            }
+            if matches!(
+                parent.kind(),
+                "method_declaration" | "constructor_declaration"
+            ) {
+                return Ok(field(parent, "body").is_some_and(|body| {
+                    body.start_byte() <= scope.start_byte() && scope.end_byte() <= body.end_byte()
+                }));
+            }
+            if matches!(
+                parent.kind(),
+                "catch_clause"
+                    | "for_statement"
+                    | "enhanced_for_statement"
+                    | "class_body"
+                    | "interface_body"
+                    | "trigger_declaration"
+                    | "trigger_body"
+            ) || owner_kind(parent)
+            {
+                return Ok(false);
+            }
+            ancestor = parent.parent();
+        }
+        Ok(false)
+    }
+
+    #[cfg(test)]
+    fn formal_use(
+        &mut self,
+        node: Node<'_>,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        Ok(self.lexical_use(node, source, cancellation)? == Some(BindingKind::Formal))
+    }
+
+    fn lexical_use(
+        &mut self,
+        node: Node<'_>,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<Option<BindingKind>, AdapterError> {
+        cancellation.check()?;
+        if !formal_value_position(node) {
+            return Ok(None);
+        }
+        let mut ancestor = node.parent();
+        let owner = loop {
+            let Some(parent) = ancestor else {
+                return Ok(None);
+            };
+            if !self.visit_body_node(cancellation)? {
+                return Ok(None);
+            }
+            if matches!(
+                parent.kind(),
+                "method_declaration" | "constructor_declaration"
+            ) {
+                break parent;
+            }
+            if (owner_kind(parent) && parent.kind() != "local_variable_declaration")
+                || matches!(parent.kind(), "class_body" | "interface_body")
+            {
+                return Ok(None);
+            }
+            ancestor = parent.parent();
+        };
+        if !self.formals.contains_key(&owner.id()) {
+            if self.owners.len().saturating_add(self.formals.len()) >= self.maximum_entries {
+                self.exhausted = true;
+                return Ok(None);
+            }
+            let proof = self.formal_proof(owner, source, cancellation)?;
+            if self.exhausted
+                || self.owners.len().saturating_add(self.formals.len()) >= self.maximum_entries
+            {
+                self.exhausted = true;
+                return Ok(None);
+            }
+            self.formals
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            self.formals.insert(owner.id(), proof);
+        }
+        let Some(Some(proof)) = self.formals.get(&owner.id()) else {
+            return Ok(None);
+        };
+        let range = node.byte_range();
+        if range.start < proof.body.start || range.end > proof.body.end {
+            return Ok(None);
+        }
+        let Some(name) = source.get(range) else {
+            return Ok(None);
+        };
+        let start = proof
+            .bindings
+            .partition_point(|binding| folded_cmp(source, &binding.name, name).is_lt());
+        let mut selected = None;
+        for binding in proof.bindings.get(start..).unwrap_or_default() {
+            cancellation.check()?;
+            let Some(remaining) = self.remaining_body_nodes.checked_sub(1) else {
+                self.exhausted = true;
+                return Ok(None);
+            };
+            self.remaining_body_nodes = remaining;
+            if !folded_cmp(source, &binding.name, name).is_eq() {
+                break;
+            }
+            if binding.scope.start <= node.start_byte() && node.end_byte() <= binding.scope.end {
+                if selected.is_some()
+                    || binding.kind == BindingKind::Barrier
+                    || node.start_byte() < binding.available
+                    || source.get(binding.name.clone()) != Some(name)
+                {
+                    return Ok(None);
+                }
+                selected = Some(binding.kind);
+            }
+        }
+        Ok(selected)
+    }
+
+    fn formal_proof(
+        &mut self,
+        owner: Node<'_>,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<Option<FormalProof>, AdapterError> {
+        if self.owner(owner, source, cancellation)?.is_none() {
+            return Ok(None);
+        }
+        let (Some(body), Some(parameters)) = (field(owner, "body"), field(owner, "parameters"))
+        else {
+            return Ok(None);
+        };
+        if !matches!(body.kind(), "block" | "constructor_body") {
+            return Ok(None);
+        }
+        let mut bindings = Vec::new();
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            if !self.visit_body_node(cancellation)? {
+                return Ok(None);
+            }
+            if parameter.is_extra() {
+                continue;
+            }
+            if parameter.kind() != "formal_parameter"
+                || self.owner(parameter, source, cancellation)?.is_none()
+            {
+                return Ok(None);
+            }
+            let Some(name) = field(parameter, "name") else {
+                return Ok(None);
+            };
+            // Exact ASCII spelling avoids asserting a Unicode case-folding model.
+            if source
+                .get(name.byte_range())
+                .is_none_or(|text| !text.is_ascii())
+            {
+                return Ok(None);
+            }
+            bindings
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            bindings.push(BindingProof {
+                name: name.byte_range(),
+                scope: body.byte_range(),
+                available: body.start_byte(),
+                kind: BindingKind::Formal,
+            });
+        }
+
+        let mut cursor = body.walk();
+        loop {
+            if !self.visit_body_node(cancellation)? {
+                return Ok(None);
+            }
+            let node = cursor.node();
+            // Unmodeled declaration scopes cannot borrow the callable's locals.
+            if !clean(node, source)
+                || matches!(
+                    node.kind(),
+                    "catch_clause"
+                        | "for_statement"
+                        | "enhanced_for_statement"
+                        | "when_sobject_type"
+                        | "inferred_parameters"
+                        | "query_expression"
+                        | "class_body"
+                        | "trigger_declaration"
+                        | "trigger_body"
+                )
+                || (owner_kind(node) && node.kind() != "local_variable_declaration")
+            {
+                return Ok(None);
+            }
+            if node.kind() == "local_variable_declaration" {
+                let Some(scope) = node
+                    .parent()
+                    .filter(|parent| matches!(parent.kind(), "block" | "constructor_body"))
+                else {
+                    return Ok(None);
+                };
+                let supported = self.owner(node, source, cancellation)?.is_some();
+                let mut declarations = node.walk();
+                for declarator in node.children_by_field_name("declarator", &mut declarations) {
+                    if !self.visit_body_node(cancellation)? {
+                        return Ok(None);
+                    }
+                    let Some(name) =
+                        field(declarator, "name").filter(|name| written_name(*name, source))
+                    else {
+                        return Ok(None);
+                    };
+                    if source
+                        .get(name.byte_range())
+                        .is_none_or(|name| !name.is_ascii())
+                    {
+                        return Ok(None);
+                    }
+                    bindings
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    bindings.push(BindingProof {
+                        name: name.byte_range(),
+                        scope: scope.byte_range(),
+                        available: node.end_byte(),
+                        kind: if supported {
+                            BindingKind::Local
+                        } else {
+                            BindingKind::Barrier
+                        },
+                    });
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    bindings.sort_unstable_by(|left, right| {
+                        folded_cmp(
+                            source,
+                            &left.name,
+                            source.get(right.name.clone()).unwrap_or_default(),
+                        )
+                    });
+                    cancellation.check()?;
+                    return Ok(Some(FormalProof {
+                        body: body.byte_range(),
+                        bindings,
+                    }));
+                }
+            }
+        }
+    }
+}
+
+fn folded_cmp(source: &[u8], range: &Range<usize>, name: &[u8]) -> std::cmp::Ordering {
+    source
+        .get(range.clone())
+        .unwrap_or_default()
+        .iter()
+        .map(u8::to_ascii_lowercase)
+        .cmp(name.iter().map(u8::to_ascii_lowercase))
+}
+
+fn formal_value_position(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "return_statement"
+        | "throw_statement"
+        | "argument_list"
+        | "binary_expression"
+        | "unary_expression"
+        | "update_expression"
+        | "parenthesized_expression"
+        | "ternary_expression"
+        | "array_access"
+        | "array_initializer"
+        | "map_entry" => true,
+        "field_access" | "method_invocation" => field(parent, "object") == Some(node),
+        "assignment_expression" => field(parent, "right") == Some(node),
+        "variable_declarator" => field(parent, "value") == Some(node),
+        "cast_expression" => field(parent, "value") == Some(node),
+        "instanceof_expression" => field(parent, "left") == Some(node),
+        _ => false,
     }
 }
 
@@ -80,6 +430,7 @@ fn owner_kind(node: Node<'_>) -> bool {
             | "constructor_declaration"
             | "method_declaration"
             | "field_declaration"
+            | "local_variable_declaration"
             | "formal_parameter"
             | "enum_constant"
     )
@@ -188,6 +539,9 @@ fn declaration_position(node: Node<'_>) -> bool {
         "constructor_declaration" | "field_declaration" => {
             member_owner(node).is_some_and(|owner| owner.kind() == "class_declaration")
         }
+        "local_variable_declaration" => node
+            .parent()
+            .is_some_and(|parent| matches!(parent.kind(), "block" | "constructor_body")),
         "method_declaration" => member_owner(node).is_some(),
         "enum_constant" => node.parent().is_some_and(|body| {
             body.kind() == "enum_body"
@@ -219,6 +573,31 @@ fn owner_proof(
     }
     let mut declarators = 0usize;
     let header = match node.kind() {
+        "local_variable_declaration" => {
+            if field(node, "type").is_none_or(|ty| !clean(ty, source))
+                || terminal_semicolon(node, source, cancellation)?.is_none()
+            {
+                return Ok(None);
+            }
+            let mut cursor = node.walk();
+            let mut declarators = node.children_by_field_name("declarator", &mut cursor);
+            let Some(declarator) = declarators.next() else {
+                return Ok(None);
+            };
+            if declarators.next().is_some()
+                || !clean(declarator, source)
+                || declarator.kind() != "variable_declarator"
+                || field(declarator, "name").is_none_or(|name| !written_name(name, source))
+            {
+                return Ok(None);
+            }
+            let Some(name) = field(declarator, "name") else {
+                return Ok(None);
+            };
+            let end = field(declarator, "dimensions")
+                .map_or(name.end_byte(), |dimensions| dimensions.end_byte());
+            node.start_byte()..end
+        }
         "field_declaration" => {
             if field(node, "type").is_none_or(|ty| !clean(ty, source))
                 || terminal_semicolon(node, source, cancellation)?.is_none()
@@ -335,6 +714,12 @@ fn field_owner(node: Node<'_>) -> Option<Node<'_>> {
     })
 }
 
+fn local_owner(node: Node<'_>) -> Option<Node<'_>> {
+    node.parent().filter(|parent| {
+        parent.kind() == "local_variable_declaration" && node.kind() == "variable_declarator"
+    })
+}
+
 fn definition_node(node: Node<'_>) -> Option<Node<'_>> {
     field(node, "name")
 }
@@ -353,6 +738,7 @@ fn nonlexical_identifier(
         if matches!(
             parent.kind(),
             "annotation"
+                | "switch_label"
                 | "type_arguments"
                 | "type_parameters"
                 | "superclass"
@@ -365,8 +751,15 @@ fn nonlexical_identifier(
         {
             return Ok(true);
         }
-        if (owner_kind(parent) || matches!(parent.kind(), "variable_declarator" | "type_parameter"))
-            && field(parent, "name") == Some(child)
+        if matches!(
+            parent.kind(),
+            "break_statement" | "continue_statement" | "when_sobject_type"
+        ) || ((owner_kind(parent)
+            || matches!(
+                parent.kind(),
+                "variable_declarator" | "type_parameter" | "enhanced_for_statement"
+            ))
+            && field(parent, "name") == Some(child))
         {
             return Ok(true);
         }
@@ -402,13 +795,15 @@ pub(super) fn retain_capture(
         role,
         StructuralRole::Declaration | StructuralRole::Definition | StructuralRole::Signature
     ) {
-        if let Some(owner) = field_owner(node) {
+        if let Some(owner) = field_owner(node).or_else(|| local_owner(node)) {
             let Some(proof) = cache.owner(owner, source, cancellation)? else {
                 return Ok(false);
             };
             return Ok(clean(node, source)
                 && definition_node(node).is_some_and(|name| written_name(name, source))
-                && (role != StructuralRole::Signature || proof.declarators == 1));
+                && (owner.kind() == "local_variable_declaration"
+                    || role != StructuralRole::Signature
+                    || proof.declarators == 1));
         }
         return Ok(owner_kind(node) && cache.owner(node, source, cancellation)?.is_some());
     }
@@ -420,7 +815,8 @@ pub(super) fn retain_capture(
 
 /// Maps admitted captures to original byte ranges without rewriting source.
 /// Multi-field headers intentionally remain non-container expression evidence,
-/// and unresolved member/call spellings never establish target bindings.
+/// and member/call spellings never establish target bindings. A lexical marker
+/// certifies only the native lexical proof; lowering still requires its entity.
 pub(super) fn candidate(
     node: Node<'_>,
     role: StructuralRole,
@@ -441,7 +837,12 @@ pub(super) fn candidate(
         range = 0..source.len();
         "apex.file"
     } else if role == StructuralRole::Expression {
-        if node.kind() == "field_declaration" && cache.owner(node, source, cancellation)?.is_none()
+        if node.kind() == "local_variable_declaration"
+            && cache.owner(node, source, cancellation)?.is_none()
+        {
+            "apex.unsupported_local"
+        } else if node.kind() == "field_declaration"
+            && cache.owner(node, source, cancellation)?.is_none()
         {
             if clean(node, source) && member_owner(node).is_some() {
                 "apex.accessor_semantics"
@@ -469,7 +870,18 @@ pub(super) fn candidate(
         role,
         StructuralRole::Declaration | StructuralRole::Definition | StructuralRole::Signature
     ) {
-        let syntax = if let Some(owner) = field_owner(node) {
+        let syntax = if let Some(owner) = local_owner(node) {
+            let proof = cache
+                .owner(owner, source, cancellation)?
+                .ok_or_else(|| query_failure("query-apex-local-owner"))?;
+            depth_node = owner;
+            range = if role == StructuralRole::Signature {
+                proof.header
+            } else {
+                proof.extent
+            };
+            "apex.local_variable"
+        } else if let Some(owner) = field_owner(node) {
             let proof = cache
                 .owner(owner, source, cancellation)?
                 .ok_or_else(|| query_failure("query-apex-field-owner"))?;
@@ -520,7 +932,11 @@ pub(super) fn candidate(
             {
                 "apex.member"
             }
-            _ => "apex.identifier",
+            _ => match cache.lexical_use(node, source, cancellation)? {
+                Some(BindingKind::Formal) => "apex.formal_identifier",
+                Some(BindingKind::Local) => "apex.local_identifier",
+                Some(BindingKind::Barrier) | None => "apex.identifier",
+            },
         }
     } else {
         match role {
@@ -568,7 +984,7 @@ mod tests {
         let first = tree.root_node().named_child(0).unwrap();
         let second = tree.root_node().named_child(1).unwrap();
         let cancellation = Cancellation::new();
-        let mut cache = CaptureCache::new(1);
+        let mut cache = CaptureCache::new(1, 64);
         for _ in 0..4 {
             assert!(valid_owner_chain(first, source, &cancellation, &mut cache).unwrap());
         }
@@ -584,7 +1000,7 @@ mod tests {
         let tree = tree(source);
         let owner = tree.root_node().named_child(0).unwrap();
         let cancellation = Cancellation::new();
-        let mut cache = CaptureCache::new(1);
+        let mut cache = CaptureCache::new(1, 64);
         assert!(valid_owner_chain(owner, source, &cancellation, &mut cache).unwrap());
         assert!(cancellation.cancel(CancellationReason::ClientRequest));
         assert!(valid_owner_chain(owner, source, &cancellation, &mut cache).is_err());
@@ -598,5 +1014,129 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn return_use<'tree>(tree: &'tree Tree, source: &[u8]) -> Node<'tree> {
+        let start = source
+            .windows(b"return Value".len())
+            .position(|window| window == b"return Value")
+            .unwrap()
+            + b"return ".len();
+        let node = tree
+            .root_node()
+            .named_descendant_for_byte_range(start, start + b"Value".len())
+            .unwrap();
+        assert_eq!(node.kind(), "identifier");
+        node
+    }
+
+    #[test]
+    fn formal_proof_scans_each_callable_once_and_obeys_existing_bounds() {
+        let source = b"class Written { Integer Read(Integer Value) { return Value; } }";
+        let tree = tree(source);
+        let node = return_use(&tree, source);
+        let cancellation = Cancellation::new();
+        let mut cache = CaptureCache::new(64, 64);
+        assert!(valid_owner_chain(node, source, &cancellation, &mut cache).unwrap());
+        assert!(cache.formal_use(node, source, &cancellation).unwrap());
+        let mut remaining = cache.remaining_body_nodes;
+        for _ in 0..4 {
+            assert!(cache.formal_use(node, source, &cancellation).unwrap());
+            // Three ancestors and one matching binding are charged per use;
+            // parameter/body scans are cached rather than repeated.
+            remaining -= 4;
+            assert_eq!(cache.remaining_body_nodes, remaining);
+        }
+        assert_eq!(cache.formals.len(), 1);
+        let mut bounded = CaptureCache::new(64, 2);
+        assert!(!bounded.formal_use(node, source, &cancellation).unwrap());
+        assert!(bounded.exhausted());
+        assert_eq!(bounded.remaining_body_nodes, 0);
+        assert!(bounded.owners.is_empty());
+        assert!(bounded.formals.is_empty());
+        assert!(!bounded.formal_use(node, source, &cancellation).unwrap());
+    }
+
+    #[test]
+    fn cancelled_cached_formal_proof_is_not_reused() {
+        let source = b"class Written { Integer Read(Integer Value) { return Value; } }";
+        let tree = tree(source);
+        let node = return_use(&tree, source);
+        let cancellation = Cancellation::new();
+        let mut cache = CaptureCache::new(64, 64);
+        assert!(cache.formal_use(node, source, &cancellation).unwrap());
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert!(cache.formal_use(node, source, &cancellation).is_err());
+    }
+
+    #[test]
+    fn malformed_callable_cannot_certify_a_formal_use() {
+        let source = b"class Written { Integer Read(Integer Value) { return Value;";
+        let tree = tree(source);
+        let node = return_use(&tree, source);
+        let mut cache = CaptureCache::new(64, 64);
+        assert!(
+            !cache
+                .formal_use(node, source, &Cancellation::new())
+                .unwrap()
+        );
+        assert!(cache.formals.values().all(Option::is_none));
+    }
+
+    #[test]
+    fn differently_cased_formals_are_ambiguous_even_for_an_exact_use() {
+        let source =
+            b"class Written { Integer Read(Integer Value, Integer value) { return Value; } }";
+        let tree = tree(source);
+        let node = return_use(&tree, source);
+        let mut cache = CaptureCache::new(64, 128);
+        assert!(
+            !cache
+                .formal_use(node, source, &Cancellation::new())
+                .unwrap()
+        );
+        assert!(!cache.exhausted());
+    }
+
+    #[test]
+    fn local_proof_reuses_callable_work_and_rejects_a_cached_use_at_the_bound() {
+        let source = b"class Written { Integer Read(Integer Input) { Integer Value = Input; return Value; } }";
+        let tree = tree(source);
+        let node = return_use(&tree, source);
+        let cancellation = Cancellation::new();
+        let mut cache = CaptureCache::new(64, 128);
+        assert_eq!(
+            cache.lexical_use(node, source, &cancellation).unwrap(),
+            Some(BindingKind::Local)
+        );
+        let remaining = cache.remaining_body_nodes;
+        assert_eq!(
+            cache.lexical_use(node, source, &cancellation).unwrap(),
+            Some(BindingKind::Local)
+        );
+        assert_eq!(cache.remaining_body_nodes, remaining - 4);
+        assert_eq!(cache.formals.len(), 1);
+        cache.remaining_body_nodes = 3;
+        assert_eq!(
+            cache.lexical_use(node, source, &cancellation).unwrap(),
+            None
+        );
+        assert!(cache.exhausted());
+        assert_eq!(cache.remaining_body_nodes, 0);
+    }
+
+    #[test]
+    fn cancelled_cached_local_proof_is_not_reused() {
+        let source = b"class Written { Integer Read() { Integer Value = 1; return Value; } }";
+        let tree = tree(source);
+        let node = return_use(&tree, source);
+        let cancellation = Cancellation::new();
+        let mut cache = CaptureCache::new(64, 128);
+        assert_eq!(
+            cache.lexical_use(node, source, &cancellation).unwrap(),
+            Some(BindingKind::Local)
+        );
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert!(cache.lexical_use(node, source, &cancellation).is_err());
     }
 }

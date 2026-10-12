@@ -4009,7 +4009,7 @@ mod tests {
             .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
             .expect("current symbol envelope exists")
             .clone();
-        assert_eq!(current_symbol.version, "1.2");
+        assert_eq!(current_symbol.version, "1.3");
         current.entities[0]
             .evidence
             .derivation
@@ -4075,6 +4075,19 @@ mod tests {
                 "1.1",
                 serde_json::to_string(&compact).expect("legacy compact claim encodes canonically"),
             ),
+            (
+                "1.2",
+                serde_json::to_string(&(
+                    compact.language,
+                    compact.kind,
+                    compact.container,
+                    &compact.container_identity,
+                    compact.declared_identity,
+                    &compact.signature_discriminator,
+                    &compact.build_context_discriminator,
+                ))
+                .expect("legacy positional claim encodes canonically"),
+            ),
         ];
         let mut input_carriers = BTreeSet::from([current_symbol.id]);
         for (version, payload) in legacy_payloads {
@@ -4126,7 +4139,7 @@ mod tests {
                     .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
                     .expect("symbol claim survives migration");
                 assert_eq!(file.version, "1.0");
-                assert_eq!(symbol.version, "1.2");
+                assert_eq!(symbol.version, "1.3");
                 assert_eq!(
                     document.entities[0].evidence.derivation,
                     [FactRef::Fact(symbol.id)]

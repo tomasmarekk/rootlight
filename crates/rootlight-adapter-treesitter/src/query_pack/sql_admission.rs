@@ -28,6 +28,7 @@ pub(super) fn retain(
             || owner.is_missing()
             || (owner.kind() == "tsql_procedure" && sql::procedure_header(owner).is_none())
             || (owner.kind() == "tsql_table_variable" && owner.has_error())
+            || (matches!(owner.kind(), "tsql_if" | "tsql_conditional_block") && owner.has_error())
         {
             return Ok(false);
         }

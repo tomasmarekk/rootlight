@@ -562,3 +562,76 @@ fn sql_tsql_rejected_routines_do_not_reparent_locals_or_columns_to_the_file() {
         CoverageStatus::Complete
     );
 }
+
+#[test]
+fn sql_tsql_closed_batch_branches_preserve_table_column_owners() {
+    let source = "SET ANSI_NULLS ON\r\nGO\r\n\
+                  IF NOT EXISTS (SELECT 1 FROM sys.objects) BEGIN\r\n\
+                  CREATE TABLE [work].[First] ([Id] INT,\r\n\
+                  CONSTRAINT [PK_First] PRIMARY KEY CLUSTERED ([Id])\r\n\
+                  WITH (PAD_INDEX = OFF, ALLOW_ROW_LOCKS = ON))\r\n\
+                  END\r\nGO\r\n\
+                  CREATE TABLE [work].[Second] ([Id] INT)\r\nGO\r\n";
+    let result = output(source);
+    let document = result.document();
+    assert!(
+        document.diagnostics.is_empty(),
+        "{:?}",
+        document.diagnostics
+    );
+    let mut ids = Vec::new();
+    for name in ["[work].[First]", "[work].[Second]"] {
+        let table = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(table.kind, EntityKind::DatabaseObject);
+        let columns = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Field
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(table.id))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].canonical_name, "[Id]");
+        ids.push(columns[0].id);
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert!(
+        document
+            .relations
+            .iter()
+            .all(|relation| relation.predicate == RelationPredicate::Contains)
+    );
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
+fn sql_tsql_unclosed_branch_cannot_publish_its_recovered_child_declarations() {
+    let source = "IF EXISTS (SELECT 1) BEGIN\n\
+                  CREATE TABLE [work].[Leaked] ([LeakedColumn] INT)\n\
+                  GO\nCREATE TABLE [work].[After] ([KeptColumn] INT)\nGO\n";
+    let result = output(source);
+    let document = result.document();
+    for name in ["[work].[Leaked]", "[LeakedColumn]"] {
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.canonical_name == name),
+            "recovered branch leaked {name}: {:?}",
+            document.entities
+        );
+    }
+    assert!(!document.skipped_regions.is_empty());
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}

@@ -99,6 +99,10 @@ pub enum GrammarFamily {
     Fortran,
     /// Oracle PL/SQL written source without compiler or catalog evaluation.
     PlSql,
+    /// SAS physical source without macro expansion or runtime execution.
+    Sas,
+    /// Pascal written source without compiler, preprocessor or binding inference.
+    Pascal,
     /// Common Lisp written forms without reader, macro or runtime binding inference.
     CommonLisp,
     /// Scheme written owners without macro expansion or runtime binding inference.
@@ -211,7 +215,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(53);
+        let mut descriptors = Vec::with_capacity(55);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -256,11 +260,13 @@ impl GrammarRegistry {
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
+            GrammarFamily::Sas,
+            GrammarFamily::Pascal,
             GrammarFamily::CommonLisp,
+            GrammarFamily::Assembly,
             GrammarFamily::Scheme,
             GrammarFamily::Ocaml,
             GrammarFamily::OcamlInterface,
-            GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
             GrammarFamily::Wgsl,
@@ -404,6 +410,8 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::CobolFree => tree_sitter_cobol::FREE.into(),
         GrammarFamily::Fortran => tree_sitter_fortran::LANGUAGE.into(),
         GrammarFamily::PlSql => tree_sitter_plsql::LANGUAGE.into(),
+        GrammarFamily::Sas => tree_sitter_sas::LANGUAGE.into(),
+        GrammarFamily::Pascal => tree_sitter_pascal::LANGUAGE.into(),
         GrammarFamily::CommonLisp => tree_sitter_commonlisp::LANGUAGE_COMMONLISP.into(),
         GrammarFamily::Scheme => tree_sitter_scheme::LANGUAGE_SCHEME.into(),
         GrammarFamily::Ocaml => tree_sitter_ocaml::LANGUAGE_OCAML.into(),
@@ -449,7 +457,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Xml => GrammarIdentity {
             language_id: "xml",
             grammar_version: "0.7.0",
-            source_package_sha256: "4e87a41d7b5cb7f3d7f8931db78c4f0050f221257ac65fc0a7a213829ba97ef0",
+            source_package_sha256: "7d4d8df7302cd7f25282f10d6822dd405680e7b9713ae1e674a898c8cc4fcbdc",
             parser_sha256: "16829db6dee156badeaf41e8874ab9862df27fd5715ef524932a4c68c4cd4b77",
             scanner_sha256: Some(
                 "e5a8595c263774ddaad83ecf906e330832a578f6f231b5c51831ffaa87bda244",
@@ -458,7 +466,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Dtd => GrammarIdentity {
             language_id: "dtd",
             grammar_version: "0.7.0",
-            source_package_sha256: "4e87a41d7b5cb7f3d7f8931db78c4f0050f221257ac65fc0a7a213829ba97ef0",
+            source_package_sha256: "7d4d8df7302cd7f25282f10d6822dd405680e7b9713ae1e674a898c8cc4fcbdc",
             parser_sha256: "840fee13647a4124a81deb1ea8527e336c4b2fc884b1b714edb97111b5a46d48",
             scanner_sha256: Some(
                 "cdb323ea613368705ade3c6904523848f262db38ee01f5722e2f16e0751bd71c",
@@ -510,6 +518,22 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "c4518318808f6f93881d0f4cbcffc068d396ca0ee43ffc48d61962d0484d4e22",
             scanner_sha256: Some(
                 "b5b8b12151c53c39302ceec717066da08acd1da5d4f594c58a6dd7fde3749d2e",
+            ),
+        },
+        GrammarFamily::Pascal => GrammarIdentity {
+            language_id: "pascal",
+            grammar_version: "0.10.2",
+            source_package_sha256: "4ce8bf2245c875e3009bb978bc9888c558c5c17c740bdae89e78c3837e0be98a",
+            parser_sha256: "8b0944120dabf8281cc089da3fced09acf08259cc1d52794366d82209c9fc0bf",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Sas => GrammarIdentity {
+            language_id: "sas",
+            grammar_version: "0.4.2",
+            source_package_sha256: "078b1b1969451c77d493e56f201bad714d773aec459212b81e6fdf0cdd220009",
+            parser_sha256: "e659aad267830f59f23b5d3e2921aa50ccb29658de0043cf5e3b93d96faaa7c3",
+            scanner_sha256: Some(
+                "26f6979b733de848bdfb8b80af30e37e552f78355e560962028718b9143a1981",
             ),
         },
         GrammarFamily::Apex => GrammarIdentity {
@@ -690,9 +714,9 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "sql",
             grammar_version: "0.3.11",
             source_package_sha256: "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17",
-            parser_sha256: "f6484888d88d312503e5aba2e3a857aa91a9dc84ba5226fedad02e7f4cdafb31",
+            parser_sha256: "29612e8c4a564466a8c5cb69a2997ec412f84d9ae45e8c844fe6502782b1492a",
             scanner_sha256: Some(
-                "97bf059ac5609e4e11feb44177eb6e89650100287105a1cdd7b203b55e6893f7",
+                "d404489602418e2e65882f709c44c7b4677eb6f92c609c980058851885f306db",
             ),
         },
         GrammarFamily::Html => GrammarIdentity {
@@ -915,7 +939,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 53);
+        assert_eq!(registry.descriptors().len(), 55);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -960,11 +984,13 @@ mod tests {
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
             GrammarFamily::PlSql,
+            GrammarFamily::Sas,
+            GrammarFamily::Pascal,
             GrammarFamily::CommonLisp,
+            GrammarFamily::Assembly,
             GrammarFamily::Scheme,
             GrammarFamily::Ocaml,
             GrammarFamily::OcamlInterface,
-            GrammarFamily::Assembly,
             GrammarFamily::Glsl,
             GrammarFamily::Hlsl,
             GrammarFamily::Wgsl,
@@ -1212,8 +1238,20 @@ mod tests {
             (GrammarFamily::CobolFree, "cobol-free", "tree-sitter-cobol"),
             (GrammarFamily::Fortran, "fortran", "tree-sitter-fortran"),
             (GrammarFamily::PlSql, "plsql", "tree-sitter-plsql"),
+            (GrammarFamily::Sas, "sas", "tree-sitter-sas"),
+            (GrammarFamily::Pascal, "pascal", "tree-sitter-pascal"),
+            (GrammarFamily::Assembly, "assembly", "tree-sitter-asm"),
+            (GrammarFamily::Glsl, "glsl", "tree-sitter-glsl"),
+            (GrammarFamily::Hlsl, "hlsl", "tree-sitter-hlsl"),
+            (GrammarFamily::Wgsl, "wgsl", "tree-sitter-wgsl"),
             (GrammarFamily::Xml, "xml", "tree-sitter-xml"),
             (GrammarFamily::Dtd, "dtd", "tree-sitter-xml"),
+            (GrammarFamily::Ocaml, "ocaml", "tree-sitter-ocaml"),
+            (
+                GrammarFamily::OcamlInterface,
+                "ocaml-interface",
+                "tree-sitter-ocaml",
+            ),
             (
                 GrammarFamily::CommonLisp,
                 "common-lisp",
@@ -1224,16 +1262,6 @@ mod tests {
                 "scheme",
                 "tree-sitter-scheme-native-local",
             ),
-            (GrammarFamily::Ocaml, "ocaml", "tree-sitter-ocaml"),
-            (
-                GrammarFamily::OcamlInterface,
-                "ocaml-interface",
-                "tree-sitter-ocaml",
-            ),
-            (GrammarFamily::Assembly, "assembly", "tree-sitter-asm"),
-            (GrammarFamily::Glsl, "glsl", "tree-sitter-glsl"),
-            (GrammarFamily::Hlsl, "hlsl", "tree-sitter-hlsl"),
-            (GrammarFamily::Wgsl, "wgsl", "tree-sitter-wgsl"),
             (GrammarFamily::Perl, "perl", "ts-parser-perl"),
             (
                 GrammarFamily::Groovy,
@@ -1265,18 +1293,23 @@ mod tests {
                         family,
                         GrammarFamily::Vba | GrammarFamily::FSharp | GrammarFamily::FSharpSignature
                     ) || family.is_cobol()
-                        || family == GrammarFamily::Apex
-                        || family == GrammarFamily::PlSql
-                        || family == GrammarFamily::CommonLisp
-                        || family == GrammarFamily::Scheme
-                        || family == GrammarFamily::Ocaml
-                        || family == GrammarFamily::OcamlInterface
-                        || family == GrammarFamily::Assembly
-                        || family == GrammarFamily::Glsl
-                        || family == GrammarFamily::Hlsl
-                        || family == GrammarFamily::Wgsl
-                        || family == GrammarFamily::Xml
-                        || family == GrammarFamily::Dtd
+                        || matches!(
+                            family,
+                            GrammarFamily::PlSql
+                                | GrammarFamily::Apex
+                                | GrammarFamily::Sas
+                                | GrammarFamily::Pascal
+                                | GrammarFamily::CommonLisp
+                                | GrammarFamily::Scheme
+                                | GrammarFamily::Ocaml
+                                | GrammarFamily::OcamlInterface
+                                | GrammarFamily::Assembly
+                                | GrammarFamily::Glsl
+                                | GrammarFamily::Hlsl
+                                | GrammarFamily::Wgsl
+                                | GrammarFamily::Xml
+                                | GrammarFamily::Dtd
+                        )
                     {
                         "vendored_source_sha256"
                     } else {
@@ -1299,7 +1332,9 @@ mod tests {
 
     fn locked_grammar<'a>(lock: &'a str, language: &str) -> &'a str {
         let marker = format!("language = \"{language}\"");
-        let marker_start = lock.find(&marker).expect("locked grammar is present");
+        let marker_start = lock
+            .find(&marker)
+            .unwrap_or_else(|| panic!("locked grammar is present: {language}"));
         let block_start = lock[..marker_start]
             .rfind("[[grammars]]")
             .expect("grammar block starts before its language");

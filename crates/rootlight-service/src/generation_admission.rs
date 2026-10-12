@@ -15,6 +15,9 @@ use crate::{
     generation_memory_limit,
 };
 
+#[cfg(test)]
+use crate::generation_admission_observation as observation;
+
 const SERIALIZATION_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 /// A preparation-local ledger of accepted serialized staging allowances.
@@ -35,6 +38,8 @@ impl GenerationAdmission {
     /// # Errors
     /// Returns a typed memory limit if the floor already exceeds the ceiling.
     pub(super) fn new(source_preflight_bytes: u64) -> Result<Self, FirstSliceError> {
+        #[cfg(test)]
+        observation::begin_admission(source_preflight_bytes);
         if source_preflight_bytes > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
             return Err(generation_memory_limit(
                 0,
@@ -92,6 +97,8 @@ impl GenerationAdmission {
         durable_cache: bool,
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
+        #[cfg(test)]
+        observation::observe_known_attempt(bytes);
         check_cancellation(cancellation)?;
         let charged_bytes = self
             .charged_bytes
@@ -116,6 +123,8 @@ impl GenerationAdmission {
         )?;
         self.charged_bytes = charged_bytes;
         self.reservation_bytes = reservation_bytes;
+        #[cfg(test)]
+        observation::observe_admitted(bytes, reservation_bytes);
         Ok(())
     }
 
@@ -126,6 +135,8 @@ impl GenerationAdmission {
         durable_cache: bool,
         cancellation: &Cancellation,
     ) -> Result<u64, FirstSliceError> {
+        #[cfg(test)]
+        let _document_charge = observation::enter_document_charge();
         let bytes = serialized_bytes(value, self.reservation_bytes, cancellation)?;
         self.admit_known_bytes(bytes, reservation, durable_cache, cancellation)?;
         Ok(bytes)
@@ -141,6 +152,8 @@ struct JsonByteCounter<'a> {
 
 impl<'a> JsonByteCounter<'a> {
     fn new(admitted_bytes: u64, cancellation: &'a Cancellation) -> Self {
+        #[cfg(test)]
+        observation::serialization_start(admitted_bytes);
         Self {
             bytes: 0,
             admitted_bytes,
@@ -150,6 +163,8 @@ impl<'a> JsonByteCounter<'a> {
     }
 
     fn fail<T>(&mut self, failure: FirstSliceError) -> io::Result<T> {
+        #[cfg(test)]
+        observation::serialization_failed(&failure);
         self.failure = Some(failure);
         Err(io::Error::other("generation staging count stopped"))
     }
@@ -170,15 +185,23 @@ impl Write for JsonByteCounter<'_> {
         self.checkpoint()?;
         let length = buffer.len().min(SERIALIZATION_CHECKPOINT_BYTES);
         let Ok(length_bytes) = u64::try_from(length) else {
+            #[cfg(test)]
+            observation::serialization_rejected(None, None);
             return self.fail(FirstSliceError::Limits);
         };
         let Some(bytes) = self.bytes.checked_add(length_bytes) else {
+            #[cfg(test)]
+            observation::serialization_rejected(None, Some(length_bytes));
             return self.fail(FirstSliceError::Limits);
         };
         let Some(observed) = self.admitted_bytes.checked_add(bytes) else {
+            #[cfg(test)]
+            observation::serialization_rejected(Some(bytes), Some(length_bytes));
             return self.fail(FirstSliceError::Limits);
         };
         if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+            #[cfg(test)]
+            observation::serialization_rejected(Some(bytes), Some(length_bytes));
             return self.fail(generation_memory_limit(
                 0,
                 observed,
@@ -186,6 +209,8 @@ impl Write for JsonByteCounter<'_> {
             ));
         }
         self.bytes = bytes;
+        #[cfg(test)]
+        observation::serialization_prefix(bytes);
         Ok(length)
     }
 
@@ -220,6 +245,8 @@ fn serialized_bytes<T: Serialize>(
         return Err(failure);
     }
     check_cancellation(cancellation)?;
+    #[cfg(test)]
+    observation::serialization_complete(counter.bytes);
     Ok(counter.bytes)
 }
 
@@ -492,5 +519,144 @@ mod tests {
                 .reservations
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn failed_prefix_observation_preserves_original_error_and_uncommitted_bytes() {
+        let guard = observation::CaptureGuard::arm(observation::MAX_OBSERVATION_BYTES).unwrap();
+        let _phase = observation::enter_phase(observation::Phase::FileDocument);
+        let floor = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - 3;
+        let admission = GenerationAdmission::new(floor).unwrap();
+        let cancellation = Cancellation::new();
+        let mut counter = JsonByteCounter::new(admission.reservation_bytes(), &cancellation);
+        assert_eq!(counter.write(&[1, 2]).unwrap(), 2);
+        assert!(counter.write(&[3, 4]).is_err());
+        let original = generation_memory_limit(
+            0,
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + 1,
+            PendingGenerationMemory::Staged,
+        );
+        assert_eq!(counter.failure, Some(original));
+        assert_eq!(counter.bytes, 2);
+        assert_eq!(admission.charged_bytes(), 0);
+        assert!(!guard.reached());
+        observation::observe_failure(&original);
+        let bytes = guard.finish(&cancellation).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report["failure_phase"], "file_document");
+        assert_eq!(
+            report["costs"]["last_serialization"]["accepted_prefix_bytes"],
+            2
+        );
+        assert_eq!(
+            report["costs"]["last_serialization"]["attempted_prefix_bytes"],
+            4
+        );
+        assert_eq!(
+            report["costs"]["last_serialization"]["rejected_write_bytes"],
+            2
+        );
+        assert_eq!(report["costs"]["admitted_documents"]["count"], 0);
+        assert_eq!(
+            report["original_error"]["memory_limit"]["observed"],
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + 1
+        );
+        assert_eq!(counter.failure, Some(original));
+    }
+
+    #[test]
+    fn successful_census_and_failed_growth_match_the_transactional_ledger() {
+        let service = FirstSliceService::new(2).unwrap();
+        let generation = GenerationId::from_bytes([6; 20]);
+        let floor = 100;
+        let mut reservation = service
+            .reserve_generation_memory(generation, floor, PendingGenerationMemory::Reserved)
+            .unwrap();
+        let guard = observation::CaptureGuard::arm(observation::MAX_OBSERVATION_BYTES).unwrap();
+        let mut admission = GenerationAdmission::new(floor).unwrap();
+        let document = NormalizedIrDocument::empty(RepositoryId::from_bytes([7; 16]), generation);
+        let document_bytes = admission
+            .admit_document(&document, &mut reservation, false, &Cancellation::new())
+            .unwrap();
+        {
+            let _phase = observation::enter_phase(observation::Phase::OptionalChunk);
+            admission
+                .admit_known_bytes(7, &mut reservation, false, &Cancellation::new())
+                .unwrap();
+        }
+        let before = admission.reservation_bytes();
+        let original = admission
+            .admit_known_bytes(u64::MAX, &mut reservation, false, &Cancellation::new())
+            .unwrap_err();
+        assert_eq!(original, FirstSliceError::Limits);
+        assert_eq!(admission.reservation_bytes(), before);
+        observation::observe_failure(&original);
+        let report: serde_json::Value =
+            serde_json::from_slice(&guard.finish(&Cancellation::new()).unwrap()).unwrap();
+        assert_eq!(
+            report["costs"]["admitted_documents"]["bytes"],
+            document_bytes
+        );
+        assert_eq!(report["costs"]["admitted_documents"]["count"], 1);
+        assert_eq!(
+            report["costs"]["admitted_known_chunks"],
+            serde_json::json!({"count":1,"bytes":7})
+        );
+        assert_eq!(report["costs"]["admitted_total_bytes"], before);
+        assert_eq!(report["costs"]["attempted_known_bytes"], u64::MAX);
+    }
+
+    #[test]
+    fn cancelled_serialization_observation_preserves_reason_and_reservation() {
+        for after_serialization in [false, true] {
+            let service = FirstSliceService::new(2).unwrap();
+            let generation = GenerationId::from_bytes([8; 20]);
+            let floor = 100;
+            let mut reservation = service
+                .reserve_generation_memory(generation, floor, PendingGenerationMemory::Reserved)
+                .unwrap();
+            let guard = observation::CaptureGuard::arm(observation::MAX_OBSERVATION_BYTES).unwrap();
+            let _phase = observation::enter_phase(observation::Phase::FileDocument);
+            let mut admission = GenerationAdmission::new(floor).unwrap();
+            let cancellation = Cancellation::new();
+            let original = admission
+                .admit_serialized(
+                    &CancellingValue {
+                        cancellation: &cancellation,
+                        after_serialization,
+                    },
+                    &mut reservation,
+                    false,
+                    &cancellation,
+                )
+                .unwrap_err();
+            assert_eq!(
+                original,
+                FirstSliceError::Cancelled(CancellationReason::ClientRequest)
+            );
+            assert_eq!(admission.charged_bytes(), 0);
+            assert_eq!(admission.reservation_bytes(), floor);
+            assert_eq!(
+                service
+                    .generation_cache
+                    .lock()
+                    .unwrap()
+                    .reservations
+                    .get(&generation),
+                Some(&floor)
+            );
+            observation::observe_failure(&original);
+            let report: serde_json::Value =
+                serde_json::from_slice(&guard.finish(&Cancellation::new()).unwrap()).unwrap();
+            assert_eq!(report["costs"]["admitted_documents"]["count"], 0);
+            assert_eq!(report["costs"]["admitted_known_bytes"]["count"], 0);
+            assert_eq!(report["costs"]["admitted_total_bytes"], floor);
+            assert!(report["costs"]["last_serialization"]["complete_bytes"].is_null());
+            assert_eq!(report["original_error"]["code"], "cancelled");
+            assert_eq!(
+                original,
+                FirstSliceError::Cancelled(CancellationReason::ClientRequest)
+            );
+        }
     }
 }

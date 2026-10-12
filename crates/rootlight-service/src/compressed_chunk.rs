@@ -212,6 +212,10 @@ pub(super) fn with_optional_staging<T>(
     work: impl FnOnce() -> Result<T, FirstSliceError>,
     retained_bytes: impl FnOnce(&T) -> Result<u64, FirstSliceError>,
 ) -> Result<(Option<T>, u64), FirstSliceError> {
+    #[cfg(test)]
+    let _phase = crate::generation_admission_observation::enter_phase(
+        crate::generation_admission_observation::Phase::OptionalChunk,
+    );
     check_cancellation(cancellation)?;
     let base = admission.reservation_bytes();
     let peak = work_bytes.and_then(|bytes| base.checked_add(bytes).ok_or(FirstSliceError::Limits));
@@ -220,9 +224,13 @@ pub(super) fn with_optional_staging<T>(
         Err(error) => return optional_failure(error).map(|()| (None, 0)),
     };
     if let Err(error) = reservation.resize(peak, PendingGenerationMemory::Staged, durable_cache) {
+        #[cfg(test)]
+        crate::generation_admission_observation::observe_temporary_reservation(base, peak, false);
         check_cancellation(cancellation)?;
         return optional_failure(error).map(|()| (None, 0));
     }
+    #[cfg(test)]
+    crate::generation_admission_observation::observe_temporary_reservation(base, peak, true);
     let value = work();
     let value = match value {
         Ok(value) => value,

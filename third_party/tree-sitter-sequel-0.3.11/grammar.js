@@ -13,6 +13,7 @@ module.exports = grammar({
     $._dollar_quoted_string_start_tag,
     $._dollar_quoted_string_end_tag,
     $._dollar_quoted_string,
+    $.tsql_batch_separator,
   ],
 
   conflicts: $ => [
@@ -21,6 +22,14 @@ module.exports = grammar({
     [$.between_expression, $.binary_expression],
     [$.time],
     [$.timestamp],
+    // Statement wrappers retain both interpretations until their enclosing
+    // ordinary-program or explicit-batch boundary disambiguates them.
+    [$.statement, $._tsql_non_setting_statement],
+    [$._tsql_batch_contents, $._ddl_statement],
+    [$._sql_program, $._tsql_non_setting_statement],
+    [$._tsql_script_statement, $._sql_program],
+    [$._tsql_script_statement, $._shared_sql_statement],
+    [$.program, $._tsql_script_statement],
   ],
 
   precedences: $ => [
@@ -45,23 +54,58 @@ module.exports = grammar({
   word: $ => $._identifier,
 
   rules: {
-    program: $ => seq(
-      // any number of transactions, statements, or blocks with a terminating ;
-      repeat(
-        seq(
-          choice(
-            $.transaction,
-            $.statement,
-            $.block,
-            $.tsql_declare,
+    program: $ => optional(choice(
+      $._sql_program,
+      $.tsql_script,
+      seq(choice($.tsql_if, $.tsql_set_option), optional(';')),
+    )),
+
+    // Only an explicit utility batch boundary selects the semicolon-optional
+    // script envelope; ordinary SQL keeps its original statement boundaries.
+    tsql_script: $ => seq(
+      repeat1($.tsql_batch),
+      optional($.tsql_tail_batch),
+    ),
+
+    tsql_batch: $ => seq(
+      optional($._tsql_batch_contents),
+      field('separator', $.tsql_batch_separator),
+    ),
+
+    tsql_tail_batch: $ => $._tsql_batch_contents,
+
+    // A one-statement routine body cannot be followed by apparently unrelated
+    // statements in the same batch. Its end must be the batch boundary or EOF.
+    _tsql_batch_contents: $ => choice(
+      seq($.tsql_procedure, optional(';')),
+      repeat1(seq($._tsql_script_statement, optional(';'))),
+    ),
+
+    _tsql_script_statement: $ => choice(
+      $.tsql_if,
+      $.tsql_set_option,
+      $.create_table,
+      $.tsql_declare,
+    ),
+
+    _sql_program: $ => choice(
+      seq(
+        // Any nonempty sequence of terminated statements may have one final
+        // unterminated statement; only the start rule admits an empty program.
+        repeat1(
+          seq(
+            choice(
+              $.transaction,
+              $.statement,
+              $.block,
+              $.tsql_declare,
+            ),
+            ';',
           ),
-          ';',
         ),
+        optional(choice($.statement, $.tsql_declare)),
       ),
-      // optionally, a single statement without a terminating ;
-      optional(
-        choice($.statement, $.tsql_declare),
-      ),
+      choice($.statement, $.tsql_declare),
     ),
 
     keyword_select: _ => make_keyword("select"),
@@ -333,6 +377,8 @@ module.exports = grammar({
     keyword_readonly: _ => make_keyword("readonly"),
     keyword_nocount: _ => make_keyword("nocount"),
     keyword_identity: _ => make_keyword("identity"),
+    keyword_clustered: _ => make_keyword("clustered"),
+    keyword_nonclustered: _ => make_keyword("nonclustered"),
     keyword_max: _ => make_keyword("max"),
     keyword_object_id: _ => make_keyword("object_id"),
 
@@ -738,21 +784,28 @@ module.exports = grammar({
       )),
       choice(
         $._ddl_statement,
-        $._dml_write,
-        optional_parenthesis($._dml_read),
+        $._shared_sql_statement,
       ),
+    ),
+
+    // Keep dialect-specific separators in the callers; sharing statement
+    // syntax does not make ordinary SQL semicolons optional.
+    _shared_sql_statement: $ => choice(
+      $.set_statement,
+      $.create_table,
+      $._dml_write,
+      optional_parenthesis($._dml_read),
     ),
 
     _ddl_statement: $ => choice(
       $.tsql_procedure,
-      $._create_statement,
+      $._non_table_create_statement,
       $._alter_statement,
       $._drop_statement,
       $._rename_statement,
       $._optimize_statement,
       $._merge_statement,
       $.comment_statement,
-      $.set_statement,
       $.reset_statement,
     ),
 
@@ -997,17 +1050,19 @@ module.exports = grammar({
 
     _tsql_body_statement: $ => choice(
       $.tsql_block,
+      $.tsql_if,
       $._tsql_simple_statement,
     ),
 
     _tsql_simple_statement: $ => choice(
-      $.tsql_declare,
       $.tsql_set_nocount,
+      $._tsql_non_setting_statement,
+    ),
+
+    _tsql_non_setting_statement: $ => choice(
+      $.tsql_declare,
       $.tsql_return,
-      $.set_statement,
-      $.create_table,
-      $._dml_write,
-      optional_parenthesis($._dml_read),
+      $._shared_sql_statement,
     ),
 
     tsql_block: $ => seq(
@@ -1019,6 +1074,21 @@ module.exports = grammar({
 
     tsql_set_nocount: $ => seq(
       $.keyword_set, $.keyword_nocount, choice($.keyword_on, $.keyword_off),
+    ),
+
+    tsql_set_option: $ => seq(
+      $.keyword_set,
+      field('option', $.identifier),
+      field('value', choice($.keyword_on, $.keyword_off)),
+    ),
+
+    // Closed branch blocks expose physical ownership without evaluating the
+    // condition or accepting an arbitrary statement span after IF or ELSE.
+    tsql_if: $ => seq(
+      $.keyword_if,
+      field('condition', $._expression),
+      field('consequence', alias($.tsql_block, $.tsql_conditional_block)),
+      optional(seq($.keyword_else, field('alternative', alias($.tsql_block, $.tsql_conditional_block)))),
     ),
 
     tsql_return: $ => prec.right(seq($.keyword_return, optional($._expression))),
@@ -1122,9 +1192,13 @@ module.exports = grammar({
       optional($.index_hint),
     ),
 
-    _create_statement: $ => seq(
+    _create_statement: $ => choice(
+      $.create_table,
+      $._non_table_create_statement,
+    ),
+
+    _non_table_create_statement: $ => seq(
       choice(
-        $.create_table,
         $.create_view,
         $.create_materialized_view,
         $.create_index,
@@ -2898,7 +2972,7 @@ module.exports = grammar({
         ),
       ),
       $._default_expression,
-      $._primary_key,
+      seq($._primary_key, optional($.tsql_key_storage), optional($.tsql_key_options)),
       $.keyword_auto_increment,
       $.tsql_identity,
       $.direction,
@@ -2913,7 +2987,7 @@ module.exports = grammar({
         $.keyword_stored,
         $.keyword_virtual,
       ),
-      $.keyword_unique
+      seq($.keyword_unique, optional($.tsql_key_storage), optional($.tsql_key_options))
     )),
 
     tsql_identity: $ => seq(
@@ -2925,6 +2999,39 @@ module.exports = grammar({
         field('increment', alias($._integer, $.literal)),
         ')',
       )),
+    ),
+
+    tsql_key_storage: $ => choice($.keyword_clustered, $.keyword_nonclustered),
+
+    // Index settings belong to the written key, not to the enclosing table's
+    // storage options. Only explicit scalar setting forms are admitted here.
+    tsql_key_options: $ => seq(
+      $.keyword_with,
+      choice(paren_list($.tsql_index_option, true), $.tsql_fillfactor),
+    ),
+
+    tsql_index_option: $ => choice(
+      seq(
+        field('name', alias(choice(
+          make_keyword('pad_index'),
+          make_keyword('ignore_dup_key'),
+          make_keyword('statistics_norecompute'),
+          make_keyword('statistics_incremental'),
+          make_keyword('allow_row_locks'),
+          make_keyword('allow_page_locks'),
+          make_keyword('optimize_for_sequential_key'),
+          make_keyword('xml_compression'),
+        ), $.identifier)),
+        '=',
+        field('value', choice($.keyword_on, $.keyword_off)),
+      ),
+      $.tsql_fillfactor,
+    ),
+
+    tsql_fillfactor: $ => seq(
+      field('name', alias(make_keyword('fillfactor'), $.identifier)),
+      '=',
+      field('value', alias($._natural_number, $.literal)),
     ),
 
     _check_constraint: $ => seq(
@@ -2974,8 +3081,10 @@ module.exports = grammar({
       field('name', $.identifier),
       choice(
         seq(
-          $._primary_key,
+          choice($._primary_key, $.keyword_unique),
+          optional($.tsql_key_storage),
           $.ordered_columns,
+          optional($.tsql_key_options),
         ),
         seq(
           $._check_constraint
@@ -2985,13 +3094,16 @@ module.exports = grammar({
 
     _primary_key_constraint: $ => seq(
       $._primary_key,
+      optional($.tsql_key_storage),
       $.ordered_columns,
+      optional($.tsql_key_options),
     ),
 
     _key_constraint: $ => seq(
       choice(
         seq(
           $.keyword_unique,
+          optional($.tsql_key_storage),
           optional(
             choice(
               $.keyword_index,

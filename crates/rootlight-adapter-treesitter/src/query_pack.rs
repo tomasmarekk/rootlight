@@ -35,10 +35,12 @@ mod matlab;
 mod nix;
 mod objective_c;
 mod ocaml;
+mod pascal;
 mod perl;
 mod plsql;
 mod powershell;
 mod r;
+mod sas;
 mod scala;
 mod scheme;
 mod sql;
@@ -374,12 +376,18 @@ impl QueryPack {
         if matches!(
             family,
             GrammarFamily::PlSql
+                | GrammarFamily::Sas
+                | GrammarFamily::Pascal
                 | GrammarFamily::CommonLisp
                 | GrammarFamily::Scheme
                 | GrammarFamily::Glsl
                 | GrammarFamily::Hlsl
         ) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+            expected.push("expression");
+        }
+        if family == GrammarFamily::Apex {
+            expected.retain(|name| !matches!(*name, "call" | "import"));
             expected.push("expression");
         }
         if family == GrammarFamily::Wgsl {
@@ -389,10 +397,6 @@ impl QueryPack {
                     "call" | "comment" | "documentation" | "import" | "string"
                 )
             });
-            expected.push("expression");
-        }
-        if family == GrammarFamily::Apex {
-            expected.retain(|name| !matches!(*name, "call" | "import"));
             expected.push("expression");
         }
         if family == GrammarFamily::Assembly {
@@ -725,7 +729,10 @@ impl QueryPack {
         let mut fsharp_captures =
             fsharp::CaptureCache::new(limits.captures, input.normalize_calls, limits.body_nodes);
         let mut plsql_captures = plsql::CaptureCache::new(limits.captures.min(limits.body_nodes));
-        let mut apex_captures = apex::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut sas_captures = sas::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut apex_captures =
+            apex::CaptureCache::new(limits.captures.min(limits.body_nodes), limits.body_nodes);
+        let mut pascal_captures = pascal::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut common_lisp_captures =
             common_lisp::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut scheme_captures = scheme::CaptureCache::new(limits.captures.min(limits.body_nodes));
@@ -914,6 +921,22 @@ impl QueryPack {
                         continue;
                     }
                 }
+                if input.family == GrammarFamily::Pascal {
+                    let admitted = pascal::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut pascal_captures,
+                    )?;
+                    if pascal_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::Apex {
                     let admitted = apex::retain_capture(
                         capture.node,
@@ -923,6 +946,22 @@ impl QueryPack {
                         &mut apex_captures,
                     )?;
                     if apex_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !admitted {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::Sas {
+                    let admitted = sas::retain_capture(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut sas_captures,
+                    )?;
+                    if sas_captures.exhausted() {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1214,6 +1253,14 @@ impl QueryPack {
                         input.cancellation,
                         &mut scheme_captures,
                     )
+                } else if input.family == GrammarFamily::Pascal {
+                    pascal::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut pascal_captures,
+                    )
                 } else if input.family == GrammarFamily::Apex {
                     apex::candidate(
                         capture.node,
@@ -1221,6 +1268,14 @@ impl QueryPack {
                         input.source,
                         input.cancellation,
                         &mut apex_captures,
+                    )
+                } else if input.family == GrammarFamily::Sas {
+                    sas::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut sas_captures,
                     )
                 } else {
                     candidate_for_capture(
@@ -1234,7 +1289,9 @@ impl QueryPack {
                     )
                 };
                 if fsharp_captures.exhausted()
+                    || sas_captures.exhausted()
                     || apex_captures.exhausted()
+                    || pascal_captures.exhausted()
                     || common_lisp_captures.exhausted()
                     || scheme_captures.exhausted()
                     || assembly_captures.exhausted()
@@ -1825,6 +1882,7 @@ fn candidate_for_capture(
             GrammarFamily::PowerShell => "powershell.call",
             GrammarFamily::Fortran => "fortran.explicit_subroutine",
             GrammarFamily::PlSql => return Err(query_failure("query-plsql-unproven-call")),
+            GrammarFamily::Sas => return Err(query_failure("query-sas-unproven-call")),
             GrammarFamily::Assembly => return Err(query_failure("query-assembly-unproven-call")),
             GrammarFamily::Glsl => return Err(query_failure("query-glsl-unproven-call")),
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
@@ -1832,6 +1890,7 @@ fn candidate_for_capture(
             GrammarFamily::Xml | GrammarFamily::Dtd => {
                 return Err(query_failure("query-xml-unproven-call"));
             }
+            GrammarFamily::Pascal => return Err(query_failure("query-pascal-unproven-call")),
             GrammarFamily::CommonLisp => {
                 return Err(query_failure("query-common-lisp-unproven-call"));
             }
@@ -2752,7 +2811,7 @@ impl QueryPackRegistry {
     }
 
     fn compile_audited() -> Result<Self, GrammarFamily> {
-        let mut packs = Vec::with_capacity(53);
+        let mut packs = Vec::with_capacity(55);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2806,11 +2865,17 @@ impl QueryPackRegistry {
                 include_str!("../queries/fortran.scm"),
             ),
             (GrammarFamily::PlSql, include_str!("../queries/plsql.scm")),
+            (GrammarFamily::Sas, include_str!("../queries/sas.scm")),
             (GrammarFamily::Glsl, include_str!("../queries/glsl.scm")),
             (GrammarFamily::Hlsl, include_str!("../queries/hlsl.scm")),
             (GrammarFamily::Wgsl, include_str!("../queries/wgsl.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
             (GrammarFamily::Dtd, include_str!("../queries/dtd.scm")),
+            (GrammarFamily::Pascal, include_str!("../queries/pascal.scm")),
+            (
+                GrammarFamily::Assembly,
+                include_str!("../queries/assembly.scm"),
+            ),
             (
                 GrammarFamily::CommonLisp,
                 include_str!("../queries/common_lisp.scm"),
@@ -2820,10 +2885,6 @@ impl QueryPackRegistry {
             (
                 GrammarFamily::OcamlInterface,
                 include_str!("../queries/ocaml-interface.scm"),
-            ),
-            (
-                GrammarFamily::Assembly,
-                include_str!("../queries/assembly.scm"),
             ),
             (
                 GrammarFamily::FSharpSignature,
@@ -2911,6 +2972,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pascal_pack_compiles_with_only_written_source_captures() {
+        let pack = QueryPack::compile(GrammarFamily::Pascal, include_str!("../queries/pascal.scm"))
+            .expect("reviewed Pascal query matches the linked static grammar");
+        let mut names = pack.identity_query.capture_names().to_vec();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "comment",
+                "declaration",
+                "definition",
+                "expression",
+                "module",
+                "reference",
+                "root",
+                "scope",
+                "signature",
+                "string",
+            ]
+        );
+        assert!(pack.roles_by_capture.iter().all(|role| !matches!(
+            role,
+            StructuralRole::Call | StructuralRole::CallName | StructuralRole::ScopedCall
+        )));
+    }
+
+    #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
 
@@ -2957,6 +3045,9 @@ mod tests {
             GrammarFamily::CobolFixed,
             GrammarFamily::CobolFree,
             GrammarFamily::Fortran,
+            GrammarFamily::PlSql,
+            GrammarFamily::Sas,
+            GrammarFamily::Pascal,
             GrammarFamily::CommonLisp,
             GrammarFamily::Scheme,
             GrammarFamily::Ocaml,
@@ -3010,7 +3101,10 @@ mod tests {
             }
             if matches!(
                 family,
-                GrammarFamily::CommonLisp
+                GrammarFamily::PlSql
+                    | GrammarFamily::Sas
+                    | GrammarFamily::Pascal
+                    | GrammarFamily::CommonLisp
                     | GrammarFamily::Scheme
                     | GrammarFamily::Glsl
                     | GrammarFamily::Hlsl

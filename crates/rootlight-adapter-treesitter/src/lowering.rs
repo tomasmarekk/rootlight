@@ -3,6 +3,7 @@
 //! The analyzer injects a `ParseProvider` and never observes native Tree-sitter
 //! types, so extraction can evolve independently from stable IR construction.
 
+mod apex;
 mod embedded;
 mod matlab;
 mod nix_paths;
@@ -2239,6 +2240,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
         }
 
+        let apex_bindings = if self.request.language().as_str() == "apex"
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            Some(apex::FormalBindings::new(
+                &materialized,
+                self.coordinates.facts(),
+                self.full_source,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         for (index, fact) in self.coordinates.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = self.source_for_span(fact.span())?;
@@ -2824,6 +2838,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         provenance_id,
                     )?;
                     insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+                }
+                if let Some(bindings) = &apex_bindings
+                    && let Some(symbol) =
+                        bindings.resolve(fact, text, enclosing, self.full_source, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
                 }
                 if fact.syntax_kind().as_str() == "make.target.reference"
                     && let Some(Some(symbol)) = make_targets.get(text)
@@ -4409,6 +4433,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "fsharp.match_branch.scope"
                         | "fsharp.preprocessor.scope"
                         | "fsharp.preprocessor_branch.scope"
+                        | "sas.proc.scope"
+                        | "sas.data.scope"
+                        | "sas.conditional.scope"
                 ) {
                     anonymous_scopes
                         .try_reserve(1)
@@ -4428,6 +4455,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             "rootlight.ecmascript-lexical-scope/1"
                         } else if self.language_for_fact(fact) == "scss" {
                             "rootlight.scss-lexical-scope/1"
+                        } else if self.language_for_fact(fact) == "sas" {
+                            "rootlight.sas-source-scope/1"
                         } else if fact.syntax_kind().as_str() == "fsharp.local_binding.scope" {
                             "rootlight.fsharp-local-scope/1"
                         } else if fact.syntax_kind().as_str() == "fsharp.lambda.scope" {
@@ -4764,6 +4793,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 hash.update(label.as_bytes());
                 hash.update(&position.to_be_bytes());
                 Some(*hash.finalize().as_bytes())
+            } else if self.language_for_fact(fact) == "apex"
+                && kind == EntityKind::Variable
+                && fact.syntax_kind().as_str() == "apex.local_variable.declaration"
+            {
+                // Disjoint blocks can reuse a written name. Only same-name
+                // source order distinguishes these declarations; initializers
+                // and byte offsets must not change their durable identities.
+                let label = fact.syntax_kind().as_str();
+                let next = written_declarations
+                    .entry((parent_entity, label.to_owned(), name.to_string()))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                Some(source_occurrence_identity(
+                    "rootlight.apex-local-declaration/1",
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                    label,
+                    position,
+                ))
             } else if matches!(self.language_for_fact(fact), "javascript" | "typescript")
                 && kind == EntityKind::Variable
             {
@@ -6476,6 +6526,8 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(ocaml_type_member_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(sas_source_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(sas_source_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(apex_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(apex_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(
@@ -6514,13 +6566,101 @@ fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
     }
 }
 
+fn sas_source_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    match fact.syntax_kind().as_str() {
+        "sas.unsupported_owner.expression" => Some("sas-source-identity-unavailable"),
+        "sas.unknown_statement.expression" => Some("sas-statement-semantics-unavailable"),
+        "sas.fcmp_semantics.expression" => Some("sas-fcmp-body-and-binding-semantics-unavailable"),
+        "sas.macro_expansion.expression" => Some("sas-macro-expansion-unavailable"),
+        "sas.conditional_selection.expression" => Some("sas-conditional-selection-unavailable"),
+        "sas.runtime_include.expression" => Some("sas-runtime-include-unavailable"),
+        "sas.data_semantics.expression" => Some("sas-data-step-runtime-semantics-unavailable"),
+        "sas.shared_data_header.expression" => {
+            Some("sas-shared-data-header-and-runtime-semantics-unavailable")
+        }
+        "sas.dynamic_dataset.expression" => {
+            Some("sas-dynamic-or-special-dataset-identity-unavailable")
+        }
+        "sas.proc_semantics.expression" => Some("sas-proc-semantics-unavailable"),
+        _ => None,
+    }
+}
+
 fn apex_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "apex.unsupported_owner.expression" => Some("apex-source-identity-unavailable"),
+        "apex.unsupported_local.expression" => {
+            Some("apex-local-owner-and-binding-analysis-unavailable")
+        }
         "apex.accessor_semantics.expression" => Some("apex-accessor-semantics-unavailable"),
         "apex.body_semantics.expression" => Some("apex-body-binding-and-call-analysis-unavailable"),
         _ => None,
     }
+}
+
+fn pascal_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    let (domain, reason) = match fact.syntax_kind().as_str() {
+        "pascal.file.module" | "pascal.file_semantics.expression" => (
+            FactDomain::Relations,
+            "pascal-compiler-and-binding-semantics-unavailable",
+        ),
+        "pascal.unsupported_owner.expression" => {
+            (FactDomain::Entities, "pascal-source-identity-unavailable")
+        }
+        "pascal.unsupported_syntax.expression" => (
+            FactDomain::Entities,
+            "pascal-unsupported-source-structure-unavailable",
+        ),
+        "pascal.forward_type.expression" => (
+            FactDomain::Entities,
+            "pascal-forward-type-layout-unavailable",
+        ),
+        "pascal.shared_declaration.expression" => (
+            FactDomain::Relations,
+            "pascal-shared-declaration-header-association-unavailable",
+        ),
+        "pascal.preprocessing.expression" => (
+            FactDomain::Relations,
+            "pascal-preprocessor-selection-unavailable",
+        ),
+        "pascal.prototype_linkage.expression" => (
+            FactDomain::Relations,
+            "pascal-declaration-implementation-linkage-unavailable",
+        ),
+        "pascal.qualified_routine_semantics.expression" => (
+            FactDomain::Relations,
+            "pascal-written-qualifier-binding-unavailable",
+        ),
+        "pascal.accessor_semantics.expression" => (
+            FactDomain::Relations,
+            "pascal-property-accessor-binding-unavailable",
+        ),
+        "pascal.external_implementation.expression" => (
+            FactDomain::Relations,
+            "pascal-external-implementation-unavailable",
+        ),
+        "pascal.unit_semantics.expression" => (
+            FactDomain::Relations,
+            "pascal-unit-and-external-source-binding-unavailable",
+        ),
+        "pascal.call_semantics.expression" => {
+            (FactDomain::Relations, "pascal-call-target-unavailable")
+        }
+        "pascal.routine_semantics.expression" => (
+            FactDomain::Relations,
+            "pascal-body-binding-and-call-analysis-unavailable",
+        ),
+        "pascal.type_semantics.expression" => (
+            FactDomain::Relations,
+            "pascal-type-layout-and-inheritance-unavailable",
+        ),
+        "pascal.declaration_semantics.expression" => (
+            FactDomain::Relations,
+            "pascal-declaration-binding-unavailable",
+        ),
+        _ => return None,
+    };
+    Some((domain, reason))
 }
 
 fn scheme_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
@@ -6652,6 +6792,12 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     if let Some(gap) = scheme_source_gap(fact) {
         return Some(gap);
     }
+    if let Some(gap) = pascal_source_gap(fact) {
+        return Some(gap);
+    }
+    if let Some(reason) = sas_source_gap(fact) {
+        return Some((FactDomain::Entities, reason));
+    }
     if let Some(reason) = apex_source_identity_gap(fact) {
         return Some((FactDomain::Entities, reason));
     }
@@ -6697,6 +6843,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "apex.annotation_semantics.expression" => {
             Some((FactDomain::Relations, "apex-annotation-binding-unavailable"))
         }
+        "sas.file.module" => Some((
+            FactDomain::Relations,
+            "sas-compiler-and-runtime-semantics-unavailable",
+        )),
         "plsql.unsupported_owner.expression" => {
             Some((FactDomain::Entities, "plsql-source-identity-unavailable"))
         }
@@ -8321,7 +8471,9 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "fsharp.file.module"
                 | "fortran.file.module"
                 | "plsql.file.module"
+                | "sas.file.module"
                 | "apex.file.module"
+                | "pascal.file.module"
                 | "vba.file.module"
                 | "vba.class.module"
                 | "solidity.file.module"
@@ -8362,7 +8514,9 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "fsharp-signature"
                 | "fortran"
                 | "plsql"
+                | "sas"
                 | "apex"
+                | "pascal"
                 | "vba"
                 | "visual-basic-classic"
                 | "astro"
@@ -8537,7 +8691,9 @@ fn supports_declaration_signature(
         && declaration.syntax_kind().as_str() == "fsharp.file.module")
         || (language == "fortran" && declaration.syntax_kind().as_str() == "fortran.file.module")
         || (language == "plsql" && declaration.syntax_kind().as_str() == "plsql.file.module")
+        || (language == "sas" && declaration.syntax_kind().as_str() == "sas.file.module")
         || (language == "apex" && declaration.syntax_kind().as_str() == "apex.file.module")
+        || (language == "pascal" && declaration.syntax_kind().as_str() == "pascal.file.module")
         || (language == "assembly" && declaration.syntax_kind().as_str() == "assembly.file.module")
         || (language == "glsl" && declaration.syntax_kind().as_str() == "glsl.file.module")
         || (language == "common-lisp"
@@ -8562,6 +8718,23 @@ fn supports_declaration_signature(
         // Initializers widen a fragment without supplying its shared type.
         // Such a fragment cannot acquire a unique complete field header.
         return false;
+    }
+    if language == "pascal"
+        && matches!(
+            declaration.syntax_kind().as_str(),
+            "pascal.field_fragment.declaration"
+                | "pascal.variable_fragment.declaration"
+                | "pascal.class_variable_fragment.declaration"
+                | "pascal.parameter_fragment.declaration"
+        )
+    {
+        // A shared written group cannot supply a unique per-name header.
+        return false;
+    }
+    if language == "sas" && declaration.syntax_kind().as_str() == "sas.data_target.declaration" {
+        // Multiple outputs have separate name-only declarations, not a unique
+        // shared DATA header. A fallback signature would invent that ownership.
+        return definition.is_some_and(|definition| definition.span() != declaration.span());
     }
     if language == "haskell" {
         if kind == EntityKind::Variable {
@@ -8618,15 +8791,27 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
                 kind,
                 EntityKind::Variable | EntityKind::Field | EntityKind::Parameter
             ))
-        || (language == "apex" && matches!(kind, EntityKind::Field | EntityKind::Parameter))
+        || (language == "apex"
+            && matches!(
+                kind,
+                EntityKind::Field | EntityKind::Parameter | EntityKind::Variable
+            ))
+        || (language == "pascal"
+            && matches!(
+                kind,
+                EntityKind::Field
+                    | EntityKind::Parameter
+                    | EntityKind::Variable
+                    | EntityKind::Property
+            ))
         || (kind == EntityKind::Variable && language == "haskell")
         || (kind == EntityKind::Property && matches!(language, "vba" | "visual-basic-classic"))
         || (kind == EntityKind::Module
             && matches!(
                 language,
-                "cobol-fixed" | "cobol-free" | "fortran" | "plsql" | "assembly"
+                "cobol-fixed" | "cobol-free" | "fortran" | "plsql" | "pascal" | "assembly"
             ))
-        || (language == "plsql" && kind == EntityKind::DatabaseObject)
+        || (matches!(language, "plsql" | "sas") && kind == EntityKind::DatabaseObject)
         || matches!(
             kind,
             EntityKind::Function
@@ -8727,8 +8912,18 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         "scheme.symbol.reference" if fact.kind() == SyntaxFactKind::Occurrence => {
             Some("scheme-binding-target-unavailable")
         }
-        "apex.identifier.reference" | "apex.member.reference" | "apex.unproven_call.reference" => {
-            Some("apex-binding-and-dispatch-target-unavailable")
+        "pascal.identifier.reference"
+        | "pascal.unit_reference.reference"
+        | "pascal.member_reference.reference" => {
+            Some("pascal-binding-and-dispatch-target-unavailable")
+        }
+        "apex.identifier.reference"
+        | "apex.formal_identifier.reference"
+        | "apex.local_identifier.reference"
+        | "apex.member.reference"
+        | "apex.unproven_call.reference" => Some("apex-binding-and-dispatch-target-unavailable"),
+        "sas.macro_call.reference" | "sas.macro_variable.reference" | "sas.dataset.reference" => {
+            Some("sas-binding-and-runtime-target-unavailable")
         }
         "plsql.identifier.reference" => Some("plsql-binding-target-unavailable"),
         "plsql.application.reference" => Some("plsql-call-or-index-target-unavailable"),
@@ -8883,6 +9078,21 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
             _ => None,
         };
     }
+    if fact.syntax_kind().as_str().starts_with("sas.") {
+        return match (fact.kind(), fact.syntax_kind().as_str()) {
+            (
+                SyntaxFactKind::Occurrence,
+                "sas.macro_call.reference"
+                | "sas.macro_variable.reference"
+                | "sas.dataset.reference",
+            ) => Some(OccurrenceRole::Reference),
+            (SyntaxFactKind::Comment, "sas.comment.comment") => Some(OccurrenceRole::Documentation),
+            (SyntaxFactKind::StringLiteral, "sas.string.string") => {
+                Some(OccurrenceRole::StringEvidence)
+            }
+            _ => None,
+        };
+    }
     if fact.syntax_kind().as_str().starts_with("wgsl.") {
         return match (fact.kind(), fact.syntax_kind().as_str()) {
             (
@@ -8993,6 +9203,8 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
                     | "glsl.member.reference"
                     | "glsl.unproven_call.reference"
                     | "apex.identifier.reference"
+                    | "apex.formal_identifier.reference"
+                    | "apex.local_identifier.reference"
                     | "apex.member.reference"
                     | "apex.unproven_call.reference"
             ) =>
@@ -9389,6 +9601,18 @@ mod tests {
 
     use super::*;
 
+    fn declaration(label: &str) -> SyntaxFact {
+        let file = FileId::from_bytes([3; 20]);
+        SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(file, 0, 1).expect("test span is ordered"),
+            0,
+            SyntaxKindLabel::new(label).expect("test label is valid"),
+        )
+    }
+
     fn skipped_admission_gap(detail: &str) -> SkippedRegion {
         let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
         let source = SourceRef::new(
@@ -9470,16 +9694,129 @@ mod tests {
         assert!(skipped.is_empty());
     }
 
-    fn declaration(label: &str) -> SyntaxFact {
-        let file = FileId::from_bytes([3; 20]);
-        SyntaxFact::new(
-            1,
+    #[test]
+    fn pascal_group_fragments_cannot_acquire_unique_header_signatures() {
+        for (label, kind) in [
+            ("pascal.field_fragment.declaration", EntityKind::Field),
+            (
+                "pascal.class_variable_fragment.declaration",
+                EntityKind::Field,
+            ),
+            ("pascal.variable_fragment.declaration", EntityKind::Variable),
+            (
+                "pascal.parameter_fragment.declaration",
+                EntityKind::Parameter,
+            ),
+        ] {
+            assert!(!supports_declaration_signature(
+                kind,
+                "pascal",
+                &declaration(label),
+                None
+            ));
+        }
+        for (label, kind) in [
+            ("pascal.unit.declaration", EntityKind::Module),
+            ("pascal.field.declaration", EntityKind::Field),
+            ("pascal.parameter.declaration", EntityKind::Parameter),
+            ("pascal.property.declaration", EntityKind::Property),
+        ] {
+            assert!(supports_declaration_signature(
+                kind,
+                "pascal",
+                &declaration(label),
+                None
+            ));
+        }
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "pascal",
+            &declaration("pascal.file.module"),
             None,
-            SyntaxFactKind::Declaration,
-            SourceSpan::new(file, 0, 1).expect("test span is ordered"),
-            0,
-            SyntaxKindLabel::new(label).expect("test label is valid"),
-        )
+        ));
+    }
+
+    #[test]
+    fn pascal_scoped_source_gaps_do_not_replace_written_identity_with_binding() {
+        let fact = |label| {
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (label, domain, reason) in [
+            (
+                "pascal.unsupported_owner.expression",
+                FactDomain::Entities,
+                "pascal-source-identity-unavailable",
+            ),
+            (
+                "pascal.shared_declaration.expression",
+                FactDomain::Relations,
+                "pascal-shared-declaration-header-association-unavailable",
+            ),
+            (
+                "pascal.qualified_routine_semantics.expression",
+                FactDomain::Relations,
+                "pascal-written-qualifier-binding-unavailable",
+            ),
+            (
+                "pascal.prototype_linkage.expression",
+                FactDomain::Relations,
+                "pascal-declaration-implementation-linkage-unavailable",
+            ),
+            (
+                "pascal.accessor_semantics.expression",
+                FactDomain::Relations,
+                "pascal-property-accessor-binding-unavailable",
+            ),
+            (
+                "pascal.preprocessing.expression",
+                FactDomain::Relations,
+                "pascal-preprocessor-selection-unavailable",
+            ),
+            (
+                "pascal.forward_type.expression",
+                FactDomain::Entities,
+                "pascal-forward-type-layout-unavailable",
+            ),
+        ] {
+            assert_eq!(
+                source_coverage_gap(&fact(label)),
+                Some((domain, reason)),
+                "{label}"
+            );
+        }
+        assert!(pascal_source_gap(&fact("pascal.function.declaration")).is_none());
+        assert!(pascal_source_gap(&fact("rust.function.declaration")).is_none());
+    }
+
+    #[test]
+    fn pascal_references_require_language_owned_targets_but_definitions_do_not() {
+        for label in [
+            "pascal.identifier.reference",
+            "pascal.unit_reference.reference",
+            "pascal.member_reference.reference",
+        ] {
+            let reference = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                source_reference_gap(&reference),
+                Some("pascal-binding-and-dispatch-target-unavailable")
+            );
+        }
+        assert!(source_reference_gap(&declaration("pascal.function.definition")).is_none());
+        assert!(source_reference_gap(&declaration("python.identifier.reference")).is_none());
     }
 
     #[test]
@@ -9802,6 +10139,7 @@ mod tests {
             ("java.constructor.declaration", EntityKind::Constructor),
             ("java.field.declaration", EntityKind::Field),
             ("java.local_variable.declaration", EntityKind::Variable),
+            ("apex.local_variable.declaration", EntityKind::Variable),
             ("java.record.declaration", EntityKind::Struct),
             ("java.annotation.declaration", EntityKind::Interface),
             ("java.annotation_element.declaration", EntityKind::Method),
@@ -10107,6 +10445,10 @@ mod tests {
                 "apex-source-identity-unavailable",
             ),
             (
+                "apex.unsupported_local.expression",
+                "apex-local-owner-and-binding-analysis-unavailable",
+            ),
+            (
                 "apex.accessor_semantics.expression",
                 "apex-accessor-semantics-unavailable",
             ),
@@ -10150,6 +10492,7 @@ mod tests {
         ));
         assert!(supports_signature(EntityKind::Field, "apex"));
         assert!(supports_signature(EntityKind::Parameter, "apex"));
+        assert!(supports_signature(EntityKind::Variable, "apex"));
         let module = SyntaxFact::new(
             1,
             None,
@@ -10174,6 +10517,8 @@ mod tests {
         );
         for label in [
             "apex.identifier.reference",
+            "apex.formal_identifier.reference",
+            "apex.local_identifier.reference",
             "apex.member.reference",
             "apex.unproven_call.reference",
         ] {
@@ -10191,6 +10536,167 @@ mod tests {
                 Some("apex-binding-and-dispatch-target-unavailable")
             );
         }
+    }
+
+    #[test]
+    fn sas_reference_roles_do_not_infer_macro_calls_from_labels() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 10).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for label in [
+            "sas.macro_call.reference",
+            "sas.macro_variable.reference",
+            "sas.dataset.reference",
+        ] {
+            let reference = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(occurrence_role(&reference), Some(OccurrenceRole::Reference));
+            assert_eq!(
+                source_reference_gap(&reference),
+                Some("sas-binding-and-runtime-target-unavailable")
+            );
+            assert!(occurrence_role(&fact(SyntaxFactKind::Import, label)).is_none());
+        }
+        assert!(
+            occurrence_role(&fact(SyntaxFactKind::Occurrence, "sas.macro_call.call")).is_none()
+        );
+        assert_eq!(
+            occurrence_role(&fact(SyntaxFactKind::Comment, "sas.comment.comment")),
+            Some(OccurrenceRole::Documentation)
+        );
+        assert_eq!(
+            occurrence_role(&fact(SyntaxFactKind::StringLiteral, "sas.string.string")),
+            Some(OccurrenceRole::StringEvidence)
+        );
+    }
+
+    #[test]
+    fn sas_runtime_gaps_cover_all_unproved_domains_without_signature_projection() {
+        let file = FileId::from_bytes([3; 20]);
+        for (label, detail) in [
+            (
+                "sas.unsupported_owner.expression",
+                "sas-source-identity-unavailable",
+            ),
+            (
+                "sas.unknown_statement.expression",
+                "sas-statement-semantics-unavailable",
+            ),
+            (
+                "sas.fcmp_semantics.expression",
+                "sas-fcmp-body-and-binding-semantics-unavailable",
+            ),
+            (
+                "sas.macro_expansion.expression",
+                "sas-macro-expansion-unavailable",
+            ),
+            (
+                "sas.conditional_selection.expression",
+                "sas-conditional-selection-unavailable",
+            ),
+            (
+                "sas.runtime_include.expression",
+                "sas-runtime-include-unavailable",
+            ),
+            (
+                "sas.data_semantics.expression",
+                "sas-data-step-runtime-semantics-unavailable",
+            ),
+            (
+                "sas.shared_data_header.expression",
+                "sas-shared-data-header-and-runtime-semantics-unavailable",
+            ),
+            (
+                "sas.dynamic_dataset.expression",
+                "sas-dynamic-or-special-dataset-identity-unavailable",
+            ),
+            (
+                "sas.proc_semantics.expression",
+                "sas-proc-semantics-unavailable",
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Signature,
+                SourceSpan::new(file, 2, 10).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert!(!is_signature_capture(&fact));
+            assert_eq!(
+                source_coverage_gaps(&fact).collect::<Vec<_>>(),
+                [
+                    FactDomain::Entities,
+                    FactDomain::Occurrences,
+                    FactDomain::Relations
+                ]
+                .map(|domain| (domain, detail))
+            );
+        }
+    }
+
+    #[test]
+    fn sas_multi_output_name_spans_cannot_acquire_fallback_shared_headers() {
+        let file = FileId::from_bytes([3; 20]);
+        let definition = SyntaxFact::new(
+            2,
+            Some(1),
+            SyntaxFactKind::Occurrence,
+            SourceSpan::new(file, 5, 15).unwrap(),
+            1,
+            SyntaxKindLabel::new("sas.data_target.definition").unwrap(),
+        );
+        let named = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            definition.span(),
+            0,
+            SyntaxKindLabel::new("sas.data_target.declaration").unwrap(),
+        );
+        assert!(!supports_declaration_signature(
+            EntityKind::DatabaseObject,
+            "sas",
+            &named,
+            Some(&definition)
+        ));
+        let full = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            SourceSpan::new(file, 0, 30).unwrap(),
+            0,
+            SyntaxKindLabel::new("sas.data_target.declaration").unwrap(),
+        );
+        assert!(supports_declaration_signature(
+            EntityKind::DatabaseObject,
+            "sas",
+            &full,
+            Some(&definition)
+        ));
+        let module = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Module,
+            SourceSpan::new(file, 0, 30).unwrap(),
+            0,
+            SyntaxKindLabel::new("sas.file.module").unwrap(),
+        );
+        assert!(is_explicit_file_module(&module, "sas"));
+        assert!(!supports_declaration_signature(
+            EntityKind::Module,
+            "sas",
+            &module,
+            None
+        ));
     }
 
     #[test]

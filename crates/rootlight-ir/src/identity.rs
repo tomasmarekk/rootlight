@@ -23,6 +23,7 @@ pub const IDENTITY_CLAIM_VERSION: &str = "1.0";
 
 const COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION: &str = "1.1";
 const POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION: &str = "1.2";
+const DENSE_SYMBOL_IDENTITY_CLAIM_VERSION: &str = "1.3";
 
 const PROVENANCE_FACT_DOMAIN: &str = "rootlight.provenance/v2";
 const OCCURRENCE_FACT_DOMAIN: &str = "rootlight.occurrence/v2";
@@ -122,6 +123,7 @@ struct CompactSymbolIdentityClaim {
 }
 
 impl CompactSymbolIdentityClaim {
+    #[cfg(test)]
     fn from_claim(claim: &SymbolIdentityClaim) -> Result<Self, IdentityClaimError> {
         Ok(Self {
             symbol: claim.symbol,
@@ -176,6 +178,7 @@ struct PositionalSymbolIdentityClaim(
 );
 
 impl PositionalSymbolIdentityClaim {
+    #[cfg(test)]
     fn from_claim(claim: &SymbolIdentityClaim) -> Result<Self, IdentityClaimError> {
         let wire = CompactSymbolIdentityClaim::from_claim(claim)?;
         Ok(Self(
@@ -195,6 +198,29 @@ impl PositionalSymbolIdentityClaim {
         symbol: SymbolId,
         checkpoint: &mut impl FnMut() -> bool,
     ) -> Result<SymbolIdentityClaim, IdentityClaimError> {
+        self.into_claim_with_encoding(repository, symbol, checkpoint, false)
+    }
+
+    fn from_dense_claim(claim: &SymbolIdentityClaim) -> Result<Self, IdentityClaimError> {
+        let mut checkpoint = || true;
+        Ok(Self(
+            claim.language.clone(),
+            claim.kind,
+            claim.container,
+            encode_dense_claim_discriminator(&claim.container_identity, &mut checkpoint)?,
+            claim.declared_identity.clone(),
+            encode_dense_claim_discriminator(&claim.signature_discriminator, &mut checkpoint)?,
+            encode_dense_claim_discriminator(&claim.build_context_discriminator, &mut checkpoint)?,
+        ))
+    }
+
+    fn into_claim_with_encoding(
+        self,
+        repository: RepositoryId,
+        symbol: SymbolId,
+        checkpoint: &mut impl FnMut() -> bool,
+        dense: bool,
+    ) -> Result<SymbolIdentityClaim, IdentityClaimError> {
         let Self(
             language,
             kind,
@@ -210,20 +236,326 @@ impl PositionalSymbolIdentityClaim {
             language,
             kind,
             container,
-            container_identity: decode_claim_discriminator(&container_identity, checkpoint)?,
+            container_identity: decode_versioned_claim_discriminator(
+                &container_identity,
+                checkpoint,
+                dense,
+            )?,
             declared_identity,
-            signature_discriminator: decode_claim_discriminator(
+            signature_discriminator: decode_versioned_claim_discriminator(
                 &signature_discriminator,
                 checkpoint,
+                dense,
             )?,
-            build_context_discriminator: decode_claim_discriminator(
+            build_context_discriminator: decode_versioned_claim_discriminator(
                 &build_context_discriminator,
                 checkpoint,
+                dense,
             )?,
         })
     }
 }
 
+#[derive(Clone, Copy)]
+enum DenseDiscriminatorEncoding {
+    Utf8,
+    Hex,
+    Base64,
+}
+
+// Count serde's actual escaping without materializing competing JSON strings.
+struct ClaimJsonLengthWriter<'checkpoint, F> {
+    length: usize,
+    checkpoint: &'checkpoint mut F,
+    interrupted: bool,
+}
+
+impl<F: FnMut() -> bool> Write for ClaimJsonLengthWriter<'_, F> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        for chunk in buffer.chunks(4 * 1024) {
+            if self.interrupted || !(self.checkpoint)() {
+                self.interrupted = true;
+                return Err(checkpoint_io_error());
+            }
+            self.length = self
+                .length
+                .checked_add(chunk.len())
+                .ok_or_else(|| io::Error::other("identity claim encoded length overflow"))?;
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn claim_json_text_length(
+    text: &str,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<usize, IdentityClaimError> {
+    let mut writer = ClaimJsonLengthWriter {
+        length: 0,
+        checkpoint,
+        interrupted: false,
+    };
+    if serde_json::to_writer(&mut writer, text).is_err() {
+        return Err(if writer.interrupted {
+            IdentityClaimError::Interrupted
+        } else {
+            IdentityClaimError::MalformedPayload
+        });
+    }
+    writer
+        .length
+        .checked_add(2)
+        .ok_or(IdentityClaimError::MalformedPayload)
+}
+
+fn claim_base64_length(length: usize) -> Result<usize, IdentityClaimError> {
+    length
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or(IdentityClaimError::MalformedPayload)
+}
+
+fn encode_dense_claim_discriminator(
+    bytes: &[u8],
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<String, IdentityClaimError> {
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    let text = if claim_discriminator_is_utf8(bytes, checkpoint)? {
+        Some(std::str::from_utf8(bytes).map_err(|_| IdentityClaimError::MalformedPayload)?)
+    } else {
+        None
+    };
+    let hex_length = bytes
+        .len()
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(4))
+        .ok_or(IdentityClaimError::MalformedPayload)?;
+    let mut encoding = DenseDiscriminatorEncoding::Hex;
+    let mut json_length = hex_length;
+    // Equal wire costs retain legacy priority: u: before h: before b:.
+    if let Some(text) = text {
+        let utf8_length = claim_json_text_length(text, checkpoint)?;
+        if utf8_length <= json_length {
+            encoding = DenseDiscriminatorEncoding::Utf8;
+            json_length = utf8_length;
+        }
+    }
+    let base64_length = claim_base64_length(bytes.len())?
+        .checked_add(4)
+        .ok_or(IdentityClaimError::MalformedPayload)?;
+    if base64_length < json_length {
+        encoding = DenseDiscriminatorEncoding::Base64;
+    }
+    if matches!(encoding, DenseDiscriminatorEncoding::Base64) {
+        return encode_claim_base64(bytes, checkpoint);
+    }
+    let length = match encoding {
+        DenseDiscriminatorEncoding::Utf8 => bytes.len().checked_add(2),
+        DenseDiscriminatorEncoding::Hex => bytes
+            .len()
+            .checked_mul(2)
+            .and_then(|length| length.checked_add(2)),
+        DenseDiscriminatorEncoding::Base64 => unreachable!("base64 returns before text encoding"),
+    }
+    .ok_or(IdentityClaimError::MalformedPayload)?;
+    let mut encoded = String::new();
+    encoded
+        .try_reserve_exact(length)
+        .map_err(|_| IdentityClaimError::MalformedPayload)?;
+    match encoding {
+        DenseDiscriminatorEncoding::Utf8 => {
+            encoded.push_str("u:");
+            for (index, character) in text
+                .ok_or(IdentityClaimError::MalformedPayload)?
+                .chars()
+                .enumerate()
+            {
+                if index.is_multiple_of(1024) && !checkpoint() {
+                    return Err(IdentityClaimError::Interrupted);
+                }
+                encoded.push(character);
+            }
+        }
+        DenseDiscriminatorEncoding::Hex => {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            encoded.push_str("h:");
+            for chunk in bytes.chunks(2 * 1024) {
+                if !checkpoint() {
+                    return Err(IdentityClaimError::Interrupted);
+                }
+                for byte in chunk {
+                    encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                    encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                }
+            }
+        }
+        DenseDiscriminatorEncoding::Base64 => unreachable!("base64 returns before text encoding"),
+    }
+    Ok(encoded)
+}
+
+fn encode_claim_base64(
+    bytes: &[u8],
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<String, IdentityClaimError> {
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let length = claim_base64_length(bytes.len())?
+        .checked_add(2)
+        .ok_or(IdentityClaimError::MalformedPayload)?;
+    let mut encoded = String::new();
+    encoded
+        .try_reserve_exact(length)
+        .map_err(|_| IdentityClaimError::MalformedPayload)?;
+    encoded.push_str("b:");
+    for chunk in bytes.chunks(3 * 1024) {
+        if !checkpoint() {
+            return Err(IdentityClaimError::Interrupted);
+        }
+        for group in chunk.chunks(3) {
+            let first = *group.first().ok_or(IdentityClaimError::MalformedPayload)?;
+            let second = group.get(1).copied().unwrap_or(0);
+            let third = group.get(2).copied().unwrap_or(0);
+            encoded.push(char::from(ALPHABET[usize::from(first >> 2)]));
+            encoded.push(char::from(
+                ALPHABET[usize::from(((first & 3) << 4) | (second >> 4))],
+            ));
+            encoded.push(if group.len() > 1 {
+                char::from(ALPHABET[usize::from(((second & 15) << 2) | (third >> 6))])
+            } else {
+                '='
+            });
+            encoded.push(if group.len() > 2 {
+                char::from(ALPHABET[usize::from(third & 63)])
+            } else {
+                '='
+            });
+        }
+    }
+    Ok(encoded)
+}
+
+fn decode_claim_base64(
+    content: &[u8],
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, IdentityClaimError> {
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    if !content.len().is_multiple_of(4) {
+        return Err(IdentityClaimError::MalformedPayload);
+    }
+    let padding = if content.ends_with(b"==") {
+        2
+    } else if content.ends_with(b"=") {
+        1
+    } else {
+        0
+    };
+    let length = (content.len() / 4)
+        .checked_mul(3)
+        .and_then(|length| length.checked_sub(padding))
+        .ok_or(IdentityClaimError::MalformedPayload)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| IdentityClaimError::MalformedPayload)?;
+    let groups = content.len() / 4;
+    for (index, group) in content.chunks_exact(4).enumerate() {
+        if index.is_multiple_of(1024) && !checkpoint() {
+            return Err(IdentityClaimError::Interrupted);
+        }
+        let [first, second, third, fourth] = group else {
+            return Err(IdentityClaimError::MalformedPayload);
+        };
+        let first = decode_claim_base64_digit(*first)?;
+        let second = decode_claim_base64_digit(*second)?;
+        bytes.push((first << 2) | (second >> 4));
+        if *third == b'=' {
+            if *fourth != b'=' || index != groups - 1 || second & 15 != 0 {
+                return Err(IdentityClaimError::MalformedPayload);
+            }
+        } else {
+            let third = decode_claim_base64_digit(*third)?;
+            bytes.push(((second & 15) << 4) | (third >> 2));
+            if *fourth == b'=' {
+                if index != groups - 1 || third & 3 != 0 {
+                    return Err(IdentityClaimError::MalformedPayload);
+                }
+            } else {
+                bytes.push(((third & 3) << 6) | decode_claim_base64_digit(*fourth)?);
+            }
+        }
+    }
+    if bytes.len() != length {
+        return Err(IdentityClaimError::MalformedPayload);
+    }
+    Ok(bytes)
+}
+
+fn decode_claim_base64_digit(byte: u8) -> Result<u8, IdentityClaimError> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err(IdentityClaimError::MalformedPayload),
+    }
+}
+
+fn decode_versioned_claim_discriminator(
+    encoded: &str,
+    checkpoint: &mut impl FnMut() -> bool,
+    dense: bool,
+) -> Result<Vec<u8>, IdentityClaimError> {
+    if !dense {
+        return decode_claim_discriminator(encoded, checkpoint);
+    }
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    let bytes = if let Some(content) = encoded.strip_prefix("b:") {
+        decode_claim_base64(content.as_bytes(), checkpoint)?
+    } else if let Some(content) = encoded.strip_prefix("h:") {
+        if !content.len().is_multiple_of(2) {
+            return Err(IdentityClaimError::MalformedPayload);
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(content.len() / 2)
+            .map_err(|_| IdentityClaimError::MalformedPayload)?;
+        for chunk in content.as_bytes().chunks(4 * 1024) {
+            if !checkpoint() {
+                return Err(IdentityClaimError::Interrupted);
+            }
+            for pair in chunk.chunks_exact(2) {
+                let [high, low] = pair else {
+                    return Err(IdentityClaimError::MalformedPayload);
+                };
+                bytes.push((decode_claim_hex_digit(*high)? << 4) | decode_claim_hex_digit(*low)?);
+            }
+        }
+        bytes
+    } else {
+        decode_claim_discriminator(encoded, checkpoint)?
+    };
+    if encode_dense_claim_discriminator(&bytes, checkpoint)? != encoded {
+        return Err(IdentityClaimError::NoncanonicalPayload);
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
 fn encode_claim_discriminator(bytes: &[u8]) -> Result<String, IdentityClaimError> {
     let text = std::str::from_utf8(bytes).ok();
     let encoded_length = if text.is_some() {
@@ -812,7 +1144,8 @@ pub fn new_file_identity_claim_envelope(
 
 /// Builds a noncritical envelope carrying one unverified symbol claim.
 ///
-/// New envelopes use positional version 1.2 with lossless byte discriminators.
+/// New envelopes use positional version 1.3 with lossless byte discriminators
+/// selected by their smallest canonical escaped-JSON representation.
 /// Repository and symbol IDs are bound by envelope ownership and exact entity
 /// evidence. The structured claim and symbol identity recipe are unchanged.
 ///
@@ -832,14 +1165,14 @@ pub fn new_symbol_identity_claim_envelope(
     {
         return Err(IdentityClaimError::EnvelopeMismatch);
     }
-    let wire = PositionalSymbolIdentityClaim::from_claim(claim)?;
+    let wire = PositionalSymbolIdentityClaim::from_dense_claim(claim)?;
     let payload = serde_json::to_string(&wire).map_err(|_| IdentityClaimError::MalformedPayload)?;
     identity_claim_envelope_with_encoding(
         claim.repository,
         generation,
         (
             SYMBOL_IDENTITY_CLAIM_NAMESPACE,
-            POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION,
+            DENSE_SYMBOL_IDENTITY_CLAIM_VERSION,
         ),
         payload,
         provenance,
@@ -895,7 +1228,7 @@ pub fn decode_file_identity_claim_envelope_with_checkpoint(
 
 /// Decodes and validates one symbol identity-claim envelope.
 ///
-/// Accepts canonical legacy 1.0, compact 1.1, and positional 1.2 payloads.
+/// Accepts canonical legacy 1.0, compact 1.1, positional 1.2 and dense 1.3 payloads.
 ///
 /// # Errors
 ///
@@ -925,14 +1258,18 @@ pub fn decode_symbol_identity_claim_envelope_with_checkpoint(
                 decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
             wire.into_claim(&mut checkpoint)?
         }
-        POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION => {
+        POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION | DENSE_SYMBOL_IDENTITY_CLAIM_VERSION => {
             let [FactRef::Entity(symbol)] = envelope.evidence.derivation.as_slice() else {
                 return Err(IdentityClaimError::EnvelopeMismatch);
             };
             require_claim_evidence(envelope, FactRef::Entity(*symbol))?;
             let wire: PositionalSymbolIdentityClaim =
                 decode_canonical_payload(&envelope.payload, &mut checkpoint)?;
-            wire.into_claim(envelope.repository, *symbol, &mut checkpoint)?
+            if envelope.version == DENSE_SYMBOL_IDENTITY_CLAIM_VERSION {
+                wire.into_claim_with_encoding(envelope.repository, *symbol, &mut checkpoint, true)?
+            } else {
+                wire.into_claim(envelope.repository, *symbol, &mut checkpoint)?
+            }
         }
         _ => return Err(IdentityClaimError::UnsupportedEnvelope),
     };
@@ -1233,7 +1570,8 @@ fn require_claim_envelope(
     let supported_version = envelope.version == IDENTITY_CLAIM_VERSION
         || (namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE
             && (envelope.version == COMPACT_SYMBOL_IDENTITY_CLAIM_VERSION
-                || envelope.version == POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION));
+                || envelope.version == POSITIONAL_SYMBOL_IDENTITY_CLAIM_VERSION
+                || envelope.version == DENSE_SYMBOL_IDENTITY_CLAIM_VERSION));
     if envelope.namespace != namespace
         || !supported_version
         || envelope.criticality != ExtensionCriticality::Noncritical
@@ -1613,7 +1951,7 @@ mod tests {
             envelope.payload.len(),
             claim.signature_discriminator.len()
         );
-        assert_eq!(envelope.version, "1.2");
+        assert_eq!(envelope.version, "1.3");
         let fields: serde_json::Value =
             serde_json::from_str(&envelope.payload).expect("positional payload is JSON");
         assert_eq!(fields.as_array().expect("payload is positional").len(), 7);
@@ -1634,15 +1972,10 @@ mod tests {
             let (claim, envelope) = symbol_claim_fixture(bytes.clone());
             let wire: PositionalSymbolIdentityClaim =
                 serde_json::from_str(&envelope.payload).expect("positional wire payload decodes");
-            let prefix = if std::str::from_utf8(&bytes).is_ok() {
-                "u:"
-            } else {
-                "h:"
-            };
-
-            assert!(wire.3.starts_with(prefix));
-            assert!(wire.5.starts_with(prefix));
-            assert!(wire.6.starts_with(prefix));
+            let expected = shortest_discriminator_fixture(&bytes);
+            assert_eq!(wire.3, expected);
+            assert_eq!(wire.5, expected);
+            assert_eq!(wire.6, expected);
             for carrier in symbol_claim_carriers(&claim, &envelope) {
                 let decoded = decode_symbol_identity_claim_envelope(&carrier)
                     .expect("every discriminator byte survives");
@@ -1656,7 +1989,7 @@ mod tests {
     fn symbol_claim_decoder_accepts_all_canonical_carrier_versions() {
         let (claim, positional) = symbol_claim_fixture("λ\0\"\\signature".as_bytes().to_vec());
         let carriers = symbol_claim_carriers(&claim, &positional);
-        for (carrier, version) in carriers.iter().zip(["1.0", "1.1", "1.2"]) {
+        for (carrier, version) in carriers.iter().zip(["1.0", "1.1", "1.2", "1.3"]) {
             assert_eq!(carrier.version, version);
             let decoded = decode_symbol_identity_claim_envelope(carrier)
                 .expect("canonical carrier preserves the public claim");
@@ -1716,7 +2049,7 @@ mod tests {
                 Err(IdentityClaimError::NoncanonicalPayload)
             );
 
-            if envelope.version == "1.2" {
+            if matches!(envelope.version.as_str(), "1.2" | "1.3") {
                 continue;
             }
             let mut unknown_field = envelope.clone();
@@ -1750,9 +2083,9 @@ mod tests {
 
     #[test]
     fn symbol_claim_decoder_rejects_cross_version_and_mismatched_envelopes() {
-        let (claim, positional) = symbol_claim_fixture(b"signature".to_vec());
+        let (claim, positional) = symbol_claim_fixture(vec![0xff; 8]);
         for carrier in symbol_claim_carriers(&claim, &positional) {
-            for version in ["1.0", "1.1", "1.2"] {
+            for version in ["1.0", "1.1", "1.2", "1.3"] {
                 if version == carrier.version {
                     continue;
                 }
@@ -1761,12 +2094,16 @@ mod tests {
                 refresh_claim_envelope_id(&mut envelope);
                 assert_eq!(
                     decode_symbol_identity_claim_envelope(&envelope),
-                    Err(IdentityClaimError::MalformedPayload)
+                    Err(if carrier.version == "1.2" && version == "1.3" {
+                        IdentityClaimError::NoncanonicalPayload
+                    } else {
+                        IdentityClaimError::MalformedPayload
+                    })
                 );
             }
         }
 
-        for version in ["", "1.3", "2.0"] {
+        for version in ["", "1.4", "2.0"] {
             let mut envelope = positional.clone();
             envelope.version = version.to_owned();
             assert_eq!(
@@ -2013,6 +2350,246 @@ mod tests {
     }
 
     #[test]
+    fn padded_claim_base64_matches_independent_rfc4648_vectors() {
+        for (bytes, expected) in [
+            (b"".as_slice(), ""),
+            (b"f".as_slice(), "Zg=="),
+            (b"fo".as_slice(), "Zm8="),
+            (b"foo".as_slice(), "Zm9v"),
+            (b"foob".as_slice(), "Zm9vYg=="),
+            (b"fooba".as_slice(), "Zm9vYmE="),
+            (b"foobar".as_slice(), "Zm9vYmFy"),
+            ([0xff].as_slice(), "/w=="),
+            ([0xff, 0xff].as_slice(), "//8="),
+            ([0xff, 0xff, 0xff].as_slice(), "////"),
+        ] {
+            assert_eq!(
+                encode_claim_base64(bytes, &mut || true).unwrap(),
+                format!("b:{expected}")
+            );
+            assert_eq!(
+                decode_claim_base64(expected.as_bytes(), &mut || true).unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn dense_discriminators_choose_actual_json_cost_and_legacy_tie_priority() {
+        for (bytes, expected) in [
+            (b"".as_slice(), "u:"),
+            (b"abc".as_slice(), "u:abc"),
+            (b"\"".as_slice(), "u:\""),
+            (b"\\".as_slice(), "u:\\"),
+            (b"\n".as_slice(), "u:\n"),
+            (b"\0".as_slice(), "h:00"),
+            (b"\0\0".as_slice(), "h:0000"),
+            (b"\0\0\0".as_slice(), "b:AAAA"),
+            ([0xff].as_slice(), "h:ff"),
+            ([0xff, 0xff].as_slice(), "h:ffff"),
+            ([0xff, 0xff, 0xff].as_slice(), "b:////"),
+        ] {
+            assert_eq!(
+                encode_dense_claim_discriminator(bytes, &mut || true).unwrap(),
+                expected
+            );
+            assert_eq!(
+                decode_versioned_claim_discriminator(expected, &mut || true, true).unwrap(),
+                bytes
+            );
+        }
+        for text in [
+            String::from_utf8((0..=127).collect()).unwrap(),
+            "λ\0\n\r\t\"\\\u{feff}\u{2028}\u{2029}".to_owned(),
+            format!("{}λ{}", "x".repeat(4095), "x".repeat(4096)),
+        ] {
+            assert_eq!(
+                claim_json_text_length(&text, &mut || true).unwrap(),
+                serde_json::to_string(&format!("u:{text}")).unwrap().len()
+            );
+            assert_eq!(
+                encode_dense_claim_discriminator(text.as_bytes(), &mut || true).unwrap(),
+                shortest_discriminator_fixture(text.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn dense_claim_discriminators_preserve_each_byte_and_mixed_unicode_controls() {
+        for byte in 0..=u8::MAX {
+            let encoded = encode_dense_claim_discriminator(&[byte], &mut || true).unwrap();
+            assert_eq!(
+                decode_versioned_claim_discriminator(&encoded, &mut || true, true).unwrap(),
+                [byte]
+            );
+        }
+        for bytes in [
+            (0..=u8::MAX).collect::<Vec<_>>(),
+            "λ\0\n\r\t\"\\\u{feff}".as_bytes().to_vec(),
+        ] {
+            let (claim, envelope) = symbol_claim_fixture(bytes);
+            assert_eq!(
+                decode_symbol_identity_claim_envelope(&envelope).unwrap(),
+                claim
+            );
+            assert_eq!(envelope.version, "1.3");
+            assert_eq!(
+                serde_json::from_str::<Vec<serde_json::Value>>(&envelope.payload)
+                    .unwrap()
+                    .len(),
+                7
+            );
+        }
+    }
+
+    #[test]
+    fn positional_legacy_binary_fixture_remains_exact_and_readable() {
+        let (claim, dense) = symbol_claim_fixture(vec![0xff; 3]);
+        let legacy = positional_symbol_claim_envelope(&claim, &dense);
+        let expected = serde_json::to_string(&(
+            claim.language.as_str(),
+            claim.kind,
+            claim.container,
+            "h:ffffff",
+            claim.declared_identity.as_str(),
+            "h:ffffff",
+            "h:ffffff",
+        ))
+        .unwrap();
+        assert_eq!(legacy.version, "1.2");
+        assert_eq!(legacy.payload, expected);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&legacy).unwrap(),
+            claim
+        );
+        let wire: PositionalSymbolIdentityClaim = serde_json::from_str(&dense.payload).unwrap();
+        assert_eq!(
+            (wire.3.as_str(), wire.5.as_str(), wire.6.as_str()),
+            ("b:////", "b:////", "b:////")
+        );
+        assert_eq!(dense.evidence, legacy.evidence);
+        assert_eq!(dense.provenance, legacy.provenance);
+        assert_eq!(dense.repository, legacy.repository);
+        assert_eq!(dense.generation, legacy.generation);
+        assert_ne!(dense.id, legacy.id);
+
+        let (text_claim, mut text_dense) = symbol_claim_fixture(b"plain".to_vec());
+        let text_legacy = positional_symbol_claim_envelope(&text_claim, &text_dense);
+        assert_eq!(text_legacy.payload, text_dense.payload);
+        text_dense.version = "1.2".to_owned();
+        refresh_claim_envelope_id(&mut text_dense);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&text_dense).unwrap(),
+            text_claim
+        );
+    }
+
+    #[test]
+    fn dense_base64_rejects_bad_padding_tail_bits_and_alphabets() {
+        for content in [
+            "A", "AA", "AAA", "A===", "====", "AA=A", "AA==AA==", "AB==", "AAB=", "AA-_", "AA\n=",
+            "éé",
+        ] {
+            assert_eq!(
+                decode_claim_base64(content.as_bytes(), &mut || true),
+                Err(IdentityClaimError::MalformedPayload),
+                "{content:?}"
+            );
+        }
+        assert_eq!(
+            claim_base64_length(usize::MAX),
+            Err(IdentityClaimError::MalformedPayload)
+        );
+        let mut checkpoint = || true;
+        let mut writer = ClaimJsonLengthWriter {
+            length: usize::MAX,
+            checkpoint: &mut checkpoint,
+            interrupted: false,
+        };
+        assert!(writer.write(b"x").is_err());
+        assert!(!writer.interrupted);
+    }
+
+    #[test]
+    fn dense_claim_decoder_rejects_nonwinning_discriminator_carriers() {
+        for encoded in [
+            "u:\0", "b:AA==", "h:", "h:616263", "b:YWJj", "h:ffffff", "b:/w==", "h:FF",
+        ] {
+            assert_eq!(
+                decode_versioned_claim_discriminator(encoded, &mut || true, true),
+                Err(IdentityClaimError::NoncanonicalPayload),
+                "{encoded:?}"
+            );
+        }
+        assert_eq!(
+            decode_versioned_claim_discriminator("h:00", &mut || true, true),
+            Ok(vec![0])
+        );
+        assert_eq!(
+            decode_claim_discriminator("h:00", &mut || true),
+            Err(IdentityClaimError::NoncanonicalPayload)
+        );
+        let (claim, mut envelope) = symbol_claim_fixture(vec![0xff; 3]);
+        let mut wire = PositionalSymbolIdentityClaim::from_dense_claim(&claim).unwrap();
+        wire.5 = "h:ffffff".to_owned();
+        envelope.payload = serde_json::to_string(&wire).unwrap();
+        refresh_claim_envelope_id(&mut envelope);
+        assert_eq!(
+            decode_symbol_identity_claim_envelope(&envelope),
+            Err(IdentityClaimError::NoncanonicalPayload)
+        );
+    }
+
+    #[test]
+    fn dense_discriminator_canonicalization_checks_every_bounded_stage() {
+        for bytes in [
+            "λ".repeat(8 * 1024).into_bytes(),
+            vec![0xff; 16 * 1024],
+            vec![0],
+            Vec::new(),
+        ] {
+            let encoded = encode_dense_claim_discriminator(&bytes, &mut || true).unwrap();
+            let mut checkpoints = 0;
+            assert_eq!(
+                decode_versioned_claim_discriminator(
+                    &encoded,
+                    &mut || {
+                        checkpoints += 1;
+                        true
+                    },
+                    true
+                )
+                .unwrap(),
+                bytes
+            );
+            assert!(checkpoints > 2);
+            for cutoff in 1..=checkpoints {
+                let mut observed = 0;
+                assert_eq!(
+                    decode_versioned_claim_discriminator(
+                        &encoded,
+                        &mut || {
+                            observed += 1;
+                            observed < cutoff
+                        },
+                        true
+                    ),
+                    Err(IdentityClaimError::Interrupted)
+                );
+                assert_eq!(observed, cutoff);
+            }
+        }
+        assert_eq!(
+            encode_claim_base64(b"", &mut || false),
+            Err(IdentityClaimError::Interrupted)
+        );
+        assert_eq!(
+            decode_claim_base64(b"", &mut || false),
+            Err(IdentityClaimError::Interrupted)
+        );
+    }
+
+    #[test]
     fn hexadecimal_utf8_rejection_handles_boundary_spanning_code_points() {
         let text = format!("{}λ{}", "x".repeat(4095), "x".repeat(4096));
         let hex = text
@@ -2112,7 +2689,7 @@ mod tests {
             decode_file_identity_claim_envelope(&envelope).expect("file claim still decodes"),
             claim
         );
-        for version in ["1.1", "1.2"] {
+        for version in ["1.1", "1.2", "1.3"] {
             envelope.version = version.to_owned();
             assert_eq!(
                 decode_file_identity_claim_envelope(&envelope),
@@ -2195,12 +2772,55 @@ mod tests {
     fn symbol_claim_carriers(
         claim: &SymbolIdentityClaim,
         positional: &ExtensionEnvelope,
-    ) -> [ExtensionEnvelope; 3] {
+    ) -> [ExtensionEnvelope; 4] {
         [
             legacy_symbol_claim_envelope(claim, positional),
             compact_symbol_claim_envelope(claim, positional),
+            positional_symbol_claim_envelope(claim, positional),
             positional.clone(),
         ]
+    }
+
+    fn positional_symbol_claim_envelope(
+        claim: &SymbolIdentityClaim,
+        dense: &ExtensionEnvelope,
+    ) -> ExtensionEnvelope {
+        // Version 1.2 keeps its own encoder; dense writers cannot redefine the
+        // legacy fixture or silently admit shorter noncanonical alternatives.
+        identity_claim_envelope_with_encoding(
+            claim.repository,
+            dense.generation,
+            (SYMBOL_IDENTITY_CLAIM_NAMESPACE, "1.2"),
+            serde_json::to_string(&PositionalSymbolIdentityClaim::from_claim(claim).unwrap())
+                .unwrap(),
+            dense.provenance,
+            dense.evidence.source.clone().unwrap(),
+            FactRef::Entity(claim.symbol),
+        )
+        .expect("positional legacy envelope recipe remains valid")
+    }
+
+    fn shortest_discriminator_fixture(bytes: &[u8]) -> String {
+        let mut candidates = Vec::new();
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            candidates.push(format!("u:{text}"));
+        }
+        candidates.push(format!(
+            "h:{}",
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
+        candidates.push(encode_claim_base64(bytes, &mut || true).unwrap());
+        candidates
+            .into_iter()
+            .enumerate()
+            .min_by_key(|(priority, candidate)| {
+                (serde_json::to_string(candidate).unwrap().len(), *priority)
+            })
+            .unwrap()
+            .1
     }
 
     fn refresh_claim_envelope_id(envelope: &mut ExtensionEnvelope) {

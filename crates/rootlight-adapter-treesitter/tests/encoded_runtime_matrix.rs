@@ -34,7 +34,7 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 53] = [
+const CASES: [LanguageCase; 55] = [
     LanguageCase {
         name: "written.ml",
         language: "ocaml",
@@ -86,9 +86,19 @@ const CASES: [LanguageCase; 53] = [
         source: "(defun written (value) value)\n",
     },
     LanguageCase {
+        name: "Sample.pas",
+        language: "pascal",
+        source: "unit Sample; interface procedure Measure(Value: Integer); implementation procedure Measure(Value: Integer); begin end; end.\n",
+    },
+    LanguageCase {
         name: "sample.cls",
         language: "apex",
         source: "public class Written { public Integer Read(Integer Value) { return Value; } }\n",
+    },
+    LanguageCase {
+        name: "sample.sas",
+        language: "sas",
+        source: "function Measure(Value); return Value; endsub;\n",
     },
     LanguageCase {
         name: "sample.pks",

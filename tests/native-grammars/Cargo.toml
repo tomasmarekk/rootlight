@@ -12,7 +12,6 @@ license = "AGPL-3.0-only"
 resolver = "3"
 
 [dev-dependencies]
-serde_json = "=1.0.150"
 tree-sitter-kotlin-ng = { path = "../../third_party/tree-sitter-kotlin-ng-1.1.0", version = "=1.1.0", default-features = false }
 tree-sitter-cobol = { path = "../../third_party/tree-sitter-cobol-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-fortran = { path = "../../third_party/tree-sitter-fortran-0.6.0", version = "=0.6.0", default-features = false }
@@ -34,6 +33,8 @@ tree-sitter-scala = { path = "../../third_party/tree-sitter-scala-0.26.2", versi
 tree-sitter-solidity = { version = "=1.2.13", default-features = false }
 tree-sitter-r = { path = "../../third_party/tree-sitter-r-1.3.0", version = "=1.3.0", default-features = false }
 tree-sitter-sequel = { path = "../../third_party/tree-sitter-sequel-0.3.11", version = "=0.3.11", default-features = false }
+tree-sitter-sas = { path = "../../third_party/tree-sitter-sas-0.4.2", version = "=0.4.2", default-features = false }
+tree-sitter-pascal = { path = "../../third_party/tree-sitter-pascal-0.10.2", version = "=0.10.2", default-features = false }
 tree-sitter-commonlisp = { path = "../../third_party/tree-sitter-commonlisp-0.4.1", version = "=0.4.1", default-features = false }
 tree-sitter-scheme = { package = "tree-sitter-scheme-native-local", path = "../../third_party/tree-sitter-scheme-0.24.7-1", version = "=0.24.7-1" }
 tree-sitter-sfapex = { path = "../../third_party/tree-sitter-sfapex-3.0.1", version = "=3.0.1", default-features = false }
