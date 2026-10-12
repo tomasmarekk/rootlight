@@ -21,8 +21,7 @@ jobs:
     name: analyze and upload / ${{ matrix.language }}
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    # Reserve post-action time to retain diagnostics after JavaScript evaluation.
-    timeout-minutes: ${{ matrix.language == 'javascript-typescript' && 190 || 180 }}
+    timeout-minutes: 180
     permissions:
       actions: read
       contents: read
@@ -33,55 +32,27 @@ jobs:
         include:
           - language: rust
             build-mode: none
-          - language: javascript-typescript
-            build-mode: none
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Initialize CodeQL
-        if: matrix.language == 'rust'
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
-      - name: Initialize JavaScript CodeQL diagnostics
-        if: matrix.language == 'javascript-typescript'
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-          queries: security-extended
-          debug: true
-          db-location: ${{ runner.temp }}/codeql_databases
       - name: Analyze
-        if: matrix.language == 'rust'
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:${{ matrix.language }}
-      - name: Analyze JavaScript with evaluator diagnostics
-        if: matrix.language == 'javascript-typescript'
-        timeout-minutes: 180
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        env:
-          # The Init post action retains files in the database log directory.
-          CODEQL_ACTION_EXTRA_OPTIONS: >-
-            {"database":{"run-queries":[
-              "--evaluator-log=${{ runner.temp }}/codeql_databases/javascript/log/evaluator.jsonl",
-              "--evaluator-log-minify"
-            ]}}
-        with:
-          category: /language:${{ matrix.language }}
-          threads: '2'
 
   analyze-pull-request:
     name: analyze pull request / ${{ matrix.language }}
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    # Keep pull-request coverage and its runtime budget equal to main analyses.
-    timeout-minutes: ${{ matrix.language == 'javascript-typescript' && 190 || 180 }}
+    timeout-minutes: 180
     permissions:
       actions: read
       contents: read
@@ -91,57 +62,207 @@ jobs:
         include:
           - language: rust
             build-mode: none
-          - language: javascript-typescript
-            build-mode: none
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Initialize CodeQL
-        if: matrix.language == 'rust'
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
-      - name: Initialize JavaScript CodeQL diagnostics
-        if: matrix.language == 'javascript-typescript'
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-          queries: security-extended
-          debug: true
-          db-location: ${{ runner.temp }}/codeql_databases
       - name: Analyze without privileged upload
-        if: matrix.language == 'rust'
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:${{ matrix.language }}
           upload: never
           upload-database: false
-      - name: Analyze JavaScript with evaluator diagnostics without privileged upload
-        if: matrix.language == 'javascript-typescript'
+
+  javascript-database:
+    name: prepare complete JavaScript database
+    runs-on: ubuntu-24.04
+    timeout-minutes: 190
+    permissions:
+      actions: read
+      contents: read
+    env:
+      # A query group must never receive a server-selected partial overlay database.
+      CODEQL_OVERLAY_DATABASE_MODE: none
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Acquire authenticated scanner prerequisite
+        run: bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
+      - name: Test complete-suite and actual CLI merge contracts
+        run: CODEQL_TEST_CLI="$CODEQL" python3 scripts/test_codeql_javascript_shards.py
+      - name: Initialize the complete JavaScript source database
+        id: initialize
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          tools: ${{ env.CODEQL_BUNDLE }}
+          languages: javascript-typescript
+          build-mode: none
+          config-file: .github/codeql/javascript.yml
+          db-location: ${{ runner.temp }}/codeql_databases
+      - name: Extract and finalize without running queries
+        id: finalize
         timeout-minutes: 180
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        env:
-          # The Init post action retains files in the database log directory.
-          CODEQL_ACTION_EXTRA_OPTIONS: >-
-            {"database":{"run-queries":[
-              "--evaluator-log=${{ runner.temp }}/codeql_databases/javascript/log/evaluator.jsonl",
-              "--evaluator-log-minify"
-            ]}}
         with:
-          category: /language:${{ matrix.language }}
-          threads: '2'
+          skip-queries: true
           upload: never
           upload-database: false
+      - name: Bind the full database and exact 105-query suite
+        env:
+          DATABASE: ${{ fromJson(steps.finalize.outputs.db-locations).javascript }}
+          PRODUCER_CODEQL: ${{ steps.initialize.outputs.codeql-path }}
+        run: >-
+          python3 scripts/codeql_javascript_shards.py prepare
+          --codeql "$CODEQL" --producer-codeql "$PRODUCER_CODEQL"
+          --source "$GITHUB_SHA" --input "$DATABASE"
+          --output "$RUNNER_TEMP/javascript-database"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-javascript-database
+          path: ${{ runner.temp }}/javascript-database
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-javascript-manifest
+          path: ${{ runner.temp }}/javascript-database/manifest.json
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: codeql-javascript-extraction-logs
+          path: ${{ runner.temp }}/codeql_databases/javascript/log
+          retention-days: 7
+
+  javascript-query:
+    name: JavaScript queries / ${{ matrix.group }}
+    needs: javascript-database
+    runs-on: ubuntu-24.04
+    timeout-minutes: 190
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Full database copies preserve cross-file flows in every query group.
+        group: [polynomial-redos, indirect-command-injection, remaining]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Acquire authenticated scanner prerequisite
+        run: bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codeql-javascript-database
+          path: ${{ runner.temp }}/javascript-database
+      - name: Evaluate every selected query on the same complete database
+        timeout-minutes: 180
+        env:
+          QUERY_GROUP: ${{ matrix.group }}
+        run: >-
+          python3 scripts/codeql_javascript_shards.py analyze
+          --codeql "$CODEQL" --source "$GITHUB_SHA"
+          --input "$RUNNER_TEMP/javascript-database" --group "$QUERY_GROUP"
+          --output "$RUNNER_TEMP/query-results"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-javascript-result-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/query-results/results.sarif
+            ${{ runner.temp }}/query-results/receipt.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain failed evaluator and native CLI diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-javascript-query-logs-${{ matrix.group }}
+          path: |
+            ${{ runner.temp }}/query-results/evaluator.jsonl
+            ${{ runner.temp }}/query-results/database/log
+          retention-days: 7
+
+  javascript-merge:
+    name: validate and merge all JavaScript queries
+    needs: [javascript-database, javascript-query]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Acquire authenticated scanner prerequisite
+        run: bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codeql-javascript-manifest
+          path: ${{ runner.temp }}/javascript-database
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: codeql-javascript-result-*
+          path: ${{ runner.temp }}/shards
+      - name: Require 105 completed queries and one merged SARIF run
+        run: >-
+          python3 scripts/codeql_javascript_shards.py merge
+          --codeql "$CODEQL" --source "$GITHUB_SHA"
+          --manifest "$RUNNER_TEMP/javascript-database/manifest.json"
+          --input "$RUNNER_TEMP/shards" --output "$RUNNER_TEMP/merged"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-javascript-merged
+          path: ${{ runner.temp }}/merged
+          if-no-files-found: error
+          retention-days: 7
+
+  javascript-upload:
+    name: upload complete JavaScript analysis
+    if: github.event_name != 'pull_request'
+    needs: javascript-merge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codeql-javascript-merged
+          path: ${{ runner.temp }}/merged
+      - name: Verify the source-bound merged result before upload
+        run: >-
+          python3 scripts/codeql_javascript_shards.py verify-upload
+          --source "$GITHUB_SHA" --input "$RUNNER_TEMP/merged"
+      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: ${{ runner.temp }}/merged/javascript.sarif
+          # Explicit category retains the previous workflow's analysis identity.
+          category: /language:javascript-typescript
+          wait-for-processing: true
 
   codeql-required:
     name: codeql-required
     if: ${{ always() && !cancelled() }}
-    needs: [analyze-upload, analyze-pull-request]
+    needs: [analyze-upload, analyze-pull-request, javascript-database, javascript-query, javascript-merge, javascript-upload]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -149,7 +270,22 @@ jobs:
         env:
           PULL_REQUEST_RESULT: ${{ needs.analyze-pull-request.result }}
           UPLOAD_RESULT: ${{ needs.analyze-upload.result }}
+          JS_DATABASE_RESULT: ${{ needs.javascript-database.result }}
+          JS_QUERY_RESULT: ${{ needs.javascript-query.result }}
+          JS_MERGE_RESULT: ${{ needs.javascript-merge.result }}
+          JS_UPLOAD_RESULT: ${{ needs.javascript-upload.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          if [ "$JS_DATABASE_RESULT" != "success" ] || [ "$JS_QUERY_RESULT" != "success" ] ||
+             [ "$JS_MERGE_RESULT" != "success" ]; then
+            echo "complete JavaScript query coverage did not succeed" >&2
+            exit 1
+          fi
+          if { [ "$EVENT_NAME" = "pull_request" ] && [ "$JS_UPLOAD_RESULT" != "skipped" ]; } ||
+             { [ "$EVENT_NAME" != "pull_request" ] && [ "$JS_UPLOAD_RESULT" != "success" ]; }; then
+            echo "JavaScript upload did not match the event permission boundary" >&2
+            exit 1
+          fi
           if { [ "$UPLOAD_RESULT" = "success" ] && [ "$PULL_REQUEST_RESULT" = "skipped" ]; } ||
              { [ "$UPLOAD_RESULT" = "skipped" ] && [ "$PULL_REQUEST_RESULT" = "success" ]; }; then
             echo "all required CodeQL analyses succeeded"
