@@ -22,8 +22,8 @@ jobs:
     name: analyze and upload / ${{ matrix.language }}
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    # Allow full dataflow analysis of the authenticated vendored source closure.
-    timeout-minutes: 180
+    # Reserve post-action time to retain diagnostics after JavaScript evaluation.
+    timeout-minutes: ${{ matrix.language == 'javascript-typescript' && 190 || 180 }}
     permissions:
       actions: read
       contents: read
@@ -42,22 +42,47 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Initialize CodeQL
+        if: matrix.language == 'rust'
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
+      - name: Initialize JavaScript CodeQL diagnostics
+        if: matrix.language == 'javascript-typescript'
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+          debug: true
+          db-location: ${{ runner.temp }}/codeql_databases
       - name: Analyze
+        if: matrix.language == 'rust'
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:${{ matrix.language }}
+      - name: Analyze JavaScript with evaluator diagnostics
+        if: matrix.language == 'javascript-typescript'
+        timeout-minutes: 180
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        env:
+          # The Init post action retains files in the database log directory.
+          CODEQL_ACTION_EXTRA_OPTIONS: >-
+            {"database":{"run-queries":[
+              "--evaluator-log=${{ runner.temp }}/codeql_databases/javascript/log/evaluator.jsonl",
+              "--evaluator-log-minify"
+            ]}}
+        with:
+          category: /language:${{ matrix.language }}
+          threads: '2'
 
   analyze-pull-request:
     name: analyze pull request / ${{ matrix.language }}
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     # Keep pull-request coverage and its runtime budget equal to main analyses.
-    timeout-minutes: 180
+    timeout-minutes: ${{ matrix.language == 'javascript-typescript' && 190 || 180 }}
     permissions:
       actions: read
       contents: read
@@ -75,15 +100,42 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Initialize CodeQL
+        if: matrix.language == 'rust'
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
+      - name: Initialize JavaScript CodeQL diagnostics
+        if: matrix.language == 'javascript-typescript'
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+          debug: true
+          db-location: ${{ runner.temp }}/codeql_databases
       - name: Analyze without privileged upload
+        if: matrix.language == 'rust'
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:${{ matrix.language }}
+          upload: never
+          upload-database: false
+      - name: Analyze JavaScript with evaluator diagnostics without privileged upload
+        if: matrix.language == 'javascript-typescript'
+        timeout-minutes: 180
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        env:
+          # The Init post action retains files in the database log directory.
+          CODEQL_ACTION_EXTRA_OPTIONS: >-
+            {"database":{"run-queries":[
+              "--evaluator-log=${{ runner.temp }}/codeql_databases/javascript/log/evaluator.jsonl",
+              "--evaluator-log-minify"
+            ]}}
+        with:
+          category: /language:${{ matrix.language }}
+          threads: '2'
           upload: never
           upload-database: false
 
