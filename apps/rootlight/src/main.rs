@@ -305,11 +305,24 @@ fn execute_web(arguments: &[std::ffi::OsString]) -> Result<ExitCode, CliError> {
     let paths = runtime_paths()?;
     web_service::start(&paths, &executable)?;
     let url = web_service::browser_entry(&paths)?;
-    println!("Rootlight Web UI: {url}");
+    println!("{}", web_entry_announcement(&url, open_browser));
     if open_browser {
         web_service::open_browser(&url)?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn web_entry_announcement(entry_url: &str, open_browser: bool) -> String {
+    // Automatic launch hands the capability directly to the browser; only an
+    // explicit --no-open request returns it to the operator through stdout.
+    if open_browser {
+        format!(
+            "Rootlight Web UI: http://127.0.0.1:{}",
+            rootlight_runtime::WEB_UI_PORT
+        )
+    } else {
+        format!("Rootlight Web UI: {entry_url}")
+    }
 }
 
 fn execute_web_service(arguments: &[std::ffi::OsString]) -> Result<CommandResult, CliError> {
@@ -3306,6 +3319,26 @@ mod tests {
             run(arguments(&["web", "--no-open"])),
             Err(CliError::Usage)
         ));
+    }
+
+    #[test]
+    fn automatic_web_launch_does_not_print_its_bootstrap_capability() {
+        let entry_url = "http://127.0.0.1:43127/#bootstrap=operator-only-capability";
+
+        assert_eq!(
+            web_entry_announcement(entry_url, true),
+            "Rootlight Web UI: http://127.0.0.1:43127"
+        );
+    }
+
+    #[test]
+    fn explicit_no_open_preserves_the_operator_bootstrap_handoff() {
+        let entry_url = "http://127.0.0.1:43127/#bootstrap=operator-only-capability";
+
+        assert_eq!(
+            web_entry_announcement(entry_url, false),
+            format!("Rootlight Web UI: {entry_url}")
+        );
     }
 
     #[test]
