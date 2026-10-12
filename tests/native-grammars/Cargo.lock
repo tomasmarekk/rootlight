@@ -143,6 +143,7 @@ version = "0.0.0"
 dependencies = [
  "dekobon-tree-sitter-groovy",
  "rnix",
+ "serde_json",
  "tree-sitter",
  "tree-sitter-astro-next",
  "tree-sitter-bash",
