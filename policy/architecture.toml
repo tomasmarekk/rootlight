@@ -241,7 +241,7 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-sandbox"
-allowed_internal_dependencies = []
+allowed_internal_dependencies = ["rootlight-cancel"]
 allow_build_script = false
 
 [[crates]]

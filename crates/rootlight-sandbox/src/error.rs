@@ -14,6 +14,9 @@ const HRESULT_COMMITMENT_LIMIT: u32 = 0x8007_05af;
 /// Failure while validating, starting, controlling, or reaping a process.
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
+    /// Cooperative cancellation interrupted native process preparation.
+    #[error(transparent)]
+    Cancelled(#[from] rootlight_cancel::Cancelled),
     /// The process command contains an invalid path, argument, or environment entry.
     #[error("invalid process command: {0}")]
     InvalidInput(String),

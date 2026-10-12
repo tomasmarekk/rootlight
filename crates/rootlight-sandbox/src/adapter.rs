@@ -674,7 +674,9 @@ pub(crate) fn copy_authenticated_executable(
     declared_bytes: u64,
     expected_digest: Option<AdapterExecutableDigest>,
     output: &mut impl Write,
+    cancellation: &rootlight_cancel::Cancellation,
 ) -> Result<AdapterExecutableDigest, ProcessError> {
+    cancellation.check()?;
     if declared_bytes == 0 || declared_bytes > MAX_ADAPTER_EXECUTABLE_BYTES {
         return Err(ProcessError::InvalidInput(
             "the adapter executable size is outside the hard limit".to_owned(),
@@ -685,9 +687,11 @@ pub(crate) fn copy_authenticated_executable(
     let mut buffer = [0_u8; EXECUTABLE_COPY_BUFFER_BYTES];
     let mut observed_bytes = 0_u64;
     loop {
+        cancellation.check()?;
         let read = input
             .read(&mut buffer)
             .map_err(|error| ProcessError::io("read opened adapter executable", error))?;
+        cancellation.check()?;
         if read == 0 {
             break;
         }
@@ -922,12 +926,41 @@ pub fn spawn_isolated_adapter(
     command: AdapterProcessCommand,
     limits: AdapterSandboxLimits,
 ) -> Result<IsolatedAdapterProcess, ProcessError> {
+    spawn_isolated_adapter_with_cancellation(
+        command,
+        limits,
+        &rootlight_cancel::Cancellation::new(),
+    )
+}
+
+/// Stages and starts an isolated adapter while observing caller cancellation.
+///
+/// Cancellation is checked between executable-copy chunks and native setup
+/// stages, and while waiting for launcher verification. Native filesystem calls
+/// remain synchronous; a call already in progress must return before its next
+/// cancellation checkpoint. Failed preparation removes its owned workspace and
+/// terminates and reaps any child that has already started.
+///
+/// # Errors
+///
+/// Returns [`ProcessError::Cancelled`] when cancellation wins, or the same
+/// authentication, containment, and process errors as [`spawn_isolated_adapter`].
+pub fn spawn_isolated_adapter_with_cancellation(
+    command: AdapterProcessCommand,
+    limits: AdapterSandboxLimits,
+    cancellation: &rootlight_cancel::Cancellation,
+) -> Result<IsolatedAdapterProcess, ProcessError> {
     if command.expected_executable_digest.is_none() {
         return Err(ProcessError::InvalidInput(
             "native adapter isolation requires a host-authorized executable digest".to_owned(),
         ));
     }
-    let (inner, report) = platform::spawn_isolated_adapter(command, limits)?;
+    cancellation.check()?;
+    let (inner, report) = platform::spawn_isolated_adapter(command, limits, cancellation)?;
+    if let Err(cancelled) = cancellation.check() {
+        inner.fail_closed_cleanup()?;
+        return Err(cancelled.into());
+    }
     if !report.permits_deep_adapter() {
         inner.fail_closed_cleanup()?;
         return Err(ProcessError::InvalidInput(
@@ -1230,6 +1263,60 @@ mod tests {
     }
 
     #[test]
+    fn executable_copy_stops_before_writing_a_cancelled_chunk() {
+        use rootlight_cancel::{Cancellation, CancellationReason};
+
+        struct CancellingReader<'a> {
+            cancellation: &'a Cancellation,
+            reads: usize,
+        }
+
+        impl Read for CancellingReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                buffer[0] = b'x';
+                if self.reads == 2 {
+                    self.cancellation.cancel(CancellationReason::Shutdown);
+                }
+                Ok(1)
+            }
+        }
+
+        let cancellation = Cancellation::new();
+        let mut reader = CancellingReader {
+            cancellation: &cancellation,
+            reads: 0,
+        };
+        let mut output = Vec::new();
+        let result =
+            copy_authenticated_executable(&mut reader, 3, None, &mut output, &cancellation);
+        assert!(matches!(result, Err(ProcessError::Cancelled(cancelled))
+            if cancelled.reason() == CancellationReason::Shutdown));
+        assert_eq!(reader.reads, 2);
+        assert_eq!(
+            output, b"x",
+            "the cancelled chunk must not reach staged storage"
+        );
+    }
+
+    #[test]
+    fn cancelled_spawn_does_not_open_the_executable() {
+        use rootlight_cancel::{Cancellation, CancellationReason};
+
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::Shutdown);
+        let command = AdapterProcessCommand::new("missing-adapter", 1, 1, 1)
+            .expect("stream limits validate")
+            .expected_executable_digest(AdapterExecutableDigest::from_bytes([1; 32]));
+        let limits =
+            AdapterSandboxLimits::new(1, Duration::from_secs(1)).expect("sandbox limits validate");
+        assert!(
+            matches!(spawn_isolated_adapter_with_cancellation(command, limits, &cancellation),
+            Err(ProcessError::Cancelled(cancelled)) if cancelled.reason() == CancellationReason::Shutdown)
+        );
+    }
+
+    #[test]
     fn executable_copy_is_bound_to_declared_size_and_digest() {
         let executable = b"reviewed adapter executable";
         let expected = AdapterExecutableDigest::from_bytes(*blake3::hash(executable).as_bytes());
@@ -1239,6 +1326,7 @@ mod tests {
             u64::try_from(executable.len()).expect("fixture length fits u64"),
             Some(expected),
             &mut output,
+            &rootlight_cancel::Cancellation::new(),
         )
         .expect("matching executable stages");
         assert_eq!(observed, expected);
@@ -1251,6 +1339,7 @@ mod tests {
                 u64::try_from(executable.len()).expect("fixture length fits u64"),
                 Some(mismatch),
                 &mut Vec::new(),
+                &rootlight_cancel::Cancellation::new(),
             ),
             Err(ProcessError::InvalidInput(_))
         ));
@@ -1260,6 +1349,7 @@ mod tests {
                 u64::try_from(executable.len() - 1).expect("fixture length fits u64"),
                 Some(expected),
                 &mut Vec::new(),
+                &rootlight_cancel::Cancellation::new(),
             ),
             Err(ProcessError::InvalidInput(_))
         ));

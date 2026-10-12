@@ -133,7 +133,9 @@ impl ImmutableWorkspace {
     fn stage(
         source: &Path,
         expected_digest: Option<AdapterExecutableDigest>,
+        cancellation: &rootlight_cancel::Cancellation,
     ) -> Result<Self, ProcessError> {
+        cancellation.check()?;
         let (mut input, source_bytes) = open_adapter_executable(source)?;
         let directory = tempfile::Builder::new()
             .prefix("rootlight-adapter-")
@@ -145,14 +147,21 @@ impl ImmutableWorkspace {
             .write(true)
             .open(&executable)
             .map_err(|error| ProcessError::io("create staged adapter executable", error))?;
-        let executable_digest =
-            copy_authenticated_executable(&mut input, source_bytes, expected_digest, &mut output)?;
+        let executable_digest = copy_authenticated_executable(
+            &mut input,
+            source_bytes,
+            expected_digest,
+            &mut output,
+            cancellation,
+        )?;
         #[cfg(not(target_os = "macos"))]
         let _ = executable_digest;
+        cancellation.check()?;
         output
             .sync_all()
             .map_err(|error| ProcessError::io("sync staged adapter executable", error))?;
         drop(output);
+        cancellation.check()?;
         let root = fs::canonicalize(directory.path())
             .map_err(|error| ProcessError::io("resolve staged adapter workspace", error))?;
         let executable = fs::canonicalize(&executable)
@@ -356,12 +365,16 @@ pub(crate) fn probe_windows_adapter_isolation(
 pub(crate) fn spawn_isolated_adapter(
     command: AdapterProcessCommand,
     limits: AdapterSandboxLimits,
+    cancellation: &rootlight_cancel::Cancellation,
 ) -> Result<(IsolatedAdapterProcess, AdapterIsolationReport), ProcessError> {
-    let workspace =
-        ImmutableWorkspace::stage(&command.program, command.expected_executable_digest)?;
+    let workspace = ImmutableWorkspace::stage(
+        &command.program,
+        command.expected_executable_digest,
+        cancellation,
+    )?;
     let mut process = isolated_command(&workspace, &command, limits)?;
-    let mut child = retry_executable_busy(|| process.spawn())
-        .map_err(|error| ProcessError::io("create isolated adapter launcher", error))?;
+    cancellation.check()?;
+    let mut child = retry_executable_busy(|| process.spawn(), cancellation)?;
     let process_group = Pid::from_raw(i32::try_from(child.id()).map_err(|_| {
         ProcessError::InvalidInput("adapter process identifier is not representable".to_owned())
     })?);
@@ -374,11 +387,15 @@ pub(crate) fn spawn_isolated_adapter(
     #[cfg(target_os = "macos")]
     let mut stderr = stderr;
     #[cfg(target_os = "linux")]
-    let verification = verify_record(&mut stdout, &mut child, LAUNCHER_READY_RECORD);
+    let verification = verify_record(&mut stdout, &mut child, LAUNCHER_READY_RECORD, cancellation);
     #[cfg(target_os = "macos")]
-    let verification = verify_macos_unlink_handshake(&workspace, &mut stdout, &mut child);
+    let verification =
+        verify_macos_unlink_handshake(&workspace, &mut stdout, &mut child, cancellation);
     if let Err(error) = verification {
         let _ = killpg(process_group, Signal::SIGKILL);
+        // Cancellation can precede the launcher's setsid call, so its own
+        // process group may not exist yet. The retained child remains ours.
+        let _ = child.kill();
         let _ = child.wait();
         #[cfg(target_os = "macos")]
         return Err(macos_verification_failure(error, &mut stderr));
@@ -402,8 +419,12 @@ pub(crate) fn spawn_isolated_adapter(
     ))
 }
 
-fn retry_executable_busy<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+fn retry_executable_busy<T>(
+    mut operation: impl FnMut() -> io::Result<T>,
+    cancellation: &rootlight_cancel::Cancellation,
+) -> Result<T, ProcessError> {
     for attempt in 0..=EXECUTABLE_BUSY_RETRY_LIMIT {
+        cancellation.check()?;
         match operation() {
             Err(error)
                 if error.raw_os_error() == Some(libc::ETXTBSY)
@@ -413,7 +434,10 @@ fn retry_executable_busy<T>(mut operation: impl FnMut() -> io::Result<T>) -> io:
                 // a sealed staged executable is closed and synced.
                 thread::sleep(PROCESS_POLL_INTERVAL);
             }
-            result => return result,
+            result => {
+                return result
+                    .map_err(|error| ProcessError::io("create isolated adapter launcher", error));
+            }
         }
     }
     unreachable!("the bounded executable retry loop always returns")
@@ -465,8 +489,10 @@ fn verify_macos_unlink_handshake(
     workspace: &ImmutableWorkspace,
     stdout: &mut ChildStdout,
     child: &mut StdChild,
+    cancellation: &rootlight_cancel::Cancellation,
 ) -> Result<(), ProcessError> {
-    verify_record(stdout, child, MACOS_UNLINK_READY)?;
+    verify_record(stdout, child, MACOS_UNLINK_READY, cancellation)?;
+    cancellation.check()?;
     workspace.unlink_executable()?;
     let stdin = child.stdin.as_mut().ok_or_else(|| {
         ProcessError::InvalidInput("isolated adapter input pipe is missing".to_owned())
@@ -476,13 +502,14 @@ fn verify_macos_unlink_handshake(
         .and_then(|()| stdin.write_all(&workspace.executable_digest().as_bytes()))
         .and_then(|()| stdin.flush())
         .map_err(|error| ProcessError::io("acknowledge staged adapter unlink", error))?;
-    verify_record(stdout, child, LAUNCHER_READY_RECORD)
+    verify_record(stdout, child, LAUNCHER_READY_RECORD, cancellation)
 }
 
 fn verify_record(
     stdout: &mut ChildStdout,
     child: &mut StdChild,
     expected: &[u8],
+    cancellation: &rootlight_cancel::Cancellation,
 ) -> Result<(), ProcessError> {
     use std::os::fd::AsFd as _;
 
@@ -499,6 +526,7 @@ fn verify_record(
     let mut observed = vec![0_u8; expected.len()];
     let mut offset = 0;
     while offset < observed.len() {
+        cancellation.check()?;
         match stdout.read(&mut observed[offset..]) {
             Ok(0) => {
                 return Err(ProcessError::InvalidInput(
@@ -526,6 +554,7 @@ fn verify_record(
             Err(error) => return Err(ProcessError::io("read isolation handshake", error)),
         }
     }
+    cancellation.check()?;
     if observed != expected {
         return Err(ProcessError::InvalidInput(
             "isolated adapter launcher verification failed".to_owned(),
@@ -538,6 +567,9 @@ fn verify_record(
 
 #[cfg(target_os = "macos")]
 fn macos_verification_failure(fallback: ProcessError, stderr: &mut ChildStderr) -> ProcessError {
+    if matches!(fallback, ProcessError::Cancelled(_)) {
+        return fallback;
+    }
     // The child has been reaped, so this bounded read cannot wait for more
     // bytes. Only closed stage codes are promoted into the parent error.
     let mut diagnostics = Vec::new();
@@ -1130,14 +1162,17 @@ mod tests {
     #[test]
     fn executable_busy_spawn_is_retried_with_a_hard_limit() {
         let mut attempts = 0_usize;
-        let value = retry_executable_busy(|| {
-            attempts += 1;
-            if attempts <= 2 {
-                Err(io::Error::from_raw_os_error(libc::ETXTBSY))
-            } else {
-                Ok(42_u8)
-            }
-        })
+        let value = retry_executable_busy(
+            || {
+                attempts += 1;
+                if attempts <= 2 {
+                    Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+                } else {
+                    Ok(42_u8)
+                }
+            },
+            &rootlight_cancel::Cancellation::new(),
+        )
         .expect("transient executable lease clears");
 
         assert_eq!(value, 42);
@@ -1147,13 +1182,18 @@ mod tests {
     #[test]
     fn unrelated_spawn_error_is_not_retried() {
         let mut attempts = 0_usize;
-        let error = retry_executable_busy(|| {
-            attempts += 1;
-            Err::<(), _>(io::Error::from_raw_os_error(libc::ENOENT))
-        })
+        let error = retry_executable_busy(
+            || {
+                attempts += 1;
+                Err::<(), _>(io::Error::from_raw_os_error(libc::ENOENT))
+            },
+            &rootlight_cancel::Cancellation::new(),
+        )
         .expect_err("unrelated spawn error remains terminal");
 
-        assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+        assert!(
+            matches!(error, ProcessError::Io { source, .. } if source.raw_os_error() == Some(libc::ENOENT))
+        );
         assert_eq!(attempts, 1);
     }
 
@@ -1289,14 +1329,67 @@ mod tests {
     #[test]
     fn persistent_executable_busy_error_exhausts_the_retry_budget() {
         let mut attempts = 0_usize;
-        let error = retry_executable_busy(|| {
-            attempts += 1;
-            Err::<(), _>(io::Error::from_raw_os_error(libc::ETXTBSY))
-        })
+        let error = retry_executable_busy(
+            || {
+                attempts += 1;
+                Err::<(), _>(io::Error::from_raw_os_error(libc::ETXTBSY))
+            },
+            &rootlight_cancel::Cancellation::new(),
+        )
         .expect_err("persistent executable lease remains terminal");
 
-        assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
+        assert!(
+            matches!(error, ProcessError::Io { source, .. } if source.raw_os_error() == Some(libc::ETXTBSY))
+        );
         assert_eq!(attempts, EXECUTABLE_BUSY_RETRY_LIMIT + 1);
+    }
+
+    #[test]
+    fn cancellation_stops_executable_busy_retries() {
+        use rootlight_cancel::{Cancellation, CancellationReason};
+
+        let cancellation = Cancellation::new();
+        let mut attempts = 0;
+        let error = retry_executable_busy(
+            || {
+                attempts += 1;
+                cancellation.cancel(CancellationReason::Shutdown);
+                Err::<(), _>(io::Error::from_raw_os_error(libc::ETXTBSY))
+            },
+            &cancellation,
+        )
+        .expect_err("shutdown prevents another spawn attempt");
+        assert!(matches!(error, ProcessError::Cancelled(cancelled)
+            if cancelled.reason() == CancellationReason::Shutdown));
+        assert_eq!(attempts, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launcher_diagnostics_cannot_replace_cancellation() {
+        use rootlight_cancel::{Cancellation, CancellationReason};
+
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "printf '{MACOS_FAILURE_PREFIX}sandbox-entry\\n' >&2"
+            ))
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("diagnostic fixture starts");
+        let mut stderr = child.stderr.take().expect("diagnostic pipe exists");
+        child.wait().expect("diagnostic fixture exits");
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::Shutdown);
+        let fallback =
+            ProcessError::Cancelled(cancellation.check().expect_err("shutdown observed"));
+        assert!(matches!(macos_verification_failure(fallback, &mut stderr),
+            ProcessError::Cancelled(cancelled) if cancelled.reason() == CancellationReason::Shutdown));
+        let mut retained = String::new();
+        stderr
+            .read_to_string(&mut retained)
+            .expect("diagnostics remain unread");
+        assert!(retained.contains("sandbox-entry"));
     }
 
     #[test]
@@ -1313,9 +1406,14 @@ mod tests {
         fs::rename(&source, &moved).expect("opened fixture path renames");
         fs::write(&source, b"replacement executable").expect("replacement executable writes");
         let mut staged = Vec::new();
-        let observed =
-            copy_authenticated_executable(&mut opened, declared_bytes, Some(expected), &mut staged)
-                .expect("opened executable stages");
+        let observed = copy_authenticated_executable(
+            &mut opened,
+            declared_bytes,
+            Some(expected),
+            &mut staged,
+            &rootlight_cancel::Cancellation::new(),
+        )
+        .expect("opened executable stages");
 
         assert_eq!(observed, expected);
         assert_eq!(staged, original);
@@ -1366,7 +1464,11 @@ mod tests {
         let expected = executable_digest(b"negotiated executable");
 
         assert!(matches!(
-            ImmutableWorkspace::stage(&source, Some(expected)),
+            ImmutableWorkspace::stage(
+                &source,
+                Some(expected),
+                &rootlight_cancel::Cancellation::new()
+            ),
             Err(ProcessError::InvalidInput(_))
         ));
     }
@@ -1378,7 +1480,8 @@ mod tests {
         fs::write(&source, b"authenticated executable").expect("fixture executable writes");
 
         let workspace =
-            ImmutableWorkspace::stage(&source, None).expect("fixture executable stages");
+            ImmutableWorkspace::stage(&source, None, &rootlight_cancel::Cancellation::new())
+                .expect("fixture executable stages");
 
         assert_eq!(
             workspace.root,
@@ -1388,6 +1491,79 @@ mod tests {
         assert_eq!(
             workspace.executable,
             fs::canonicalize(&workspace.executable).expect("executable canonicalizes")
+        );
+    }
+
+    #[test]
+    fn cancellation_during_launcher_wait_reaps_child_and_removes_workspace() {
+        use rootlight_cancel::{Cancellation, CancellationReason};
+
+        let directory = tempfile::tempdir().expect("fixture directory opens");
+        let readiness = directory.path().join("ready");
+        mkfifo(&readiness, Mode::S_IRUSR | Mode::S_IWUSR).expect("readiness FIFO creates");
+        let source = directory.path().join("adapter");
+        let quoted_readiness = readiness.to_string_lossy().replace('\'', "'\\''");
+        // The trusted fixture deliberately stops before the native handshake.
+        // Its FIFO proves the child is running before cancellation is issued.
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$$\" \"$PWD\" > '{quoted_readiness}'\nread gate\n"
+        );
+        fs::write(&source, &script).expect("fixture executable writes");
+        let cancellation = Cancellation::new();
+        let observer_cancellation = cancellation.clone();
+        let observer = thread::spawn(move || {
+            let mut readiness = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(readiness)
+                .expect("readiness FIFO opens");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut observed = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match readiness.read(&mut buffer) {
+                    Ok(read) => observed.extend_from_slice(&buffer[..read]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("readiness observation failed: {error}"),
+                }
+                if observed.iter().filter(|byte| **byte == b'\n').count() == 2 {
+                    observer_cancellation.cancel(CancellationReason::Shutdown);
+                    return String::from_utf8(observed).expect("readiness is UTF-8");
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture launcher never became observable"
+                );
+                thread::sleep(PROCESS_POLL_INTERVAL);
+            }
+        });
+        let command = AdapterProcessCommand::new(source, 1, 64, 64)
+            .expect("stream limits validate")
+            .expected_executable_digest(executable_digest(script.as_bytes()));
+        let limits = AdapterSandboxLimits::new(64 * 1024 * 1024, Duration::from_secs(1))
+            .expect("sandbox limits validate");
+        let result =
+            crate::spawn_isolated_adapter_with_cancellation(command, limits, &cancellation);
+        let observed = observer.join().expect("readiness observer joins");
+        assert!(matches!(result, Err(ProcessError::Cancelled(cancelled))
+            if cancelled.reason() == CancellationReason::Shutdown));
+        let mut lines = observed.lines();
+        let process = Pid::from_raw(
+            lines
+                .next()
+                .expect("child PID exists")
+                .parse()
+                .expect("PID is numeric"),
+        );
+        let workspace = PathBuf::from(lines.next().expect("workspace exists"));
+        assert_eq!(
+            nix::sys::signal::kill(process, None),
+            Err(Errno::ESRCH),
+            "cancelled launcher remains alive"
+        );
+        assert!(
+            !workspace.exists(),
+            "cancelled launcher retains its staged workspace"
         );
     }
 
@@ -1407,7 +1583,13 @@ mod tests {
         let mut stdout = child.stdout.take().expect("fixture stdout exists");
         let mut stderr = child.stderr.take().expect("fixture stderr exists");
 
-        verify_record(&mut stdout, &mut child, LAUNCHER_READY_RECORD).expect("readiness verifies");
+        verify_record(
+            &mut stdout,
+            &mut child,
+            LAUNCHER_READY_RECORD,
+            &rootlight_cancel::Cancellation::new(),
+        )
+        .expect("readiness verifies");
 
         let mut adapter_output = Vec::new();
         stdout

@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     ptr,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock, TryLockError},
     thread,
     time::{Duration, Instant},
 };
@@ -76,6 +76,8 @@ use windows::{
     },
     core::{PCWSTR, PWSTR},
 };
+
+use rootlight_cancel::Cancellation;
 
 use crate::{
     AdapterExecutableDigest, AdapterIsolationReport, AdapterProcessCommand, AdapterSandboxLimits,
@@ -656,20 +658,27 @@ pub(crate) fn probe_windows_adapter_isolation(
 pub(crate) fn spawn_windows_isolated_adapter(
     command: AdapterProcessCommand,
     limits: AdapterSandboxLimits,
+    cancellation: &Cancellation,
 ) -> Result<(IsolatedAdapterProcess, AdapterIsolationReport), ProcessError> {
     let lock = SPAWN_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = lock_adapter_spawn(lock, cancellation)?;
     let mut app_container_lease = AppContainerProfileLease::acquire()?;
     let mut app_container = create_leased_app_container(&mut app_container_lease)?;
     let current_user = CurrentUserSid::load()?;
-    let workspace = PrivateAdapterWorkspace::create(
+    let workspace = match PrivateAdapterWorkspace::create(
         &command.program,
         command.expected_executable_digest,
         &current_user,
         app_container.sid,
-    )?;
+        cancellation,
+    ) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            app_container.delete()?;
+            app_container_lease.mark_reusable();
+            return Err(error);
+        }
+    };
     let mut process_command = ProcessCommand::new(&workspace.executable)
         .env_clear()
         .current_dir(&workspace.current_directory)
@@ -728,6 +737,12 @@ pub(crate) fn spawn_windows_isolated_adapter(
         | CREATE_NO_WINDOW
         | CREATE_SUSPENDED;
     let mut information = PROCESS_INFORMATION::default();
+    if let Err(cancelled) = cancellation.check() {
+        app_container.delete()?;
+        workspace.remove()?;
+        app_container_lease.mark_reusable();
+        return Err(cancelled.into());
+    }
     // SAFETY: every pointer references initialized storage that remains alive
     // through the synchronous call. The child is suspended and receives only
     // the exact pipe handles, zero-capability AppContainer identity, and
@@ -775,7 +790,11 @@ pub(crate) fn spawn_windows_isolated_adapter(
             source,
         ));
     }
-    if let Err(source) = verify_appcontainer_token(&process) {
+    if let Err(source) = cancellation
+        .check()
+        .map_err(ProcessError::from)
+        .and_then(|()| verify_appcontainer_token(&process))
+    {
         terminate_assigned_suspended(&job, &process)?;
         app_container.delete()?;
         workspace.remove()?;
@@ -794,6 +813,12 @@ pub(crate) fn spawn_windows_isolated_adapter(
         workspace.remove()?;
         app_container_lease.mark_reusable();
         return Err(source);
+    }
+    if let Err(cancelled) = cancellation.check() {
+        terminate_assigned_suspended(&job, &process)?;
+        workspace.remove()?;
+        app_container_lease.mark_reusable();
+        return Err(cancelled.into());
     }
 
     // SAFETY: this is the exact primary thread returned by CreateProcessW with
@@ -830,6 +855,25 @@ pub(crate) fn spawn_windows_isolated_adapter(
         },
         report,
     ))
+}
+
+fn lock_adapter_spawn<'lock>(
+    lock: &'lock Mutex<()>,
+    cancellation: &Cancellation,
+) -> Result<MutexGuard<'lock, ()>, ProcessError> {
+    loop {
+        cancellation.check()?;
+        let guard = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                thread::sleep(WAIT_POLL_INTERVAL);
+                continue;
+            }
+        };
+        cancellation.check()?;
+        return Ok(guard);
+    }
 }
 
 fn verify_appcontainer_token(process: &OwnedHandle) -> Result<(), ProcessError> {
@@ -1555,7 +1599,9 @@ impl PrivateAdapterWorkspace {
         expected_digest: Option<AdapterExecutableDigest>,
         current_user: &CurrentUserSid,
         app_container: PSID,
+        cancellation: &Cancellation,
     ) -> Result<Self, ProcessError> {
+        cancellation.check()?;
         let (mut source, source_bytes) = open_adapter_executable(source_executable)?;
         let mut security =
             DirectorySecurity::appcontainer_read_only(current_user.sid, app_container)?;
@@ -1598,14 +1644,20 @@ impl PrivateAdapterWorkspace {
                 return Err(ProcessError::io("create staged adapter executable", source));
             }
         };
-        if let Err(error) =
-            copy_authenticated_executable(&mut source, source_bytes, expected_digest, &mut staged)
-                .and_then(|_| {
-                    staged.sync_all().map_err(|source| {
-                        ProcessError::io("sync staged adapter executable", source)
-                    })
-                })
-        {
+        if let Err(error) = copy_authenticated_executable(
+            &mut source,
+            source_bytes,
+            expected_digest,
+            &mut staged,
+            cancellation,
+        )
+        .and_then(|_| {
+            cancellation.check()?;
+            staged
+                .sync_all()
+                .map_err(|source| ProcessError::io("sync staged adapter executable", source))?;
+            cancellation.check().map_err(ProcessError::from)
+        }) {
             drop(staged);
             let _ = fs::remove_dir_all(&root);
             return Err(error);
@@ -1996,9 +2048,14 @@ mod tests {
             "opened executable allowed path removal"
         );
         let mut staged = Vec::new();
-        let observed =
-            copy_authenticated_executable(&mut opened, declared_bytes, Some(expected), &mut staged)
-                .expect("opened executable stages");
+        let observed = copy_authenticated_executable(
+            &mut opened,
+            declared_bytes,
+            Some(expected),
+            &mut staged,
+            &Cancellation::new(),
+        )
+        .expect("opened executable stages");
 
         assert_eq!(observed, expected);
         assert_eq!(staged, original);
@@ -2051,13 +2108,52 @@ mod tests {
             .expect("fixture AppContainer opens");
         let owner = CurrentUserSid::load().expect("current user SID reads");
 
-        let result =
-            PrivateAdapterWorkspace::create(&source, Some(expected), &owner, app_container.sid);
+        let result = PrivateAdapterWorkspace::create(
+            &source,
+            Some(expected),
+            &owner,
+            app_container.sid,
+            &Cancellation::new(),
+        );
         app_container
             .delete()
             .expect("fixture AppContainer deletes");
         app_container_lease.mark_reusable();
         assert!(matches!(result, Err(ProcessError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn cancelled_adapter_spawn_returns_while_creation_lock_is_held() {
+        let lock = SPAWN_LOCK.get_or_init(|| Mutex::new(()));
+        let guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let command = AdapterProcessCommand::new(
+            env::current_exe().expect("test executable path resolves"),
+            1,
+            1,
+            1,
+        )
+        .expect("adapter limits validate")
+        .expected_executable_digest(AdapterExecutableDigest::from_bytes([1; 32]))
+        .arg("--list")
+        .expect("test selector validates");
+        let limits = AdapterSandboxLimits::new(256 * 1024 * 1024, Duration::from_secs(1))
+            .expect("sandbox limits validate");
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let cancellation =
+                Cancellation::with_deadline(Instant::now() + Duration::from_millis(100));
+            let result =
+                crate::spawn_isolated_adapter_with_cancellation(command, limits, &cancellation)
+                    .map(|_| ());
+            let _ = sent.send(result);
+        });
+        let result = received.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        worker.join().expect("cancelled spawn thread joins");
+        assert!(matches!(result, Ok(Err(ProcessError::Cancelled(cancelled)))
+            if cancelled.reason() == rootlight_cancel::CancellationReason::DeadlineExceeded));
     }
 
     #[test]
@@ -2268,6 +2364,7 @@ mod tests {
             None,
             &owner,
             foreign_profile.sid,
+            &Cancellation::new(),
         )
         .expect("foreign private workspace opens");
         let sentinel = workspace.root.join("ambient-secret.txt");
@@ -2707,7 +2804,8 @@ mod tests {
         .arg("--nocapture")
         .expect("test flag is a literal");
         let (mut adapter, report) =
-            spawn_windows_isolated_adapter(command, limits).expect("isolated adapter starts");
+            spawn_windows_isolated_adapter(command, limits, &Cancellation::new())
+                .expect("isolated adapter starts");
         assert!(report.permits_deep_adapter());
         let mut stdin = adapter.take_stdin().expect("adapter stdin is retained");
         stdin

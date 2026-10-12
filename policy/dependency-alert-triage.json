@@ -14,7 +14,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "a86da3bbd788f17c333a3dc46dc69fc10ad0aea01c01eb53cd7869ebff432149"
+      "sha256": "d5a9be23061397dd0de3c695095e63de5eab9409d14235ad20b7f815d87b3101"
     },
     {
       "path": "tests/native-grammars/Cargo.lock",

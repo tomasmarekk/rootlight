@@ -2139,6 +2139,7 @@ dependencies = [
  "landlock",
  "libc",
  "nix",
+ "rootlight-cancel",
  "seccompiler",
  "tempfile",
  "thiserror 2.0.18",

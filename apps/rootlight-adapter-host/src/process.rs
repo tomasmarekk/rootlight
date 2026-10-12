@@ -28,7 +28,8 @@ use rootlight_protocol::{
 };
 use rootlight_sandbox::{
     AdapterExecutableDigest, AdapterProcessCommand, AdapterSandboxLimits, AdapterStderr,
-    AdapterStdin, AdapterStdout, IsolatedAdapterProcess, ProcessError, spawn_isolated_adapter,
+    AdapterStdin, AdapterStdout, IsolatedAdapterProcess, ProcessError,
+    spawn_isolated_adapter_with_cancellation,
 };
 
 use crate::project::{
@@ -139,7 +140,8 @@ pub fn execute_isolated_project_adapter(
     let sandbox_limits =
         AdapterSandboxLimits::new(memory_bytes, cpu_time).map_err(|_| AdapterHostError::Process)?;
     let mut process =
-        spawn_isolated_adapter(command, sandbox_limits).map_err(map_process_spawn_error)?;
+        spawn_isolated_adapter_with_cancellation(command, sandbox_limits, cancellation)
+            .map_err(map_process_spawn_error)?;
     let isolation = IsolationReport::from_process(process.report());
 
     let stdin = process.take_stdin().ok_or(AdapterHostError::ProcessIo)?;
@@ -220,7 +222,9 @@ fn classify_process_failure(diagnostic: &[u8]) -> AdapterHostError {
 }
 
 fn map_process_spawn_error(error: ProcessError) -> AdapterHostError {
-    if error.is_resource_unavailable() {
+    if let ProcessError::Cancelled(cancelled) = error {
+        AdapterHostError::Cancelled(cancelled)
+    } else if error.is_resource_unavailable() {
         AdapterHostError::ProcessResourceUnavailable
     } else {
         AdapterHostError::Process
@@ -586,6 +590,18 @@ mod tests {
             classify_process_failure(b"error: unrecognized adapter failure\n"),
             AdapterHostError::ProcessFailed
         ));
+    }
+
+    #[test]
+    fn process_spawn_cancellation_preserves_the_owning_reason() {
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::Shutdown);
+        let cancelled = cancellation.check().expect_err("shutdown is observed");
+        assert!(
+            matches!(map_process_spawn_error(ProcessError::Cancelled(cancelled)),
+            AdapterHostError::Cancelled(cancelled)
+                if cancelled.reason() == rootlight_cancel::CancellationReason::Shutdown)
+        );
     }
 
     #[test]

@@ -115,7 +115,9 @@ pub(crate) fn probe_windows_adapter_isolation(
 pub(crate) fn spawn_windows_isolated_adapter(
     command: AdapterProcessCommand,
     _limits: AdapterSandboxLimits,
+    cancellation: &rootlight_cancel::Cancellation,
 ) -> Result<(IsolatedAdapterProcess, AdapterIsolationReport), ProcessError> {
+    cancellation.check()?;
     let _ = (
         command.program,
         command.arguments,

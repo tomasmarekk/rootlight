@@ -18,6 +18,7 @@ pub use adapter::{
     AdapterProcessCommand, AdapterSandboxLimits, AdapterStderr, AdapterStdin, AdapterStdout,
     AuthenticatedAdapterExecutable, IsolatedAdapterEntry, IsolatedAdapterProcess,
     MAX_ADAPTER_EXECUTABLE_BYTES, probe_windows_adapter_isolation, spawn_isolated_adapter,
+    spawn_isolated_adapter_with_cancellation,
 };
 pub use error::ProcessError;
 pub use process::{
