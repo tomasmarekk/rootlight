@@ -72,7 +72,10 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     let support = Arc::new(support_registry::SupportRegistry::new());
     if !config.service_mode() {
         let url = issue_browser_entry_url(&sessions, policy.origin(), Instant::now())?;
-        println!("Rootlight Web UI: {url}");
+        println!(
+            "{}",
+            browser_entry_announcement(policy.origin(), &url, config.open_browser())
+        );
         if config.open_browser() {
             let _ = browser::open(&url);
         }
@@ -140,6 +143,13 @@ pub async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), We
     result?;
     discovery_cleanup?;
     shutdown
+}
+
+fn browser_entry_announcement(origin: &str, entry_url: &str, open_browser: bool) -> String {
+    // The normal launch sends its one-use capability directly to the browser.
+    // Explicit --no-open callers need that capability as their command result.
+    let destination = if open_browser { origin } else { entry_url };
+    format!("Rootlight Web UI: {destination}")
 }
 
 fn issue_browser_entry_url(
@@ -212,6 +222,20 @@ mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_browser_launch_does_not_print_its_bootstrap_capability() {
+        let origin = "http://127.0.0.1:43127";
+        let entry_url = format!("{origin}/#bootstrap=one-use-capability");
+        assert_eq!(
+            browser_entry_announcement(origin, &entry_url, true),
+            format!("Rootlight Web UI: {origin}")
+        );
+        assert_eq!(
+            browser_entry_announcement(origin, &entry_url, false),
+            format!("Rootlight Web UI: {entry_url}")
+        );
+    }
 
     #[test]
     fn standalone_browser_entry_issues_a_consumable_fragment_bootstrap() {
