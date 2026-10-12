@@ -782,11 +782,38 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
     );
     assert_ne!(repository_id, UNINDEXED_REPOSITORY);
 
+    // Coverage is immutable for the receipt, but freshness is relative to the
+    // active generation in the same response after background refinement.
+    let assert_structural_generation = |status: &Value, generation: &str| {
+        assert_eq!(status["generation"]["generation_id"], generation);
+        assert_eq!(status["data"]["requested_generation"], generation);
+        assert_eq!(status["data"]["resolved_generation"], generation);
+        let active_generation = status["data"]["active_generation"]["generation_id"]
+            .as_str()
+            .expect("indexed repository status has an active generation");
+        let (structural_freshness, semantic_freshness, publication_state) =
+            if active_generation == generation {
+                ("current", "stale", "published")
+            } else {
+                ("superseded", "superseded", "retained")
+            };
+        assert_eq!(
+            status["generation"]["structural_freshness"],
+            structural_freshness
+        );
+        assert_eq!(
+            status["generation"]["semantic_freshness"],
+            semantic_freshness
+        );
+        assert_eq!(status["data"]["publication_state"], publication_state);
+    };
+    let empty_generation = published_generation(&indexed);
     let empty = wait_for_ready_repository_status(
         &mut mcp,
         "status-empty",
         json!({
             "repository": {"repository_id": repository_id},
+            "generation": empty_generation,
             "coverage_detail": "language",
             "include_operations": true
         }),
@@ -802,11 +829,7 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
         empty_status["data"]["coverage"]["languages"][0]["files_indexed"],
         1
     );
-    assert_eq!(
-        empty_status["generation"]["structural_freshness"],
-        "current"
-    );
-    assert_eq!(empty_status["generation"]["semantic_freshness"], "stale");
+    assert_structural_generation(empty_status, &empty_generation);
     assert_eq!(
         empty_status["data"]["recommended_actions"],
         json!(["index repository"])
@@ -853,6 +876,7 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
         "status-metadata",
         json!({
             "repository": {"repository_id": repository_id},
+            "generation": successor_generation,
             "coverage_detail": "language",
             "include_operations": true
         }),
@@ -868,10 +892,7 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
         .expect("the retained manifest has TOML coverage");
     assert_eq!(toml["files_indexed"], 1);
     assert_eq!(toml["files_skipped"], 0);
-    assert_eq!(
-        metadata_status["generation"]["generation_id"],
-        successor_generation
-    );
+    assert_structural_generation(metadata_status, &successor_generation);
     assert_eq!(
         metadata_status["data"]["operations"][0]["state"],
         "published"
@@ -884,6 +905,28 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
             .any(|action| action == "inspect operation")
     );
     assert_eq!(metadata_status["warnings"][0]["code"], "stale_generation");
+
+    let retained = mcp.call(
+        "status-retained-empty",
+        "repo.status",
+        json!({
+            "repository": {"repository_id": repository_id},
+            "generation": empty_generation,
+            "coverage_detail": "language"
+        }),
+    );
+    assert_success(&retained, "repo.status");
+    let retained_status = &retained["result"]["structuredContent"];
+    assert_ne!(
+        retained_status["data"]["active_generation"]["generation_id"],
+        empty_generation
+    );
+    assert_structural_generation(retained_status, &empty_generation);
+    assert_eq!(
+        retained_status["data"]["coverage"],
+        empty_status["data"]["coverage"]
+    );
+    assert_eq!(retained_status["warnings"][0]["code"], "stale_generation");
 
     mcp.finish();
     daemon.finish();
