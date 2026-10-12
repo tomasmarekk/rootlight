@@ -83,15 +83,17 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
 
     wait_for_active_generation(&mut mcp, &repository_id, &generation);
 
-    let status = mcp.call(
-        "restart-status",
-        "repo.status",
-        json!({
-            "repository": {"repository_id": repository_id},
-            "generation": generation,
-            "include_operations": true
-        }),
-    );
+    let status = process_support::retry_transient_busy("restart-status", |request_id| {
+        mcp.call(
+            request_id,
+            "repo.status",
+            json!({
+                "repository": {"repository_id": repository_id},
+                "generation": generation,
+                "include_operations": true
+            }),
+        )
+    });
     assert_success(&status, "repo.status");
     assert_eq!(
         status["result"]["structuredContent"]["data"]["resolved_generation"],
@@ -179,15 +181,18 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
-    let successor_status = mcp.call(
-        "successor-restart-status",
-        "repo.status",
-        json!({
-            "repository": {"repository_id": repository_id},
-            "generation": "active",
-            "include_operations": true
-        }),
-    );
+    let successor_status =
+        process_support::retry_transient_busy("successor-restart-status", |request_id| {
+            mcp.call(
+                request_id,
+                "repo.status",
+                json!({
+                    "repository": {"repository_id": repository_id},
+                    "generation": "active",
+                    "include_operations": true
+                }),
+            )
+        });
     assert_success(&successor_status, "repo.status");
     assert_eq!(
         successor_status["result"]["structuredContent"]["data"]["resolved_generation"],
