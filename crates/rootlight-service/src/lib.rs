@@ -34,7 +34,7 @@ mod plsql_native_tests;
 mod refinement;
 pub mod source_archive;
 #[cfg(test)]
-#[path = "../examples/source_inventory/admission_profile.rs"]
+#[path = "source_inventory_example/admission_profile.rs"]
 mod source_inventory_admission_profile;
 #[cfg(test)]
 mod syntax_admission_observation;

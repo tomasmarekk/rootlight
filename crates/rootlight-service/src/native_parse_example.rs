@@ -30,7 +30,7 @@ use rootlight_vfs::{RelativePath, RepositoryRoot};
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 use serde_json::{Value, json};
 
-#[path = "source_inventory/admission_profile.rs"]
+#[path = "source_inventory_example/admission_profile.rs"]
 mod profile;
 
 type DiagnosticResult<T> = Result<T, Box<dyn Error>>;
@@ -356,7 +356,7 @@ fn main() -> DiagnosticResult<()> {
     // These source fingerprints label a diagnostic frontend, not an authenticated
     // installed binary or the provider identity used by a published service index.
     let frontend_version = "rootlight-native-parse-diagnostic-1.0";
-    let frontend_digest = content_hash(include_bytes!("native_parse.rs"));
+    let frontend_digest = content_hash(include_bytes!("native_parse_example.rs"));
     let build_context = BuildContextIdentity::new(content_hash(
         b"rootlight.native-parse.diagnostic-build-context/1",
     ));
@@ -417,7 +417,9 @@ fn main() -> DiagnosticResult<()> {
         encoding: "utf-8",
         source: &source,
         configuration_hash: config.hash(),
-        profile_source_hash: content_hash(include_bytes!("source_inventory/admission_profile.rs")),
+        profile_source_hash: content_hash(include_bytes!(
+            "source_inventory_example/admission_profile.rs"
+        )),
         profile,
         coverage,
         resources,

@@ -35,12 +35,12 @@ use rootlight_vfs::{RelativePath, RepositoryRoot};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[path = "source_inventory/admission_profile.rs"]
+#[path = "source_inventory_example/admission_profile.rs"]
 mod profile;
 
 const SCHEMA: &str = "rootlight-adapter-diagnostics/1";
 const MAX_INVENTORY_BYTES: u64 = 256 * 1024 * 1024;
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/230";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/243";
 const USAGE: &str =
     "usage: adapter_diagnostics REPOSITORY SAVED_INVENTORY_JSON [--max-fatal-errors COUNT]";
 
@@ -381,7 +381,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let maximum = usize::try_from(config.analysis().max_source_file_bytes)?;
     let limits = profile::analysis_limits(maximum)?;
-    let profile_hash = content_hash(include_bytes!("source_inventory/admission_profile.rs"));
+    let profile_hash = content_hash(include_bytes!(
+        "source_inventory_example/admission_profile.rs"
+    ));
     let generation = derive_generation(GenerationIdentity {
         repository: saved.manifest.repository,
         parent: None,
@@ -613,6 +615,6 @@ mod tests {
     fn analyzer_binary_seed_matches_the_service_recipe() {
         let seed = std::str::from_utf8(ANALYZER_BINARY_SEED).unwrap();
         let declaration = format!("const ANALYZER_BINARY_SEED: &[u8] = b\"{seed}\";");
-        assert!(include_str!("../src/lib.rs").contains(&declaration));
+        assert!(include_str!("lib.rs").contains(&declaration));
     }
 }

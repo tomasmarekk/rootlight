@@ -10,6 +10,22 @@ publish = false
 [[example]]
 name = "index_coverage"
 path = "src/index_coverage_example.rs"
+test = true
+
+[[example]]
+name = "source_inventory"
+path = "src/source_inventory_example.rs"
+test = true
+
+[[example]]
+name = "native_parse"
+path = "src/native_parse_example.rs"
+test = true
+
+[[example]]
+name = "adapter_diagnostics"
+path = "src/adapter_diagnostics_example.rs"
+test = true
 
 [dependencies]
 blake3.workspace = true

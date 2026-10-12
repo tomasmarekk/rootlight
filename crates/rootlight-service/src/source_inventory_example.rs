@@ -20,7 +20,7 @@ use rootlight_ids::{ContentHash, derive_repository};
 use rootlight_vfs::RepositoryRoot;
 use serde::Serialize;
 
-#[path = "source_inventory/admission.rs"]
+#[path = "source_inventory_example/admission.rs"]
 mod admission;
 
 const DIAGNOSTIC_NAMESPACE: &str = "rootlight.source-inventory.diagnostic/1";
