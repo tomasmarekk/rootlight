@@ -104,6 +104,56 @@ class CargoDenyPolicyTests(unittest.TestCase):
         self.assertIn("unused-workspace-dependency", checked.stdout)
         self.assertIn("unused-policy-fixture", checked.stdout)
 
+    def test_production_policy_rejects_rusqlite_session_feature(self) -> None:
+        # The stand-in tests Cargo feature resolution and the real policy, without
+        # acquiring or compiling the prohibited optional upstream bindgen closure.
+        dependency_root = self.root / "feature-contract"
+        (dependency_root / "src").mkdir(parents=True)
+        (dependency_root / "src" / "lib.rs").write_text("", encoding="utf-8")
+        (dependency_root / "Cargo.toml").write_text(
+            '[package]\nname = "rusqlite"\nversion = "0.39.0"\n'
+            'edition = "2021"\nlicense = "MIT"\n'
+            '[workspace]\n[features]\nsession = []\n',
+            encoding="utf-8",
+        )
+        manifest = self.manifest.read_text(encoding="utf-8")
+        self.manifest.write_text(
+            manifest.replace('members = ["member"]', 'members = ["member"]\nexclude = ["feature-contract"]'),
+            encoding="utf-8",
+        )
+        member_manifest = self.root / "member" / "Cargo.toml"
+        disabled = 'rusqlite = { path = "../feature-contract", version = "=0.39.0", default-features = false }\n'
+        with member_manifest.open("a", encoding="utf-8") as member:
+            member.write(disabled)
+        self.environment["CARGO_REGISTRIES_CRATES_IO_PROTOCOL"] = "git"
+        generated = self.run_command("cargo", "generate-lockfile", "--offline")
+        self.assertEqual(generated.returncode, 0, generated.stdout)
+        arguments = (
+            "cargo", "deny", "--locked", "--offline", "--config", str(PROJECT / "deny.toml"), "check", "bans"
+        )
+        checked = self.run_command(*arguments)
+        self.assertEqual(checked.returncode, 0, checked.stdout)
+
+        member_manifest.write_text(
+            member_manifest.read_text(encoding="utf-8").replace(
+                disabled, disabled.replace("false }", 'false, features = ["session"] }')
+            ),
+            encoding="utf-8",
+        )
+        metadata = self.run_command(
+            "cargo", "metadata", "--locked", "--offline", "--all-features", "--format-version=1"
+        )
+        self.assertEqual(metadata.returncode, 0, metadata.stdout)
+        graph = json.loads(metadata.stdout)
+        package = next(item for item in graph["packages"] if item["name"] == "rusqlite")
+        node = next(item for item in graph["resolve"]["nodes"] if item["id"] == package["id"])
+        self.assertEqual(node["features"], ["session"])
+        checked = self.run_command(*arguments)
+        self.assertNotEqual(checked.returncode, 0, checked.stdout)
+        self.assertIn("feature-banned", checked.stdout)
+        self.assertIn("rusqlite", checked.stdout)
+        self.assertIn("session", checked.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

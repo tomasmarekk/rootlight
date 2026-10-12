@@ -75,6 +75,12 @@ crate = "tree-sitter@0.26.11"
 allow = ["std"]
 exact = true
 
+[[bans.features]]
+crate = "rusqlite@0.39.0"
+# Session::diff dereferences an optional SQLite error message on allocation failure.
+# Keep that upstream API unreachable until its null handling is fixed and reviewed.
+deny = ["session"]
+
 [bans.workspace-dependencies]
 duplicates = "deny"
 include-path-dependencies = false
