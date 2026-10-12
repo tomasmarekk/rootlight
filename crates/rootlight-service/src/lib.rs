@@ -17,9 +17,15 @@ mod durable;
 #[cfg(test)]
 mod embedded_resolution_tests;
 #[cfg(test)]
+mod extension_admission_observation;
+#[cfg(test)]
 mod fsharp_native_tests;
 mod fsharp_projects;
 mod generation_admission;
+#[cfg(test)]
+mod generation_admission_observation;
+#[cfg(test)]
+mod generation_text_observation;
 #[cfg(test)]
 mod haskell_native_tests;
 pub mod office_package;
@@ -36,6 +42,29 @@ mod syntax_admission_observation;
 mod vba_native_tests;
 #[cfg(test)]
 mod version_merge_tests;
+
+// Keep the original expression in production; only armed unit tests classify
+// propagated failures while the caller's phase guard is still active.
+#[cfg(not(test))]
+macro_rules! observe_generation_phase {
+    ($phase:ident, $operation:expr) => {
+        $operation
+    };
+}
+
+#[cfg(test)]
+macro_rules! observe_generation_phase {
+    ($phase:ident, $operation:expr) => {{
+        let _phase = generation_admission_observation::enter_phase(
+            generation_admission_observation::Phase::$phase,
+        );
+        let result = $operation;
+        if let Err(error) = &result {
+            generation_admission_observation::observe_failure(error);
+        }
+        result
+    }};
+}
 
 use std::{
     borrow::Cow,
@@ -243,7 +272,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/242";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/243";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/107";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/12";
@@ -8198,12 +8227,17 @@ impl FirstSliceService {
             bytes_examined,
             0,
         ));
-        let mut reserved_memory_bytes =
-            ensure_generation_memory_preflight(source_preflight.source_bytes)?;
-        let mut memory_reservation = self.reserve_generation_memory(
-            generation,
-            reserved_memory_bytes,
-            PendingGenerationMemory::Reserved,
+        let mut reserved_memory_bytes = observe_generation_phase!(
+            SourcePreflight,
+            ensure_generation_memory_preflight(source_preflight.source_bytes)
+        )?;
+        let mut memory_reservation = observe_generation_phase!(
+            SourcePreflight,
+            self.reserve_generation_memory(
+                generation,
+                reserved_memory_bytes,
+                PendingGenerationMemory::Reserved,
+            )
         )?;
         let reclaimable_generations = self.inactive_generation_ids();
         self.source_snapshots.preflight_admission_after_reclaim(
@@ -8437,16 +8471,21 @@ impl FirstSliceService {
             cancellation,
         )?;
         let mut document = NormalizedIrDocument::empty(repository, generation);
-        let mut output_admission =
-            generation_admission::GenerationAdmission::new(reserved_memory_bytes)?;
+        let mut output_admission = observe_generation_phase!(
+            SourcePreflight,
+            generation_admission::GenerationAdmission::new(reserved_memory_bytes)
+        )?;
         let mut append_state = DocumentAppendState::from_document(&document)?;
         for input in &unsupported_sources {
             let disposition = unsupported_source_document(repository, generation, input)?;
-            output_admission.admit_document(
-                &disposition,
-                &mut memory_reservation,
-                self.durable.is_some(),
-                cancellation,
+            observe_generation_phase!(
+                DispositionDocument,
+                output_admission.admit_document(
+                    &disposition,
+                    &mut memory_reservation,
+                    self.durable.is_some(),
+                    cancellation,
+                )
             )?;
             append_normalized_document_with_cancellation(
                 &mut document,
@@ -8668,11 +8707,14 @@ impl FirstSliceService {
                         Err(error) => return Err(map_adapter_error(error, cancellation).into()),
                     }
                 };
-            let serialized_document_bytes = output_admission.admit_document(
-                &file_document,
-                &mut memory_reservation,
-                self.durable.is_some(),
-                cancellation,
+            let serialized_document_bytes = observe_generation_phase!(
+                FileDocument,
+                output_admission.admit_document(
+                    &file_document,
+                    &mut memory_reservation,
+                    self.durable.is_some(),
+                    cancellation,
+                )
             )?;
             if !normalized_reused {
                 lowered_files = lowered_files
@@ -8951,14 +8993,17 @@ impl FirstSliceService {
         incremental_plan.state.evidence.normalized_fact_work =
             normalized_fact_work(&document, &reused_normalized_records, cancellation)?;
         let mut incremental = incremental_plan.state;
-        let serialized_document_bytes = normalized_document_serialized_bytes(&document)?;
+        let serialized_document_bytes = observe_generation_phase!(
+            FinalProjection,
+            normalized_document_serialized_bytes(&document)
+        )?;
+        let lexical_coverage_bytes = observe_generation_phase!(
+            FinalProjection,
+            source_lexical_coverage_memory_bytes(document.files.len(), &document, cancellation)
+        )?;
         let memory_bytes = ensure_generation_memory_admission(
             serialized_document_bytes
-                .checked_add(source_lexical_coverage_memory_bytes(
-                    document.files.len(),
-                    &document,
-                    cancellation,
-                )?)
+                .checked_add(lexical_coverage_bytes)
                 .ok_or(FirstSliceError::Limits)?,
         )?;
         let logical_workspace_bytes =
@@ -8980,15 +9025,31 @@ impl FirstSliceService {
                 )
                 .and_then(|bytes| bytes.checked_add(explain_index_peak_bytes))
                 .ok_or(FirstSliceError::Limits)?;
+        #[cfg(test)]
+        if let Ok(structural_cache_bytes) = u64::try_from(structural_artifacts.accounted_bytes) {
+            generation_admission_observation::observe_projection_peak(
+                generation_admission_observation::ProjectionPeak {
+                    document_bytes: serialized_document_bytes,
+                    lexical_coverage_bytes,
+                    workspace_bytes: logical_workspace_bytes,
+                    structural_cache_bytes,
+                    explain_index_bytes: explain_index_peak_bytes,
+                    peak_bytes: logical_staged_memory_bytes,
+                },
+            );
+        }
         // Projection can retain the canonical document while one complete
         // source record and its rebound buffers coexist with compact graph
         // workspace and the prepared parser cache. Admit that conservative peak
         // before allocating the projection buffers.
         reserved_memory_bytes = reserved_memory_bytes.max(output_admission.reservation_bytes());
-        memory_reservation.resize(
-            logical_staged_memory_bytes,
-            PendingGenerationMemory::Staged,
-            self.durable.is_some(),
+        observe_generation_phase!(
+            FinalProjection,
+            memory_reservation.resize(
+                logical_staged_memory_bytes,
+                PendingGenerationMemory::Staged,
+                self.durable.is_some(),
+            )
         )?;
         reserved_memory_bytes = reserved_memory_bytes.max(logical_staged_memory_bytes);
         let metadata = GenerationMetadata::new(
@@ -9001,14 +9062,26 @@ impl FirstSliceService {
         )
         .map_err(|_| FirstSliceError::Identity)?;
         let context = GenerationContext::new(cancellation, GenerationBudget::default());
-        let verified = IdentityVerifiedGeneration::verify(
-            metadata,
-            document,
-            self.analysis_limits.ir(),
-            &self.extensions,
-            &context,
-        )
-        .map_err(|error| map_identity_error(error, cancellation))?;
+        #[cfg(test)]
+        generation_admission_observation::observe_text_document(
+            &document,
+            &rootlight_storage::SourceFileCatalog::default(),
+            context
+                .budget()
+                .limit(rootlight_storage::GenerationResource::TextBytes),
+            cancellation,
+        );
+        let verified = observe_generation_phase!(
+            FinalVerification,
+            IdentityVerifiedGeneration::verify(
+                metadata,
+                document,
+                self.analysis_limits.ir(),
+                &self.extensions,
+                &context,
+            )
+            .map_err(|error| map_identity_error(error, cancellation))
+        )?;
         let memory_bytes = ensure_generation_memory_admission(
             memory_bytes
                 .checked_add(verified.snapshot().retained_symbol_explain_index_bytes())
@@ -10082,11 +10155,14 @@ impl FirstSliceService {
                             fallback_error = Some(FirstSliceProjectAnalysisError::Protocol);
                         } else {
                             for document in &documents {
-                                output_admission.admit_document(
-                                    document,
-                                    memory_reservation,
-                                    self.durable.is_some(),
-                                    cancellation,
+                                observe_generation_phase!(
+                                    ProjectDocument,
+                                    output_admission.admit_document(
+                                        document,
+                                        memory_reservation,
+                                        self.durable.is_some(),
+                                        cancellation,
+                                    )
                                 )?;
                             }
                             match prepare_project_analysis_document(
@@ -10155,11 +10231,14 @@ impl FirstSliceService {
                                             )
                                         })
                                         .and_then(|document| {
-                                            output_admission.admit_document(
-                                                &document,
-                                                memory_reservation,
-                                                self.durable.is_some(),
-                                                cancellation,
+                                            observe_generation_phase!(
+                                                ProjectDocument,
+                                                output_admission.admit_document(
+                                                    &document,
+                                                    memory_reservation,
+                                                    self.durable.is_some(),
+                                                    cancellation,
+                                                )
                                             )?;
                                             append_project_document_with_capacity_with_cancellation(
                                                 target,
@@ -14172,7 +14251,7 @@ impl FirstSliceService {
                 if !path_prefixes.is_empty()
                     && !file
                         .and_then(|file| snapshot.find_file(file))
-                        .is_some_and(&in_path_scope)
+                        .is_some_and(in_path_scope)
                 {
                     return Ok(());
                 }
@@ -18181,6 +18260,8 @@ fn ensure_generation_memory_preflight(source_bytes: u64) -> Result<u64, FirstSli
         .checked_mul(GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR)
         .and_then(|bytes| bytes.checked_add(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES))
         .ok_or(FirstSliceError::Limits)?;
+    #[cfg(test)]
+    generation_admission_observation::observe_source_floor(observed);
     if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
         return Err(generation_memory_limit(
             0,
@@ -20673,6 +20754,14 @@ fn plan_optional_extensions(
         .checked_add(required_bytes)
         .ok_or(FirstSliceError::Limits)?;
     if observed_required_bytes > limits.max_total_extension_bytes {
+        #[cfg(test)]
+        extension_admission_observation::observe(
+            &target.extensions,
+            &source.extensions,
+            observed_required_bytes,
+            limits.max_total_extension_bytes,
+            cancellation,
+        );
         return Err(resource_limit(
             FirstSliceResource::ExtensionBytes,
             observed_required_bytes,
@@ -23233,6 +23322,50 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn generation_phase_hook_preserves_the_original_result() {
+        use generation_admission_observation::{CaptureGuard, MAX_OBSERVATION_BYTES};
+
+        let capture = CaptureGuard::arm(MAX_OBSERVATION_BYTES).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let original = FirstSliceError::ResourceLimit {
+            resource: FirstSliceResource::TextBytes,
+            observed: 17,
+            limit: 16,
+        };
+        let result = observe_generation_phase!(FinalVerification, {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(original)
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result, Err(original));
+        let report: serde_json::Value =
+            serde_json::from_slice(&capture.finish(&Cancellation::new()).unwrap()).unwrap();
+        assert_eq!(report["failure_phase"], "final_verification");
+        assert_eq!(report["failure_phase_classified_by_caller"], true);
+        assert_eq!(report["original_error"]["code"], "resource_limit");
+        assert_eq!(
+            report["original_error"]["resource_limit"]["resource"],
+            "text_bytes"
+        );
+        assert_eq!(report["original_error"]["resource_limit"]["observed"], 17);
+        assert_eq!(report["original_error"]["resource_limit"]["limit"], 16);
+    }
+
+    #[test]
+    fn generation_phase_hook_does_not_seal_successful_work() {
+        use generation_admission_observation::{CaptureGuard, MAX_OBSERVATION_BYTES};
+
+        let capture = CaptureGuard::arm(MAX_OBSERVATION_BYTES).unwrap();
+        let result = observe_generation_phase!(FileDocument, Ok::<_, FirstSliceError>(37));
+        assert_eq!(result, Ok(37));
+        assert!(!capture.reached());
+        assert_eq!(
+            capture.finish(&Cancellation::new()),
+            Err(FirstSliceError::Identity)
+        );
+    }
 
     #[test]
     fn identity_allocation_failure_is_not_invalid_generation() {
@@ -31462,11 +31595,13 @@ mod tests {
             "sample.mli",
             "sample.pl",
             "sample.php",
+            "sample.pas",
             "sample.pks",
             "sample.py",
             "sample.R",
             "sample.rb",
             "sample.rs",
+            "sample.sas",
             "sample.scala",
             "sample.dart",
             "sample.ps1",
@@ -31509,12 +31644,20 @@ mod tests {
                     "route.pks",
                     "create or replace package RouteKit as\nprocedure Inspect(Value in number);\nend RouteKit;\n/\n",
                 ),
+                (
+                    "measure.sas",
+                    "function Measure(Value); return Value; endsub;\n",
+                ),
+                (
+                    "Written.pas",
+                    "unit Written; interface procedure Measure(Value: Integer); implementation procedure Measure(Value: Integer); begin end; end.\n",
+                ),
                 ("Written.lisp", "(defun written (value) value)\n"),
-                ("written.scm", "(define (measure value) value)\n"),
                 (
                     "written.cls",
                     "public class Written { public Integer Read(Integer Value) { return Value; } }\n",
                 ),
+                ("written.scm", "(define (measure value) value)\n"),
             ],
         );
         let mut service = FirstSliceService::new(2).expect("service initializes");
@@ -31532,7 +31675,7 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 7);
+        assert_eq!(receipt.indexed_files, 9);
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -31569,6 +31712,47 @@ mod tests {
                     .is_some_and(|source| source.span().file() == plsql.id)
         }));
         mapped.insert(plsql.language.as_str());
+        let sas = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "measure.sas")
+            .expect("SAS source is retained through its ordinary suffix route");
+        assert_eq!(sas.language, "sas");
+        assert_eq!(source_language_from_path("sample.sas"), Some("sas"));
+        assert!(generation.document().entities.iter().any(|entity| {
+            entity.language == "sas"
+                && entity.kind == EntityKind::Function
+                && entity.canonical_name == "Measure"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == sas.id)
+        }));
+        mapped.insert(sas.language.as_str());
+        let pascal = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "Written.pas")
+            .expect("Pascal source is retained through its dedicated source suffix");
+        assert_eq!(pascal.language, "pascal");
+        assert_eq!(source_language_from_path("sample.pas"), Some("pascal"));
+        assert_eq!(source_language_from_path("sample.pp"), None);
+        assert_eq!(source_language_from_path("Form.dfm"), None);
+        assert_eq!(source_language_from_path("Written.dproj"), None);
+        assert!(generation.document().entities.iter().any(|entity| {
+            entity.language == "pascal"
+                && entity.kind == EntityKind::Function
+                && entity.canonical_name == "Measure"
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == pascal.id)
+        }));
+        mapped.insert(pascal.language.as_str());
         let common_lisp = generation
             .document()
             .files
@@ -36933,15 +37117,30 @@ mod tests {
     #[test]
     fn prolog_dcg_nonterminal_identity_stays_distinct_from_predicate_identity() {
         let fixture = TempDir::new().expect("fixture root exists");
-        let source = "phrase(X) :- X = plain.\nphrase(X) --> [X].\nphrase(Y) --> [Y].\n";
+        let source = "phrase(X) --> [X].\nphrase(Y) --> [Y].\nphrase(X) :- X = plain.\n";
         fs::write(fixture.path().join("grammar.pl"), source).expect("Prolog source writes");
         let mut service = FirstSliceService::new(2).expect("service initializes");
         let receipt = service
             .index_repository(fixture.path(), &deadline())
             .expect("DCG source indexes");
+        assert_eq!(receipt.indexed_files, 1);
         let generation = service
             .loaded_generation_snapshot(receipt.generation)
             .expect("generation remains retained");
+        let file = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "grammar.pl")
+            .expect("DCG-first source is retained");
+        assert_eq!(file.language, "prolog");
+        assert!(
+            generation
+                .document()
+                .entities
+                .iter()
+                .all(|entity| entity.language != "perl")
+        );
         let mut names = generation
             .document()
             .entities
@@ -36951,6 +37150,28 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort_unstable();
         assert_eq!(names, ["phrase//1", "phrase/1"]);
+        let body_gaps = generation
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "prolog-body-semantics-partial")
+            .collect::<Vec<_>>();
+        assert_eq!(body_gaps.len(), 2);
+        for gap in body_gaps {
+            assert_eq!(
+                gap.reason,
+                rootlight_ir::SkippedRegionReason::UnsupportedConstruct
+            );
+            assert_eq!(gap.source.generation(), receipt.generation);
+            assert_eq!(gap.source.span().file(), file.id);
+        }
+        assert!(
+            generation
+                .document()
+                .skipped_regions
+                .iter()
+                .all(|gap| gap.detail != "parser-coverage-incomplete")
+        );
         let located = service
             .code_locate(
                 receipt.generation,
@@ -36979,6 +37200,7 @@ mod tests {
             .and_then(|hit| hit.source.clone())
             .expect("nonterminal retains source evidence");
         assert_eq!(reference.generation(), receipt.generation);
+        assert_eq!(reference.span().file(), file.id);
         let start = usize::try_from(reference.span().start_byte()).expect("fixture offset fits");
         let end = usize::try_from(reference.span().end_byte()).expect("fixture offset fits");
         assert_eq!(
@@ -38399,7 +38621,7 @@ mod tests {
             PARSER_PROVIDER_SET_SEED,
             TREE_SITTER_ADAPTER_VERSION.as_bytes(),
             TREE_SITTER_RUNTIME_VERSION.as_bytes(),
-            b"rootlight.first-slice.treesitter-structural/202",
+            b"rootlight.first-slice.treesitter-structural/242",
             grammar.as_bytes(),
         ])
         .unwrap();
@@ -38495,6 +38717,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/239",
             b"rootlight.first-slice.treesitter-structural/240",
             b"rootlight.first-slice.treesitter-structural/241",
+            b"rootlight.first-slice.treesitter-structural/242",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
@@ -60693,7 +60916,9 @@ mod tests {
             let physical = &bytes[usize::try_from(declaration.span().start_byte()).unwrap()
                 ..usize::try_from(declaration.span().end_byte()).unwrap()];
             let units = physical
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     if little_endian {
                         u16::from_le_bytes([pair[0], pair[1]])
