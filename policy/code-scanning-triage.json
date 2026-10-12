@@ -1,0 +1,437 @@
+{
+  "schema": "rootlight.code-scanning-triage/1",
+  "entries": [
+    {
+      "number": 1,
+      "rule": "js/redos",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "third_party/tree-sitter-powershell-0.26.4/grammar.js",
+      "source_lines": {
+        "start": 117,
+        "end": 117
+      },
+      "function": "rules.expandable_string_literal",
+      "evidence": [
+        "The regular-expression literal is a Tree-sitter grammar token passed to token.immediate; no JavaScript RegExp execution consumes user input at this call.",
+        "bindings/rust/build.rs compiles the retained src/parser.c and src/scanner.c. Runtime parsing uses the generated C lexer (src/parser.c:5995), not JavaScript's backtracking regular-expression engine."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 2,
+      "rule": "js/bad-code-sanitization",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "scripts/test_npm_wrappers.mjs",
+      "source_lines": {
+        "start": 146,
+        "end": 148
+      },
+      "function": "elevatedLifecycle test subprocess",
+      "evidence": [
+        "The subprocess is a regression test for refusing elevated installation. The imported postinstall.mjs is copied from the repository into a mkdtempSync-created fixture (lines 71-99).",
+        "Only the fixture file URL is interpolated, after pathToFileURL conversion and JSON.stringify string-literal encoding. spawnSync receives an argument array and no shell; external JavaScript source is not being sanitized or executed."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 3,
+      "rule": "js/incomplete-sanitization",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "third_party/tree-sitter-scala-0.26.2/grammar.js",
+      "source_lines": {
+        "start": 59,
+        "end": 59
+      },
+      "function": "noSlashStar",
+      "evidence": [
+        "noSlash and noSlashStar transform compile-time operator character-class constants; their call sites use OP, OP_END_LEFT, and OP_NO_COLON, never user-controlled source.",
+        "Each input constant at lines 49-52 contains exactly one literal slash and one literal asterisk, as documented at line 57. Removing one occurrence is complete for the actual inputs; these helpers are grammar construction, not a general sanitization boundary."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 4,
+      "rule": "js/missing-origin-check",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "apps/rootlight-web/frontend/src/workers/graph-decoder.worker.ts",
+      "source_lines": {
+        "start": 22,
+        "end": 22
+      },
+      "function": "dedicated graph decoder Worker message listener",
+      "evidence": [
+        "The listener runs in a dedicated module Worker, created by createGraphDecoderWorker in apps/rootlight-web/frontend/src/features/graph/controller/graph-decoder-client.ts:122-127 with a repository-owned module URL.",
+        "Messages arrive on that Worker's private owner communication channel via GraphDecoderClient.decode. The callback is not registered on Window, and foreign windows cannot address it with window.postMessage; a Window message-origin check does not apply to this channel."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 13,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-service/src/lib.rs",
+      "source_lines": {
+        "start": 32537,
+        "end": 32537
+      },
+      "function": "tests::durable_file_only_fallback_preserves_exact_query_source_and_coverage::assert_file_only_state",
+      "evidence": [
+        "The assertion helper is nested inside a #[test] at lines 32520-32522, itself within the #[cfg(test)] tests module spanning lines 20361-40213.",
+        "The debug output is an index receipt for synthetic Rust, CSS, and Lua files created in private temporary fixtures at lines 32672-32715. The reported account_staging_bytes sources are memory accounting, not credentials or financial account data; this is failure-only test output."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 14,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "xtask/src/package.rs",
+      "source_lines": {
+        "start": 284,
+        "end": 285
+      },
+      "function": "smoke",
+      "evidence": [
+        "The println formats only report.candidate_target. exercise_install_lifecycle assigns that field from candidate_manifest.target at line 1222.",
+        "The value is the public package target identifier, read from package-manifest.json by read_lifecycle_manifest. No signing seed, private key, trusted-context object, or session credential is formatted by this statement."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 16,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 12828,
+        "end": 12828
+      },
+      "function": "tests::attached_index_disconnect_uses_independent_cancel_lane",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The fixed server nonce connects the test client to the fixture daemon while checking cancellation after an attached client disconnects. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 17,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 12939,
+        "end": 12939
+      },
+      "function": "tests::detached_index_trailing_data_uses_independent_cancel_lane",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The fixed server nonce connects a fixture client while testing detached-work cancellation and invalid trailing protocol data. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 18,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 13023,
+        "end": 13023
+      },
+      "function": "tests::negotiation_rejects_stale_nonce_and_unsupported_major",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The deliberately different nonce is the rejected stale-nonce input; the next assertion requires a negotiation error. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 19,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 13026,
+        "end": 13026
+      },
+      "function": "tests::negotiation_rejects_stale_nonce_and_unsupported_major",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The known fixture server nonce is paired with an invalid all-zero client ID to assert negotiation rejection. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 20,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 13068,
+        "end": 13068
+      },
+      "function": "tests::negotiation_rejects_stale_nonce_and_unsupported_major",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The known fixture nonce isolates unsupported protocol-major validation; this input is used only by the negotiation rejection test. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 21,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 16028,
+        "end": 16028
+      },
+      "function": "tests::negotiated_connection_quota_isolates_clients_and_releases_on_disconnect",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The first fixture client uses deterministic server and client identities so later connections can test the per-client quota. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 22,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 16050,
+        "end": 16050
+      },
+      "function": "tests::negotiated_connection_quota_isolates_clients_and_releases_on_disconnect",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The repeated fixture client identity deliberately triggers the same-client connection quota. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 23,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 16080,
+        "end": 16080
+      },
+      "function": "tests::negotiated_connection_quota_isolates_clients_and_releases_on_disconnect",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "A different deterministic fixture client identity verifies quota isolation between clients. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 24,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-daemon-core/src/lib.rs",
+      "source_lines": {
+        "start": 16107,
+        "end": 16107
+      },
+      "function": "tests::negotiated_connection_quota_isolates_clients_and_releases_on_disconnect",
+      "evidence": [
+        "The entire containing function is inside the #[cfg(test)] tests module spanning lines 12164-20957. The test-only service and hello helpers use fixed fixture identities (lines 12177-12180 and 12276-12280).",
+        "The first fixture identity reconnects after disconnect to verify that its connection quota was released. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 25,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 1767,
+        "end": 1767
+      },
+      "function": "decode_hex",
+      "evidence": [
+        "The zero array is initialization storage for decoding, not a generated nonce or secret. Lines 1760-1765 require exactly 2*N lowercase hexadecimal input bytes.",
+        "Lines 1768-1770 overwrite every output element with the corresponding parsed input byte. Any failed parse returns None; Some(decoded) is returned only after the complete overwrite. No initialization byte supplies entropy or a fixed credential."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 26,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2319,
+        "end": 2319
+      },
+      "function": "tests::discovery_round_trip_is_checked_namespaced_and_read_only",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The fixed nonce identifies only the fixture discovery record whose checked round trip is asserted. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 27,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2338,
+        "end": 2338
+      },
+      "function": "tests::web_discovery_round_trip_is_bounded_private_and_instance_exact",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The fixed instance nonce and control token belong to a fixture WebDiscoveryRecord; the test also asserts that Debug output omits the control token. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 28,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2356,
+        "end": 2356
+      },
+      "function": "tests::web_discovery_round_trip_is_bounded_private_and_instance_exact",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The mismatching fixed nonce deliberately verifies that foreign-instance cleanup leaves the fixture discovery record intact. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 29,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2368,
+        "end": 2368
+      },
+      "function": "tests::web_discovery_rejects_unknown_fields_and_non_reserved_ports",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The deterministic nonce and token construct a synthetic discovery record for unknown-field tampering and schema rejection. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 30,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2396,
+        "end": 2396
+      },
+      "function": "tests::web_discovery_rejects_unknown_fields_and_non_reserved_ports",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The deterministic nonce and token are inputs to a constructor call expected to reject a non-reserved port. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 31,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2615,
+        "end": 2615
+      },
+      "function": "tests::discovery_allows_negotiation_with_future_minor_and_rejects_obsolete_minor",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The fixed fixture nonce keeps discovery identity constant while the test varies protocol minor versions. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 32,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2636,
+        "end": 2636
+      },
+      "function": "tests::cleanup_never_removes_a_replaced_record",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The first deterministic nonce represents a stale fixture owner; cleanup must not remove the replacement record. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 33,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2637,
+        "end": 2637
+      },
+      "function": "tests::cleanup_never_removes_a_replaced_record",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The second deterministic nonce identifies the replacement fixture record that stale cleanup must preserve. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 34,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "crates/rootlight-runtime/src/lib.rs",
+      "source_lines": {
+        "start": 2657,
+        "end": 2657
+      },
+      "function": "tests::stale_cleanup_refuses_regular_files_and_links",
+      "evidence": [
+        "The containing #[test] is inside the #[cfg(test)] tests module spanning lines 1849-2671. The paths() helper at lines 1986-1992 creates private temporary state and runtime directories.",
+        "The fixed nonce derives a test endpoint filename occupied by a regular file or symlink; the assertions require refusal to remove it. These constants are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 35,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "apps/rootlight/src/main.rs",
+      "source_lines": {
+        "start": 3677,
+        "end": 3677
+      },
+      "function": "tests::update_health_runtime_supports_a_nonce_specific_endpoint",
+      "evidence": [
+        "The #[test] is inside the #[cfg(test)] tests module spanning lines 3095-4275.",
+        "The deterministic nonce only derives an endpoint for private temporary health state/runtime directories (lines 3666-3678), verifying that the endpoint is representable. It is excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 36,
+      "rule": "rust/hard-coded-cryptographic-value",
+      "source_commit": "967d260e351de151d841495d001ef40e23e5eee1",
+      "path": "apps/rootlight-daemon/src/first_slice.rs",
+      "source_lines": {
+        "start": 17608,
+        "end": 17608
+      },
+      "function": "tests::assert_watcher_initial_reconciliation",
+      "evidence": [
+        "This fixture helper is inside the #[cfg(test)] tests module spanning lines 16189-28466.",
+        "The fixed nonce connects the fixture watcher and control service for initial-reconciliation assertions. The helper and this nonce are excluded from production builds."
+      ],
+      "disposition": "false_positive"
+    }
+  ]
+}
