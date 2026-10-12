@@ -77,10 +77,19 @@ verify_sha256 \
 cp scripts/cargo-geiger-0.13.0.lock "$geiger_source/Cargo.lock"
 git -C "$geiger_source" apply --check --unidiff-zero --whitespace=error-all "$geiger_patch"
 git -C "$geiger_source" apply --unidiff-zero --whitespace=error-all "$geiger_patch"
-cargo install \
-    --locked \
-    --path "$geiger_source" \
-    --root "$temporary_root/cargo-geiger-install"
+# This declared audit-tool prerequisite has its own acquisition phase and source
+# root; product source replacement and offline policy must not resolve its graph.
+(
+    RUSTUP_TOOLCHAIN="$(rustup show active-toolchain)"
+    export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN%% *}"
+    cd "$geiger_source"
+    CARGO_NET_OFFLINE=false cargo fetch --locked
+    cargo install \
+        --offline \
+        --locked \
+        --path . \
+        --root "$temporary_root/cargo-geiger-install"
+)
 cp \
     "$temporary_root/cargo-geiger-install/bin/cargo-geiger$executable_suffix" \
     "$install_root/cargo-geiger$executable_suffix"
