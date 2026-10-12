@@ -766,8 +766,10 @@ fn closed_boolean_exports_and_callers_gate_final_cross_module_resolution() {
     }
 }
 
-const COMPILATION_WORK_GROUPS: usize = 96;
-const COMPILATION_WORK_STATEMENTS: usize = 768;
+// More branch groups preserve per-use scan pressure with fewer call facts to
+// serialize through the durable lifecycle. The retained IR proves the bound.
+const COMPILATION_WORK_GROUPS: usize = 256;
+const COMPILATION_WORK_STATEMENTS: usize = 288;
 
 fn compilation_work_deadline() -> Cancellation {
     // This larger durable fixture tests the default work ceiling, not indexing
@@ -819,6 +821,7 @@ fn assert_default_work_compilation_bindings(
         .filter(|extension| extension.namespace == rootlight_ir::VBA_COMPILATION_NAMESPACE)
         .collect();
     assert_eq!(inventories.len(), modules.len());
+    let mut linear_scan_work = 0_usize;
     for &(name, text) in modules {
         let file = source_file(document, text);
         let envelope = inventories
@@ -832,6 +835,20 @@ fn assert_default_work_compilation_bindings(
             })
             .unwrap();
         let inventory = rootlight_ir::decode_vba_compilation_envelope(envelope).unwrap();
+        let occurrences = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.file == file)
+            .count();
+        linear_scan_work = linear_scan_work
+            .checked_add(
+                inventory
+                    .branches
+                    .len()
+                    .checked_mul(occurrences)
+                    .expect("authored per-file scan work is representable"),
+            )
+            .expect("authored aggregate scan work is representable");
         let source = envelope.evidence.source.as_ref().unwrap();
         assert!(inventory.complete);
         assert_eq!(source.span(), inventory.scope);
@@ -892,6 +909,13 @@ fn assert_default_work_compilation_bindings(
         assert_eq!(read.data.chunks[0].bytes, text.as_bytes());
         assert!(read.data.chunks[0].extracted_from.is_some());
     }
+    // The former resolver charged every branch for every occurrence. Count
+    // actual retained facts so reducing fixture cost cannot erase that failure.
+    assert!(
+        linear_scan_work > rootlight_resolve::MAX_RESOLUTION_WORK_LIMIT,
+        "linear scan work {linear_scan_work} must exceed the default resolver ceiling"
+    );
+    eprintln!("retained compilation linear-scan work lower bound: {linear_scan_work}");
 
     let client = modules
         .iter()
