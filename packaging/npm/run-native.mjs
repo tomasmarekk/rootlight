@@ -34,6 +34,19 @@ const managedUninstallEnvironment = "ROOTLIGHT_NPM_MANAGED_UNINSTALL";
 const maximumBridgeFileBytes = 64 * 1024;
 const maximumNativeErrorBytes = 64 * 1024;
 const elevatedServiceExitStatus = 6;
+const serviceFailureReasons = new Set([
+  "runtime_unavailable",
+  "launch_failed",
+  "early_exit",
+  "start_timeout",
+  "stop_timeout",
+  "control_failed",
+  "invalid_response",
+  "browser_failed",
+  "registration_failed",
+  "privilege_inspection_failed",
+  "elevated_execution",
+]);
 const nativePackages = new Map([
   ["darwin-arm64", "@tomasmarekk/rootlight-darwin-arm64"],
   ["darwin-x64", "@tomasmarekk/rootlight-darwin-x64"],
@@ -58,7 +71,7 @@ export function runNative(executable) {
   exitFor(spawnNative(executable, process.argv.slice(2)));
 }
 
-export function runLifecycle(action) {
+export async function runLifecycle(action) {
   if (!new Set(["install", "uninstall"]).has(action)) {
     fail("rootlight: unsupported npm lifecycle action");
   }
@@ -91,12 +104,7 @@ export function runLifecycle(action) {
     }
     return;
   }
-  const lifecycleStdio = process.platform === "win32" ? "pipe" : "ignore";
-  const result = spawnNative(
-    "rootlight",
-    ["service", action],
-    lifecycleStdio,
-  );
+  const result = await spawnLifecycle(["service", action]);
   if (isWindowsElevatedServiceDenial(result)) {
     console.warn(
       `rootlight: refusing to ${action} the per-user service from an elevated Windows process; run rootlight service ${action} as the desktop user`,
@@ -113,18 +121,13 @@ export function runLifecycle(action) {
     }
     return;
   }
-  if (result.error !== undefined) {
+  if (result.error !== undefined || result.truncated || result.status !== 0) {
     if (action === "install") {
       removeCliBridgeAfterFailedInstall();
     }
-    fail(
-      `rootlight: failed to start the native executable: ${result.error.message}`,
+    console.error(
+      `rootlight: service failure ${JSON.stringify(serviceFailure(action, result))}`,
     );
-  }
-  if (result.status !== 0) {
-    if (action === "install") {
-      removeCliBridgeAfterFailedInstall();
-    }
     fail(`rootlight: failed to ${action} the local service`);
   }
   if (
@@ -138,6 +141,79 @@ export function runLifecycle(action) {
     }
   }
   process.exit(0);
+}
+
+function spawnLifecycle(arguments_) {
+  const executable = resolveNativeExecutable("rootlight");
+  return new Promise((resolveResult) => {
+    const child = spawn(executable, arguments_, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const streams = { stdout: [], stderr: [] };
+    const lengths = { stdout: 0, stderr: 0 };
+    let truncated = false;
+    let finished = false;
+    for (const name of ["stdout", "stderr"]) {
+      child[name].on("data", (chunk) => {
+        lengths[name] += chunk.length;
+        if (lengths[name] <= maximumNativeErrorBytes) streams[name].push(chunk);
+        else truncated = true;
+      });
+    }
+    const finish = (status, signal, error) => {
+      if (finished) return;
+      finished = true;
+      // Persistent descendants may inherit these pipes. Only the native CLI's
+      // exit owns lifecycle completion; never wait for descendant stream EOF.
+      setImmediate(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        resolveResult({
+          status,
+          signal,
+          error,
+          truncated,
+          stdout: Buffer.concat(streams.stdout).toString("utf8"),
+          stderr: Buffer.concat(streams.stderr).toString("utf8"),
+        });
+      });
+    };
+    child.once("error", (error) => finish(null, null, error));
+    child.once("exit", (status, signal) => finish(status, signal));
+  });
+}
+
+function serviceFailure(action, result) {
+  let reason = "unclassified";
+  if (result.error !== undefined) reason = "spawn_failed";
+  else if (result.truncated) reason = "output_limit";
+  else {
+    try {
+      const response = JSON.parse(result.stderr);
+      const detail = response?.error?.details?.service_reason;
+      if (
+        response?.contract_version === "1.0" &&
+        response?.ok === false &&
+        response?.error?.code === "BUSY" &&
+        detail?.type === "label" &&
+        serviceFailureReasons.has(detail.value)
+      )
+        reason = detail.value;
+    } catch {
+      // Unstructured native output is intentionally never forwarded.
+    }
+  }
+  return {
+    schema: "rootlight.npm-service-failure/1",
+    action,
+    reason,
+    exit_status: Number.isInteger(result.status) ? result.status : null,
+    signal:
+      typeof result.signal === "string" &&
+      /^SIG[A-Z0-9]{1,12}$/u.test(result.signal)
+        ? result.signal
+        : null,
+  };
 }
 
 function uninstallRootlight() {
@@ -195,6 +271,7 @@ function isWindowsElevatedServiceDenial(result) {
   if (
     process.platform !== "win32" ||
     result.error !== undefined ||
+    result.truncated ||
     result.status !== elevatedServiceExitStatus ||
     result.stdout !== "" ||
     typeof result.stderr !== "string"

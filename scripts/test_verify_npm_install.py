@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -17,6 +20,59 @@ SPEC.loader.exec_module(verify_npm_install)
 
 
 class VerifyNpmInstallTests(unittest.TestCase):
+    def test_failure_receipt_survives_install_cleanup_without_raw_output(self) -> None:
+        diagnostic = {
+            "schema": "rootlight.npm-service-failure/1", "action": "install",
+            "reason": "early_exit", "exit_status": 3, "signal": None,
+        }
+        completed = verify_npm_install.subprocess.CompletedProcess(
+            args=["npm", "install"], returncode=1, stdout="private-source-value",
+            stderr="npm error rootlight: service failure " + json.dumps(diagnostic),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def cleanup(*arguments: object) -> None:
+                shutil.rmtree(root / "local" / "project")
+                shutil.rmtree(root / "local" / "prefix")
+
+            with (
+                mock.patch.object(verify_npm_install.subprocess, "run", return_value=completed),
+                mock.patch.object(verify_npm_install, "cleanup", side_effect=cleanup),
+                self.assertRaises(verify_npm_install.NpmInstallError),
+            ):
+                verify_npm_install.verify_install_mode(
+                    "local", root, root / "runtime", root / "root.tgz",
+                    root / "native.tgz", "rootlight-darwin-x64",
+                    "@tomasmarekk/rootlight-darwin-x64", "npm",
+                )
+
+            receipt = (root / "local" / "failure.json").read_text(encoding="utf-8")
+            self.assertNotIn("private-source-value", receipt)
+            self.assertEqual(json.loads(receipt), {
+                "schema": "rootlight.npm-install-failure/1", "mode": "local",
+                "command_exit_status": 1, "service_failure": diagnostic,
+            })
+            self.assertFalse((root / "local" / "project").exists())
+
+    def test_service_failure_parser_rejects_unreviewed_fields_and_values(self) -> None:
+        valid = {
+            "schema": "rootlight.npm-service-failure/1", "action": "install",
+            "reason": "early_exit", "exit_status": 3, "signal": None,
+        }
+        for mutation in (
+            {"reason": "private-source-value"}, {"extra": "private-source-value"},
+            {"exit_status": True}, {"signal": "private-source-value"},
+            {"action": "private-source-value"}, {"reason": ["early_exit"]},
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertIsNone(verify_npm_install.parse_service_failure(
+                    verify_npm_install.SERVICE_FAILURE_PREFIX + json.dumps(valid | mutation)
+                ))
+        self.assertIsNone(verify_npm_install.parse_service_failure(
+            verify_npm_install.SERVICE_FAILURE_PREFIX + "x" * 1025
+        ))
+
     def test_windows_resolves_the_command_shim(self) -> None:
         with mock.patch.object(
             verify_npm_install.shutil,

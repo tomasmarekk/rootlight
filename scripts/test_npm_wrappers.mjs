@@ -110,6 +110,15 @@ try {
       '  console.error(JSON.stringify({ contract_version: "1.0", ok: false, exit_family: "security_policy", error: { code: "PERMISSION_DENIED", message: "local web service requires a non-elevated process", retryable: false } }));',
       "  process.exit(6);",
       "}",
+      "if (process.env.ROOTLIGHT_TEST_SERVICE_FAILURE) {",
+      "  const reason = process.env.ROOTLIGHT_TEST_SERVICE_FAILURE;",
+      '  const privateValue = "private-source-and-bootstrap-capability";',
+      '  if (reason === "descendant") { const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: "inherit" }); child.unref(); }',
+      '  const label = new Set(["large", "descendant"]).has(reason) ? "early_exit" : reason;',
+      '  const output = reason === "raw" ? privateValue : reason === "oversized" ? privateValue.repeat(4000) : JSON.stringify({ contract_version: "1.0", ok: false, error: { code: "BUSY", details: { service_reason: { type: "label", value: label } }, unexpected: reason === "large" ? privateValue.repeat(1600) : privateValue } });',
+      '  require("node:fs").writeSync(2, output);',
+      "  process.exit(3);",
+      "}",
       'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: "inherit" });',
       "child.unref();",
       "",
@@ -219,6 +228,54 @@ try {
       assert.equal(bridgeResult.status, 0, bridgeResult.stderr);
       assert.equal(bridgeResult.stdout.trim(), process.version);
     }
+  }
+
+  for (const [nativeReason, expectedReason] of [
+    ["early_exit", "early_exit"],
+    ["registration_failed", "registration_failed"],
+    ["large", "early_exit"],
+    ["descendant", "early_exit"],
+    ["private-source-and-bootstrap-capability", "unclassified"],
+    ["raw", "unclassified"],
+    ["oversized", "output_limit"],
+  ]) {
+    const started = Date.now();
+    const result = spawnSync(
+      process.execPath,
+      [join(rootBin, "postinstall.mjs")],
+      {
+        cwd: temporary,
+        encoding: "utf8",
+        env: {
+          ...lifecycleEnvironment,
+          ROOTLIGHT_TEST_SERVICE_FAILURE: nativeReason,
+        },
+      },
+    );
+    assert.equal(result.status, 1, result.stderr);
+    assert.ok(Date.now() - started < 2000, "failed lifecycle waited for a descendant");
+    assert.equal(result.stdout, "");
+    assert.ok(
+      !result.stderr.includes("private-source-and-bootstrap-capability"),
+    );
+    const diagnosticLine = result.stderr
+      .split("\n")
+      .find((line) => line.startsWith("rootlight: service failure "));
+    assert.notEqual(diagnosticLine, undefined, result.stderr);
+    assert.deepEqual(
+      JSON.parse(diagnosticLine.slice("rootlight: service failure ".length)),
+      {
+        schema: "rootlight.npm-service-failure/1",
+        action: "install",
+        reason: expectedReason,
+        exit_status: 3,
+        signal: null,
+      },
+    );
+    assert.equal(
+      existsSync(join(globalBin, ".rootlight-cli-bridge.json")),
+      false,
+    );
   }
 
   for (const name of [

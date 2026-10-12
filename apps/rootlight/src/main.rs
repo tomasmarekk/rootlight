@@ -3066,9 +3066,13 @@ impl CliError {
             )
             .build();
         }
-        if matches!(self, Self::WebService(_)) {
+        if let Self::WebService(error) = self {
             return PublicError::builder(ErrorCode::Busy, "local web service is unavailable")
                 .retryable()
+                .detail(
+                    DetailKey::parse("service_reason")?,
+                    PublicValue::Label(SafeLabel::parse(error.diagnostic_reason())?),
+                )
                 .next_action(NextAction::Retry)
                 .build();
         }
@@ -3837,6 +3841,41 @@ mod tests {
             "local web service requires a non-elevated process"
         );
         assert!(!public.retryable());
+    }
+
+    #[test]
+    fn web_service_diagnostics_retain_only_static_failure_reasons() {
+        let failures = [
+            (web_service::WebServiceError::EarlyExit, "early_exit"),
+            (web_service::WebServiceError::StartTimedOut, "start_timeout"),
+            (
+                web_service::WebServiceError::Registration(std::io::Error::other(
+                    "private-source-and-bootstrap-capability",
+                )),
+                "registration_failed",
+            ),
+            (
+                web_service::WebServiceError::Control(std::io::Error::other(
+                    "private-source-and-bootstrap-capability",
+                )),
+                "control_failed",
+            ),
+        ];
+        for (failure, reason) in failures {
+            let error = CliError::WebService(failure);
+            let public = error.public_error().expect("public error builds");
+            assert_eq!(public.code(), ErrorCode::Busy);
+            assert_eq!(public.message(), "local web service is unavailable");
+            assert!(public.retryable());
+            let json = serde_json::to_value(public).expect("public error serializes");
+            assert_eq!(json["details"]["service_reason"]["type"], "label");
+            assert_eq!(json["details"]["service_reason"]["value"], reason);
+            assert!(
+                !json
+                    .to_string()
+                    .contains("private-source-and-bootstrap-capability")
+            );
+        }
     }
 
     #[test]

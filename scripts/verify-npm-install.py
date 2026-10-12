@@ -24,6 +24,13 @@ COMMAND_TIMEOUT_SECONDS = 180
 HTTP_TIMEOUT_SECONDS = 5
 STOP_TIMEOUT_SECONDS = 30
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
+SERVICE_FAILURE_PREFIX = "rootlight: service failure "
+SERVICE_FAILURE_REASONS = {
+    "runtime_unavailable", "launch_failed", "early_exit", "start_timeout",
+    "stop_timeout", "control_failed", "invalid_response", "browser_failed",
+    "registration_failed", "privilege_inspection_failed", "elevated_execution",
+    "spawn_failed", "output_limit", "unclassified",
+}
 WEB_URL = re.compile(
     r"^Rootlight Web UI: http://127\.0\.0\.1:43127/"
     r"#bootstrap=([A-Za-z0-9_-]{43})\r?\n$"
@@ -39,6 +46,17 @@ TARGET_PACKAGES = {
 
 class NpmInstallError(RuntimeError):
     """The observable npm installation contract was not satisfied."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        command_exit_status: int | None = None,
+        service_failure: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.command_exit_status = command_exit_status
+        self.service_failure = service_failure
 
 
 def parse_args(arguments: list[str]) -> argparse.Namespace:
@@ -264,6 +282,16 @@ def verify_install_mode(
             "uninstall_removed_native_package": True,
             "uninstall_removed_root_package": True,
         }
+    except NpmInstallError as error:
+        # Cleanup removes installed packages and private runtime data. Retain
+        # only this closed diagnostic contract, never command output or tokens.
+        write_json_new(root / "failure.json", {
+            "schema": "rootlight.npm-install-failure/1",
+            "mode": mode,
+            "command_exit_status": error.command_exit_status,
+            "service_failure": error.service_failure,
+        })
+        raise
     finally:
         cleanup(
             mode,
@@ -400,9 +428,40 @@ def run(
     if check and completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise NpmInstallError(
-            f"{stage} failed with exit code {completed.returncode}: {detail[:2000]}"
+            f"{stage} failed with exit code {completed.returncode}: {detail[:2000]}",
+            command_exit_status=completed.returncode,
+            service_failure=parse_service_failure(completed.stderr),
         )
     return completed
+
+
+def parse_service_failure(output: str) -> dict[str, object] | None:
+    """Retain only the bounded public npm lifecycle diagnostic contract."""
+    for line in output.splitlines():
+        # npm may prepend its own error label to lifecycle stderr.
+        _, separator, payload = line.partition(SERVICE_FAILURE_PREFIX)
+        if not separator or len(payload) > 1024:
+            continue
+        try:
+            value = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict) or set(value) != {
+            "schema", "action", "reason", "exit_status", "signal"
+        }:
+            continue
+        status, signal = value["exit_status"], value["signal"]
+        if (
+            value["schema"] == "rootlight.npm-service-failure/1"
+            and value["action"] in ("install", "uninstall")
+            and isinstance(value["reason"], str)
+            and value["reason"] in SERVICE_FAILURE_REASONS
+            and (status is None or (type(status) is int and -(2**31) <= status < 2**31))
+            and (signal is None or (isinstance(signal, str) and
+                 re.fullmatch(r"SIG[A-Z0-9]{1,12}", signal)))
+        ):
+            return value
+    return None
 
 
 def run_json(

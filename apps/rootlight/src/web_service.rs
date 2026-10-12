@@ -108,6 +108,27 @@ pub(crate) enum WebServiceError {
 }
 
 impl WebServiceError {
+    pub(crate) fn diagnostic_reason(&self) -> &'static str {
+        // Classify the boundary without publishing OS errors, paths, or tokens.
+        match self {
+            Self::Runtime(_) => "runtime_unavailable",
+            #[cfg(not(windows))]
+            Self::Launch(_) => "launch_failed",
+            #[cfg(windows)]
+            Self::WindowsLaunch(_) => "launch_failed",
+            Self::EarlyExit => "early_exit",
+            Self::StartTimedOut => "start_timeout",
+            Self::StopTimedOut => "stop_timeout",
+            Self::Control(_) => "control_failed",
+            Self::InvalidResponse => "invalid_response",
+            Self::Browser(_) => "browser_failed",
+            Self::Registration(_) => "registration_failed",
+            #[cfg(not(unix))]
+            Self::PrivilegeInspection => "privilege_inspection_failed",
+            Self::ElevatedExecution => "elevated_execution",
+        }
+    }
+
     #[cfg(not(unix))]
     pub(crate) fn is_privilege_inspection_failure(&self) -> bool {
         matches!(self, Self::PrivilegeInspection)
