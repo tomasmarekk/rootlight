@@ -68,8 +68,8 @@ pub use groovy_type_lookup::{
 pub use identity::{
     FILE_IDENTITY_CLAIM_NAMESPACE, FactIdentityRecipeError, FileIdentityClaim,
     IDENTITY_CLAIM_VERSION, IdentityClaimError, RustImplScopeIdentity, RustScopeIdentityError,
-    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SymbolIdentityClaim, canonical_rust_impl_scope,
-    canonical_symbol_signature, decode_file_identity_claim_envelope,
+    SYMBOL_IDENTITY_CLAIM_NAMESPACE, SYMBOL_IDENTITY_CLAIM_VERSION, SymbolIdentityClaim,
+    canonical_rust_impl_scope, canonical_symbol_signature, decode_file_identity_claim_envelope,
     decode_file_identity_claim_envelope_with_checkpoint, decode_symbol_identity_claim_envelope,
     decode_symbol_identity_claim_envelope_with_checkpoint, derive_coverage_record_id,
     derive_coverage_record_id_with_checkpoint, derive_diagnostic_record_id,

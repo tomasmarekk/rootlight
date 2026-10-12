@@ -23,7 +23,8 @@ use rootlight_ids::{
 };
 use rootlight_ir::{
     AnalysisTier, CoverageScope, CoverageStatus, ExtensionSupport, FactDomain, OccurrenceRole,
-    OccurrenceTarget, RelationPredicate,
+    OccurrenceTarget, RelationPredicate, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+    SYMBOL_IDENTITY_CLAIM_VERSION,
 };
 use rootlight_protocol::{
     adapter_contract::{ADAPTER_NONCE_BYTES, NegotiatedSession},
@@ -33,7 +34,8 @@ use rootlight_protocol::{
             ResourceLimits,
         },
         common::v1::{
-            ContentHash as WireContentHash, FileId as WireFileId, GenerationId as WireGenerationId,
+            ContentHash as WireContentHash, ContractVersion, ExtensionDescriptor,
+            FileId as WireFileId, GenerationId as WireGenerationId,
             RepositoryId as WireRepositoryId,
         },
     },
@@ -174,6 +176,23 @@ fn actual_isolated_binary_returns_multifile_tier_b() {
 
     assert!(output.isolation().permits_deep_adapter());
     assert_eq!(output.document().files.len(), 3);
+    let symbol_claim = output
+        .document()
+        .extensions
+        .iter()
+        .find(|extension| extension.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
+        .expect("project symbols retain their identity claims across the process boundary");
+    assert_eq!(symbol_claim.version, SYMBOL_IDENTITY_CLAIM_VERSION);
+    assert!(session.has_extension(&ExtensionDescriptor {
+        namespace: symbol_claim.namespace.clone(),
+        version: Some(ContractVersion { major: 1, minor: 3 }),
+        critical: false,
+    }));
+    assert!(!session.has_extension(&ExtensionDescriptor {
+        namespace: symbol_claim.namespace.clone(),
+        version: Some(ContractVersion { major: 1, minor: 0 }),
+        critical: false,
+    }));
     assert!(output.document().provenance.iter().all(|provenance| {
         provenance.producer.name() == PROJECT_ADAPTER_NAME
             && provenance.producer.version() == PROJECT_ADAPTER_VERSION

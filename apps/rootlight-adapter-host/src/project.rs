@@ -28,8 +28,9 @@ use rootlight_ids::{
     ContentHash, FileId, FileIdentity, GenerationId, RepositoryId, content_hash, derive_file,
 };
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE, IrLimits,
-    LEXICAL_EXTENSION_NAMESPACE, ProducerIdentity, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SourceRef,
+    AnalysisTier, BuildContextIdentity, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE,
+    IDENTITY_CLAIM_VERSION, IrLimits, LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION,
+    ProducerIdentity, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SYMBOL_IDENTITY_CLAIM_VERSION, SourceRef,
     SourceSpan,
 };
 use rootlight_protocol::{
@@ -366,22 +367,24 @@ const fn project_protocol_version() -> ContractVersion {
     }
 }
 
-fn lexical_extension() -> ExtensionDescriptor {
-    project_extension(LEXICAL_EXTENSION_NAMESPACE)
-}
-
 fn project_extensions() -> Vec<ExtensionDescriptor> {
     vec![
-        project_extension(FILE_IDENTITY_CLAIM_NAMESPACE),
-        project_extension(SYMBOL_IDENTITY_CLAIM_NAMESPACE),
-        lexical_extension(),
+        project_extension(FILE_IDENTITY_CLAIM_NAMESPACE, IDENTITY_CLAIM_VERSION),
+        project_extension(
+            SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+            SYMBOL_IDENTITY_CLAIM_VERSION,
+        ),
+        project_extension(LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION),
     ]
 }
 
-fn project_extension(namespace: &str) -> ExtensionDescriptor {
+fn project_extension(namespace: &str, version: &str) -> ExtensionDescriptor {
     ExtensionDescriptor {
         namespace: namespace.to_owned(),
-        version: Some(ContractVersion { major: 1, minor: 0 }),
+        version: Some(
+            crate::parse_extension_version(version)
+                .expect("built-in IR extension versions have canonical major and minor components"),
+        ),
         critical: false,
     }
 }
@@ -1168,17 +1171,24 @@ mod tests {
         assert_eq!(
             extensions
                 .iter()
-                .map(|extension| extension.namespace.as_str())
+                .map(|extension| (extension.namespace.as_str(), extension.version))
                 .collect::<Vec<_>>(),
             [
-                FILE_IDENTITY_CLAIM_NAMESPACE,
-                SYMBOL_IDENTITY_CLAIM_NAMESPACE,
-                LEXICAL_EXTENSION_NAMESPACE,
+                (
+                    FILE_IDENTITY_CLAIM_NAMESPACE,
+                    Some(ContractVersion { major: 1, minor: 0 })
+                ),
+                (
+                    SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+                    Some(ContractVersion { major: 1, minor: 3 })
+                ),
+                (
+                    LEXICAL_EXTENSION_NAMESPACE,
+                    Some(ContractVersion { major: 1, minor: 0 })
+                ),
             ]
         );
-        assert!(extensions.iter().all(|extension| {
-            extension.version == Some(ContractVersion { major: 1, minor: 0 }) && !extension.critical
-        }));
+        assert!(extensions.iter().all(|extension| !extension.critical));
     }
 
     #[test]
