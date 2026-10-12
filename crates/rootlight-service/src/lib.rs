@@ -6383,7 +6383,7 @@ impl FirstSliceService {
             .map_err(|_| FirstSliceError::Limits)?;
         let analysis_limits = analysis_limits(maximum_source_bytes)?;
         let parser = Arc::new(
-            TreeSitterProvider::new(parser_config(maximum_source_bytes)?)
+            TreeSitterProvider::new_deferred(parser_config(maximum_source_bytes)?)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
         let registry = GrammarRegistry::audited().map_err(|_| FirstSliceError::Adapter)?;

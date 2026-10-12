@@ -183,8 +183,8 @@ impl TreeSitterProvider {
             }
             let pack = self
                 .query_packs
-                .get(family)
-                .ok_or_else(|| provider_failure("embedded-query-pack"))?;
+                .get_for_native(family, family, cancellation)
+                .map_err(|error| error.into_adapter_error("embedded-query-pack"))?;
             let mut captures = if let Some(maximum) = max_facts {
                 let extraction = pack.extract(
                     family,

@@ -141,12 +141,41 @@ impl TreeSitterProvider {
     ///
     /// Compiled built-in queries are shared across the process; parser pools,
     /// source caches, capacities and incremental identities remain independent.
+    /// Every built-in query is compiled and validated before this returns.
     ///
     /// # Errors
     ///
     /// Returns [`RuntimeConfigError`] if built-in registry/capability metadata
     /// fails validation or process-local provider identities are exhausted.
     pub fn new(config: RuntimeConfig) -> Result<Self, RuntimeConfigError> {
+        let provider = Self::new_deferred(config)?;
+        QueryPackRegistry::audited()
+            .map_err(|family| RuntimeConfigError::InvalidBuiltInQueryPack { family })?;
+        Ok(provider)
+    }
+
+    /// Creates a provider that compiles each built-in query on first use.
+    ///
+    /// All grammar ABIs and capability metadata are validated immediately.
+    /// All languages, embedded grammars and TSX remain available. Immutable
+    /// queries are shared with eager providers; pools and caches remain independent.
+    /// Query compilation failures return [`AdapterError::ProviderFailed`] with
+    /// code `query-pack-compile` from the invoking parse or analysis operation.
+    /// Cancellation is checked before and after first-use compilation or waiting;
+    /// hard preemption of native compilation requires the isolated supervisor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeConfigError`] if registry/capability metadata fails
+    /// validation or process-local provider identities are exhausted.
+    pub fn new_deferred(config: RuntimeConfig) -> Result<Self, RuntimeConfigError> {
+        Self::with_query_packs(config, QueryPackRegistry::deferred())
+    }
+
+    fn with_query_packs(
+        config: RuntimeConfig,
+        query_packs: &'static QueryPackRegistry,
+    ) -> Result<Self, RuntimeConfigError> {
         #[allow(
             deprecated,
             reason = "try_update is unavailable on the supported Rust 1.90 minimum"
@@ -157,10 +186,8 @@ impl TreeSitterProvider {
             })
             .map_err(|_| RuntimeConfigError::ProviderIdentityExhausted)?;
         let registry = GrammarRegistry::audited()?;
-        let query_packs = QueryPackRegistry::audited()
-            .map_err(|family| RuntimeConfigError::InvalidBuiltInQueryPack { family })?;
         for descriptor in registry.descriptors() {
-            if query_packs.get(descriptor.family()).is_none() {
+            if !query_packs.contains(descriptor.family()) {
                 return Err(RuntimeConfigError::InvalidBuiltInQueryPack {
                     family: descriptor.family(),
                 });
@@ -227,10 +254,11 @@ impl TreeSitterProvider {
             cancellation.check()?;
             return Ok(0);
         }
-        let pack = self
-            .query_packs
-            .get_for_source(prepared.family, request.source().path().as_str())
-            .ok_or_else(|| provider_failure("query-pack-missing"))?;
+        let pack = self.query_packs.get_for_source(
+            prepared.family,
+            request.source().path().as_str(),
+            cancellation,
+        )?;
         let mut candidates = pack.extract_identity(
             prepared.family,
             &prepared.tree,
@@ -691,10 +719,11 @@ impl TreeSitterProvider {
         cancellation.check()?;
         let budget = sink.remaining_budget();
         let max_facts = pre_extraction_fact_limit(budget)?;
-        let pack = self
-            .query_packs
-            .get_for_source(family, request.source().path().as_str())
-            .ok_or_else(|| provider_failure("query-pack-missing"))?;
+        let pack = self.query_packs.get_for_source(
+            family,
+            request.source().path().as_str(),
+            cancellation,
+        )?;
         let mut extraction = pack.extract(
             family,
             tree,
@@ -900,7 +929,14 @@ impl std::fmt::Debug for TreeSitterProvider {
             .field("capabilities", &self.capabilities)
             .field("config", &self.config)
             .field("query_pack_count", &self.query_packs.len())
-            .field("query_pattern_count", &self.query_packs.pattern_count())
+            .field(
+                "initialized_query_pack_count",
+                &self.query_packs.initialized_count(),
+            )
+            .field(
+                "initialized_query_pattern_count",
+                &self.query_packs.initialized_pattern_count(),
+            )
             .field("stats", &self.stats())
             .finish_non_exhaustive()
     }
@@ -3505,6 +3541,32 @@ mod tests {
     }
 
     #[test]
+    fn deferred_provider_metadata_and_debug_do_not_compile_queries() {
+        let registry = Box::leak(Box::new(QueryPackRegistry::uninitialized_for_test()));
+        let config = RuntimeConfig::new(
+            4096,
+            1024,
+            64,
+            8,
+            8,
+            1,
+            4096,
+            ParserSettings::new(256).unwrap(),
+        )
+        .unwrap();
+        let provider = TreeSitterProvider::with_query_packs(config, registry).unwrap();
+        assert_eq!(registry.initialized_count(), 0);
+        assert_eq!(provider.registry.descriptors().len(), 55);
+        assert_eq!(provider.capabilities.languages().len(), 55);
+        assert_eq!(provider.stats().pooled_parsers, 0);
+        assert_eq!(provider.stats().cache.entries, 0);
+        let debug = format!("{provider:?}");
+        assert!(debug.contains("initialized_query_pack_count: 0"));
+        assert!(debug.contains("initialized_query_pattern_count: 0"));
+        assert_eq!(registry.initialized_count(), 0);
+    }
+
+    #[test]
     fn providers_share_immutable_queries_but_keep_runtime_state_private() {
         let barrier = std::sync::Barrier::new(4);
         let barrier = &barrier;
@@ -3524,7 +3586,12 @@ mod tests {
                         )
                         .expect("valid provider configuration");
                         barrier.wait();
-                        TreeSitterProvider::new(config).expect("audited provider initializes")
+                        if capacity % 2 == 0 {
+                            TreeSitterProvider::new_deferred(config)
+                                .expect("deferred provider initializes")
+                        } else {
+                            TreeSitterProvider::new(config).expect("audited provider initializes")
+                        }
                     })
                 })
                 .collect::<Vec<_>>();
@@ -3563,11 +3630,19 @@ mod tests {
             assert!(std::ptr::eq(
                 first
                     .query_packs
-                    .get_for_source(GrammarFamily::TypeScript, "source.tsx")
+                    .get_for_source(
+                        GrammarFamily::TypeScript,
+                        "source.tsx",
+                        &Cancellation::new()
+                    )
                     .unwrap(),
                 provider
                     .query_packs
-                    .get_for_source(GrammarFamily::TypeScript, "source.tsx")
+                    .get_for_source(
+                        GrammarFamily::TypeScript,
+                        "source.tsx",
+                        &Cancellation::new()
+                    )
                     .unwrap(),
             ));
         }

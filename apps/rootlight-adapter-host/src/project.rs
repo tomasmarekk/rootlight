@@ -462,8 +462,8 @@ fn analyze_project_request(
     validate_input_order(&decoded_inputs)?;
 
     let runtime_config = parser_config(&decoded_inputs, limits)?;
-    let parser =
-        TreeSitterProvider::new(runtime_config).map_err(|_| AdapterHostError::ProjectAnalysis)?;
+    let parser = TreeSitterProvider::new_deferred(runtime_config)
+        .map_err(|_| AdapterHostError::ProjectAnalysis)?;
     let producer = ProducerIdentity::new(
         PROJECT_ADAPTER_NAME,
         PROJECT_ADAPTER_VERSION,

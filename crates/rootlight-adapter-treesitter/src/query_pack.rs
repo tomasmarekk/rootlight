@@ -8,7 +8,7 @@ use std::{cmp::Ordering, collections::BinaryHeap, ops::ControlFlow, sync::OnceLo
 use rootlight_adapter_sdk::{
     AdapterError, DiagnosticCode, ResourceKind, SinkError, SyntaxFactKind,
 };
-use rootlight_cancel::Cancellation;
+use rootlight_cancel::{Cancellation, Cancelled};
 use tree_sitter::{
     CaptureQuantifier, Query, QueryCapture, QueryCursor, QueryCursorOptions, StreamingIterator,
 };
@@ -23,6 +23,8 @@ mod assembly;
 mod cobol;
 mod common_lisp;
 mod dart;
+#[cfg(test)]
+mod deferred_tests;
 mod ecmascript;
 mod fortran;
 mod fsharp;
@@ -1422,8 +1424,85 @@ fn identity_scan_limits(max_nodes: usize) -> Result<QueryScanLimits, AdapterErro
 }
 
 pub(crate) struct QueryPackRegistry {
-    packs: Vec<(GrammarFamily, QueryPack)>,
-    typescript_tsx: QueryPack,
+    packs: Vec<(GrammarFamily, QueryPackEntry)>,
+    typescript_tsx: QueryPackEntry,
+}
+
+struct QueryPackEntry {
+    family: GrammarFamily,
+    native: GrammarFamily,
+    source: &'static str,
+    compiled: OnceLock<Result<QueryPack, GrammarFamily>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum QueryPackError {
+    #[error("query pack is missing for {family:?} with native grammar {native:?}")]
+    Missing {
+        family: GrammarFamily,
+        native: GrammarFamily,
+    },
+    #[error("query compilation failed for {family:?} with native grammar {native:?}")]
+    Compilation {
+        family: GrammarFamily,
+        native: GrammarFamily,
+    },
+    #[error(transparent)]
+    Cancelled(#[from] Cancelled),
+}
+
+impl From<QueryPackError> for AdapterError {
+    fn from(error: QueryPackError) -> Self {
+        error.into_adapter_error("query-pack-missing")
+    }
+}
+
+impl QueryPackError {
+    pub(crate) fn into_adapter_error(self, missing_code: &'static str) -> AdapterError {
+        match self {
+            Self::Missing { .. } => query_failure(missing_code),
+            Self::Compilation { .. } => query_failure("query-pack-compile"),
+            Self::Cancelled(cancelled) => cancelled.into(),
+        }
+    }
+}
+
+impl QueryPackEntry {
+    const fn new(family: GrammarFamily, native: GrammarFamily, source: &'static str) -> Self {
+        Self {
+            family,
+            native,
+            source,
+            compiled: OnceLock::new(),
+        }
+    }
+
+    fn load(&self, cancellation: &Cancellation) -> Result<&QueryPack, QueryPackError> {
+        self.load_with(cancellation, || {
+            if self.family == self.native {
+                QueryPack::compile(self.family, self.source)
+            } else {
+                QueryPack::compile_native(self.family, self.native, self.source)
+            }
+        })
+    }
+
+    fn load_with(
+        &self,
+        cancellation: &Cancellation,
+        initialize: impl FnOnce() -> Result<QueryPack, GrammarFamily>,
+    ) -> Result<&QueryPack, QueryPackError> {
+        cancellation.check()?;
+        // Query compilation is native, non-preemptible work. A caller cancelled
+        // while compiling or waiting must not consume the result; only the
+        // immutable built-in query is retained for other callers.
+        let compiled = self.compiled.get_or_init(initialize);
+        cancellation.check()?;
+        compiled.as_ref().map_err(|_| QueryPackError::Compilation {
+            family: self.family,
+            native: self.native,
+        })
+    }
 }
 
 fn query_failure(code: &'static str) -> AdapterError {
@@ -2800,19 +2879,34 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
 }
 
 impl QueryPackRegistry {
-    pub(crate) fn audited() -> Result<&'static Self, GrammarFamily> {
-        // Native query analysis is expensive (see benches/provider_startup.rs).
-        // Only the fixed built-in queries are shared: source trees, cursors and
-        // caller budgets remain request- or provider-owned. Static inputs also
-        // make a compilation failure deterministic for the process lifetime.
-        static AUDITED: OnceLock<Result<QueryPackRegistry, GrammarFamily>> = OnceLock::new();
-        AUDITED
-            .get_or_init(Self::compile_audited)
-            .as_ref()
-            .map_err(|family| *family)
+    #[cfg(test)]
+    pub(crate) fn uninitialized_for_test() -> Self {
+        Self::catalogue()
     }
 
-    fn compile_audited() -> Result<Self, GrammarFamily> {
+    pub(crate) fn audited() -> Result<&'static Self, GrammarFamily> {
+        let registry = Self::deferred();
+        let cancellation = Cancellation::new();
+        for (family, entry) in &registry.packs {
+            entry.load(&cancellation).map_err(|_| *family)?;
+        }
+        registry
+            .typescript_tsx
+            .load(&cancellation)
+            .map_err(|_| GrammarFamily::TypeScript)?;
+        Ok(registry)
+    }
+
+    pub(crate) fn deferred() -> &'static Self {
+        // Native query analysis is expensive (see benches/provider_startup.rs).
+        // A fresh isolated request must not compile unrelated languages. Only
+        // immutable built-in queries and their deterministic failures are shared;
+        // source trees, cursors and caller budgets remain provider-owned.
+        static REGISTRY: OnceLock<QueryPackRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(Self::catalogue)
+    }
+
+    fn catalogue() -> Self {
         let mut packs = Vec::with_capacity(55);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
@@ -2916,21 +3010,21 @@ impl QueryPackRegistry {
                 include_str!("../queries/solidity.scm"),
             ),
         ] {
-            packs.push((family, QueryPack::compile(family, source)?));
+            packs.push((family, QueryPackEntry::new(family, family, source)));
         }
         packs.sort_by_key(|(family, _)| *family);
-        let typescript_tsx = QueryPack::compile_native(
+        let typescript_tsx = QueryPackEntry::new(
             GrammarFamily::TypeScript,
             GrammarFamily::JavaScript,
             include_str!("../queries/typescript.scm"),
-        )?;
-        Ok(Self {
+        );
+        Self {
             packs,
             typescript_tsx,
-        })
+        }
     }
 
-    pub(crate) fn get(&self, family: GrammarFamily) -> Option<&QueryPack> {
+    fn entry(&self, family: GrammarFamily) -> Option<&QueryPackEntry> {
         self.packs
             .binary_search_by_key(&family, |(registered, _)| *registered)
             .ok()
@@ -2938,34 +3032,64 @@ impl QueryPackRegistry {
             .map(|(_, pack)| pack)
     }
 
+    pub(crate) fn contains(&self, family: GrammarFamily) -> bool {
+        self.entry(family).is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, family: GrammarFamily) -> Result<&QueryPack, QueryPackError> {
+        self.get_for_native(family, family, &Cancellation::new())
+    }
+
     pub(crate) const fn len(&self) -> usize {
         self.packs.len() + 1
     }
 
-    pub(crate) fn get_for_source(&self, family: GrammarFamily, path: &str) -> Option<&QueryPack> {
-        self.get_for_native(family, native_family_for_source(family, path))
+    pub(crate) fn get_for_source(
+        &self,
+        family: GrammarFamily,
+        path: &str,
+        cancellation: &Cancellation,
+    ) -> Result<&QueryPack, QueryPackError> {
+        self.get_for_native(family, native_family_for_source(family, path), cancellation)
     }
 
     pub(crate) fn get_for_native(
         &self,
         family: GrammarFamily,
         native: GrammarFamily,
-    ) -> Option<&QueryPack> {
-        if family == GrammarFamily::TypeScript && native == GrammarFamily::JavaScript {
+        cancellation: &Cancellation,
+    ) -> Result<&QueryPack, QueryPackError> {
+        cancellation.check()?;
+        let entry = if family == GrammarFamily::TypeScript && native == GrammarFamily::JavaScript {
             Some(&self.typescript_tsx)
         } else if family == native {
-            self.get(family)
+            self.entry(family)
         } else {
             None
-        }
+        };
+        entry
+            .ok_or(QueryPackError::Missing { family, native })?
+            .load(cancellation)
     }
 
-    pub(crate) fn pattern_count(&self) -> usize {
+    pub(crate) fn initialized_count(&self) -> usize {
         self.packs
             .iter()
-            .map(|(_, pack)| pack.identity_query.pattern_count())
-            .sum::<usize>()
-            + self.typescript_tsx.identity_query.pattern_count()
+            .map(|(_, entry)| entry)
+            .chain(std::iter::once(&self.typescript_tsx))
+            .filter(|entry| entry.compiled.get().is_some())
+            .count()
+    }
+
+    pub(crate) fn initialized_pattern_count(&self) -> usize {
+        self.packs
+            .iter()
+            .map(|(_, entry)| entry)
+            .chain(std::iter::once(&self.typescript_tsx))
+            .filter_map(|entry| entry.compiled.get().and_then(|result| result.as_ref().ok()))
+            .map(|pack| pack.identity_query.pattern_count())
+            .sum()
     }
 }
 
@@ -3003,6 +3127,8 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
+        assert_eq!(registry.len(), 56);
+        assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
             GrammarFamily::Rust,

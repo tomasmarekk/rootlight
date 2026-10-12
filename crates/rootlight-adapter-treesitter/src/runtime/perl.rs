@@ -53,8 +53,8 @@ impl TreeSitterProvider {
         let context = context.unwrap_or(&mut local_context);
         let pack = self
             .query_packs
-            .get(GrammarFamily::Perl)
-            .ok_or_else(|| provider_failure("perl-replacement-query-pack"))?;
+            .get_for_native(GrammarFamily::Perl, GrammarFamily::Perl, cancellation)
+            .map_err(|error| error.into_adapter_error("perl-replacement-query-pack"))?;
         while let Some(job) = pending.pop() {
             for scope in job.scopes {
                 cancellation.check()?;

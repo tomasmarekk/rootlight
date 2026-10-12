@@ -1,4 +1,5 @@
-//! Measures first-provider and repeated-provider construction in a fresh process.
+//! Measures eager and deferred provider construction in a fresh process.
+//! Deferred measurements run before the eager audit warms native queries.
 //! Both include teardown; configuration construction is outside timing, and
 //! durations are evidence rather than correctness thresholds or indexing timings.
 
@@ -8,10 +9,14 @@ use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, RuntimeConfigError, TreeSitterProvider,
 };
 
-fn measure(config: &RuntimeConfig, iterations: u32) -> Result<u128, RuntimeConfigError> {
+fn measure(
+    config: &RuntimeConfig,
+    iterations: u32,
+    construct: fn(RuntimeConfig) -> Result<TreeSitterProvider, RuntimeConfigError>,
+) -> Result<u128, RuntimeConfigError> {
     let started = Instant::now();
     for _ in 0..iterations {
-        let provider = black_box(TreeSitterProvider::new(black_box(config.clone()))?);
+        let provider = black_box(construct(black_box(config.clone()))?);
         black_box(provider.stats());
         drop(provider);
     }
@@ -29,7 +34,19 @@ fn main() -> Result<(), RuntimeConfigError> {
         2 * 1024 * 1024,
         ParserSettings::new(256)?,
     )?;
-    let first = measure(&config, 1)?;
+    let first_deferred = measure(&config, 1, TreeSitterProvider::new_deferred)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": "rootlight.provider-startup-benchmark/1",
+            "scenario": "first_deferred_provider",
+            "iterations": 1,
+            "samples_ns": [first_deferred],
+            "median_ns": first_deferred,
+            "debug_assertions": cfg!(debug_assertions),
+        })
+    );
+    let first = measure(&config, 1, TreeSitterProvider::new)?;
     println!(
         "{}",
         serde_json::json!({
@@ -44,7 +61,7 @@ fn main() -> Result<(), RuntimeConfigError> {
 
     let mut samples = Vec::with_capacity(5);
     for _ in 0..5 {
-        samples.push(measure(&config, 8)?);
+        samples.push(measure(&config, 8, TreeSitterProvider::new)?);
     }
     samples.sort_unstable();
     println!(
