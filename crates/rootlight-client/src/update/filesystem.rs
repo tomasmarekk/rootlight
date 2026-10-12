@@ -1930,7 +1930,13 @@ fn copy_bootstrap_artifact(
         .state
         .create_file(OsStr::new(BOOTSTRAP_ARTIFACT_COPY_NAME))
         .map_err(FilesystemUpdateError::PrivateTree)?;
-    let digest = copy_bounded_hash(&mut source, &mut copy, expected_bytes)?;
+    // The archive contains multiple members, each with its own smaller extraction limit.
+    let digest = copy_bounded_hash(
+        &mut source,
+        &mut copy,
+        expected_bytes,
+        MAX_UPDATE_ARTIFACT_BYTES,
+    )?;
     copy.sync_all()
         .map_err(FilesystemUpdateError::PrivateTree)?;
     drop(copy);
@@ -2135,7 +2141,7 @@ fn write_zip_file_in_directory(
     let mut output = parent
         .create_file(file_name)
         .map_err(FilesystemUpdateError::PrivateTree)?;
-    let observed = copy_bounded_hash(reader, &mut output, expected_bytes)?;
+    let observed = copy_bounded_hash(reader, &mut output, expected_bytes, MAX_ENTRY_BYTES)?;
     output
         .sync_all()
         .map_err(FilesystemUpdateError::PrivateTree)?;
@@ -2163,7 +2169,7 @@ fn hash_zip_entry(
     reader: &mut impl Read,
     declared: &PackageManifestEntry,
 ) -> Result<(), FilesystemUpdateError> {
-    let observed = copy_bounded_hash(reader, &mut io::sink(), declared.bytes)?;
+    let observed = copy_bounded_hash(reader, &mut io::sink(), declared.bytes, MAX_ENTRY_BYTES)?;
     if observed != declared.sha256 {
         return Err(FilesystemUpdateError::InvalidArchive);
     }
@@ -2174,8 +2180,9 @@ fn copy_bounded_hash(
     reader: &mut impl Read,
     writer: &mut impl Write,
     expected_bytes: u64,
+    maximum_bytes: u64,
 ) -> Result<String, FilesystemUpdateError> {
-    if expected_bytes > MAX_ENTRY_BYTES {
+    if expected_bytes > maximum_bytes {
         return Err(FilesystemUpdateError::InvalidArchive);
     }
     let mut remaining = expected_bytes;
@@ -3388,6 +3395,72 @@ mod tests {
             .sync_all()
             .expect("owned artifact copy synchronizes");
         (temporary, root)
+    }
+
+    #[test]
+    fn bounded_copy_enforces_size_and_exact_stream_contents() {
+        let content = b"verified package member";
+        let length = u64::try_from(content.len()).expect("fixture length fits");
+        let mut output = Vec::new();
+        let digest = copy_bounded_hash(&mut content.as_slice(), &mut output, length, length)
+            .expect("exact bounded contents copy");
+        assert_eq!(output, content);
+        assert_eq!(digest, hex_sha256(Sha256::digest(content)));
+
+        for (expected, maximum) in [
+            (length, length - 1),
+            (length - 1, length),
+            (length + 1, length + 1),
+        ] {
+            assert!(matches!(
+                copy_bounded_hash(&mut content.as_slice(), &mut io::sink(), expected, maximum),
+                Err(FilesystemUpdateError::InvalidArchive)
+            ));
+        }
+        let declared = PackageManifestEntry {
+            path: "bin/rootlight".to_owned(),
+            kind: "binary".to_owned(),
+            bytes: MAX_ENTRY_BYTES + 1,
+            sha256: "a".repeat(64),
+            unix_mode: 0o755,
+        };
+        assert!(matches!(
+            declared.validate(),
+            Err(FilesystemUpdateError::InvalidArchive)
+        ));
+    }
+
+    #[test]
+    fn bootstrap_copy_admits_archive_sizes_above_the_member_limit() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let install_root = temporary.path().join("install");
+        prepare_private_install_root(&install_root).expect("private install root creates");
+        let root = Dir::open_ambient_dir(&install_root, ambient_authority())
+            .expect("private install root opens");
+        let layout = InstallLayout {
+            root: install_root,
+            state: PrivateDirectory::create(&root, OsStr::new("state"))
+                .expect("private state creates"),
+            versions: PrivateDirectory::create(&root, OsStr::new(VERSIONS_DIRECTORY))
+                .expect("private versions creates"),
+        };
+
+        for expected_bytes in [MAX_ENTRY_BYTES + 1, MAX_UPDATE_ARTIFACT_BYTES] {
+            // A write-only handle proves admission reaches streaming without
+            // making every platform test copy a multi-hundred-megabyte fixture.
+            let source = File::create(temporary.path().join("unreadable-source"))
+                .expect("write-only source creates");
+            let error = copy_bootstrap_artifact(&layout, source, expected_bytes)
+                .expect_err("admitted archive reaches the unreadable source handle");
+            assert!(matches!(error, FilesystemUpdateError::Io(_)), "{error:?}");
+        }
+
+        let source = File::create(temporary.path().join("unreadable-source"))
+            .expect("write-only source creates");
+        assert!(matches!(
+            copy_bootstrap_artifact(&layout, source, MAX_UPDATE_ARTIFACT_BYTES + 1),
+            Err(FilesystemUpdateError::InvalidArchive)
+        ));
     }
 
     #[test]
