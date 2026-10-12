@@ -38,11 +38,13 @@ vi.mock("../src/hooks/use-graph-projection", () => ({
 
 vi.mock("../src/features/graph/components/graph-viewport", () => ({
   GraphViewport: (props: {
+    layoutIdentity: { scopeFingerprint: string };
     onSelectionChange?: (ordinals: readonly number[]) => void;
     onLabelsVisibleChange?: (visible: boolean) => void;
     overlayOrdinals?: readonly number[];
   }) => (
     <div aria-label="Mock graph viewport">
+      <output aria-label="Layout scope">{props.layoutIdentity.scopeFingerprint}</output>
       <button type="button" onClick={() => props.onSelectionChange?.([1])}>
         Select symbol
       </button>
@@ -118,6 +120,39 @@ beforeEach(() => {
 });
 
 describe("ProjectWorkspacePage", () => {
+  it.each(["architecture", "files"])(
+    "preserves the %s layout identity while selection updates the inspector",
+    async (view) => {
+      renderWorkspace(`?view=${view}`);
+      expect(await screen.findByLabelText("Layout scope")).toHaveTextContent("repository");
+
+      await userEvent.click(screen.getByRole("button", { name: "Select symbol" }));
+      expect(screen.getByLabelText("Mock node inspector")).toBeVisible();
+      expect(screen.getByTestId("workspace-location")).toHaveTextContent(`selected=${symbolId}`);
+      expect(screen.getByLabelText("Layout scope")).toHaveTextContent("repository");
+
+      await userEvent.click(screen.getByRole("button", { name: "Close inspector" }));
+      expect(screen.queryByLabelText("Mock node inspector")).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Layout scope")).toHaveTextContent("repository");
+    },
+  );
+
+  it.each(["symbols", "neighborhood"])(
+    "changes the %s layout identity with its selected projection seed",
+    async (view) => {
+      const previousSeed = `sym1_${"e".repeat(39)}`;
+      renderWorkspace(`?view=${view}&selected=${previousSeed}`);
+      expect(await screen.findByLabelText("Layout scope")).toHaveTextContent(previousSeed);
+
+      await userEvent.click(screen.getByRole("button", { name: "Select symbol" }));
+      expect(screen.getByLabelText("Layout scope")).toHaveTextContent(symbolId);
+      expect(screen.getByLabelText("Mock node inspector")).toBeVisible();
+      expect(useGraphProjection).toHaveBeenLastCalledWith(
+        expect.objectContaining({ view, selectedSymbolId: symbolId }),
+      );
+    },
+  );
+
   it("pins graph requests to the resolved generation and keeps safe state in history", async () => {
     renderWorkspace();
 

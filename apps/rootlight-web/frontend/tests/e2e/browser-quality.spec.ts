@@ -107,6 +107,66 @@ test("keeps the Projects entry bounded and lazy-loads graph resources", async ({
   });
 });
 
+for (const view of ["architecture", "files"]) {
+  test(`preserves the ${view} canvas while selection updates the inspector`, async ({ page }) => {
+    const quality = monitorBrowserQuality(page);
+    const application = await installQualityApplication(page, { edgeCount: 24, nodeCount: 12 });
+    await page.goto(`/projects/${repositoryId}?view=${view}`);
+    const canvas = page.locator(".graph-viewport__canvas[data-lifecycle='ready'] canvas");
+    await expect(canvas).toBeVisible();
+    await expect(page.getByText("12 of 12 returned nodes")).toBeVisible();
+    // Pagination releases the server handle while the canvas retains its decoded model.
+    await expect.poll(() => application.graphReleaseCount()).toBe(1);
+    const originalCanvas = await canvas.elementHandle();
+    expect(await markCount(page, "rootlight.graph.controller.ready")).toBe(1);
+    expect(await markCount(page, "rootlight.graph.controller.dispose")).toBe(0);
+
+    const firstNode = page.getByRole("button", {
+      name: /component-000 symbol synthetic\/module-000/u,
+    });
+    await firstNode.click();
+    await expect(firstNode).toHaveAttribute("aria-pressed", "true");
+    const closeInspector = page.getByRole("button", { name: "Close node inspector" });
+    await expect(closeInspector).toBeVisible();
+    expect(
+      await originalCanvas.evaluate(
+        (element) =>
+          element.isConnected &&
+          element === document.querySelector(".graph-viewport__canvas canvas"),
+      ),
+    ).toBe(true);
+    expect(await markCount(page, "rootlight.graph.controller.ready")).toBe(1);
+    expect(await markCount(page, "rootlight.graph.controller.dispose")).toBe(0);
+    expect(application.graphOpenCount()).toBe(1);
+    expect(application.activeProjectionCount()).toBe(0);
+
+    await closeInspector.click();
+    await expect(closeInspector).not.toBeVisible();
+    await expect(firstNode).toHaveAttribute("aria-pressed", "false");
+    expect(
+      await originalCanvas.evaluate(
+        (element) =>
+          element.isConnected &&
+          element === document.querySelector(".graph-viewport__canvas canvas"),
+      ),
+    ).toBe(true);
+    expect(await markCount(page, "rootlight.graph.controller.ready")).toBe(1);
+    expect(await markCount(page, "rootlight.graph.controller.dispose")).toBe(0);
+
+    await page
+      .locator("#main-content")
+      .getByRole("link", { name: "Projects", exact: true })
+      .click();
+    await expect(page.getByRole("heading", { name: "Projects", level: 1 })).toBeVisible();
+    await expect.poll(() => application.graphReleaseCount()).toBe(1);
+    expect(await originalCanvas.evaluate((element) => element.isConnected)).toBe(false);
+    expect(await markCount(page, "rootlight.graph.controller.ready")).toBe(1);
+    expect(await markCount(page, "rootlight.graph.controller.dispose")).toBe(1);
+    expect(application.activeProjectionCount()).toBe(0);
+    await quality.assertClean();
+  });
+}
+
 test("meets maximum supported graph interaction and disposal budgets", async ({
   browser,
   browserName,
@@ -227,6 +287,12 @@ test("meets maximum supported graph interaction and disposal budgets", async ({
   expect(application.activeProjectionCount()).toBe(0);
   expect(application.graphOpenCount()).toBe(graphPerformanceIterations);
   expect(application.graphReleaseCount()).toBe(graphPerformanceIterations);
+  expect(await markCount(page, "rootlight.graph.controller.ready")).toBe(
+    graphPerformanceIterations,
+  );
+  expect(await markCount(page, "rootlight.graph.controller.dispose")).toBe(
+    graphPerformanceIterations,
+  );
   expect(await workerStats(page)).toMatchObject({ active: 0, maximumActive: 1 });
   await quality.assertClean();
 });

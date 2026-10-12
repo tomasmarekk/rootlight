@@ -116,13 +116,14 @@ function ProjectWorkspace({
   const { width: railWidth, setWidth: setRailWidth } = useWorkspaceRailWidth();
   const [retryKey, setRetryKey] = useState(0);
   const [impactSymbolIds, setImpactSymbolIds] = useState<readonly string[]>([]);
+  const selectedSymbolId = workspaceState.selected?.startsWith("sym1_")
+    ? workspaceState.selected
+    : undefined;
   const graph = useGraphProjection({
     repositoryId,
     generationId: detail.resolvedGenerationId,
     view: workspaceState.view,
-    selectedSymbolId: workspaceState.selected?.startsWith("sym1_")
-      ? workspaceState.selected
-      : undefined,
+    selectedSymbolId,
     relations: workspaceState.relations,
     minimumConfidence: workspaceState.minConfidence,
     budgetProfile: workspaceState.budgetProfile,
@@ -527,7 +528,10 @@ function ProjectWorkspace({
                 repositoryId,
                 generationId: detail.resolvedGenerationId,
                 view: workspaceState.view,
-                scopeFingerprint: workspaceState.selected ?? "repository",
+                scopeFingerprint:
+                  workspaceState.view === "symbols" || workspaceState.view === "neighborhood"
+                    ? (selectedSymbolId ?? "repository")
+                    : "repository",
                 layoutVersion: "atlas-v1",
               }}
               view={workspaceState.view}
