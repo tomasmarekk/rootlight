@@ -942,8 +942,9 @@ jobs:
   offline:
     name: offline / blocked egress / linux
     runs-on: ubuntu-24.04
-    # Source export and independent empty-cache qualification share this budget.
-    timeout-minutes: 90
+    # Cold export and isolated tests consume 90 minutes before final source
+    # verification and artifact upload; keep room for the complete empty-cache gate.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
