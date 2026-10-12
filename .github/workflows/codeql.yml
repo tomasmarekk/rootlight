@@ -22,7 +22,8 @@ jobs:
     name: analyze and upload / ${{ matrix.language }}
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Allow full dataflow analysis of the authenticated vendored source closure.
+    timeout-minutes: 180
     permissions:
       actions: read
       contents: read
@@ -55,7 +56,8 @@ jobs:
     name: analyze pull request / ${{ matrix.language }}
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Keep pull-request coverage and its runtime budget equal to main analyses.
+    timeout-minutes: 180
     permissions:
       actions: read
       contents: read
