@@ -8636,11 +8636,63 @@
       "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/395",
       "vulnerable_active_versions": [],
       "vulnerable_version_range": "< 0.35.5"
+    },
+    {
+      "active_versions": [
+        "0.8.6",
+        "0.9.5"
+      ],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-cq8v-f236-94qc",
+      "manifest_sha256": "b1e73368b13ab4a6d1f076e8b6b1dbb202387e4c6987cab455174f72907c0243",
+      "number": 396,
+      "package": {
+        "ecosystem": "rust",
+        "name": "rand"
+      },
+      "reason": "This exact published Cargo.lock contains rand 0.9.2 for the dependency crate's own upstream development graph. Rootlight selects anstream-0.6.21 as a dependency, not a Cargo test root; its nested lock is preserved archive metadata and is not read for dependency resolution. All four selected executable Rust lock graphs use only rand 0.8.6 or 0.9.5, both outside this advisory range.",
+      "reported_manifest": "source-inputs/cargo/anstream-0.6.21/Cargo.lock",
+      "source_witness": {
+        "archive_sha256": "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a",
+        "container": "anstream-0.6.21",
+        "original_archive": "source-inputs/crates/anstream-0.6.21.crate",
+        "published_member_path": "Cargo.lock",
+        "published_member_sha256": "b1e73368b13ab4a6d1f076e8b6b1dbb202387e4c6987cab455174f72907c0243"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/396",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": ">= 0.9.0, < 0.9.3"
+    },
+    {
+      "active_versions": [
+        "0.8.6",
+        "0.9.5"
+      ],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-cq8v-f236-94qc",
+      "manifest_sha256": "10930fdde31ba98c5a454ca3a9b974e217a5422938770b97d73292be0c080c43",
+      "number": 397,
+      "package": {
+        "ecosystem": "rust",
+        "name": "rand"
+      },
+      "reason": "This exact published Cargo.lock contains rand 0.8.5 for the dependency crate's own upstream development graph. Rootlight selects anstyle-parse-0.2.7 as a dependency, not a Cargo test root; its nested lock is preserved archive metadata and is not read for dependency resolution. All four selected executable Rust lock graphs use only rand 0.8.6 or 0.9.5, both outside this advisory range.",
+      "reported_manifest": "source-inputs/cargo/anstyle-parse-0.2.7/Cargo.lock",
+      "source_witness": {
+        "archive_sha256": "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2",
+        "container": "anstyle-parse-0.2.7",
+        "original_archive": "source-inputs/crates/anstyle-parse-0.2.7.crate",
+        "published_member_path": "Cargo.lock",
+        "published_member_sha256": "10930fdde31ba98c5a454ca3a9b974e217a5422938770b97d73292be0c080c43"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/397",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": ">= 0.7.0, < 0.8.6"
     }
   ],
   "counts": {
     "fixed_in_active_lock": 8,
-    "nonexecuted_published_metadata": 304,
+    "nonexecuted_published_metadata": 306,
     "superseded_original_build_plan": 47
   },
   "dependabot_pull_requests": [
@@ -8861,5 +8913,5 @@
   "repository": "tomasmarekk/rootlight",
   "review_date": "2026-10-12",
   "schema": "rootlight.dependency-alert-review/1",
-  "scope": "All 359 open Dependabot alerts retrieved before remediation; every selected executable dependency and optional/development pin included."
+  "scope": "All 359 open Dependabot alerts retrieved before remediation plus two published nested-lock alerts discovered after the dependency graph refreshed; every selected executable dependency and optional/development pin included."
 }
