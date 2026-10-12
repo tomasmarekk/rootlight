@@ -95,9 +95,11 @@ jobs:
           python -B scripts/verify_lightning_yarn_sources.py --project .
           python -B scripts/verify_lightning_security_sources.py --project .
           python -B scripts/test_install_frontend_from_archives.py
+          # Report creation is exclusive; keep reports outside the restored Cargo cache.
+          npm_source_report_dir="$(mktemp -d "$RUNNER_TEMP/npm-source-closure.XXXXXX")"
           python -B scripts/verify_local_npm_sources.py \
             --project-root . \
-            --output target/npm-source-closure.actual.json
+            --output "$npm_source_report_dir/npm-source-closure.actual.json"
           node --check packaging/npm/rootlight.mjs
           node --check packaging/npm/rootlight-mcp.mjs
           node --check packaging/npm/run-native.mjs
