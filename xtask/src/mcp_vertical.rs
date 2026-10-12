@@ -88,7 +88,9 @@ const HOSTILE_ROOT_SENTINEL: &str = "rootlight-hostile-root";
 const SYNTAX_RECOVERY_DIAGNOSTIC: &str = "syntax-error-recovery";
 const PROJECT_ANALYSIS_FALLBACK_DIAGNOSTIC: &str = "project-adapter-analysis-fallback";
 const PROJECT_SEMANTICS_PROVIDER: &str = "rootlight-project-semantics";
-const START_TIMEOUT: Duration = Duration::from_secs(10);
+// Match the daemon lifecycle harness while cold startup initializes its catalog
+// and support inventory before publishing the authenticated endpoint.
+const START_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const ADMISSION_RETRY_ATTEMPTS: u8 = 32;
@@ -208,7 +210,7 @@ pub(crate) fn check(options: &Options) -> Result<CheckEvidence, VerticalError> {
             Ok(completion)
         }
         Err(error) => {
-            evidence.write_failure(error.category())?;
+            evidence.write_failure(&error)?;
             Err(error)
         }
     }
@@ -5330,46 +5332,54 @@ fn wait_until_ready(
     paths: &RuntimePaths,
     daemon: &mut SupervisedDaemon,
 ) -> Result<(), VerticalError> {
-    let deadline = Instant::now()
-        .checked_add(START_TIMEOUT)
-        .ok_or(VerticalError::Clock)?;
-    loop {
-        daemon.require_running()?;
-        if paths.discover().is_ok()
-            && Client::connect_or_start(paths, [0x71; 16], ConnectPolicy::ExistingOnly)
-                .and_then(|client| client.health())
-                .is_ok_and(|health| health.ready)
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(VerticalError::DaemonReadyTimedOut);
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    wait_until_daemon_available(paths, daemon, true)
 }
 
 fn wait_until_requestable(
     paths: &RuntimePaths,
     daemon: &mut SupervisedDaemon,
 ) -> Result<(), VerticalError> {
+    // A recovering daemon is intentionally requestable so the first pinned
+    // repository request can prioritize its deferred generation restore.
+    wait_until_daemon_available(paths, daemon, false)
+}
+
+fn wait_until_daemon_available(
+    paths: &RuntimePaths,
+    daemon: &mut SupervisedDaemon,
+    require_ready_health: bool,
+) -> Result<(), VerticalError> {
     let deadline = Instant::now()
         .checked_add(START_TIMEOUT)
         .ok_or(VerticalError::Clock)?;
     loop {
         daemon.require_running()?;
-        // A recovering daemon is intentionally requestable so the first pinned
-        // repository request can prioritize its deferred generation restore.
-        if paths.discover().is_ok()
-            && Client::connect_or_start(paths, [0x71; 16], ConnectPolicy::ExistingOnly).is_ok()
-        {
+        let Err(stage) = probe_daemon_readiness(paths, require_ready_health) else {
             return Ok(());
-        }
+        };
         if Instant::now() >= deadline {
-            return Err(VerticalError::DaemonReadyTimedOut);
+            return Err(VerticalError::DaemonReadyTimedOut { stage });
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn probe_daemon_readiness(
+    paths: &RuntimePaths,
+    require_ready_health: bool,
+) -> Result<(), DaemonReadinessStage> {
+    paths
+        .discover()
+        .map_err(|_| DaemonReadinessStage::Discovery)?;
+    let client = Client::connect_or_start(paths, [0x71; 16], ConnectPolicy::ExistingOnly)
+        .map_err(|_| DaemonReadinessStage::Connection)?;
+    if require_ready_health {
+        let health = client.health().map_err(|_| DaemonReadinessStage::Health)?;
+        if !health.ready {
+            return Err(DaemonReadinessStage::NotReady);
+        }
+    }
+    Ok(())
 }
 
 fn wait_until_connections_released(client: &Client) -> Result<(), VerticalError> {
@@ -6152,14 +6162,18 @@ impl EvidencePaths {
         write_json_file(&self.summary, summary)
     }
 
-    fn write_failure(&self, category: &'static str) -> Result<(), VerticalError> {
+    fn write_failure(&self, error: &VerticalError) -> Result<(), VerticalError> {
         write_json_file(
             &self.failure,
             &FailureEvidence {
                 schema_version: EVIDENCE_SCHEMA_VERSION,
                 run_status: "failed",
-                error_category: category,
+                error_category: error.category(),
                 transcript_path: "transcript.jsonl",
+                daemon_readiness_stage: match error {
+                    VerticalError::DaemonReadyTimedOut { stage } => Some(*stage),
+                    _ => None,
+                },
             },
         )
     }
@@ -6207,6 +6221,18 @@ struct FailureEvidence {
     run_status: &'static str,
     error_category: &'static str,
     transcript_path: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_readiness_stage: Option<DaemonReadinessStage>,
+}
+
+/// Closed readiness categories keep failure evidence free of runtime paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DaemonReadinessStage {
+    Discovery,
+    Connection,
+    Health,
+    NotReady,
 }
 
 #[derive(Serialize)]
@@ -6888,8 +6914,8 @@ pub(crate) enum VerticalError {
     CheckedToolDomain { tool: &'static str, code: String },
     #[error("MCP request timed out")]
     RequestTimedOut,
-    #[error("daemon readiness timed out")]
-    DaemonReadyTimedOut,
+    #[error("daemon readiness timed out ({stage:?})")]
+    DaemonReadyTimedOut { stage: DaemonReadinessStage },
     #[error("daemon discovery cleanup timed out")]
     DaemonCleanupTimedOut,
     #[error("durable journal did not expose an admitted operation before its request deadline")]
@@ -6937,7 +6963,7 @@ impl VerticalError {
             Self::Json { .. } | Self::Utf8 { .. } | Self::OwnedUtf8 { .. } => "encoding",
             Self::Invariant(_) | Self::CheckedToolDomain { .. } => "invariant",
             Self::RequestTimedOut => "request_timeout",
-            Self::DaemonReadyTimedOut => "daemon_ready_timeout",
+            Self::DaemonReadyTimedOut { .. } => "daemon_ready_timeout",
             Self::DaemonAdmissionTimedOut => "daemon_admission_timeout",
             Self::DaemonCleanupTimedOut
             | Self::DurableJournalIdleTimedOut
@@ -6970,6 +6996,71 @@ mod tests {
         validate_architecture_community_data, validate_tool_matrix_cells,
     };
     use serde_json::json;
+
+    #[test]
+    fn readiness_probe_classifies_missing_discovery_without_starting_a_daemon() {
+        let temporary = tempfile::tempdir().expect("temporary runtime root");
+        let paths = rootlight_runtime::RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .expect("isolated runtime paths");
+        for require_ready_health in [false, true] {
+            assert_eq!(
+                super::probe_daemon_readiness(&paths, require_ready_health),
+                Err(super::DaemonReadinessStage::Discovery)
+            );
+            assert!(!paths.state_dir().exists());
+            assert!(!paths.runtime_dir().exists());
+        }
+    }
+
+    #[test]
+    fn readiness_failure_evidence_retains_only_the_closed_stage() {
+        use super::{DaemonReadinessStage, EvidencePaths};
+
+        let temporary = tempfile::tempdir().expect("temporary evidence root");
+        let paths = EvidencePaths::prepare(temporary.path()).expect("evidence paths");
+        for (stage, label) in [
+            (DaemonReadinessStage::Discovery, "discovery"),
+            (DaemonReadinessStage::Connection, "connection"),
+            (DaemonReadinessStage::Health, "health"),
+            (DaemonReadinessStage::NotReady, "not_ready"),
+        ] {
+            paths
+                .write_failure(&VerticalError::DaemonReadyTimedOut { stage })
+                .expect("bounded readiness evidence");
+            let evidence: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&paths.failure).expect("failure evidence bytes"),
+            )
+            .expect("failure evidence JSON");
+            assert_eq!(
+                evidence,
+                json!({
+                    "schema_version": "1.0",
+                    "run_status": "failed",
+                    "error_category": "daemon_ready_timeout",
+                    "transcript_path": "transcript.jsonl",
+                    "daemon_readiness_stage": label,
+                })
+            );
+        }
+        paths
+            .write_failure(&VerticalError::Invariant("private diagnostic sentinel"))
+            .expect("unrelated failure evidence");
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.failure).expect("failure evidence bytes"))
+                .expect("failure evidence JSON");
+        assert_eq!(
+            evidence,
+            json!({
+                "schema_version": "1.0",
+                "run_status": "failed",
+                "error_category": "invariant",
+                "transcript_path": "transcript.jsonl",
+            })
+        );
+    }
 
     #[test]
     fn answer_match_requires_exact_declaration_and_source_file_provenance() {
