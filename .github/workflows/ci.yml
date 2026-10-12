@@ -1,4 +1,4 @@
-# Every relevant revision must pass the complete release-quality validation set.
+# The current revision must pass the complete release-quality validation set.
 name: CI
 
 on:
@@ -10,10 +10,9 @@ permissions:
   contents: read
 
 concurrency:
-  # GitHub retains only one pending run per group, so every push needs an
-  # immutable group while superseded revisions of one pull request may cancel.
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Release runners from superseded revisions of the same branch or pull request.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

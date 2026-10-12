@@ -1,4 +1,4 @@
-# CodeQL is an independent required security gate for every relevant revision.
+# CodeQL is an independent required security gate for the current revision.
 name: CodeQL
 
 on:
@@ -12,10 +12,9 @@ on:
 permissions: {}
 
 concurrency:
-  # Preserve every pushed revision while allowing superseded pull-request
-  # analyses to release their runners.
-  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Release runners from superseded revisions of the same branch or pull request.
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze-upload:
