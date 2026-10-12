@@ -28,6 +28,11 @@ SQLITE = "source-inputs/cargo/libsqlite3-sys-0.37.0/sqlite3/sqlite3ext.h"
 LINUX = "source-inputs/cargo/linux-raw-sys-0.12.1/src/x86_64/netlink.rs"
 WINDOWS = "source-inputs/cargo/windows-0.61.3/src/Windows/Win32"
 HISTORICAL = "source-inputs/historical-cargo-checksums.json"
+NATIVE_CLOSURE = (
+    "source-inputs/producer-security/"
+    "lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/native-source-closure.json"
+)
+GRAMMAR_LOCK = "adapters/grammars.lock"
 
 
 def _historical_cargo_checksum(root: Path, name: str) -> dict:
@@ -207,6 +212,75 @@ class GitleaksPolicyTests(unittest.TestCase):
         detected = {finding["File"] for finding in findings
                     if finding["RuleID"] == "generic-api-key"}
         self.assertEqual(detected, set(files), "known digests elsewhere must remain detectable")
+
+    def reviewed_source_metadata_exceptions(self) -> dict[str, bytes]:
+        """Bind each non-Cargo digest exception to the retained bytes it identifies."""
+        policy = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+        descriptions = {
+            "Published native profile archive integrity tokens": (NATIVE_CLOSURE, "match"),
+            "Published Scheme intertoken source digest": (GRAMMAR_LOCK, "secret"),
+        }
+        rules = {rule["description"]: rule for rule in policy["allowlists"]
+                 if rule["description"] in descriptions}
+        self.assertEqual(set(rules), set(descriptions))
+        result = {}
+        for description, (name, target) in descriptions.items():
+            rule = rules[description]
+            self.assertEqual(rule["paths"], ["^" + re.escape(name).replace(r"\-", "-") + "$"])
+            self.assertEqual(rule["targetRules"], ["generic-api-key"])
+            self.assertEqual(rule["condition"], "AND")
+            self.assertEqual(rule["regexTarget"], target)
+            if name == NATIVE_CLOSURE:
+                document = json.loads((ROOT / name).read_bytes())
+                self.assertEqual(len(rule["regexes"]), 3)
+                matches = []
+                for expression in rule["regexes"]:
+                    packages = [package for package in document["packages"]
+                                if re.fullmatch(expression, f'token": "{package["pin"]["integrity"]}"')]
+                    self.assertEqual(len(packages), 1, "integrity exception must name one archive")
+                    pin = packages[0]["pin"]
+                    self.assertRegex(pin["archive_filename"], r"\A[a-f0-9]{64}\.tgz\Z")
+                    archive = ROOT / Path(name).parent / "archives" / pin["archive_filename"]
+                    token = "sha512-" + base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
+                    self.assertEqual(token, pin["integrity"])
+                    match = f'token": "{token}"'
+                    self.assertEqual(expression, "^" + re.escape(match) + "$")
+                    matches.append(match)
+                result[name] = ("\n".join(matches) + "\n").encode()
+            else:
+                document = tomllib.loads((ROOT / name).read_text(encoding="utf-8"))
+                grammar = next(item for item in document["grammars"] if item["language"] == "scheme")
+                member = "upstream/grammar/intertoken.js"
+                digest = grammar["vendored"]["files"][member]
+                source = ROOT / Path(grammar["vendored"]["manifest_path"]).parent / member
+                self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest)
+                self.assertEqual(rule["regexes"], ["^" + digest + "$"])
+                result[name] = f'api_key = "{digest}"\n'.encode()
+        return result
+
+    def test_reviewed_source_metadata_and_exact_exceptions_scan_clean(self) -> None:
+        fixtures = self.reviewed_source_metadata_exceptions()
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                self.assertFalse(self.scan(fixtures, mode))
+                self.assertFalse(self.scan({name: (ROOT / name).read_bytes() for name in fixtures}, mode))
+
+    def test_reviewed_metadata_exceptions_reject_changed_values_and_relocated_matches(self) -> None:
+        fixtures = self.reviewed_source_metadata_exceptions()
+        digest = hashlib.sha256(b"rootlight unrelated metadata negative control").hexdigest()
+        unknown = f'api_key = "{digest}"\n'.encode()
+        unknown += b"token = 'glpat-" + b"0123456789" + b"abcdefghijkl'\n"
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                findings = self.scan({name: unknown for name in fixtures}, mode)
+                detected = {(finding["File"], finding["RuleID"]) for finding in findings}
+                for name in fixtures:
+                    self.assertIn((name, "generic-api-key"), detected)
+                    self.assertIn((name, "gitlab-pat"), detected)
+                relocated = {"relocated/" + name: content for name, content in fixtures.items()}
+                findings = self.scan(relocated, mode)
+                self.assertEqual({finding["File"] for finding in findings
+                                  if finding["RuleID"] == "generic-api-key"}, set(relocated))
 
     def test_authenticated_upstream_samples_remain_unchanged_and_scan_clean(self) -> None:
         paths = [CHECKSUM, PEM, WEBSOCKET, SQLITE, LINUX,

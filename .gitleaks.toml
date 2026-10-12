@@ -2234,3 +2234,79 @@ regexes = [
   '''^token":\ "sha512\-w96Cjofp72M5IIhpjgobBimYEfoPjx1Vx0BSX9P30WBdZW2WIKU0T1Bd0kz2eNZ9ikjKgHbEyKx8BB6H1L3h3A=="$''',
   '''^token":\ "sha512\-zIHwmZPRshsCdpMDyVsqGmgyP0yT8GAgXUnkdAoJisxvf33k7yO6OuoKmcTGuXPWSsm8Oh88nZicRLA9Y0rUeA=="$''',
 ]
+
+[[allowlists]]
+description = "Published Scheme intertoken source digest"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^adapters/grammars\.lock$''']
+regexes = [
+  '''^87a831ff9b2545322970634e684089b8b4ff80ff349fd23486ffb96c09820c08$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: syn-3.0.8"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/syn-3\.0\.8/\.cargo-checksum\.json$''']
+regexes = [
+  '''^c30b921a96739c9334ec2bdd06552729891e0251b9d8fbdf0b8f5cc897babee5$''',
+  '''^f79afb8272b8c9b6fe63716c6be5c53d8e7c5ca5473bf3ec891b6e1be9887716$''',
+  '''^fddf7540f6c87e088ca2e4cd59a4769bc99989907a71e0d7cb42ee6ec067a6ac$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: toml-0.9.12+spec-1.1.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/toml-0\.9\.12\+spec-1\.1\.0/\.cargo-checksum\.json$''']
+regexes = [
+  '''^4656eda0f988c004138ecc3ca985bca47244c107a7630e58f752059e6199569e$''',
+  '''^6f730c3123424c90cb1cf5e5f109ae5dfd570e173f52401c291f972a29b6e40a$''',
+  '''^8df2621359f20709b4ff0dc1abbeb9ca58578d92a3e3746f8eec5fd58a3eb8a4$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: toml_parser-1.1.5+spec-1.1.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/toml_parser-1\.1\.5\+spec-1\.1\.0/\.cargo-checksum\.json$''']
+regexes = [
+  '''^30f7a7dd608d874f0bf9649cb5f89f10366ab96abda75dc82155949f0d694a51$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: toml_writer-1.1.3+spec-1.1.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/toml_writer-1\.1\.3\+spec-1\.1\.0/\.cargo-checksum\.json$''']
+regexes = [
+  '''^69e65eb19dfe3ce1b59528b5789fb51c2847276c26bb1a4f0a5ae25b7e7ec127$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: winnow-0.7.15"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/winnow-0\.7\.15/\.cargo-checksum\.json$''']
+regexes = [
+  '''^c480a60546670fc14024c80773f17c9518022e7022ec4186845e8720a81e7ddc$''',
+]
+
+[[allowlists]]
+description = "Published native profile archive integrity tokens"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/native-source-closure\.json$''']
+regexes = [
+  '''^token":\ "sha512\-AVbw3UJ2e9bq64vSaS9Am0fje1Pa8pbGqTTsmXfaIiMpnr5DlDhfJOuLj9Sf95ZPVDAUerDfEk88MPmPe7UCQg=="$''',
+  '''^token":\ "sha512\-DqGhF5IKoBl8WNf8C1gu8q0xZSInh9j1kJJMqT3a94w1JzVaBU4EXOSMrz9yDqMT0xt3selp83fuFMQ0uzv6qA=="$''',
+  '''^token":\ "sha512\-agE4QfB2Lkp9uICn7BAqoscw4SZP9kTE2hxiFI3jBPmXJfdqiahTbUuKGsMoN2GtqL9AxhYioAcVvgsb1HvRbA=="$''',
+]
