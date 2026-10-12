@@ -23078,7 +23078,13 @@ mod tests {
         let fixture = TempDir::new().unwrap();
         fs::create_dir_all(fixture.path().join("src")).unwrap();
         fs::write(fixture.path().join("src/lib.rs"), "pub fn written() {}\n").unwrap();
-        fs::write(fixture.path().join("fallback.asm"), "opaque source\n").unwrap();
+        // An unmapped extension keeps this fallback witness independent of
+        // native language adapters added to the default registry.
+        fs::write(
+            fixture.path().join("fallback.sourceblob"),
+            "opaque source\n",
+        )
+        .unwrap();
         let mut service = FirstSliceService::new(2).unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
         let cancellation = Cancellation::with_deadline(deadline);
@@ -23133,18 +23139,19 @@ mod tests {
                 .iter()
                 .map(|row| row.language.as_str())
                 .collect::<Vec<_>>(),
-            ["assembly", "rust"]
+            ["rust", "unknown"]
         );
         assert_eq!(
-            languages[0].status,
+            languages[1].status,
             daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32
         );
         assert!(
             first_context
                 .coverage_gaps
                 .iter()
-                .any(|gap| gap.reason == "unsupported"
-                    && gap.language.as_deref() == Some("assembly"))
+                .any(|gap| gap.reason == "unrecognized"
+                    && gap.language.as_deref() == Some("unknown")
+                    && gap.files == 1)
         );
         fs::write(
             fixture.path().join("other.py"),
