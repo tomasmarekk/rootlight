@@ -782,9 +782,9 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
     );
     assert_ne!(repository_id, UNINDEXED_REPOSITORY);
 
-    let empty = mcp.call(
+    let empty = wait_for_ready_repository_status(
+        &mut mcp,
         "status-empty",
-        "repo.status",
         json!({
             "repository": {"repository_id": repository_id},
             "coverage_detail": "language",
@@ -848,9 +848,9 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
         ],
     );
 
-    let metadata = mcp.call(
+    let metadata = wait_for_ready_repository_status(
+        &mut mcp,
         "status-metadata",
-        "repo.status",
         json!({
             "repository": {"repository_id": repository_id},
             "coverage_detail": "language",
@@ -932,6 +932,46 @@ fn index_repository(mcp: &mut McpProcess, id: &str, root: &Path) -> Value {
     });
     assert_success(&response, "repo.index");
     response
+}
+
+fn wait_for_ready_repository_status(mcp: &mut McpProcess, id: &str, arguments: Value) -> Value {
+    let deadline = Instant::now()
+        .checked_add(STARTUP_TIMEOUT)
+        .expect("bounded repository readiness deadline is representable");
+    for attempt in 1_u16.. {
+        let response = mcp.call(
+            &format!("{id}-attempt-{attempt}"),
+            "repo.status",
+            arguments.clone(),
+        );
+        assert_success(&response, "repo.status");
+        let data = &response["result"]["structuredContent"]["data"];
+        match data["repository_state"].as_str() {
+            Some("ready") => return response,
+            Some("indexing") => {
+                // A watcher operation may begin after the explicit index publishes.
+                // The transient state must still agree with this exact snapshot.
+                let operations = data["operations"]
+                    .as_array()
+                    .expect("readiness requests include operation details");
+                assert!(
+                    operations.iter().any(|operation| matches!(
+                        operation["state"].as_str(),
+                        Some("queued" | "running" | "waiting_for_context")
+                    )),
+                    "indexing state has no active operation: {response:#}"
+                );
+            }
+            state => panic!("unexpected repository readiness state {state:?}: {response:#}"),
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "repository did not become ready: {response:#}"
+        );
+        thread::sleep(Duration::from_millis(100).min(deadline.saturating_duration_since(now)));
+    }
+    unreachable!("bounded repository readiness loop returns or panics")
 }
 
 fn wait_for_active_generation(mcp: &mut McpProcess, repository_id: &str, generation: &str) {
