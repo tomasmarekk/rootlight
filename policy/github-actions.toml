@@ -13,6 +13,11 @@ commit = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 release = "v6.1.0"
 
 [[actions]]
+repository = "actions/cache/restore"
+commit = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+release = "v6.1.0"
+
+[[actions]]
 repository = "actions/setup-node"
 commit = "820762786026740c76f36085b0efc47a31fe5020"
 release = "v7.0.0"

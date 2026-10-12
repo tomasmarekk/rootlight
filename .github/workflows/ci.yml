@@ -436,7 +436,18 @@ jobs:
         shell: bash
         run: rustup show active-toolchain
       - name: Restore exact platform build inputs
+        if: runner.os != 'Windows'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rootlight-ci-platform-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-debug-v1
+      # Saving the full Windows target exceeded the job budget after all checks passed.
+      - name: Restore exact Windows platform build inputs
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
