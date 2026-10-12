@@ -4,8 +4,9 @@
 // and generated notice inventory without exposing checkout-specific paths.
 
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, readdir, writeFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
+import { readRegularFile } from "./read-regular-file.mjs";
 import { verifyLocalDependencyOrigins } from "./verify-local-dependency-origins.mjs";
 
 const options = parseOptions(process.argv.slice(2));
@@ -164,15 +165,7 @@ async function collectFiles(root) {
 }
 
 async function readRegular(path, maximum) {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maximum) {
-    throw new Error("release input is not a bounded regular file");
-  }
-  const bytes = await readFile(path);
-  if (bytes.length !== metadata.size) {
-    throw new Error("release input changed while it was read");
-  }
-  return bytes;
+  return readRegularFile(path, maximum);
 }
 
 function validAssetPath(path) {

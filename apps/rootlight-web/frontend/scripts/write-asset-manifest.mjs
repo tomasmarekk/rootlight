@@ -1,8 +1,9 @@
 // Produces the bounded, stable asset inventory verified by the Rust web host.
 
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, writeFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
+import { readRegularFile } from "./read-regular-file.mjs";
 
 const distributionRoot = resolve(import.meta.dirname, "..", "dist");
 const manifestName = "asset-manifest.json";
@@ -37,18 +38,14 @@ if (files.length === 0 || files.length > maximumAssets) {
 let totalBytes = 0;
 const assets = [];
 for (const file of files) {
-  const metadata = await lstat(file);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maximumAssetBytes) {
-    throw new Error("asset file is unsupported or oversized");
-  }
-  totalBytes += metadata.size;
+  const bytes = await readRegularFile(file, maximumAssetBytes);
+  totalBytes += bytes.length;
   if (totalBytes > maximumTotalBytes) {
     throw new Error("asset inventory is oversized");
   }
-  const bytes = await readFile(file);
   assets.push({
     path: relative(distributionRoot, file).split(sep).join("/"),
-    bytes: metadata.size,
+    bytes: bytes.length,
     sha256: createHash("sha256").update(bytes).digest("hex"),
   });
 }

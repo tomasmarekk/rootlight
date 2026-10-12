@@ -2,9 +2,13 @@
 // rootlight npm cli bridge
 
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
-  readFileSync,
+  openSync,
+  readSync,
   realpathSync,
   rmSync,
 } from "node:fs";
@@ -64,14 +68,44 @@ for (const name of ownedFiles) {
 await removeOwnedPath(manifestPath);
 await removeOwnedPath(join(binDirectory, cliBridgeCleanupRuntime));
 
-function readBridgeManifest(path) {
-  const metadata = lstatSync(path);
-  if (!metadata.isFile() || metadata.size > maximumBridgeFileBytes) {
-    fail("rootlight: deferred CLI cleanup manifest is invalid");
+function readBridgeFile(path) {
+  const before = lstatSync(path);
+  if (
+    !before.isFile() || before.isSymbolicLink() ||
+    before.size > maximumBridgeFileBytes
+  ) {
+    throw new Error("CLI bridge input is not a bounded regular file");
   }
+  // The copied cleanup runtime is standalone, so it retains its own descriptor guard.
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const metadata = fstatSync(descriptor);
+    if (
+      !metadata.isFile() || metadata.dev !== before.dev ||
+      metadata.ino !== before.ino || metadata.size !== before.size
+    ) {
+      throw new Error("CLI bridge input changed while it was opened");
+    }
+    const bytes = Buffer.alloc(metadata.size + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset !== metadata.size || fstatSync(descriptor).size !== metadata.size) {
+      throw new Error("CLI bridge input changed while it was read");
+    }
+    return bytes.subarray(0, offset).toString("utf8");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function readBridgeManifest(path) {
   let value;
   try {
-    value = JSON.parse(readFileSync(path, "utf8"));
+    value = JSON.parse(readBridgeFile(path));
   } catch {
     fail("rootlight: deferred CLI cleanup manifest is invalid");
   }
@@ -95,11 +129,7 @@ function validateOwnedBridgeFile(path) {
   if (!existsSync(path)) {
     fail("rootlight: deferred CLI cleanup file is missing");
   }
-  const metadata = lstatSync(path);
-  if (!metadata.isFile() || metadata.size > maximumBridgeFileBytes) {
-    fail("rootlight: deferred CLI cleanup ownership is invalid");
-  }
-  if (!readFileSync(path, "utf8").includes(cliBridgeMarker)) {
+  if (!readBridgeFile(path).includes(cliBridgeMarker)) {
     fail("rootlight: deferred CLI cleanup file was modified");
   }
 }

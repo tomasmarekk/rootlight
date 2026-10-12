@@ -1,10 +1,15 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -458,12 +463,42 @@ function writeBridgeFile(path, content, executable = true) {
 }
 
 function validateOwnedBridgeFile(path) {
-  const metadata = lstatSync(path);
-  if (!metadata.isFile() || metadata.size > maximumBridgeFileBytes) {
-    throw new Error(`CLI bridge ownership is invalid at ${path}`);
-  }
-  if (!readFileSync(path, "utf8").includes(cliBridgeMarker)) {
+  if (!readBridgeFile(path).includes(cliBridgeMarker)) {
     throw new Error(`CLI bridge was modified at ${path}`);
+  }
+}
+
+function readBridgeFile(path) {
+  const before = lstatSync(path);
+  if (
+    !before.isFile() || before.isSymbolicLink() ||
+    before.size > maximumBridgeFileBytes
+  ) {
+    throw new Error("CLI bridge input is not a bounded regular file");
+  }
+  // The copied cleanup runtime is standalone, so it retains its own descriptor guard.
+  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const metadata = fstatSync(descriptor);
+    if (
+      !metadata.isFile() || metadata.dev !== before.dev ||
+      metadata.ino !== before.ino || metadata.size !== before.size
+    ) {
+      throw new Error("CLI bridge input changed while it was opened");
+    }
+    const bytes = Buffer.alloc(metadata.size + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset !== metadata.size || fstatSync(descriptor).size !== metadata.size) {
+      throw new Error("CLI bridge input changed while it was read");
+    }
+    return bytes.subarray(0, offset).toString("utf8");
+  } finally {
+    closeSync(descriptor);
   }
 }
 
@@ -471,13 +506,9 @@ function readBridgeManifest(path) {
   if (!existsSync(path)) {
     return undefined;
   }
-  const metadata = lstatSync(path);
-  if (!metadata.isFile() || metadata.size > maximumBridgeFileBytes) {
-    throw new Error(`CLI bridge manifest is invalid at ${path}`);
-  }
   let value;
   try {
-    value = JSON.parse(readFileSync(path, "utf8"));
+    value = JSON.parse(readBridgeFile(path));
   } catch {
     throw new Error(`CLI bridge manifest is invalid at ${path}`);
   }

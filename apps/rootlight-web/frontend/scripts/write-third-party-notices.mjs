@@ -3,8 +3,9 @@
 // Package identities come from package-lock.json; license text is copied only
 // from the matching installed package so the release never invents obligations.
 
-import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import { readRegularFile } from "./read-regular-file.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const outputFlag = process.argv.indexOf("--output");
@@ -44,11 +45,7 @@ for (const [packagePath, record] of Object.entries(lock.packages)) {
   const licenseFiles = [];
   for (const name of candidates) {
     const path = resolve(directory, name);
-    const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 1024 * 1024) {
-      throw new Error(`production package ${manifest.name} has an invalid license file`);
-    }
-    const text = await readFile(path, "utf8");
+    const text = (await readRegularFile(path, 1024 * 1024)).toString("utf8");
     licenseFiles.push({ name: basename(path), text: normalizeText(text) });
   }
   if (licenseFiles.length === 0) {

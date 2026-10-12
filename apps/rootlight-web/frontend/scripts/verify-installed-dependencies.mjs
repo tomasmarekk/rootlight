@@ -6,8 +6,9 @@
 // snapshot back to the repository lockfile without weakening required-package
 // coverage.
 
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { readRegularFile } from "./read-regular-file.mjs";
 
 if (
   process.version !== "v24.11.1" ||
@@ -166,14 +167,7 @@ async function addPackage(packages, pending, directory, packagePath) {
 }
 
 async function readJson(path, maximum) {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maximum) {
-    throw new Error("npm metadata is not a bounded regular file");
-  }
-  const bytes = await readFile(path);
-  if (bytes.length !== metadata.size) {
-    throw new Error("npm metadata changed while it was read");
-  }
+  const bytes = await readRegularFile(path, maximum);
   return JSON.parse(bytes.toString("utf8"));
 }
 
