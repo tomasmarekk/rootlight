@@ -2,8 +2,6 @@
 //! Traversal follows storage's TextBytes order; fixed numeric rows never retain
 //! names, paths or payloads, and terminal-error reconciliation is explicit.
 
-#![cfg(test)]
-
 use rootlight_cancel::Cancellation;
 use rootlight_ir::NormalizedIrDocument;
 use rootlight_storage::{HARD_MAX_GENERATION_TEXT_BYTES, SourceFileCatalog};

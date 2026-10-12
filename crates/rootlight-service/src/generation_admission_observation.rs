@@ -352,7 +352,7 @@ impl CaptureGuard {
             let mut slot = slot
                 .try_borrow_mut()
                 .map_err(|_| FirstSliceError::Retention)?;
-            if !slot.as_ref().is_some_and(|state| state.id == self.id) {
+            if slot.as_ref().is_none_or(|state| state.id != self.id) {
                 return Err(FirstSliceError::Identity);
             }
             slot.take().ok_or(FirstSliceError::Identity)
