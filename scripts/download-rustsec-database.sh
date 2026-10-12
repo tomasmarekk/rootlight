@@ -3,8 +3,8 @@
 
 set -euo pipefail
 
-snapshot="9f3e138091487e69144f536d36976e427a7a3307"
-expected_sha256="b0eb048042adf7d7c06ad426195ebd7a8c2dd946eb53fde658cb45a3bc82f265"
+snapshot="25a288f68f2d5ebe658b243a334110c7217a2569"
+expected_sha256="050966b5085577e5cc1d0f534c6054d2ed596bd950b338cece9f793880d673de"
 destination="${1:-artifacts/rustsec-db}"
 archive="$(mktemp)"
 cleanup() {
