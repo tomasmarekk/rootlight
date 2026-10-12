@@ -3561,13 +3561,18 @@ mod tests {
             .check(root.path(), &state, Duration::from_secs(5))
             .expect("candidate succeeds");
         assert_eq!(observed.failure(), None);
-        fs::write(&binary, b"invalid-executable-format").expect("invalid executable writes");
+        // macOS can run invalid formats through a shell; a non-directory
+        // interpreter path forces a spawn error without that fallback.
+        fs::write(&binary, b"#!/dev/null/rootlight-missing-interpreter\n")
+            .expect("unlaunchable candidate writes");
         assert!(
             observed
                 .check(root.path(), &state, Duration::from_secs(5))
                 .is_err()
         );
-        assert_eq!(observed.failure().unwrap().reason(), "spawn_failed");
+        let diagnostic = observed.failure().unwrap();
+        assert_eq!(diagnostic.phase(), "spawn");
+        assert_eq!(diagnostic.reason(), "spawn_failed");
     }
 
     impl CandidateHealthCheck for PassingHealth {
