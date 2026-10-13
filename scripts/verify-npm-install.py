@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,16 @@ COMMAND_TIMEOUT_SECONDS = 180
 HTTP_TIMEOUT_SECONDS = 5
 STOP_TIMEOUT_SECONDS = 30
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
+MAX_STARTUP_DIAGNOSTIC_FILES = 8
+MAX_STARTUP_DIAGNOSTIC_BYTES = 8192
+MAX_STARTUP_DIAGNOSTIC_RECORDS = 64
+MAX_STARTUP_STATE_ENTRIES = 128
+STARTUP_DIAGNOSTIC_FILE = re.compile(r"startup-diagnostics-([1-9][0-9]{0,9})\.jsonl")
+STARTUP_DIAGNOSTIC_STAGES = (
+    "runtime_ready", "journal_open", "journal_ready",
+    "adapter_identity_open", "adapter_identity_ready", "service_open",
+    "service_ready", "listener_ready", "discovery_published",
+)
 SERVICE_FAILURE_PREFIX = "rootlight: service failure "
 SERVICE_FAILURE_REASONS = {
     "runtime_unavailable", "launch_failed", "early_exit", "start_timeout",
@@ -166,6 +177,8 @@ def verify_install_mode(
         project.mkdir()
         write_json_new(project / "package.json", {"private": True})
     environment = npm_environment(prefix, cache, state, runtime, root / "login")
+    if native_package == TARGET_PACKAGES["x86_64-apple-darwin"]:
+        environment["ROOTLIGHT_STARTUP_DIAGNOSTICS"] = "1"
     cli = npm_cli_path(prefix)
     package_root = installed_package_path(mode, prefix, project)
     native_cli = native_cli_path(package_root, native_directory)
@@ -191,6 +204,10 @@ def verify_install_mode(
             stage=f"{mode} npm install",
         )
         install_seconds = time.monotonic() - started
+        if environment.get("ROOTLIGHT_STARTUP_DIAGNOSTICS") == "1":
+            _capture_startup_diagnostics(
+                state, root / "initial-install-startup-diagnostics.json", emit=True,
+            )
         if not cli.is_file():
             raise NpmInstallError(
                 f"{mode} npm install did not create the Rootlight command shim"
@@ -284,8 +301,10 @@ def verify_install_mode(
             "uninstall_removed_root_package": True,
         }
     except NpmInstallError as error:
-        # Cleanup removes installed packages and private runtime data. Retain
-        # only this closed diagnostic contract, never command output or tokens.
+        if environment.get("ROOTLIGHT_STARTUP_DIAGNOSTICS") == "1":
+            _capture_startup_diagnostics(state, root / "startup-diagnostics.json")
+        # Cleanup removes installed packages and private runtime data. Keep the
+        # existing closed failure receipt separate from optional phase evidence.
         write_json_new(root / "failure.json", {
             "schema": "rootlight.npm-install-failure/1",
             "mode": mode,
@@ -312,6 +331,122 @@ def checked_directory(path: Path, label: str) -> Path:
     return resolved
 
 
+def _unique_startup_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate startup field")
+        result[key] = value
+    return result
+
+
+def _startup_records(raw: bytes) -> list[dict[str, object]]:
+    if not raw or len(raw) > MAX_STARTUP_DIAGNOSTIC_BYTES or not raw.endswith(b"\n"):
+        raise ValueError("invalid startup record length")
+    lines = raw.decode("utf-8").splitlines()
+    if len(lines) > MAX_STARTUP_DIAGNOSTIC_RECORDS:
+        raise ValueError("too many startup records")
+    records = []
+    previous_elapsed = -1
+    previous_stage = -1
+    for line in lines:
+        record = json.loads(line, object_pairs_hook=_unique_startup_fields)
+        if not isinstance(record, dict) or set(record) != {"schema", "stage", "elapsed_us"}:
+            raise ValueError("invalid startup fields")
+        stage = record["stage"]
+        elapsed = record["elapsed_us"]
+        if (
+            record["schema"] != "rootlight.startup-diagnostics/1"
+            or not isinstance(stage, str)
+            or stage not in STARTUP_DIAGNOSTIC_STAGES
+            or type(elapsed) is not int
+            or not 0 <= elapsed <= (1 << 64) - 1
+        ):
+            raise ValueError("invalid startup value")
+        stage_index = STARTUP_DIAGNOSTIC_STAGES.index(stage)
+        if elapsed < previous_elapsed or stage_index <= previous_stage:
+            raise ValueError("nonmonotonic startup records")
+        previous_elapsed, previous_stage = elapsed, stage_index
+        records.append(record)
+    return records
+
+
+def _read_startup_diagnostics(state: Path) -> list[dict[str, object]]:
+    if os.name != "posix":
+        raise OSError("startup descriptor capture requires POSIX")
+    directory = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(directory).st_uid != os.geteuid():
+            raise ValueError("unowned startup state")
+        names = []
+        with os.scandir(directory) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > MAX_STARTUP_STATE_ENTRIES:
+                    raise ValueError("too many startup state entries")
+                if not entry.name.startswith("startup-diagnostics-"):
+                    continue
+                match = STARTUP_DIAGNOSTIC_FILE.fullmatch(entry.name)
+                if match is None or int(match[1]) > (1 << 32) - 1:
+                    raise ValueError("invalid startup filename")
+                names.append((int(match[1]), entry.name))
+                if len(names) > MAX_STARTUP_DIAGNOSTIC_FILES:
+                    raise ValueError("too many startup files")
+        results = []
+        for pid, name in sorted(names):
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory,
+            )
+            with os.fdopen(descriptor, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or before.st_uid != os.geteuid()
+                    or before.st_nlink != 1
+                    or before.st_mode & 0o022
+                    or before.st_size > MAX_STARTUP_DIAGNOSTIC_BYTES
+                ):
+                    raise ValueError("invalid startup file")
+                raw = stream.read(MAX_STARTUP_DIAGNOSTIC_BYTES + 1)
+                after = os.fstat(stream.fileno())
+                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                    raise ValueError("startup file changed during capture")
+            results.append({"pid": pid, "records": _startup_records(raw)})
+        return results
+    finally:
+        os.close(directory)
+
+
+def _capture_startup_diagnostics(
+    state: Path, destination: Path, *, emit: bool = False,
+) -> None:
+    # Diagnostic failures cannot replace the original installation failure.
+    # Persist only reviewed phase records, never parser errors or source text.
+    try:
+        try:
+            files = _read_startup_diagnostics(state)
+            status = "captured" if files else "unavailable"
+        except FileNotFoundError:
+            files, status = [], "unavailable"
+        except (OSError, ValueError, RecursionError):
+            files, status = [], "rejected"
+        snapshot = {
+            "schema": "rootlight.npm-startup-diagnostics/1",
+            "status": status,
+            "files": files,
+        }
+        try:
+            write_json_new(destination, snapshot)
+        except OSError:
+            pass
+        if emit:
+            try:
+                print(json.dumps(snapshot, separators=(",", ":")))
+            except (OSError, ValueError):
+                pass
+    except OSError:
+        pass
+
+
 def npm_environment(
     prefix: Path,
     cache: Path,
@@ -322,6 +457,7 @@ def npm_environment(
     platform: str = sys.platform,
 ) -> dict[str, str]:
     environment = os.environ.copy()
+    environment.pop("ROOTLIGHT_STARTUP_DIAGNOSTICS", None)
     command_directory = prefix if os.name == "nt" else prefix / "bin"
     environment.update(
         {

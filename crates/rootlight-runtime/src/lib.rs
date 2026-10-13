@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 mod user_paths;
 pub use user_paths::user_home_dir;
 
+pub mod startup_diagnostics;
+
 /// Maximum serialized discovery record accepted from disk.
 pub const MAX_DISCOVERY_BYTES: u64 = 4 * 1024;
 /// Current discovery-record schema version.

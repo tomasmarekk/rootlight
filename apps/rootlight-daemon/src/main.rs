@@ -30,6 +30,7 @@ use rootlight_operations::{CatalogWriterLock, OperationJournal};
 use rootlight_runtime::{
     COORDINATED_START_SIGNAL_ENV, COORDINATED_START_SIGNAL_VERSION, CoordinatedStartupSignal,
     DiscoveryRecord, RuntimePaths,
+    startup_diagnostics::{self, StartupStage},
 };
 use rootlight_service::FirstSliceStoragePolicy;
 
@@ -78,6 +79,7 @@ fn validate_arguments() -> Result<DaemonMode, DaemonError> {
 async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     let paths = runtime_paths()?;
     paths.prepare_owner()?;
+    startup_diagnostics::initialize(&paths);
     let storage_policy = load_storage_policy(&paths)?;
     let _launch = if matches!(
         mode,
@@ -94,7 +96,9 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
     cleanup_prior_instance(&paths)?;
     let endpoint = paths.endpoint(nonce)?;
     let catalog_path = paths.operation_journal_path();
+    startup_diagnostics::record(StartupStage::JournalOpen);
     let journal = Arc::new(OperationJournal::open(&catalog_path)?);
+    startup_diagnostics::record(StartupStage::JournalReady);
     let limits = DaemonLimits::default();
     let telemetry = Arc::new(Telemetry::new(TelemetryOutput::StderrJson));
     let state = Arc::new(DaemonState::starting_with_telemetry(telemetry));
@@ -124,9 +128,11 @@ async fn run_async(mode: DaemonMode) -> Result<(), DaemonError> {
         service.with_diagnostic_actor()?;
     let service = Arc::new(service);
     let listener = Arc::new(AsyncLocalListener::bind(endpoint.clone())?);
+    startup_diagnostics::record(StartupStage::ListenerReady);
     let discovery = DiscoveryRecord::new(&paths, std::process::id(), &endpoint, nonce)?;
     state.set_endpoint_status(HealthStatus::Healthy);
     paths.publish(&discovery)?;
+    startup_diagnostics::record(StartupStage::DiscoveryPublished);
     let discovery = DiscoveryGuard::new(paths, nonce);
 
     let connection_slots = Arc::new(tokio::sync::Semaphore::new(

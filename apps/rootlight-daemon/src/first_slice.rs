@@ -84,7 +84,10 @@ use rootlight_query::{
     ExecutionCompletenessState, HistoryCompareScope, LocateMode, QueryResource, QueryUsage,
     RelationDirection, RelationFamily, TestsSelectKind,
 };
-use rootlight_runtime::{CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT};
+use rootlight_runtime::{
+    CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
+    startup_diagnostics::{self, StartupStage},
+};
 use rootlight_service::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_TRAVERSAL,
     AdvancedAstNode, FactDomain as IncrementalFactDomain, FallbackReason as ServiceFallbackReason,
@@ -281,6 +284,7 @@ impl InstalledProjectAnalyzer {
         {
             return Err(FirstSliceError::Adapter);
         }
+        startup_diagnostics::record(StartupStage::AdapterIdentityOpen);
         let identity = project_adapter_identity_with_cancellation(&executable, cancellation)
             .map_err(|error| match error {
                 AdapterHostError::Cancelled(cancelled) => {
@@ -290,6 +294,7 @@ impl InstalledProjectAnalyzer {
             })?;
         let provider_identity =
             adapter_identity_digest(&identity).map_err(|_| FirstSliceError::Adapter)?;
+        startup_diagnostics::record(StartupStage::AdapterIdentityReady);
         Ok(Some(Arc::new(Self {
             executable,
             provider_identity,
@@ -4585,6 +4590,7 @@ impl FirstSliceDaemon {
         );
         let project_analyzer = InstalledProjectAnalyzer::discover(&cancellation)
             .map_err(FirstSliceHostError::Service)?;
+        startup_diagnostics::record(StartupStage::ServiceOpen);
         let (service, deferred_restore) = match project_analyzer {
             Some(project_analyzer) => {
                 FirstSliceService::open_durable_deferred_with_project_analyzer_and_policy(
@@ -4598,6 +4604,7 @@ impl FirstSliceDaemon {
             }
         }
         .map_err(FirstSliceHostError::Service)?;
+        startup_diagnostics::record(StartupStage::ServiceReady);
         let recovery_targets = deferred_restore
             .active_targets()
             .map_err(FirstSliceHostError::Service)?;
