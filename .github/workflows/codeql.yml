@@ -1,4 +1,5 @@
-# CodeQL is an independent required security gate for the current revision.
+# Analyze all maintained source on every change without unpacked upstream archives.
+# The independent weekly CodeQL Full workflow retains complete repository coverage.
 name: CodeQL
 
 on:
@@ -6,124 +7,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  # Release runners from superseded revisions of the same branch or pull request.
   group: codeql-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust-analysis:
-    name: analyze and retain / ${{ matrix.language }}
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    permissions:
-      actions: read
-      contents: read
-    outputs:
-      artifact-id: ${{ steps.retain.outputs.artifact-id }}
-      artifact-digest: ${{ steps.retain.outputs.artifact-digest }}
-      receipt-sha256: ${{ steps.bind.outputs.receipt-sha256 }}
-      producer-attempt: ${{ steps.bind.outputs.producer-attempt }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - language: rust
-            build-mode: none
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Acquire authenticated Rust scanner prerequisite
-        run: bash scripts/setup-codeql-rust.sh "$RUNNER_TEMP/codeql-tools"
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          tools: ${{ env.CODEQL_BUNDLE }}
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-          queries: security-extended
-      - name: Analyze
-        id: analyze
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          category: /language:${{ matrix.language }}
-          output: ${{ runner.temp }}/rust-analysis
-          upload: never
-          upload-database: false
-      - name: Bind successful analysis to its source and attempt
-        id: bind
-        env:
-          ANALYSIS_OUTCOME: ${{ steps.analyze.outcome }}
-        run: |
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import subprocess
-
-          if os.environ["ANALYSIS_OUTCOME"] != "success":
-              raise SystemExit("Rust analysis did not complete successfully")
-          source = os.environ["GITHUB_SHA"]
-          if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != source:
-              raise SystemExit("Rust analysis checkout does not match the event source")
-          directory = Path(os.environ["RUNNER_TEMP"]) / "rust-analysis"
-          report = directory / "rust.sarif"
-          if report.is_symlink() or not report.is_file() or report.stat().st_size == 0:
-              raise SystemExit("Rust analysis report is missing or not a regular file")
-          data = report.read_bytes()
-          sarif = json.loads(data)
-          runs = sarif.get("runs", [])
-          if (sarif.get("version") != "2.1.0" or len(runs) != 1 or
-              runs[0].get("tool", {}).get("driver", {}).get("name") != "CodeQL" or
-              runs[0].get("automationDetails", {}).get("id") != "/language:rust/"):
-              raise SystemExit("Unexpected Rust analysis report identity")
-          workflow = subprocess.check_output([
-              "git", "show", f"{source}:.github/workflows/codeql.yml"
-          ])
-          # Completion comes from the successful analyzer, not a SARIF rule count.
-          receipt = {
-              "schema": 1,
-              "source_sha": source,
-              "ref": os.environ["GITHUB_REF"],
-              "repository": os.environ["GITHUB_REPOSITORY"],
-              "run_id": os.environ["GITHUB_RUN_ID"],
-              "producer_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-              "analysis_outcome": "success",
-              "category": "/language:rust/",
-              "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
-              "reports": {"rust.sarif": hashlib.sha256(data).hexdigest()},
-          }
-          encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
-          with (directory / "receipt.json").open("xb") as output:
-              output.write(encoded)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"receipt-sha256={hashlib.sha256(encoded).hexdigest()}\n")
-              output.write(f"producer-attempt={receipt['producer_attempt']}\n")
-          PY
-      - name: Retain Rust results before any Code Scanning upload
-        id: retain
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: codeql-rust-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/rust-analysis/rust.sarif
-            ${{ runner.temp }}/rust-analysis/receipt.json
-          if-no-files-found: error
-          retention-days: 7
-
   analyze-upload:
-    name: upload retained analysis / ${{ matrix.language }}
+    name: analyze / ${{ matrix.language }}
     if: github.event_name != 'pull_request'
-    needs: rust-analysis
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -136,100 +31,48 @@ jobs:
         include:
           - language: rust
             build-mode: none
-    env:
-      ARTIFACT_ID: ${{ needs.rust-analysis.outputs.artifact-id }}
-      ARTIFACT_DIGEST: ${{ needs.rust-analysis.outputs.artifact-digest }}
-      RECEIPT_SHA256: ${{ needs.rust-analysis.outputs.receipt-sha256 }}
-      PRODUCER_ATTEMPT: ${{ needs.rust-analysis.outputs.producer-attempt }}
+          - language: javascript-typescript
+            build-mode: none
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-          fetch-depth: 0
-      - name: Verify the immutable producer artifact before download
+      - name: Acquire authenticated scanner prerequisite
         env:
-          GH_TOKEN: ${{ github.token }}
+          LANGUAGE: ${{ matrix.language }}
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-
-          artifact_id = os.environ["ARTIFACT_ID"]
-          attempt = os.environ["PRODUCER_ATTEMPT"]
-          if not re.fullmatch(r"[1-9][0-9]*", artifact_id):
-              raise SystemExit("Missing or invalid producer artifact ID")
-          if (not re.fullmatch(r"[1-9][0-9]*", attempt) or
-              int(attempt) > int(os.environ["GITHUB_RUN_ATTEMPT"])):
-              raise SystemExit("Invalid producer attempt for this upload")
-          for name in ("ARTIFACT_DIGEST", "RECEIPT_SHA256"):
-              if not re.fullmatch(r"[0-9a-f]{64}", os.environ[name]):
-                  raise SystemExit("Missing or invalid producer digest")
-          repository = os.environ["GITHUB_REPOSITORY"]
-          metadata = json.loads(subprocess.check_output([
-              "gh", "api", f"repos/{repository}/actions/artifacts/{artifact_id}"
-          ]))
-          run = metadata.get("workflow_run", {})
-          if (metadata.get("id") != int(artifact_id) or metadata.get("expired") is not False or
-              metadata.get("name") != f"codeql-rust-{os.environ['GITHUB_RUN_ID']}-{attempt}" or
-              metadata.get("digest") != f"sha256:{os.environ['ARTIFACT_DIGEST']}" or
-              run.get("id") != int(os.environ["GITHUB_RUN_ID"]) or
-              run.get("head_sha") != os.environ["GITHUB_SHA"]):
-              raise SystemExit("Retained Rust artifact does not match the successful producer")
-          PY
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+          if [ "$LANGUAGE" = "rust" ]; then
+            bash scripts/setup-codeql-rust.sh "$RUNNER_TEMP/codeql-tools"
+          else
+            bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
+          fi
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          artifact-ids: ${{ needs.rust-analysis.outputs.artifact-id }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ github.run_id }}
-          path: ${{ runner.temp }}/rust-analysis
-          digest-mismatch: error
-      - name: Verify retained source and report bytes before upload
-        run: |
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import subprocess
-
-          source = os.environ["GITHUB_SHA"]
-          if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != source:
-              raise SystemExit("Upload checkout does not match the analyzed source")
-          directory = Path(os.environ["RUNNER_TEMP"]) / "rust-analysis"
-          if {path.name for path in directory.iterdir()} != {"receipt.json", "rust.sarif"}:
-              raise SystemExit("Unexpected retained Rust artifact inventory")
-          for path in directory.iterdir():
-              if path.is_symlink() or not path.is_file():
-                  raise SystemExit("Retained Rust evidence must contain only regular files")
-          encoded = (directory / "receipt.json").read_bytes()
-          if hashlib.sha256(encoded).hexdigest() != os.environ["RECEIPT_SHA256"]:
-              raise SystemExit("Retained Rust receipt differs from the successful producer")
-          workflow = subprocess.check_output([
-              "git", "show", f"{source}:.github/workflows/codeql.yml"
-          ])
-          report_digest = hashlib.sha256((directory / "rust.sarif").read_bytes()).hexdigest()
-          # A manual upload-only rerun retains the original successful producer attempt.
-          expected = {
-              "schema": 1,
-              "source_sha": source,
-              "ref": os.environ["GITHUB_REF"],
-              "repository": os.environ["GITHUB_REPOSITORY"],
-              "run_id": os.environ["GITHUB_RUN_ID"],
-              "producer_attempt": os.environ["PRODUCER_ATTEMPT"],
-              "analysis_outcome": "success",
-              "category": "/language:rust/",
-              "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
-              "reports": {"rust.sarif": report_digest},
-          }
-          if json.loads(encoded) != expected:
-              raise SystemExit("Retained Rust evidence is not bound to this source and producer")
-          PY
-      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+          tools: ${{ env.CODEQL_BUNDLE }}
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: .github/codeql/source.yml
+      - name: Analyze maintained source
+        timeout-minutes: 20
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          sarif_file: ${{ runner.temp }}/rust-analysis/rust.sarif
+          category: /language:${{ matrix.language }}
+          output: ${{ runner.temp }}/codeql-results
+          upload: never
+          upload-database: false
+      - name: Retain successful results before upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-${{ matrix.language }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload and require processed results
+        timeout-minutes: 5
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-results
           category: /language:${{ matrix.language }}
           sha: ${{ github.sha }}
           ref: ${{ github.ref }}
@@ -239,7 +82,7 @@ jobs:
     name: analyze pull request / ${{ matrix.language }}
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -249,240 +92,63 @@ jobs:
         include:
           - language: rust
             build-mode: none
+          - language: javascript-typescript
+            build-mode: none
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-          fetch-depth: 0
-      - name: Acquire authenticated Rust scanner prerequisite
-        run: bash scripts/setup-codeql-rust.sh "$RUNNER_TEMP/codeql-tools"
+      - name: Acquire authenticated scanner prerequisite
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          if [ "$LANGUAGE" = "rust" ]; then
+            bash scripts/setup-codeql-rust.sh "$RUNNER_TEMP/codeql-tools"
+          else
+            bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
+          fi
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           tools: ${{ env.CODEQL_BUNDLE }}
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          queries: security-extended
-      - name: Analyze without privileged upload
+          config-file: .github/codeql/source.yml
+      - name: Analyze pull request without privileged upload
+        timeout-minutes: 20
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:${{ matrix.language }}
+          output: ${{ runner.temp }}/codeql-results
           upload: never
           upload-database: false
-
-  javascript-database:
-    name: prepare complete JavaScript database
-    runs-on: ubuntu-24.04
-    timeout-minutes: 190
-    permissions:
-      actions: read
-      contents: read
-    env:
-      # A query group must never receive a server-selected partial overlay database.
-      CODEQL_OVERLAY_DATABASE_MODE: none
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Acquire authenticated scanner prerequisite
-        run: bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
-      - name: Test complete-suite and actual CLI merge contracts
-        run: CODEQL_TEST_CLI="$CODEQL" python3 scripts/test_codeql_javascript_shards.py
-      - name: Initialize the complete JavaScript source database
-        id: initialize
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          tools: ${{ env.CODEQL_BUNDLE }}
-          languages: javascript-typescript
-          build-mode: none
-          config-file: .github/codeql/javascript.yml
-          db-location: ${{ runner.temp }}/codeql_databases
-      - name: Extract and finalize without running queries
-        id: finalize
-        timeout-minutes: 180
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          skip-queries: true
-          upload: never
-          upload-database: false
-      - name: Bind the full database and exact 105-query suite
-        env:
-          DATABASE: ${{ fromJson(steps.finalize.outputs.db-locations).javascript }}
-          PRODUCER_CODEQL: ${{ steps.initialize.outputs.codeql-path }}
-        run: >-
-          python3 scripts/codeql_javascript_shards.py prepare
-          --codeql "$CODEQL" --producer-codeql "$PRODUCER_CODEQL"
-          --source "$GITHUB_SHA" --input "$DATABASE"
-          --output "$RUNNER_TEMP/javascript-database"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: codeql-javascript-database
-          path: ${{ runner.temp }}/javascript-database
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: codeql-javascript-manifest
-          path: ${{ runner.temp }}/javascript-database/manifest.json
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: failure()
-        with:
-          name: codeql-javascript-extraction-logs
-          path: ${{ runner.temp }}/codeql_databases/javascript/log
-          retention-days: 7
-
-  javascript-query:
-    name: JavaScript queries / ${{ matrix.group }}
-    needs: javascript-database
-    runs-on: ubuntu-24.04
-    timeout-minutes: 190
-    permissions:
-      actions: read
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        # Full database copies preserve cross-file flows in every query group.
-        group: [polynomial-redos, indirect-command-injection, remaining]
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - name: Acquire authenticated scanner prerequisite
-        run: bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: codeql-javascript-database
-          path: ${{ runner.temp }}/javascript-database
-      - name: Evaluate every selected query on the same complete database
-        timeout-minutes: 180
-        env:
-          QUERY_GROUP: ${{ matrix.group }}
-        run: >-
-          python3 scripts/codeql_javascript_shards.py analyze
-          --codeql "$CODEQL" --source "$GITHUB_SHA"
-          --input "$RUNNER_TEMP/javascript-database" --group "$QUERY_GROUP"
-          --output "$RUNNER_TEMP/query-results"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: codeql-javascript-result-${{ matrix.group }}
-          path: |
-            ${{ runner.temp }}/query-results/results.sarif
-            ${{ runner.temp }}/query-results/receipt.json
-          if-no-files-found: error
-          retention-days: 7
-      - name: Retain failed evaluator and native CLI diagnostics
-        if: failure()
+      - name: Retain pull request analysis
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codeql-javascript-query-logs-${{ matrix.group }}
-          path: |
-            ${{ runner.temp }}/query-results/evaluator.jsonl
-            ${{ runner.temp }}/query-results/database/log
-          retention-days: 7
-
-  javascript-merge:
-    name: validate and merge all JavaScript queries
-    needs: [javascript-database, javascript-query]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - name: Acquire authenticated scanner prerequisite
-        run: bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: codeql-javascript-manifest
-          path: ${{ runner.temp }}/javascript-database
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: codeql-javascript-result-*
-          path: ${{ runner.temp }}/shards
-      - name: Require 105 completed queries and one merged SARIF run
-        run: >-
-          python3 scripts/codeql_javascript_shards.py merge
-          --codeql "$CODEQL" --source "$GITHUB_SHA"
-          --manifest "$RUNNER_TEMP/javascript-database/manifest.json"
-          --input "$RUNNER_TEMP/shards" --output "$RUNNER_TEMP/merged"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: codeql-javascript-merged
-          path: ${{ runner.temp }}/merged
+          name: codeql-pr-${{ matrix.language }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-results/*.sarif
           if-no-files-found: error
           retention-days: 7
-
-  javascript-upload:
-    name: upload complete JavaScript analysis
-    if: github.event_name != 'pull_request'
-    needs: javascript-merge
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: codeql-javascript-merged
-          path: ${{ runner.temp }}/merged
-      - name: Verify the source-bound merged result before upload
-        run: >-
-          python3 scripts/codeql_javascript_shards.py verify-upload
-          --source "$GITHUB_SHA" --input "$RUNNER_TEMP/merged"
-      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          sarif_file: ${{ runner.temp }}/merged/javascript.sarif
-          # Explicit category retains the previous workflow's analysis identity.
-          category: /language:javascript-typescript
-          wait-for-processing: true
 
   codeql-required:
     name: codeql-required
     if: ${{ always() && !cancelled() }}
-    needs: [rust-analysis, analyze-upload, analyze-pull-request, javascript-database, javascript-query, javascript-merge, javascript-upload]
+    needs: [analyze-upload, analyze-pull-request]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require every CodeQL language analysis
+      - name: Require successful analyses for both languages
         env:
-          PULL_REQUEST_RESULT: ${{ needs.analyze-pull-request.result }}
-          RUST_ANALYSIS_RESULT: ${{ needs.rust-analysis.result }}
-          UPLOAD_RESULT: ${{ needs.analyze-upload.result }}
-          JS_DATABASE_RESULT: ${{ needs.javascript-database.result }}
-          JS_QUERY_RESULT: ${{ needs.javascript-query.result }}
-          JS_MERGE_RESULT: ${{ needs.javascript-merge.result }}
-          JS_UPLOAD_RESULT: ${{ needs.javascript-upload.result }}
           EVENT_NAME: ${{ github.event_name }}
+          UPLOAD_RESULT: ${{ needs.analyze-upload.result }}
+          PULL_REQUEST_RESULT: ${{ needs.analyze-pull-request.result }}
         run: |
-          if [ "$JS_DATABASE_RESULT" != "success" ] || [ "$JS_QUERY_RESULT" != "success" ] ||
-             [ "$JS_MERGE_RESULT" != "success" ]; then
-            echo "complete JavaScript query coverage did not succeed" >&2
-            exit 1
-          fi
-          if { [ "$EVENT_NAME" = "pull_request" ] && [ "$JS_UPLOAD_RESULT" != "skipped" ]; } ||
-             { [ "$EVENT_NAME" != "pull_request" ] && [ "$JS_UPLOAD_RESULT" != "success" ]; }; then
-            echo "JavaScript upload did not match the event permission boundary" >&2
-            exit 1
-          fi
-          if { [ "$EVENT_NAME" != "pull_request" ] && [ "$RUST_ANALYSIS_RESULT" = "success" ] &&
-               [ "$UPLOAD_RESULT" = "success" ] && [ "$PULL_REQUEST_RESULT" = "skipped" ]; } ||
-             { [ "$EVENT_NAME" = "pull_request" ] && [ "$RUST_ANALYSIS_RESULT" = "skipped" ] &&
-               [ "$UPLOAD_RESULT" = "skipped" ] && [ "$PULL_REQUEST_RESULT" = "success" ]; }; then
-            echo "all required CodeQL analyses succeeded"
+          if { [ "$EVENT_NAME" != "pull_request" ] && [ "$UPLOAD_RESULT" = "success" ] &&
+               [ "$PULL_REQUEST_RESULT" = "skipped" ]; } ||
+             { [ "$EVENT_NAME" = "pull_request" ] && [ "$UPLOAD_RESULT" = "skipped" ] &&
+               [ "$PULL_REQUEST_RESULT" = "success" ]; }; then
+            echo "both required CodeQL language analyses succeeded"
           else
-            echo "required CodeQL analyses did not succeed: rust=$RUST_ANALYSIS_RESULT upload=$UPLOAD_RESULT pull_request=$PULL_REQUEST_RESULT" >&2
+            echo "required CodeQL analyses failed: upload=$UPLOAD_RESULT pull_request=$PULL_REQUEST_RESULT" >&2
             exit 1
           fi

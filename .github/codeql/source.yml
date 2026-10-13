@@ -1,0 +1,12 @@
+# Routine analysis includes all maintained code, tests, tooling, and producer patches.
+# Upstream source inventories remain covered by the independent full-repository scan.
+name: Rootlight maintained source security
+queries:
+  - uses: security-extended
+paths-ignore:
+  - source-inputs/cargo
+  - source-inputs/producer-dependencies
+  - source-inputs/producers
+  - target
+  - apps/rootlight-web/frontend/node_modules
+  - apps/rootlight-web/frontend/dist

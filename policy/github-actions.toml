@@ -68,8 +68,8 @@ permissions = [
 ]
 
 [[write_permission_jobs]]
-workflow = ".github/workflows/codeql.yml"
-job = "javascript-upload"
+workflow = ".github/workflows/codeql-full.yml"
+job = "analyze-upload"
 condition = "github.event_name != 'pull_request'"
 permissions = [
   "actions=read",

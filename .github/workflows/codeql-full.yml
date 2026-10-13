@@ -1,0 +1,76 @@
+# Complete upstream and maintained sources are analyzed outside the change gate.
+# Separate categories prevent routine scans from overwriting full-source findings.
+name: CodeQL Full
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: codeql-full-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analyze-upload:
+    name: full source / ${{ matrix.language }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Acquire authenticated scanner prerequisite
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          if [ "$LANGUAGE" = "rust" ]; then
+            bash scripts/setup-codeql-rust.sh "$RUNNER_TEMP/codeql-tools"
+          else
+            bash scripts/setup-codeql-javascript.sh "$RUNNER_TEMP/codeql-tools"
+          fi
+      - name: Initialize complete-source CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          tools: ${{ env.CODEQL_BUNDLE }}
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+      - name: Analyze complete repository source
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: /scope:full/language:${{ matrix.language }}
+          output: ${{ runner.temp }}/codeql-results
+          upload: never
+          upload-database: false
+      - name: Retain complete-source results before upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-full-${{ matrix.language }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload and require processed results
+        timeout-minutes: 5
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-results
+          category: /scope:full/language:${{ matrix.language }}
+          sha: ${{ github.sha }}
+          ref: ${{ github.ref }}
+          wait-for-processing: true

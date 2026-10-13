@@ -1,5 +1,0 @@
-# Every JavaScript shard uses the database extracted with this complete-source policy.
-# Query-only partitioning must never introduce source-path exclusions.
-name: Complete JavaScript security analysis
-queries:
-  - uses: security-extended
