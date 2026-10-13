@@ -1,4 +1,4 @@
-//! Production-process evidence for repository indexing and status lifecycle.
+//! Production-process evidence for structural repository indexing and status lifecycle.
 
 mod process_support;
 
@@ -51,7 +51,7 @@ fn repository_generation_and_source_queries_survive_daemon_restart() {
     write_repository(&repository_root, 1);
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
-    let daemon_binary = build_default_daemon();
+    let daemon_binary = build_structural_daemon(&fixture.path().join("binaries"));
 
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
@@ -252,7 +252,7 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     write_repository(&repository_root, 1);
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
-    let daemon_binary = build_default_daemon();
+    let daemon_binary = build_structural_daemon(&fixture.path().join("binaries"));
 
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
@@ -269,7 +269,7 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     assert_eq!(published_generation(&unchanged), initial_generation);
     let unchanged_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-unchanged-status", &unchanged);
-    assert_retained_generation(unchanged_evidence);
+    assert_retained_generation(unchanged_evidence, &unchanged);
     let unchanged_writes = operation_resources(
         &mut mcp,
         "incremental-unchanged-resources",
@@ -297,7 +297,7 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     let edited_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-edit-status", &edited);
     if background_stage == Some(MutationStage::Edit) {
-        assert_retained_generation(edited_evidence.clone());
+        assert_retained_generation(edited_evidence.clone(), &edited);
     }
     let edited_work = assert_mutation_work(&mut mcp, &edited, edited_evidence.clone());
     assert!(
@@ -311,7 +311,7 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     assert_eq!(published_generation(&edited_noop), edited_generation);
     let edited_noop_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-edit-noop-status", &edited_noop);
-    assert_retained_generation(edited_noop_evidence);
+    assert_retained_generation(edited_noop_evidence, &edited_noop);
     assert_eq!(
         operation_incremental_evidence(&mut mcp, "incremental-edit-history", &edited),
         edited_evidence,
@@ -333,7 +333,7 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     let reverted_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-revert-status", &reverted);
     if background_stage == Some(MutationStage::Revert) {
-        assert_retained_generation(reverted_evidence.clone());
+        assert_retained_generation(reverted_evidence.clone(), &reverted);
     }
     assert_mutation_work(&mut mcp, &reverted, reverted_evidence);
     assert_generation_source(&mut mcp, &reverted, "pub fn answer() -> u32 { 1 }\n");
@@ -353,7 +353,7 @@ fn assert_incremental_sequence(background_stage: Option<MutationStage>) {
     let reedited_evidence =
         operation_incremental_evidence(&mut mcp, "incremental-reedit-status", &reedited);
     if background_stage == Some(MutationStage::Reedit) {
-        assert_retained_generation(reedited_evidence.clone());
+        assert_retained_generation(reedited_evidence.clone(), &reedited);
     }
     assert_mutation_work(&mut mcp, &reedited, reedited_evidence);
     assert_generation_source(&mut mcp, &reedited, "pub fn answer() -> u32 { 2 }\n");
@@ -399,7 +399,7 @@ fn assert_mutation_work(mcp: &mut McpProcess, indexed: &Value, evidence: Value) 
         assert_single_file_rebuild(evidence.clone());
         return evidence;
     }
-    assert_retained_generation(evidence);
+    assert_retained_generation(evidence, indexed);
     let repository_id = required_text(
         indexed,
         &["result", "structuredContent", "data", "repository_id"],
@@ -502,7 +502,7 @@ fn assert_repository_lifecycle(observe_background_noop: bool) {
 
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
-    let daemon_binary = build_default_daemon();
+    let daemon_binary = build_structural_daemon(&fixture.path().join("binaries"));
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
@@ -743,7 +743,7 @@ fn wait_for_background_noop(mcp: &mut McpProcess, repository_id: &str, generatio
             assert_success(&detail, "operation.status");
             let data = &detail["result"]["structuredContent"]["data"];
             assert_eq!(data["published_generation"], generation);
-            assert_retained_generation(data["incremental"].clone());
+            assert_retained_generation(data["incremental"].clone(), &detail);
             return operation_id.to_owned();
         }
         assert!(
@@ -770,7 +770,7 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
 
     let state_dir = fixture.path().join("state");
     let runtime_dir = fixture.path().join("runtime");
-    let daemon_binary = build_default_daemon();
+    let daemon_binary = build_structural_daemon(&fixture.path().join("binaries"));
     let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
     daemon.wait_until_ready(&runtime_dir);
     let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
@@ -893,16 +893,35 @@ fn repository_status_distinguishes_empty_missing_metadata_and_unavailable_result
     assert_eq!(toml["files_indexed"], 1);
     assert_eq!(toml["files_skipped"], 0);
     assert_structural_generation(metadata_status, &successor_generation);
-    assert_eq!(
-        metadata_status["data"]["operations"][0]["state"],
-        "published"
-    );
+    let operations = metadata_status["data"]["operations"]
+        .as_array()
+        .expect("metadata status includes operation history");
+    let metadata_operation = operations
+        .iter()
+        .find(|operation| operation["operation_id"] == metadata_content["data"]["operation_id"])
+        .expect("metadata status retains the exact indexing operation");
+    assert_eq!(metadata_operation["state"], "published", "{metadata:#}");
     assert!(
-        !metadata_status["data"]["recommended_actions"]
-            .as_array()
-            .expect("repository status returns recommended actions")
-            .iter()
-            .any(|action| action == "inspect operation")
+        operations.iter().all(|operation| matches!(
+            operation["state"].as_str(),
+            Some("published" | "failed" | "cancelled")
+        )),
+        "ready metadata status contains a nonterminal operation: {metadata:#}"
+    );
+
+    // A ready generation can retain failed watcher or semantic operations.
+    // Recommendations must describe the history in this same response.
+    let expected_actions = if operations
+        .iter()
+        .any(|operation| operation["state"] == "failed")
+    {
+        json!(["index repository", "inspect operation"])
+    } else {
+        json!(["index repository"])
+    };
+    assert_eq!(
+        metadata_status["data"]["recommended_actions"], expected_actions,
+        "metadata recommendations disagree with operation history: {metadata:#}"
     );
     assert_eq!(metadata_status["warnings"][0]["code"], "stale_generation");
 
@@ -1108,8 +1127,12 @@ fn assert_single_file_rebuild(evidence: Value) {
     );
 }
 
-fn assert_retained_generation(evidence: Value) {
-    assert_eq!(evidence["build_strategy"], "retained_generation");
+#[track_caller]
+fn assert_retained_generation(evidence: Value, indexed: &Value) {
+    assert_eq!(
+        evidence["build_strategy"], "retained_generation",
+        "unexpected retaining evidence: {evidence:#}; indexing receipt: {indexed:#}"
+    );
     assert_eq!(evidence["changed_inputs"], 0);
     assert_eq!(evidence["changed_files"], 0);
     assert_eq!(evidence["invalidated_units"], 0);
@@ -1157,7 +1180,7 @@ fn assert_public_error(response: &Value, expected: &str) {
     );
 }
 
-fn build_default_daemon() -> PathBuf {
+fn build_structural_daemon(binary_dir: &Path) -> PathBuf {
     let mcp_binary = PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp"));
     let profile_dir = mcp_binary
         .parent()
@@ -1190,7 +1213,28 @@ fn build_default_daemon() -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(daemon.is_file(), "daemon build did not produce {daemon:?}");
-    daemon
+    // Auto watcher work must use the same provider mode as Structural requests.
+    // A sibling adapter host would enable independent semantic refinement.
+    fs::create_dir(binary_dir).expect("private structural binary directory is created");
+    let isolated = binary_dir.join(format!("rootlight-daemon{}", std::env::consts::EXE_SUFFIX));
+    let copied = fs::copy(&daemon, &isolated).expect("compiled structural daemon is copied");
+    assert_eq!(
+        copied,
+        fs::metadata(&daemon)
+            .expect("compiled daemon metadata is readable")
+            .len(),
+        "the complete compiled daemon is copied"
+    );
+    assert!(
+        !binary_dir
+            .join(format!(
+                "rootlight-adapter-host{}",
+                std::env::consts::EXE_SUFFIX
+            ))
+            .exists(),
+        "structural fixtures must not discover an adapter host"
+    );
+    isolated
 }
 
 struct DaemonProcess {

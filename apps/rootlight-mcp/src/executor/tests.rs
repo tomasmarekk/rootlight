@@ -9348,6 +9348,61 @@ async fn repo_status_projects_bounded_operations_and_freshness_controls() {
 }
 
 #[tokio::test]
+async fn repo_status_retains_failure_actions_after_publication() {
+    for historical_state in [
+        client::OperationState::Succeeded,
+        client::OperationState::Failed,
+        client::OperationState::Interrupted,
+    ] {
+        let mut status = repository_status_response();
+        status.operations = vec![
+            RepositoryStatusOperation {
+                operation: operation(),
+                kind: client::OperationKind::RepositoryIndex,
+                state: client::OperationState::Succeeded,
+                completed_units: 1,
+                total_units: 1,
+                owned_by_client: true,
+                started_unix_ms: 2,
+            },
+            RepositoryStatusOperation {
+                operation: second_operation(),
+                kind: client::OperationKind::RepositoryIndex,
+                state: historical_state,
+                completed_units: 0,
+                total_units: 1,
+                owned_by_client: false,
+                started_unix_ms: 1,
+            },
+        ];
+        let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(status)));
+        let output = execute(
+            &harness.executor,
+            VerticalTool::RepoStatus,
+            json!({
+                "repository": {"repository_id": repository()},
+                "include_operations": true
+            }),
+        )
+        .await
+        .expect("ready status preserves terminal operation history");
+
+        assert_eq!(output["data"]["repository_state"], "ready");
+        assert_eq!(output["data"]["publication_state"], "published");
+        assert_eq!(output["data"]["operations"][0]["state"], "published");
+        let (historical_label, expected_actions) = match historical_state {
+            client::OperationState::Succeeded => ("published", json!([])),
+            client::OperationState::Failed | client::OperationState::Interrupted => {
+                ("failed", json!(["inspect operation"]))
+            }
+            _ => unreachable!("the fixture contains only terminal states"),
+        };
+        assert_eq!(output["data"]["operations"][1]["state"], historical_label);
+        assert_eq!(output["data"]["recommended_actions"], expected_actions);
+    }
+}
+
+#[tokio::test]
 async fn repo_status_preserves_exact_generation_when_active_changes() {
     let mut status = repository_status_response();
     status.resolved_generation = alternate_generation();
