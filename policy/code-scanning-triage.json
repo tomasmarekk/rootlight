@@ -4026,6 +4026,26 @@
         "This rejects the specific expired-guard flow only. The active rkyv dependency and the caller obligations documented for rkyv::with::Unsafe remain unchanged."
       ],
       "disposition": "false_positive"
+    },
+    {
+      "number": 229,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "160b9de0ec2b9f92bf141ffbcb3017f63c86e016",
+      "path": "crates/rootlight-service/src/index_coverage_example.rs",
+      "source_lines": {
+        "start": 2267,
+        "end": 2267
+      },
+      "function": "gap_evidence_distinguishes_callees_applications_and_shared_spans",
+      "source_sha256": "07acc79541fe149f458bbe2ff2fdc9975e57f0b5aeafc448741425e0524ae8b4",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "evidence": [
+        "The pinned SensitiveDataCall model classifies return values using function-name account heuristics. Here account_staging_bytes and account_external_staging_bytes refer to storage-byte accounting, not user-account information.",
+        "account_staging_bytes accepts a u64 byte count and checked-adds two atomic counters (durable.rs:4018-4044). Its only returns are Ok(()) and the fieldless FirstSliceError::Limits; the error Display is the constant first-slice limits are invalid (lib.rs:15410-15411). No credential, account identifier, token or file text enters those return values.",
+        "The SARIF contains six source references and four complete attached flows, each inspected. Their sink is the cfg(test) assertion missing gap: {text}: {row}, reached through inspect(...).unwrap() and report[files][0]. The test creates Module.bas from a fixed VBA fixture; text is Missing, Missing(1) or Other, and the row describes only that synthetic input.",
+        "This rejects the specific secret-data classification and attached test flows; it does not waive review of production logging or classify every report as nonsensitive."
+      ],
+      "disposition": "false_positive"
     }
   ]
 }
