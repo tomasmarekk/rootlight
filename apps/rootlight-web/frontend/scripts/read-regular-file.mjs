@@ -17,19 +17,37 @@ export async function readRegularFile(path, maximum) {
   if (!Number.isSafeInteger(maximum) || maximum < 0) {
     throw new Error("regular file byte limit is invalid");
   }
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.size > maximum) {
-    throw new Error("input is not a bounded regular file");
+  let handle;
+  try {
+    // Nonblocking open prevents a substituted FIFO from waiting for a writer;
+    // no path metadata observed before open is trusted for the descriptor.
+    handle = await open(
+      path,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+  } catch (error) {
+    if (error.code === "ELOOP" || error.code === "EISDIR") {
+      throw new Error("input is not a bounded regular file", { cause: error });
+    }
+    throw error;
   }
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const metadata = await handle.stat();
     if (
       !metadata.isFile() ||
-      metadata.dev !== before.dev ||
-      metadata.ino !== before.ino ||
-      metadata.size !== before.size
+      !Number.isSafeInteger(metadata.size) ||
+      metadata.size < 0 ||
+      metadata.size > maximum
     ) {
+      throw new Error("input is not a bounded regular file");
+    }
+    // The path check also rejects links where O_NOFOLLOW is unavailable. All
+    // subsequent reads remain bound to this descriptor if the path changes.
+    const entry = await lstat(path);
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > maximum) {
+      throw new Error("input is not a bounded regular file");
+    }
+    if (metadata.dev !== entry.dev || metadata.ino !== entry.ino || metadata.size !== entry.size) {
       throw new Error("input identity changed while it was opened");
     }
     const bytes = Buffer.alloc(metadata.size + 1);

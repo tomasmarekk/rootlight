@@ -548,20 +548,23 @@ function validateOwnedBridgeFile(path) {
 }
 
 function readBridgeFile(path) {
-  const before = lstatSync(path);
-  if (
-    !before.isFile() || before.isSymbolicLink() ||
-    before.size > maximumBridgeFileBytes
-  ) {
-    throw new Error("CLI bridge input is not a bounded regular file");
-  }
   // The copied cleanup runtime is standalone, so it retains its own descriptor guard.
-  const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+  );
   try {
+    const current = lstatSync(path);
     const metadata = fstatSync(descriptor);
     if (
-      !metadata.isFile() || metadata.dev !== before.dev ||
-      metadata.ino !== before.ino || metadata.size !== before.size
+      !current.isFile() || current.isSymbolicLink() || !metadata.isFile() ||
+      current.size > maximumBridgeFileBytes || metadata.size > maximumBridgeFileBytes
+    ) {
+      throw new Error("CLI bridge input is not a bounded regular file");
+    }
+    if (
+      metadata.dev !== current.dev || metadata.ino !== current.ino ||
+      metadata.size !== current.size
     ) {
       throw new Error("CLI bridge input changed while it was opened");
     }

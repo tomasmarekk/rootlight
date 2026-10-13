@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import { runInNewContext } from "node:vm";
 
 const nativePackages = new Map([
   ["darwin-arm64", "@tomasmarekk/rootlight-darwin-arm64"],
@@ -63,8 +65,162 @@ function markerNpmCli(marker, prefix) {
   ].join("\n");
 }
 
+function bridgeReaderSource(file) {
+  const source = readFileSync(join(sourceRoot, "packaging", "npm", file), "utf8");
+  const matches = [...source.matchAll(/^function readBridgeFile\(path\) \{[\s\S]*?^\}/gmu)];
+  assert.equal(matches.length, 1, `${file} must contain one standalone bridge reader`);
+  return matches[0][0];
+}
+
+function instrumentBridgeReader(source, hooks = {}) {
+  const calls = { opened: [], closed: [], allocations: 0, reads: 0 };
+  const reader = runInNewContext(`(${source})`, {
+    ...fs,
+    ...hooks,
+    maximumBridgeFileBytes: 64 * 1024,
+    Buffer: {
+      alloc(size) {
+        calls.allocations += 1;
+        assert.ok(size <= 64 * 1024 + 1, "bridge allocation must remain bounded");
+        return Buffer.alloc(size);
+      },
+    },
+    openSync(...args) {
+      const descriptor = (hooks.openSync ?? fs.openSync)(...args);
+      calls.opened.push(descriptor);
+      return descriptor;
+    },
+    closeSync(descriptor) {
+      calls.closed.push(descriptor);
+      fs.closeSync(descriptor);
+    },
+    readSync(...args) {
+      calls.reads += 1;
+      return (hooks.readSync ?? fs.readSync)(...args);
+    },
+  });
+  return { reader, calls };
+}
+
+function assertBridgeReaders(temporary) {
+  const sources = ["run-native.mjs", "remove-cli-bridge.mjs"].map(bridgeReaderSource);
+  assert.equal(sources[0], sources[1], "standalone cleanup must retain the same guard");
+  for (const [index, source] of sources.entries()) {
+    const directory = join(temporary, `reader-${index}`);
+    mkdirSync(directory);
+    const path = join(directory, "bridge");
+    const assertRejectedBeforeRead = (hooks = {}, expected) => {
+      const { reader, calls } = instrumentBridgeReader(source, hooks);
+      assert.throws(() => reader(path), expected);
+      assert.equal(calls.allocations, 0);
+      assert.equal(calls.reads, 0);
+      assert.deepEqual(calls.closed, calls.opened);
+    };
+    for (const size of [0, 64 * 1024]) {
+      writeFileSync(path, "x".repeat(size));
+      const { reader, calls } = instrumentBridgeReader(source);
+      assert.equal(reader(path), "x".repeat(size));
+      assert.deepEqual(calls.closed, calls.opened);
+      assert.equal(calls.opened.length, 1);
+    }
+    writeFileSync(path, "x".repeat(64 * 1024 + 1));
+    assertRejectedBeforeRead();
+    rmSync(path);
+    mkdirSync(path);
+    assertRejectedBeforeRead();
+    rmSync(path, { recursive: true });
+
+    for (const replacement of ["other bridge", "x".repeat(64 * 1024 + 1)]) {
+      writeFileSync(path, "owned bridge");
+      assertRejectedBeforeRead(
+        {
+          openSync(file, flags) {
+            const descriptor = fs.openSync(file, flags);
+            fs.renameSync(file, join(directory, `opened-${replacement.length}`));
+            writeFileSync(file, replacement);
+            return descriptor;
+          },
+        },
+        replacement.length > 64 * 1024 ? /bounded regular file/u : /changed while it was opened/u,
+      );
+    }
+    writeFileSync(path, "owned bridge");
+    assertRejectedBeforeRead(
+      { lstatSync() { throw new Error("metadata unavailable"); } },
+      /metadata unavailable/u,
+    );
+    for (const mutate of [() => fs.appendFileSync(path, "x"), () => fs.truncateSync(path, 0)]) {
+      writeFileSync(path, "owned bridge");
+      let changed = false;
+      const { reader, calls } = instrumentBridgeReader(source, {
+        readSync(...args) {
+          if (!changed) {
+            changed = true;
+            mutate();
+          }
+          return fs.readSync(...args);
+        },
+      });
+      assert.throws(() => reader(path), /changed while it was read/u);
+      assert.deepEqual(calls.closed, calls.opened);
+      assert.equal(calls.opened.length, 1);
+    }
+
+    const destination = join(directory, "destination");
+    writeFileSync(destination, "foreign bridge");
+    rmSync(path);
+    try {
+      fs.symlinkSync(destination, path, "file");
+    } catch (error) {
+      if (process.platform !== "win32" || error.code !== "EPERM") throw error;
+      console.log("bridge symlink test requires Windows symlink privilege");
+    }
+    if (fs.existsSync(path)) {
+      assertRejectedBeforeRead();
+      assertRejectedBeforeRead({ constants: { ...fs.constants, O_NOFOLLOW: 0 } });
+      assert.equal(readFileSync(destination, "utf8"), "foreign bridge");
+      rmSync(path);
+    }
+    if (process.platform !== "win32") {
+      writeFileSync(path, "owned bridge");
+      const fifo = join(directory, "fifo");
+      const created = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+      assert.equal(created.status, 0, created.stderr);
+      // A separate process bounds a regression that blocks opening the substituted FIFO.
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+        import assert from "node:assert/strict";
+        import * as fs from "node:fs";
+        import { runInNewContext } from "node:vm";
+        const source = ${JSON.stringify(source)};
+        const path = ${JSON.stringify(path)};
+        const fifo = ${JSON.stringify(fifo)};
+        let opened = 0;
+        let closed = 0;
+        const reader = runInNewContext("(" + source + ")", {
+          ...fs, maximumBridgeFileBytes: 64 * 1024,
+          Buffer: { alloc() { assert.fail("FIFO must not allocate"); } },
+          openSync(file, flags) {
+            fs.renameSync(fifo, file);
+            const descriptor = fs.openSync(file, flags);
+            opened += 1;
+            return descriptor;
+          },
+          readSync() { assert.fail("FIFO must not be read"); },
+          closeSync(descriptor) { closed += 1; fs.closeSync(descriptor); },
+        });
+        assert.throws(() => reader(path), /bounded regular file/u);
+        assert.equal(opened, 1);
+        assert.equal(closed, 1);
+      `], { encoding: "utf8", timeout: 5000 });
+      assert.equal(result.error, undefined, result.error?.message);
+      assert.equal(result.status, 0, result.stderr);
+    }
+  }
+}
+
 const temporary = mkdtempSync(join(tmpdir(), "rootlight-npm-wrappers-"));
 try {
+  assertBridgeReaders(temporary);
   const globalPrefix = join(temporary, "global");
   const globalBin =
     process.platform === "win32" ? globalPrefix : join(globalPrefix, "bin");
