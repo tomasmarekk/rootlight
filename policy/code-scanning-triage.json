@@ -3946,6 +3946,86 @@
         "This rejects the specific expired-guard dataflow, not the general unsafe preconditions or all possible defects in the destination library."
       ],
       "disposition": "false_positive"
+    },
+    {
+      "number": 222,
+      "rule": "rust/access-after-lifetime-ended",
+      "source_commit": "f8d15941d7bfad1421cb732386dd27208c21d6c0",
+      "path": "source-inputs/cargo/rkyv-0.8.18/src/impls/core/with/mod.rs",
+      "source_lines": {
+        "start": 735,
+        "end": 735
+      },
+      "function": "ArchiveWith<UnsafeCell<F>>::resolve_with",
+      "source_sha256": "b306f27c13bf8d53627cd17437bc1506605231133253af01b18eccf455765bdb",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "evidence": [
+        "All four attached SARIF flows originate at ptr::read(&guard.value) in hashbrown0.12.3 ScopeGuard::into_inner (scopeguard.rs:29-41). The function returns owned T by value and forgets the old guard; it does not return a pointer to the guard's stack slot.",
+        "RawTable::clone allocates and clones a new heap table, then returns that owner through ManuallyDrop::into_inner(ScopeGuard::into_inner(guard)) (raw/mod.rs:1600-1625). The reported flow conflates this value move with an escaping stack pointer and connects unrelated generic cloning and serialization implementations.",
+        "The sink accesses the UnsafeCell supplied through its live field: &UnsafeCell<F> argument. None of these flows establishes an alias from that argument to the former hashbrown guard stack slot.",
+        "This rejects the specific expired-guard flow only. The active rkyv dependency and the caller obligations documented for rkyv::with::Unsafe remain unchanged."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 223,
+      "rule": "rust/access-after-lifetime-ended",
+      "source_commit": "f8d15941d7bfad1421cb732386dd27208c21d6c0",
+      "path": "source-inputs/cargo/rkyv-0.8.18/src/impls/core/with/mod.rs",
+      "source_lines": {
+        "start": 749,
+        "end": 749
+      },
+      "function": "SerializeWith<UnsafeCell<F>>::serialize_with",
+      "source_sha256": "b306f27c13bf8d53627cd17437bc1506605231133253af01b18eccf455765bdb",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "evidence": [
+        "All four attached SARIF flows originate at ptr::read(&guard.value) in hashbrown0.12.3 ScopeGuard::into_inner (scopeguard.rs:29-41). The function returns owned T by value and forgets the old guard; it does not return a pointer to the guard's stack slot.",
+        "RawTable::clone allocates and clones a new heap table, then returns that owner through ManuallyDrop::into_inner(ScopeGuard::into_inner(guard)) (raw/mod.rs:1600-1625). The reported flow conflates this value move with an escaping stack pointer and connects unrelated generic cloning and serialization implementations.",
+        "The sink serializes the UnsafeCell supplied through its live field: &UnsafeCell<F> argument. None of these flows establishes an alias from that argument to the former hashbrown guard stack slot.",
+        "This rejects the specific expired-guard flow only. The active rkyv dependency and the caller obligations documented for rkyv::with::Unsafe remain unchanged."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 224,
+      "rule": "rust/access-after-lifetime-ended",
+      "source_commit": "f8d15941d7bfad1421cb732386dd27208c21d6c0",
+      "path": "source-inputs/cargo/rkyv-0.8.18/src/impls/core/with/mod.rs",
+      "source_lines": {
+        "start": 776,
+        "end": 776
+      },
+      "function": "ArchiveWith<Cell<F>>::resolve_with",
+      "source_sha256": "b306f27c13bf8d53627cd17437bc1506605231133253af01b18eccf455765bdb",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "evidence": [
+        "All four attached SARIF flows originate at ptr::read(&guard.value) in hashbrown0.12.3 ScopeGuard::into_inner (scopeguard.rs:29-41). The function returns owned T by value and forgets the old guard; it does not return a pointer to the guard's stack slot.",
+        "RawTable::clone allocates and clones a new heap table, then returns that owner through ManuallyDrop::into_inner(ScopeGuard::into_inner(guard)) (raw/mod.rs:1600-1625). The reported flow conflates this value move with an escaping stack pointer and connects unrelated generic cloning and serialization implementations.",
+        "The sink accesses the Cell supplied through its live field: &Cell<F> argument. None of these flows establishes an alias from that argument to the former hashbrown guard stack slot.",
+        "This rejects the specific expired-guard flow only. The active rkyv dependency and the caller obligations documented for rkyv::with::Unsafe remain unchanged."
+      ],
+      "disposition": "false_positive"
+    },
+    {
+      "number": 225,
+      "rule": "rust/access-after-lifetime-ended",
+      "source_commit": "f8d15941d7bfad1421cb732386dd27208c21d6c0",
+      "path": "source-inputs/cargo/rkyv-0.8.18/src/impls/core/with/mod.rs",
+      "source_lines": {
+        "start": 790,
+        "end": 790
+      },
+      "function": "SerializeWith<Cell<F>>::serialize_with",
+      "source_sha256": "b306f27c13bf8d53627cd17437bc1506605231133253af01b18eccf455765bdb",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "evidence": [
+        "All four attached SARIF flows originate at ptr::read(&guard.value) in hashbrown0.12.3 ScopeGuard::into_inner (scopeguard.rs:29-41). The function returns owned T by value and forgets the old guard; it does not return a pointer to the guard's stack slot.",
+        "RawTable::clone allocates and clones a new heap table, then returns that owner through ManuallyDrop::into_inner(ScopeGuard::into_inner(guard)) (raw/mod.rs:1600-1625). The reported flow conflates this value move with an escaping stack pointer and connects unrelated generic cloning and serialization implementations.",
+        "The sink serializes the Cell supplied through its live field: &Cell<F> argument. None of these flows establishes an alias from that argument to the former hashbrown guard stack slot.",
+        "This rejects the specific expired-guard flow only. The active rkyv dependency and the caller obligations documented for rkyv::with::Unsafe remain unchanged."
+      ],
+      "disposition": "false_positive"
     }
   ]
 }
