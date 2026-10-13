@@ -4046,6 +4046,46 @@
         "This rejects the specific secret-data classification and attached test flows; it does not waive review of production logging or classify every report as nonsensitive."
       ],
       "disposition": "false_positive"
+    },
+    {
+      "number": 230,
+      "rule": "js/file-system-race",
+      "source_commit": "652bb1a0c7908e9669ae87f6d0bebb5e06935f81",
+      "path": "scripts/test_npm_wrappers.mjs",
+      "source_lines": {
+        "start": 140,
+        "end": 140
+      },
+      "function": "assertBridgeReaders injected openSync fault",
+      "source_sha256": "dbe5a219b43bf98afcd9400533566745548708f09eafd0d37569b7468d712f9e",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "evidence": [
+        "The sink is writeFileSync(file, replacement) after fs.openSync at line 138 and the deliberate rename at line 139. It intentionally substitutes the opened file's pathname so that the production reader must reject the descriptor/path identity mismatch before allocating or reading.",
+        "The unchanged regression fails against the original reader and passes against the repaired readers. Removing this adversarial write would weaken the regression rather than fix production behavior.",
+        "The path is a fixed reader-{0,1}/bridge descendant of mkdtempSync(join(tmpdir(), rootlight-npm-wrappers-)); replacement contents are test literals. No production request, analyzed project path or network input selects this fixture.",
+        "The authoritative NPM_RUNTIME_FILES allowlist in scripts/prepare_npm_packages.py copies only six packaging/npm runtime files into the package. This test script is excluded and invoked only as a regression harness. This disposition applies only to the exact reviewed fixture operation."
+      ],
+      "disposition": "used_in_tests"
+    },
+    {
+      "number": 231,
+      "rule": "js/file-system-race",
+      "source_commit": "652bb1a0c7908e9669ae87f6d0bebb5e06935f81",
+      "path": "scripts/test_npm_wrappers.mjs",
+      "source_lines": {
+        "start": 185,
+        "end": 185
+      },
+      "function": "assertBridgeReaders Unix FIFO fixture initialization",
+      "source_sha256": "dbe5a219b43bf98afcd9400533566745548708f09eafd0d37569b7468d712f9e",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "evidence": [
+        "The sink is writeFileSync(path, owned bridge), not the prior removal operation. After the symlink regression checks existsSync at line 178, validates reader rejection and removes its fixture link at line 182, this write recreates a regular fixture for the following Unix FIFO-substitution control.",
+        "The synchronous setup is limited to a fixed reader-{0,1}/bridge descendant of a newly created mkdtempSync fixture. Both its path and contents are test literals; no production cleanup operation or external file path reaches this branch.",
+        "The following bounded child deliberately substitutes a FIFO at the open boundary and verifies rejection without content allocation, reading or waiting for a writer. The final Windows/Linux qualification retains this exact test source; Unix executes both FIFO controls.",
+        "The authoritative six-file NPM_RUNTIME_FILES allowlist excludes scripts/test_npm_wrappers.mjs from runtime packages. This disposition covers only the exact private fixture transition and does not exempt production filesystem operations or other tests."
+      ],
+      "disposition": "used_in_tests"
     }
   ]
 }
