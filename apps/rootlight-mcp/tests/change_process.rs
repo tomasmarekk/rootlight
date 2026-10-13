@@ -42,8 +42,18 @@ fn change_tools_preserve_truthful_contracts_across_processes() {
     commit_repository(&repository_root, "head");
     let head_revision = git_stdout(&repository_root, &["rev-parse", "HEAD"]);
     let second = index_repository(&mut mcp, &repository_root, "second");
+    // Git refs follow active publication even when a rebuild preserves committed bytes.
+    let rebuilt = index_repository_with_mode(&mut mcp, &repository_root, "same-head", "rebuild");
+    assert_eq!(rebuilt.repository_id, second.repository_id);
+    assert_ne!(rebuilt.generation_id, second.generation_id);
     let symbol_id = locate_symbol(&mut mcp, &second, "change_target");
-    assert_git_history_selectors_are_admitted(&mut mcp, &second, &base_revision, &head_revision);
+    assert_git_history_selectors_are_admitted(
+        &mut mcp,
+        &second,
+        &repository_root,
+        &base_revision,
+        &head_revision,
+    );
     fs::write(
         repository_root.join("src/lib.rs"),
         concat!(
@@ -453,6 +463,7 @@ fn retained_analysis_arguments(tool: &str, mut arguments: Value) -> Value {
 fn assert_git_history_selectors_are_admitted(
     mcp: &mut McpProcess,
     second: &IndexReceipt,
+    repository_root: &Path,
     base_revision: &str,
     head_revision: &str,
 ) {
@@ -468,9 +479,23 @@ fn assert_git_history_selectors_are_admitted(
     );
     assert_success(&current, "history.compare");
     let current = &current["result"]["structuredContent"];
-    assert_common_read_contract("history.compare", current, second);
+    let selected = IndexReceipt {
+        repository_id: second.repository_id.clone(),
+        generation_id: required_string(
+            &current["data"]["matched_states"]["head_generation"],
+            "Git-selected head generation",
+        ),
+    };
+    assert_ne!(selected.generation_id, second.generation_id);
+    assert_eq!(
+        current["data"]["matched_states"]["base_generation"], selected.generation_id,
+        "both clean HEAD selectors must resolve to the same publication"
+    );
+    assert_common_read_contract("history.compare", current, &selected);
+    assert_eq!(current["generation"]["structural_freshness"], "current");
     assert_eq!(current["data"]["changes"], json!([]));
     assert_eq!(current["data"]["lineage"], json!([]));
+    assert_generation_source_matches_git(mcp, &selected, repository_root, head_revision);
 
     let unavailable = mcp.call(
         "change-unindexed-git-history",
@@ -483,6 +508,68 @@ fn assert_git_history_selectors_are_admitted(
         }),
     );
     assert_public_error(&unavailable, "INCOMPLETE_COVERAGE");
+}
+
+fn assert_generation_source_matches_git(
+    mcp: &mut McpProcess,
+    selected: &IndexReceipt,
+    repository_root: &Path,
+    revision: &str,
+) {
+    let located = mcp.call(
+        "change-git-source-locate",
+        "code.locate",
+        json!({
+            "repository": {"repository_id": selected.repository_id},
+            "generation": selected.generation_id,
+            "query": "src/lib.rs",
+            "search_modes": ["path"],
+            "kinds": ["file"],
+            "scope": {"paths": ["src/lib.rs"]},
+            "response_profile": "evidence"
+        }),
+    );
+    assert_success(&located, "code.locate");
+    let output = &located["result"]["structuredContent"];
+    assert_common_read_contract("code.locate", output, selected);
+    let matches = output["data"]["matches"]
+        .as_array()
+        .expect("selected generation returns source matches");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["path"], "src/lib.rs");
+    assert_eq!(matches[0]["kind"], "file");
+    let source_ref = &matches[0]["source_ref"];
+    assert_eq!(source_ref["generation"], selected.generation_id);
+    assert_eq!(source_ref["repository"], selected.repository_id);
+    let source = mcp.call(
+        "change-git-source-read",
+        "source.read",
+        json!({
+            "repository": {"repository_id": selected.repository_id},
+            "generation": selected.generation_id,
+            "references": [{"source_ref": source_ref}],
+            "encoding": "utf8_lossless_when_valid"
+        }),
+    );
+    assert_success(&source, "source.read");
+    let output = &source["result"]["structuredContent"];
+    assert_common_read_contract("source.read", output, selected);
+    assert_eq!(output["truncated"], false);
+    let chunks = output["data"]["chunks"]
+        .as_array()
+        .expect("selected generation returns source chunks");
+    assert_eq!(chunks.len(), 1);
+    let content = chunks[0]["content"]
+        .as_str()
+        .expect("committed fixture source is lossless UTF-8");
+    let committed = Command::new("git")
+        .current_dir(repository_root)
+        .args(["show", &format!("{revision}:src/lib.rs")])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("committed fixture source is readable");
+    assert!(committed.status.success());
+    assert_eq!(content.as_bytes(), committed.stdout);
 }
 
 fn assert_tool_data(tool: &str, output: &Value, first: &IndexReceipt, second: &IndexReceipt) {
@@ -810,7 +897,16 @@ fn git_stdout(root: &Path, arguments: &[&str]) -> String {
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path, case: &str) -> IndexReceipt {
-    let arguments = json!({"root": root, "mode": "auto", "detached": false});
+    index_repository_with_mode(mcp, root, case, "auto")
+}
+
+fn index_repository_with_mode(
+    mcp: &mut McpProcess,
+    root: &Path,
+    case: &str,
+    mode: &str,
+) -> IndexReceipt {
+    let arguments = json!({"root": root, "mode": mode, "detached": false});
     let response = process_support::retry_transient_busy(&format!("index-{case}"), |attempt_id| {
         mcp.call(attempt_id, "repo.index", arguments.clone())
     });
