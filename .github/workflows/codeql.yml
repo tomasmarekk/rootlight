@@ -41,9 +41,12 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Acquire authenticated Rust scanner prerequisite
+        run: bash scripts/setup-codeql-rust.sh "$RUNNER_TEMP/codeql-tools"
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
+          tools: ${{ env.CODEQL_BUNDLE }}
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
@@ -251,9 +254,12 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Acquire authenticated Rust scanner prerequisite
+        run: bash scripts/setup-codeql-rust.sh "$RUNNER_TEMP/codeql-tools"
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
+          tools: ${{ env.CODEQL_BUNDLE }}
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
