@@ -55,6 +55,8 @@ LIGHTNING_NATIVE_LOCK_PATH = f"{LIGHTNING_NATIVE_PATH}/overlays/Cargo.lock"
 FRONTEND_PATHS = ("apps/rootlight-web/frontend/package.json", CANONICAL_LOCK,
                   "apps/rootlight-web/frontend/.npmrc")
 VERIFICATION_SCRIPT_PATHS = (
+    "scripts/build_lightning_native.py", "scripts/build_frontend_from_sources.py",
+    "scripts/install_frontend_from_archives.py", "scripts/check_lightning_frontend_boundary.cjs",
     "scripts/install_lightning_from_archives.py",
     "scripts/verify_lightning_installed_placements.py",
     "scripts/lightning_yarn_pins.py", "scripts/patch_npm_source_fixture.py",

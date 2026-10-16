@@ -8,6 +8,7 @@ must deny network access; derived cache output is not OS-denied acceptance.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -157,6 +158,46 @@ def _environment(work: Path, cache: Path, node: Path) -> dict[str, str]:
         "NPM_CONFIG_FUND": "false", "NPM_CONFIG_UPDATE_NOTIFIER": "false",
         "NPM_CONFIG_PREFER_ONLINE": "false", "NPM_CONFIG_FETCH_RETRIES": "0",
     }
+
+
+def _run_install(arguments: list[str], frontend: Path, environment: dict, work: Path,
+                 phase: str = "npm-ci", *, capture_version: bool = False):
+    if phase not in {"node-version", "npm-version", "npm-ci"}:
+        raise FrontendInstallationError("unsupported frontend child phase")
+    state = {"schema": "rootlight.frontend-install-child/1", "phase": phase, "command": arguments,
+             "spawn_attempted": False, "pid": None, "exit_code": None, "writer_closed": False,
+             "stdout": None if capture_version else "npm-ci.stdout",
+             "stderr": None if capture_version else "npm-ci.stderr"}
+    failure, child = None, None
+    try:
+        with contextlib.ExitStack() as streams:
+            out = subprocess.PIPE if capture_version else streams.enter_context((work / "npm-ci.stdout").open("xb"))
+            err = subprocess.DEVNULL if capture_version else streams.enter_context((work / "npm-ci.stderr").open("xb"))
+            state["spawn_attempted"] = True
+            child = subprocess.Popen(arguments, cwd=frontend, env=environment, shell=False,
+                                     stdout=out, stderr=err, text=True)
+            state["pid"] = child.pid
+            stdout, _stderr = child.communicate()
+        state.update(exit_code=child.returncode, writer_closed=True)
+        return subprocess.CompletedProcess(arguments, child.returncode, stdout)
+    except BaseException as error:
+        failure = error
+        state["error"] = type(error).__name__
+        if child is not None:
+            try:
+                state["exit_code"] = child.poll()
+                state["writer_closed"] = state["exit_code"] is not None
+            except BaseException as observation_error:
+                state["state_observation_error"] = type(observation_error).__name__
+        raise
+    finally:
+        try:
+            with (work / (phase + ".json")).open("xb") as stream:
+                stream.write((json.dumps(state, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+        except BaseException as reporting_error:
+            if failure is None:
+                raise
+            failure.add_note(phase + " child-state reporting failed: " + str(reporting_error))
 
 
 def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm_cli: Path) -> dict[str, Any]:
@@ -319,9 +360,8 @@ def install_frontend(source_root: Path, work: Path, cache: Path, node: Path, npm
     def run(arguments: list[str], phase: str, *, expected_version: str | None = None) -> None:
         unchanged()
         try:
-            result = subprocess.run(arguments, cwd=frontend, env=environment, shell=False, check=False,
-                                    stdout=subprocess.PIPE if expected_version else subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, text=True, timeout=300)
+            result = _run_install(arguments, frontend, environment, work, phase,
+                                  capture_version=expected_version is not None)
         except (OSError, subprocess.SubprocessError) as error:
             raise FrontendInstallationError("frontend subprocess failed: " + phase) from error
         finally:

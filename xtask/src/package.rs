@@ -61,7 +61,17 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 32] = [
+const DISTRIBUTION_LICENSES: [&str; 42] = [
+    "tree-sitter-rocq-0.2.0-LICENSE-DECLARATIONS.json",
+    "tree-sitter-rocq-0.2.0-MIT-REFERENCE.txt",
+    "tree-sitter-rocq-0.2.0-SPDX-MIT-REFERENCE.json",
+    "tree-sitter-rocq-0.2.0-SOURCE-ORIGIN.json",
+    "tree-sitter-rocq-0.2.0-LOCAL-SOURCE.md",
+    "tree-sitter-eiffel-1.0.0-LICENSE",
+    "tree-sitter-systemverilog-0.4.1-LICENSE",
+    "tree-sitter-v-0.0.6-LICENSE",
+    "tree-sitter-cmake-0.7.5-LICENSE",
+    "tree-sitter-julia-0.25.0-LICENSE",
     "tree-sitter-xml-0.7.0-LICENSE",
     "tree-sitter-0.26.11-LICENSE",
     "tree-sitter-wgsl-0.0.9-LICENSE.md",
@@ -589,6 +599,21 @@ struct ArchiveBuild<'a> {
 fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
     // Read retained vendor notices directly instead of maintaining a second copy.
     match filename {
+        "tree-sitter-rocq-0.2.0-LICENSE-DECLARATIONS.json" => {
+            workspace.join("third_party/tree-sitter-rocq-0.2.0/upstream/license-declarations.json")
+        }
+        "tree-sitter-rocq-0.2.0-MIT-REFERENCE.txt" => {
+            workspace.join("third_party/tree-sitter-rocq-0.2.0/LICENSE-MIT-REFERENCE.txt")
+        }
+        "tree-sitter-rocq-0.2.0-SPDX-MIT-REFERENCE.json" => {
+            workspace.join("third_party/tree-sitter-rocq-0.2.0/upstream/spdx-MIT-reference.json")
+        }
+        "tree-sitter-rocq-0.2.0-SOURCE-ORIGIN.json" => {
+            workspace.join("third_party/tree-sitter-rocq-0.2.0/upstream/source-origin.json")
+        }
+        "tree-sitter-rocq-0.2.0-LOCAL-SOURCE.md" => {
+            workspace.join("third_party/tree-sitter-rocq-0.2.0/LOCAL-SOURCE.md")
+        }
         "tree-sitter-scheme-0.24.7-1-LICENSE" => {
             workspace.join("third_party/tree-sitter-scheme-0.24.7-1/upstream/LICENSE")
         }
@@ -2325,9 +2350,99 @@ mod tests {
     }
 
     #[test]
+    fn coq_distribution_preserves_license_declarations_and_reference_provenance() {
+        let workspace = workspace_root().expect("workspace root");
+        for (filename, source, expected_sha256) in [
+            (
+                "tree-sitter-rocq-0.2.0-LICENSE-DECLARATIONS.json",
+                "upstream/license-declarations.json",
+                "c820cf5ea9a442518dd554464086e9b733948518c9de4b6b9deb2168fb8ab57e",
+            ),
+            (
+                "tree-sitter-rocq-0.2.0-MIT-REFERENCE.txt",
+                "LICENSE-MIT-REFERENCE.txt",
+                "32303ab887b8c90b6e6fe49e2f031ca01b23b5190e236447d94e1944684dc769",
+            ),
+            (
+                "tree-sitter-rocq-0.2.0-SPDX-MIT-REFERENCE.json",
+                "upstream/spdx-MIT-reference.json",
+                "0c2b3c87a154a4aaac6bc6a735dd454dc29d9a78c23a85deedb080e0c65de1f8",
+            ),
+            (
+                "tree-sitter-rocq-0.2.0-SOURCE-ORIGIN.json",
+                "upstream/source-origin.json",
+                "1ef5cf1b397847172bd76a974f5eae61e8a65f51318b02863718a72a9f500ca0",
+            ),
+            (
+                "tree-sitter-rocq-0.2.0-LOCAL-SOURCE.md",
+                "LOCAL-SOURCE.md",
+                "6c58602ae2c7c8a0bab1a32ca1317c46d5ebcdf6d006d1479b5d737607205634",
+            ),
+        ] {
+            assert!(DISTRIBUTION_LICENSES.contains(&filename));
+            let path = distribution_license_path(&workspace, filename);
+            assert_eq!(
+                path,
+                workspace
+                    .join("third_party/tree-sitter-rocq-0.2.0")
+                    .join(source)
+            );
+            let bytes = read_regular_bounded(&path, MAX_THIRD_PARTY_LICENSE_BYTES).unwrap();
+            assert_eq!(sha256(&bytes), expected_sha256);
+        }
+        let origin: serde_json::Value = serde_json::from_slice(
+            &fs::read(distribution_license_path(
+                &workspace,
+                "tree-sitter-rocq-0.2.0-SOURCE-ORIGIN.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(origin["authored_full_license_notice_present"], false);
+        assert_eq!(
+            origin["external_license_reference"]["upstream_authored_notice"],
+            false
+        );
+        assert_eq!(
+            origin["external_license_reference"]["copyright_placeholders_filled"],
+            false
+        );
+    }
+
+    #[test]
     fn local_grammar_distribution_notices_match_retained_sources() {
         let workspace = workspace_root().expect("workspace root");
         for (filename, source, expected_bytes, expected_sha256) in [
+            (
+                "tree-sitter-v-0.0.6-LICENSE",
+                "adapters/licenses/tree-sitter-v-0.0.6-LICENSE",
+                1132,
+                "abfabe98680cd5bef27c8ca64549b2f45df38f028509fe6f9eca7a52a5af72f6",
+            ),
+            (
+                "tree-sitter-systemverilog-0.4.1-LICENSE",
+                "adapters/licenses/tree-sitter-systemverilog-0.4.1-LICENSE",
+                1080,
+                "f4ceaa91e73e623d6b30895a3b644e0e277754a81c8b28655b75d7a9113f1ac4",
+            ),
+            (
+                "tree-sitter-eiffel-1.0.0-LICENSE",
+                "adapters/licenses/tree-sitter-eiffel-1.0.0-LICENSE",
+                1076,
+                "8a138713a72dc117037c40c7b5a587649a7e96aa0dc4c4517fc947173348c0c7",
+            ),
+            (
+                "tree-sitter-cmake-0.7.5-LICENSE",
+                "adapters/licenses/tree-sitter-cmake-0.7.5-LICENSE",
+                1073,
+                "97334c0f9c0962b33cbe03223f584b8ed64c2d14419ce80cc2e945eb8d367d28",
+            ),
+            (
+                "tree-sitter-julia-0.25.0-LICENSE",
+                "adapters/licenses/tree-sitter-julia-0.25.0-LICENSE",
+                1088,
+                "74f800107f200f4e28da33e9c3f86230d37d8f4c0a4916f7111e800c395ee3a2",
+            ),
             (
                 "tree-sitter-ocaml-0.25.0-LICENSE",
                 "third_party/tree-sitter-ocaml-0.25.0/LICENSE",

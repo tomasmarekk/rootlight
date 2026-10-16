@@ -26,6 +26,15 @@ from verify_npm_source_bundle import archive_filename
 from verify_local_npm_sources import verify_local_bundle
 
 
+def modeled_popen(process):
+    """Adapt synthetic completed results at the Popen seam without launching tools."""
+    def spawn(arguments, **options):
+        result = process(arguments, **options)
+        return SimpleNamespace(pid=123, returncode=result.returncode,
+            communicate=lambda: (result.stdout, None), poll=lambda: result.returncode)
+    return spawn
+
+
 class FrontendArchiveInstallationTests(unittest.TestCase):
     """Require canonical inputs and local-only invocations without running npm."""
 
@@ -174,7 +183,7 @@ class FrontendArchiveInstallationTests(unittest.TestCase):
 
     def invoke(self, *, process=None, **paths):
         """Run the installer with a mocked subprocess seam and explicit paths."""
-        with mock.patch.object(install.subprocess, "run", side_effect=process or self.process) as runner:
+        with mock.patch.object(install.subprocess, "Popen", side_effect=modeled_popen(process or self.process)) as runner:
             result = install.install_frontend(
                 paths.get("source", self.source), paths.get("work", self.work),
                 paths.get("cache", self.cache), self.node, self.npm_cli,
@@ -183,7 +192,7 @@ class FrontendArchiveInstallationTests(unittest.TestCase):
 
     def rejected_before_process(self, pattern: str, **paths) -> None:
         """Require rejection before staging, cache population or subprocess launch."""
-        with mock.patch.object(install.subprocess, "run") as runner:
+        with mock.patch.object(install.subprocess, "Popen") as runner:
             with self.assertRaisesRegex((ValueError, OSError), pattern):
                 install.install_frontend(paths.get("source", self.source), paths.get("work", self.work),
                                          paths.get("cache", self.cache), self.node, self.npm_cli)
@@ -231,8 +240,8 @@ class FrontendArchiveInstallationTests(unittest.TestCase):
             self.assertEqual(arguments[0], str(self.node))
             self.assertEqual(options["cwd"], self.staged_frontend)
             self.assertIs(options["shell"], False)
-            self.assertIs(options["check"], False)
-            self.assertEqual(options["timeout"], 300)
+            self.assertNotIn("check", options)
+            self.assertNotIn("timeout", options)
             environment = options["env"]
             for key in ("NODE_OPTIONS", "NODE_PATH", "npm_config_ignore_scripts", "HTTP_PROXY"):
                 self.assertNotIn(key, environment)
@@ -475,6 +484,141 @@ class FrontendArchiveInstallationTests(unittest.TestCase):
             self.invoke(process=lambda *_args, **_options: SimpleNamespace(returncode=0, stdout="wrong\n"))
         self.assertEqual(list(self.cache.iterdir()), [])
 
+    def test_actual_subprocess_run_interruption_kill_branch_is_not_inherited(self) -> None:
+        """Real stdlib run with a Popen stub detects the historical kill/reap path."""
+        interruption = KeyboardInterrupt("synthetic caller cancellation after spawn")
+        actions = []
+        class Child:
+            pid = 56789
+            returncode = None
+            def communicate(self, *args, **kwargs):
+                actions.append("communicate")
+                raise interruption
+            def poll(self):
+                actions.append("poll")
+                return None
+            def kill(self):
+                actions.append("kill")
+            def terminate(self):
+                actions.append("terminate")
+            def wait(self, *args, **kwargs):
+                actions.append("wait")
+                return None
+            def __enter__(self):
+                actions.append("context-enter")
+                return self
+            def __exit__(self, *args):
+                actions.append("context-exit")
+                self.wait()
+                return False
+        with mock.patch.object(install.subprocess, "Popen", return_value=Child()), \
+             mock.patch.object(install.subprocess, "run", wraps=subprocess.run) as actual_run:
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                install._run_install([str(self.node), str(self.npm_cli), "ci"], self.frontend, {}, self.work)
+        self.assertIs(raised.exception, interruption)
+        self.assertNotIn("kill", actions)
+        self.assertNotIn("terminate", actions)
+        self.assertNotIn("wait", actions)
+        self.assertNotIn("context-enter", actions)
+        actual_run.assert_not_called()
+        state = json.loads((self.work / "npm-ci.json").read_bytes())
+        self.assertEqual(state["pid"], 56789)
+        self.assertIsNone(state["exit_code"])
+        self.assertFalse(state["writer_closed"])
+
+    def test_version_children_share_no_implicit_kill_and_exact_output_contract(self) -> None:
+        """Both declared version probes use the same observed Popen boundary."""
+        self.invoke()
+        for phase in ("node-version", "npm-version", "npm-ci"):
+            state = json.loads((self.work / (phase + ".json")).read_bytes())
+            self.assertEqual(state["pid"], 123)
+            self.assertEqual(state["exit_code"], 0)
+            self.assertTrue(state["writer_closed"])
+        for arguments, options in self.calls[:2]:
+            self.assertEqual(options["stdout"], subprocess.PIPE)
+            self.assertEqual(options["stderr"], subprocess.DEVNULL)
+            self.assertTrue(options["text"])
+            self.assertNotIn("timeout", options)
+        source = Path(install.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("subprocess.run(", source)
+
+    def test_npm_ci_raw_logs_preserve_success_bytes_without_stdout_relay(self) -> None:
+        """The installer keeps raw output separately and returns its existing report."""
+        import contextlib
+        output = io.StringIO()
+        def process(arguments, **options):
+            result = self.process(arguments, **options)
+            if arguments[2:3] == ["ci"]:
+                options["stdout"].write(b"installed local archives\n\xff\x00")
+                options["stderr"].write(b"retained npm diagnostics\n\xfe")
+            return result
+        with contextlib.redirect_stdout(output):
+            result, _runner = self.invoke(process=process)
+        self.assertEqual(output.getvalue(), "")
+        self.assertTrue(result["npm_ci_completed"])
+        self.assertEqual((self.work / "npm-ci.stdout").read_bytes(), b"installed local archives\n\xff\x00")
+        self.assertEqual((self.work / "npm-ci.stderr").read_bytes(), b"retained npm diagnostics\n\xfe")
+        state = json.loads((self.work / "npm-ci.json").read_bytes())
+        self.assertEqual(state["exit_code"], 0)
+        self.assertTrue(state["writer_closed"])
+        self.assertTrue(state["spawn_attempted"])
+        self.assertEqual(state["command"], self.calls[-1][0])
+        self.assertNotIn("timeout", self.calls[-1][1])
+
+    def test_npm_ci_nonzero_retains_diagnostics_and_exact_exit_without_retry(self) -> None:
+        """A failed install remains failed with its exact status and raw logs."""
+        def process(arguments, **options):
+            result = self.process(arguments, **options)
+            if arguments[2:3] == ["ci"]:
+                options["stdout"].write(b"partial install\n")
+                options["stderr"].write(b"specific synthetic npm failure\n")
+                result.returncode = 29
+            return result
+        with self.assertRaisesRegex(ValueError, "command/version failed: npm-ci"):
+            self.invoke(process=process)
+        state = json.loads((self.work / "npm-ci.json").read_bytes())
+        self.assertEqual(state["exit_code"], 29)
+        self.assertTrue(state["writer_closed"])
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual((self.work / "npm-ci.stdout").read_bytes(), b"partial install\n")
+        self.assertEqual((self.work / "npm-ci.stderr").read_bytes(), b"specific synthetic npm failure\n")
+
+    def test_npm_ci_spawn_failure_is_unknown_and_keeps_opened_logs(self) -> None:
+        """No child result is invented when the subprocess call raises."""
+        def process(arguments, **options):
+            result = self.process(arguments, **options)
+            if arguments[2:3] == ["ci"]:
+                raise OSError("synthetic unavailable executable")
+            return result
+        with self.assertRaisesRegex(ValueError, "subprocess failed: npm-ci"):
+            self.invoke(process=process)
+        state = json.loads((self.work / "npm-ci.json").read_bytes())
+        self.assertIsNone(state["exit_code"])
+        self.assertFalse(state["writer_closed"])
+        self.assertEqual(state["error"], "OSError")
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual((self.work / "npm-ci.stdout").read_bytes(), b"")
+        self.assertEqual((self.work / "npm-ci.stderr").read_bytes(), b"")
+
+    def test_npm_ci_caller_interruption_propagates_with_unknown_writer(self) -> None:
+        """The capture seam neither swallows cancellation nor invents child closure."""
+        interruption = KeyboardInterrupt("synthetic caller cancellation")
+        def process(arguments, **options):
+            result = self.process(arguments, **options)
+            if arguments[2:3] == ["ci"]:
+                options["stderr"].write(b"diagnostic before interruption\n")
+                raise interruption
+            return result
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            self.invoke(process=process)
+        self.assertIs(raised.exception, interruption)
+        state = json.loads((self.work / "npm-ci.json").read_bytes())
+        self.assertIsNone(state["exit_code"])
+        self.assertFalse(state["writer_closed"])
+        self.assertEqual(state["error"], "KeyboardInterrupt")
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual((self.work / "npm-ci.stderr").read_bytes(), b"diagnostic before interruption\n")
+
     def test_nonzero_exit_and_subprocess_exception_have_no_fallback(self) -> None:
         """Failed child commands stop before any later phase without deleting outputs."""
         cases = (SimpleNamespace(returncode=7, stdout=""), OSError("synthetic unavailable tool"),
@@ -490,7 +634,7 @@ class FrontendArchiveInstallationTests(unittest.TestCase):
                         raise failure
                     return failure
 
-                with mock.patch.object(install.subprocess, "run", side_effect=fail) as runner:
+                with mock.patch.object(install.subprocess, "Popen", side_effect=modeled_popen(fail)) as runner:
                     with self.assertRaisesRegex(ValueError, "failed"):
                         install.install_frontend(fixture.source, fixture.work, fixture.cache,
                                                  fixture.node, fixture.npm_cli)

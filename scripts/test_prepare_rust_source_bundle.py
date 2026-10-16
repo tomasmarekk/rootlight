@@ -42,6 +42,7 @@ _LIGHTNING_PLACEMENT_SCRIPT_PATHS = (
 
 
 _EXPORTED_VERIFIER_BOOTSTRAP = """
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -53,7 +54,15 @@ paths = json.loads(sys.argv[2])
 archive_pin = sys.argv[3]
 sys.path.insert(0, str(root / "scripts"))
 origins = {}
+source_files = {}
 for relative in paths:
+    if Path(relative).suffix != ".py":
+        source = root / relative
+        if source.resolve() != source or not source.is_file():
+            raise SystemExit("non-Python verifier resolved outside exported regular sources")
+        content = source.read_bytes()
+        source_files[relative] = {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        continue
     name = Path(relative).stem
     module = importlib.import_module(name)
     origin = Path(module.__file__).resolve()
@@ -65,7 +74,7 @@ if archive_pin:
 sys.argv = [str(root / "scripts/prepare_rust_source_bundle.py"),
             "--destination", str(root), "--verify-only"]
 runpy.run_path(sys.argv[0], run_name="__main__")
-print(json.dumps({"module_origins": origins}, sort_keys=True))
+print(json.dumps({"module_origins": origins, "source_files": source_files}, sort_keys=True))
 """
 
 
@@ -93,9 +102,18 @@ def _verify_with_exported_scripts(case, exported: Path, *, archive_pin: str = ""
     rows = result.stdout.splitlines()
     case.assertEqual(len(rows), 2)
     case.assertEqual(json.loads(rows[0])["status"], "verified")
-    origins = json.loads(rows[1])["module_origins"]
+    verification = json.loads(rows[1])
+    origins = verification["module_origins"]
     case.assertEqual(origins, {Path(relative).stem: str((exported / relative).resolve())
-                              for relative in bundle.VERIFICATION_SCRIPT_PATHS})
+                              for relative in bundle.VERIFICATION_SCRIPT_PATHS
+                              if Path(relative).suffix == ".py"})
+    # Non-Python helpers remain byte-bound inputs without executing their runtime.
+    case.assertEqual(verification["source_files"], {
+        relative: {"bytes": len((exported / relative).read_bytes()),
+                   "sha256": bundle.digest(exported / relative)}
+        for relative in bundle.VERIFICATION_SCRIPT_PATHS if Path(relative).suffix != ".py"
+    })
+    case.assertIn("scripts/check_lightning_frontend_boundary.cjs", verification["source_files"])
     case.assertEqual(origins[Path(_OBSERVER_SCRIPT_PATH).stem],
                      str((exported / _OBSERVER_SCRIPT_PATH).resolve()))
 
@@ -802,6 +820,13 @@ class RustSourceBundleTests(unittest.TestCase):
             (project / bundle.MANIFEST_PATH).write_bytes(producer.json_bytes(manifest))
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, "Yarn source inputs"):
                 bundle.verify_project_bundle(project)
+
+    def test_frontend_source_build_helpers_are_required_export_inputs(self) -> None:
+        required = {
+            "scripts/build_lightning_native.py", "scripts/build_frontend_from_sources.py",
+            "scripts/install_frontend_from_archives.py", "scripts/check_lightning_frontend_boundary.cjs",
+        }
+        self.assertTrue(required.issubset(bundle.VERIFICATION_SCRIPT_PATHS))
 
     def test_all_verification_modules_must_be_tracked_before_export(self) -> None:
         source, inventory = self.create_checkout()
