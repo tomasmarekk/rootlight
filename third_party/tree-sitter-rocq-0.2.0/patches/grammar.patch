@@ -1,0 +1,334 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -21,6 +21,7 @@
+     [$.generic_tactic_body],
+     [$.match_pattern, $.list_literal],
+     [$.binder],
++    [$.record_constructor, $.class_singleton_field],
+ 
+     [$.fixannot, $._qualid],
+     [$.assert_tactic, $._qualid],
+@@ -159,15 +160,25 @@
+ 
+         $.theorem_command,
+         $.definition_command,
++        $.instance_command,
++        $.declare_instance_command,
++        $.existing_instance_command,
++        $.existing_class_command,
++        $.record_command,
++        $.class_command,
+         $.fixpoint_command,
+         $.inductive_command,
+         $.assumption_command,
+         $.arguments_command,
+         $.section_command,
+         $.module_command,
++        $.module_type_command,
++        $.include_command,
++        $.context_command,
+         $.end_command,
+         $.reserved_notation_command,
+         $.notation_command,
++        $.tactic_notation_command,
+ 
+         $.proof_command,
+         $.qed_command,
+@@ -379,6 +390,97 @@
+       $._def_body
+     ),
+ 
++    instance_command: $ => seq(
++      "Instance", field("name", $.ident_decl), repeat($.binder),
++      ":", field("type", $.type), optional($.instance_priority),
++      optional(seq(":=", field("body", choice($.instance_field_body, $._term))))
++    ),
++
++    declare_instance_command: $ => seq(
++      "Declare", "Instance", field("name", $.ident_decl), repeat($.binder),
++      ":", field("type", $.type), optional($.instance_priority)
++    ),
++
++    existing_instance_command: $ => seq(
++      "Existing", choice(
++        seq("Instance", alias($._qualid, $.reference)),
++        seq("Instances", repeat1(alias($._qualid, $.reference)))
++      ), optional($.instance_priority)
++    ),
++
++    existing_class_command: $ => seq(
++      "Existing", "Class", alias($._qualid, $.reference)
++    ),
++
++    record_command: $ => seq(
++      choice("Record", "Structure"), $._record_head,
++      optional($.record_constructor), field("fields", $.record_body),
++      optional(seq("as", field("argument", $.ident)))
++    ),
++
++    class_command: $ => seq(
++      "Class", $._record_head, choice(
++        seq(optional($.record_constructor), field("fields", $.class_record_body),
++          optional(seq("as", field("argument", $.ident)))),
++        $.class_singleton_field
++      )
++    ),
++
++    _record_head: $ => seq(
++      field("name", $.ident_decl), repeat($.binder),
++      optional(seq(":", field("sort", $.record_sort))), ":="
++    ),
++
++    record_sort: $ => choice("SProp", "Prop", "Set", "Type"),
++
++    record_constructor: $ => field("name", $.ident),
++
++    record_body: $ => seq(
++      "{", $.record_field, repeat(seq(";", $.record_field)), optional(";"), "}"
++    ),
++
++    class_record_body: $ => seq(
++      "{", alias($.class_record_field, $.record_field),
++      repeat(seq(";", alias($.class_record_field, $.record_field))), optional(";"), "}"
++    ),
++
++    record_field: $ => seq(
++      repeat(field("attributes", $._constructor_attr)),
++      field("name", choice($.ident, $.wildcard)), optional($._record_field_spec),
++      optional($.decl_notations)
++    ),
++
++    class_record_field: $ => seq(
++      repeat(field("attributes", $._constructor_attr)),
++      field("name", choice($.ident, $.wildcard)), optional($._record_field_spec),
++      optional($.instance_priority), optional($.decl_notations)
++    ),
++
++    _record_field_spec: $ => choice(
++      seq(repeat($.binder), $.of_type_inst,
++        optional(seq(":=", field("value", $.record_field_value)))),
++      seq(repeat($.binder), ":=", field("value", $.record_field_value))
++    ),
++
++    record_field_value: $ => $._term,
++
++    class_singleton_field: $ => seq(
++      field("name", $.ident), repeat($.binder), $.of_type_inst
++    ),
++
++    instance_priority: $ => prec(1, seq("|", $._natural)),
++
++    instance_field_body: $ => seq("{", optional($._field_assignments), "}"),
++
++    _field_assignments: $ => seq(
++      $.field_assignment, repeat(seq(";", $.field_assignment)), optional(";")
++    ),
++
++    field_assignment: $ => seq(
++      field("name", $._qualid), repeat($.binder),
++      ":=", field("value", $._term)
++    ),
++
+     _def_body: $ => choice(
+       seq(
+         repeat($.binder),
+@@ -518,7 +620,58 @@
+ 
+     section_command: $ => seq("Section", $.ident),
+ 
+-    module_command: $ => seq("Module", $.ident,),
++    module_command: $ => seq(
++      "Module", optional(choice("Import", "Export")),
++      field("name", $.ident), repeat($.module_binder),
++      optional($.module_type_constraint),
++      optional(seq(":=", field("body", $.module_expression),
++        repeat(seq("<+", field("body", $.module_expression)))))
++    ),
++
++    module_type_command: $ => seq(
++      "Module", "Type", field("name", $.ident), repeat($.module_binder),
++      optional(seq("<:", repeat1(field("type", $.module_type_expression)))),
++      optional(seq(":=", field("body", $.module_type_expression),
++        repeat(seq("<+", field("body", $.module_type_expression)))))
++    ),
++
++    module_binder: $ => seq(
++      "(", optional(choice("Import", "Export")), repeat1(field("name", $.ident)),
++      ":", field("type", $.module_type_expression), ")"
++    ),
++
++    module_type_constraint: $ => choice(
++      seq(":", field("type", $.module_type_expression)),
++      seq("<:", repeat1(field("type", $.module_type_expression)))
++    ),
++
++    module_expression: $ => choice(
++      seq("!", repeat1($._module_atom)),
++      seq(repeat1($._module_atom), optional($.module_inline_annotation))
++    ),
++
++    module_type_expression: $ => choice(
++      seq("!", $._module_type),
++      seq($._module_type, optional($.module_inline_annotation))
++    ),
++
++    _module_type: $ => prec.left(seq(
++      choice($._qualid, seq("(", $._module_type, ")")), repeat($._module_atom)
++    )),
++
++    module_inline_annotation: $ => choice(
++      seq("[", "no", "inline", "]"),
++      seq("[", "inline", "at", "level", $._natural, "]")
++    ),
++
++    _module_atom: $ => choice($._qualid, seq("(", $._module_atom, ")")),
++
++    include_command: $ => seq(
++      "Include", field("module", $.module_type_expression),
++      repeat(seq("<+", field("module", $.module_type_expression)))
++    ),
++
++    context_command: $ => seq("Context", repeat1($.binder)),
+ 
+     end_command: $ => seq("End", $.ident),
+ 
+@@ -742,9 +895,29 @@
+     ),
+ 
+     _term1: $ => choice(
++      $.term_projection,
+       $.scoped_term,
+       $._term0,
+     ),
++
++    term_projection: $ => prec.left('scope', seq(
++      field("object", $.projection_object), ".(",
++      choice(
++        seq(field("projection", $.projection_name),
++          repeat(field("argument", $.projection_argument))),
++        seq("@", field("projection", $.projection_name),
++          repeat(field("argument", alias($.projection_explicit_argument, $.projection_argument))))
++      ), ")"
++    )),
++
++    projection_object: $ => $._term1,
++    projection_name: $ => $._qualid,
++    projection_argument: $ => choice(
++      field("value", $._term1),
++      seq("(", field("name", $.ident), ":=", field("value", $._term), ")"),
++      seq("(", field("position", $._natural), ":=", field("value", $._term), ")")
++    ),
++    projection_explicit_argument: $ => field("value", $._term1),
+ 
+     _term0: $ => seq(
+       optional("'"), // For ImpParser Chapter
+@@ -755,6 +928,8 @@
+         $.match_expression,
+         $.parenthesized_term,
+         $.metavariable,
++        $.ltac_term,
++        $.record_construction,
+ 
+         // Custom
+         $.list_literal,
+@@ -765,6 +940,10 @@
+ 
+ 
+     double_dot: $ => "..",
++
++    ltac_term: $ => seq("ltac", ":", "(", field("body", $._ltac_expr), ")"),
++
++    record_construction: $ => prec(1, seq("{|", optional($._field_assignments), "|}")),
+ 
+     recursive_notation_term: $ => seq(
+       $.double_dot,
+@@ -1114,6 +1293,7 @@
+       seq("(", repeat($._name), ":", $.type, ")"),
+       seq("(", $._name, optional(seq(":", $.type)), ":=", $._term, ")"),
+       $.implicit_binders,
++      $.generalizing_binder,
+       seq("(", $._name, ":", $.type, "|", $._term, ")"),
+       seq($.destructuring_pattern),
+     ),
+@@ -1123,12 +1303,42 @@
+       seq("[", repeat1($._name), optional(seq(":", $.type)), "]")
+     ),
+ 
++    generalizing_binder: $ => seq(
++      "`", choice(
++        seq("(", $.generalizing_constraint, repeat(seq(",", $.generalizing_constraint)), optional(","), ")"),
++        seq("{", $.generalizing_constraint, repeat(seq(",", $.generalizing_constraint)), optional(","), "}"),
++        seq("[", $.generalizing_constraint, repeat(seq(",", $.generalizing_constraint)), optional(","), "]")
++      )
++    ),
++
++    generalizing_constraint: $ => choice(
++      prec(1, seq(field("name", choice($.ident, $.wildcard)), ":", optional("!"), field("type", $._term))),
++      seq("{", field("name", choice($.ident, $.wildcard)), "}", ":", optional("!"), field("type", $._term)),
++      seq(optional("!"), field("type", $._term))
++    ),
++
+     open_binders: $ => seq(
+       repeat1($.binder),
+       optional(seq(":", $.type))
+     ),
+ 
+     // ~~~~~~~~~~~~~~~ Tactics ~~~~~~~~~~~~~~~~~~~
++
++    tactic_notation_command: $ => seq(
++      "Tactic", "Notation",
++      optional(seq("(", "at", "level", field("level", $.tactic_notation_level), ")")),
++      repeat1($.tactic_notation_item),
++      ":=",
++      field("body", $._ltac_expr)
++    ),
++
++    tactic_notation_level: $ => /[0-5]/,
++
++    tactic_notation_item: $ => choice(
++      $.string,
++      seq(field("entry", $.ident), "(", field("parameter", $.ident),
++        optional(seq(",", field("separator", $.string))), ")")
++    ),
+ 
+     ltac_definition: $ => seq(
+       "Ltac",
+@@ -1147,6 +1357,28 @@
+ 
+       $.tactic_or,
+       $.match_goal,
++      $.match_tactic,
++    ),
++
++    match_tactic: $ => prec('tactic_match', seq(
++      choice("match", "lazymatch", "multimatch"),
++      field("value", $.ltac_match_value),
++      "with",
++      optional("|"),
++      $.match_tactic_case,
++      repeat(seq("|", $.match_tactic_case)),
++      "end"
++    )),
++
++    ltac_match_value: $ => choice(
++      seq("type", "of", $._one_term),
++      $._one_term
++    ),
++
++    match_tactic_case: $ => seq(
++      field("pattern", $.match_pattern),
++      "=>",
++      field("body", $._ltac_expr)
+     ),
+ 
+     parenthesized_tactic: $ => seq(
+@@ -1482,8 +1714,7 @@
+     // Rules for Software Foundations Imp Chapters
+     custom_notation_block: $ => choice(
+       seq('<{', repeat($._dsl_token), '}>'),
+-      seq('[|', repeat($._dsl_token), '|]'),
+-      seq('{|', repeat($._dsl_token), '|}')
++      seq('[|', repeat($._dsl_token), '|]')
+     ),
+ 
+     _dsl_token: $ => choice(

@@ -1,0 +1,88 @@
+name: CI-Bindings
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0' # weekly
+  push:
+  pull_request:
+    paths:
+      - grammar.js
+      - src/**
+      - test/**
+      - bindings/**
+      - binding.gyp
+      - package.json
+      - package-lock.json
+      - .github/workflows/ci_bind.yml
+
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test bindings
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+          abi_version: [14, 15]
+
+    env:
+      TREE_SITTER_ABI_VERSION: ${{ matrix.abi_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up tree-sitter
+        uses: tree-sitter/setup-action@v2
+        with:
+          tree-sitter-ref: v0.26.9
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev --omit=peer --omit=optional
+
+      - name: Python binding
+        uses: tree-sitter/parser-test-action@v2
+        with:
+          test-python: true
+
+      - name: Other bindings
+        uses: tree-sitter/parser-test-action@v2
+        with:
+          test-rust: true
+          test-go: true
+          # INFO: With tree-sitter 0.25.6 Swift bindings did not work
+          # test-swift: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          node-version: 22
+          cache-dependency-path: package-lock.json
+
+      - name: Install all dependencies
+        shell: sh
+        run: npm ci
+
+      - name: list module
+        shell: sh
+        run: npm list
+
+        # INFO: Node tests still not work with tree-sitter-cli v0.25.2
+        # See: https://github.com/tree-sitter/tree-sitter/issues/4234
+      - name: Run tests
+        shell: sh
+        run: node --test bindings/node/*_test.js
+
+      - name: Generate parser
+        run: |
+          tree-sitter generate --abi=${{ matrix.abi_version }}
+          [[ ! -d node_modules ]] || rm -rf node_modules

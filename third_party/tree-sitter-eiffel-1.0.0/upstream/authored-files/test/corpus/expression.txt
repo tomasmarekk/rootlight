@@ -1,0 +1,483 @@
+===
+Current
+===
+class A feature x
+  do
+    f(Current)
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call
+                  (unqualified_call
+                    (identifier)
+                    (actuals
+                      (expression (current)))))))))))))
+
+===
+Void
+===
+class A feature x
+  do
+    f(Void)
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call
+                  (unqualified_call
+                    (identifier)
+                    (actuals
+                      (expression (void)))))))))))))
+
+===
+Character constant
+===
+class A feature x
+  do
+    f('a')
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call
+                  (unqualified_call
+                    (identifier)
+                    (actuals
+                      (expression (character_constant (character))))))))))))))
+
+===
+Expression. Bracket expression
+===
+class A
+invariant
+  f[1]
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (bracket_expression
+            (call (unqualified_call (identifier)))
+            (expression (integer_constant (integer)))))))))
+
+===
+Expression. Manifest tuple
+===
+class A
+invariant
+  [1, "a"]
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (manifest_tuple
+            (expression
+              (integer_constant
+                (integer)))
+            (expression
+              (basic_manifest_string
+                (string_content)))))))))
+
+===
+Expression. Creation expression
+===
+class A
+invariant
+  create {A}.x
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (creation_expression
+            (manifest_type (class_type (class_name)))
+            (unqualified_call (identifier))))))))
+
+===
+Expression. Manifest array
+===
+class A
+invariant
+  {A} <<1>>
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (manifest_type (class_type (class_name)))
+          (manifest_array (expression (integer_constant (integer)))))))))
+
+===
+Expression. Call agent
+===
+class A
+invariant
+  agent x.f({A}?)
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (agent
+            (call_agent
+              (agent_target (identifier))
+              (agent_unqualified
+                (identifier)
+                (placeholder (manifest_type (class_type (class_name))))))))))))
+
+===
+Expression. Inline agent
+===
+class A
+invariant
+  agent do end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (agent
+            (inline_agent
+              (attribute_or_routine
+                (feature_body
+                  (effective_routine
+                    (internal
+                      (routine_mark))))))))))))
+
+===
+Expression. Address
+===
+class A
+invariant
+  $a
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (address
+            (identifier)))))))
+
+===
+Expression. Object test
+===
+class A
+invariant
+attached {X} y as t
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (object_test
+            (manifest_type (class_type (class_name)))
+            (expression (call (unqualified_call (identifier))))
+            (identifier)))))))
+
+===
+Expression. Tuple type with entities
+===
+class A
+invariant
+  {TUPLE [a: INTEGER; b: INTEGER]}
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (manifest_type
+            (tuple_type
+              (class_name)
+              (tuple_parameter_list
+                (entity_declaration_group
+                  (identifier)
+                  (class_type (class_name)))
+                (entity_declaration_group
+                  (identifier)
+                  (class_type (class_name)))))))))))
+
+===
+Expression. Tuple type with class names
+===
+class A
+invariant
+  {TUPLE [A, B]}
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (manifest_type
+            (tuple_type
+              (class_name)
+              (tuple_parameter_list
+                (class_type (class_name))
+                (class_type (class_name))))))))))
+
+===
+Expression. Anchored
+===
+class A
+invariant
+  {like Current}
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression (manifest_type (anchored (current))))))))
+
+===
+Expression. Anchored to call
+===
+class A
+invariant
+  {like x.y.z}
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (manifest_type
+            (anchored
+              (call
+                (call
+                  (call
+                    (unqualified_call (identifier)))
+                  (unqualified_call (identifier)))
+                (unqualified_call (identifier))))))))))
+
+===
+Expression. Quantifier loop
+===
+class A
+invariant
+  across a as i all i end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (quantifier_loop
+            (iteration
+              (expression (call (unqualified_call (identifier))))
+              (identifier))
+            (quantifier_loop_body
+              (expression (call (unqualified_call (identifier)))))))))))
+
+===
+Expression. Symbolic quantifier loop
+===
+class A
+invariant
+  ∀ x: list ¦ x
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (quantifier_loop
+            (identifier)
+            (expression (call (unqualified_call (identifier))))
+            (expression (call (unqualified_call (identifier))))))))))
+
+===
+Expression. Call on bracket expression
+===
+class A
+invariant
+  a[i].f
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (call
+            (bracket_expression
+              (call (unqualified_call (identifier)))
+              (expression (call (unqualified_call (identifier)))))
+            (unqualified_call (identifier))))))))
+
+===
+Expression. Free operator
+===
+class a
+invariant
+#1 a |f "str" + 1
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (operator_expression
+            (expression
+              (operator_expression
+                (expression
+                  (operator_expression
+                    (unary
+                      (free_operator))
+                    (expression
+                      (call
+                        (unqualified_call
+                          (identifier))))))
+                (free_operator)
+                (expression
+                  (basic_manifest_string
+                    (string_content)))))
+            (binary_plus_minus)
+            (expression
+              (integer_constant
+                (integer)))))))))
+
+===
+Expression. Unary of call on Current
+===
+class A
+invariant
+  not Current.has (Void)
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (operator_expression
+            (unary
+              (unary_not))
+            (expression
+              (call
+                (current)
+                (unqualified_call
+                  (identifier)
+                  (actuals
+                    (expression
+                      (void))))))))))))
+
+===
+Expression. Implies
+===
+class A
+invariant
+a implies b ⇒ c
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (operator_expression
+            (expression
+              (operator_expression
+                (expression
+                  (call (unqualified_call (identifier))))
+                (binary_implies)
+                (expression
+                  (call (unqualified_call (identifier))))))
+            (binary_implies)
+            (expression
+              (call
+                (unqualified_call
+                  (identifier))))))))))
+
+===
+Expression. Inspect
+===
+class A
+invariant
+inspect a
+when 1 then True
+when {A}.const then True
+else False end
+end
+---
+(source_file
+  (class_declaration
+    (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (multi_branch_expression
+            (expression
+              (call
+                (unqualified_call
+                  (identifier))))
+            (when_part_expression
+              (choice
+                (integer_constant
+                  (integer)))
+              (expression
+                (boolean_constant)))
+            (when_part_expression
+              (choice
+                (class_constant
+                  (manifest_type
+                    (class_type
+                      (class_name)))
+                  (identifier)))
+              (expression
+                (boolean_constant)))
+            (else_part_expression
+              (expression
+                (boolean_constant)))))))))

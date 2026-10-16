@@ -74,6 +74,19 @@ third_party/tree-sitter-xml-0.7.0/patches/** whitespace=-blank-at-eol,-blank-at-
 third_party/tree-sitter-xml-0.7.0/upstream/archives/** binary
 adapters/licenses/tree-sitter-xml-0.7.0-LICENSE -text
 adapters/licenses/tree-sitter-0.26.11-LICENSE -text
+# CMake retains complete original publications and reviewed scanner patch bytes.
+third_party/tree-sitter-cmake-0.7.5/** -text
+third_party/tree-sitter-cmake-0.7.5/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
+third_party/tree-sitter-cmake-0.7.5/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+adapters/licenses/tree-sitter-cmake-0.7.5-LICENSE -text
+third_party/tree-sitter-julia-0.25.0/** -text
+third_party/tree-sitter-julia-0.25.0/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
+third_party/tree-sitter-julia-0.25.0/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+adapters/licenses/tree-sitter-julia-0.25.0-LICENSE -text
+third_party/tree-sitter-eiffel-1.0.0/** -text
+third_party/tree-sitter-eiffel-1.0.0/upstream/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol conflict-marker-size=32
+third_party/tree-sitter-eiffel-1.0.0/patches/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+adapters/licenses/tree-sitter-eiffel-1.0.0-LICENSE -text
 # Published Pascal indentation is retained in both preferred-source versions.
 third_party/tree-sitter-pascal-0.10.2/grammar.js* whitespace=-space-before-tab
 # Retained Kotlin registry inputs and scanner originals remain byte-exact.
@@ -120,3 +133,9 @@ crates/rootlight-unicode/data/CompositionExclusions-17.0.0.txt whitespace=-blank
 # Native producer overlays and authenticated original archives retain exact bytes.
 source-inputs/producer-security/** -text whitespace=-blank-at-eof,-blank-at-eol
 source-inputs/producer-security/**/*.tgz binary
+
+# Retained SystemVerilog and V inputs preserve authenticated upstream bytes.
+third_party/tree-sitter-systemverilog-0.4.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-v-0.0.6/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+# Authored Rocq source and its retained archive preserve exact upstream bytes.
+third_party/tree-sitter-rocq-0.2.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol

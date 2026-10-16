@@ -1,0 +1,96 @@
+{
+  "schema": "rootlight.systemverilog-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-systemverilog",
+    "version": "0.4.1",
+    "license": "MIT",
+    "unpublished_local_binding": true,
+    "rust_version": "1.90"
+  },
+  "upstream": {
+    "repository": "https://github.com/gmlarumbe/tree-sitter-systemverilog",
+    "revision": "3390da8c76a976b6f47d19667accc43e81a1483b",
+    "git_tree": "fd73705ec5d1f6dfe4e64283c41068063f5d77a9",
+    "published_archive": {
+      "path": "upstream/tree-sitter-systemverilog-published.tar.gz",
+      "bytes": 3176537,
+      "sha256": "4efa1295b39c54c04998382f860891ced37fd37af94dc3b88a8b057b73cdf7fd",
+      "url": "https://github.com/gmlarumbe/tree-sitter-systemverilog/releases/download/v0.4.1/tree-sitter-systemverilog.tar.gz"
+    },
+    "authored_archive": {
+      "path": "upstream/tree-sitter-systemverilog-authored.tar.gz",
+      "bytes": 3177229,
+      "sha256": "d4d1cc4f8bbaec979274521ff7d895d1dbba4bd8997bd2cfdc0b62ac40924bf6",
+      "url": "https://codeload.github.com/gmlarumbe/tree-sitter-systemverilog/tar.gz/3390da8c76a976b6f47d19667accc43e81a1483b"
+    },
+    "signature_verified": false,
+    "preserved_authored_files": 47,
+    "preserved_published_files": 47,
+    "authored_published_bytes_identical": false,
+    "differing_paths": [
+      "src/tree_sitter/array.h"
+    ],
+    "path_mappings": [
+      {
+        "original_path": ".gitignore",
+        "retained_path": ".gitignore.upstream"
+      },
+      {
+        "original_path": ".gitattributes",
+        "retained_path": ".gitattributes.upstream"
+      }
+    ]
+  },
+  "preferred_inputs": {
+    "origin": "exact-authored-git-tree",
+    "parser": "src/parser.c",
+    "scanner": null,
+    "grammar": "grammar.js",
+    "declared_native_abi": 15,
+    "declared_field_count": 20,
+    "generated_files_hand_edited": false,
+    "upstream_optimization_pragmas_retained": true
+  },
+  "foreign_tests": {
+    "repository": "https://github.com/gmlarumbe/tree-sitter-systemverilog-test",
+    "revision": "631e067b9b54c96deb997d3ea74b6c85df23a63a",
+    "git_tree": "433d05720a7f67210478aad8861523399193c4d5",
+    "files": 6493,
+    "bytes": 181965519,
+    "retained_in_package": false,
+    "required_for_native_compilation": false,
+    "grammar_mit_license_applies": false,
+    "blanket_redistribution_clearance": false
+  },
+  "build": {
+    "acquisition_or_generation": false,
+    "uses_upstream_lifecycle_hooks": false,
+    "inputs": [
+      "src/parser.c",
+      "src/tree_sitter/parser.h"
+    ],
+    "direct_local_dependencies": [
+      {
+        "name": "tree-sitter-language",
+        "version": "0.1.7"
+      },
+      {
+        "name": "cc",
+        "version": "1.2.67",
+        "role": "build"
+      }
+    ]
+  },
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 25028,
+    "sha256": "1afd97233067a988578eeb6f04e9ba78cda3be27208910310278b7f48048bdb7"
+  },
+  "qualification": {
+    "native_runtime_compatibility_verified": false,
+    "whole_language_coverage_percent": null,
+    "installed_mcp_verified": false,
+    "empty_cache_independent_network_denial_verified": false,
+    "license_policy_or_legal_acceptance_verified": false
+  }
+}

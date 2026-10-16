@@ -1,0 +1,32 @@
+{
+  "schema": "rootlight.rocq-authored-source-origin/1",
+  "repository": "https://github.com/aruzdh/tree-sitter-rocq",
+  "revision": "300fe33fc299c30f736fd56d8ef8a28b08acd4e6",
+  "archive": {
+    "path": "tree-sitter-rocq-authored-300fe33fc299c30f736fd56d8ef8a28b08acd4e6.tar.gz",
+    "bytes": 2027714,
+    "sha256": "d6126c24121b2f438a567e82e6c203415b18f68f03567dece1d617e3c44c131f",
+    "url": "https://codeload.github.com/aruzdh/tree-sitter-rocq/tar.gz/300fe33fc299c30f736fd56d8ef8a28b08acd4e6"
+  },
+  "authored_files": 91,
+  "authored_bytes": 18905733,
+  "archive_modes": "acquisition-inventory.json",
+  "license": "MIT",
+  "authored_full_license_notice_present": false,
+  "authored_declarations": "license-declarations.json",
+  "external_license_reference": {
+    "url": "https://spdx.org/licenses/MIT.json",
+    "path": "spdx-MIT-reference.json",
+    "sha256": "0c2b3c87a154a4aaac6bc6a735dd454dc29d9a78c23a85deedb080e0c65de1f8",
+    "upstream_authored_notice": false,
+    "copyright_placeholders_filled": false
+  },
+  "template_manifest_repository": "https://github.com/tree-sitter/tree-sitter-rocq",
+  "signature_verified": false,
+  "upstream_code_executed_during_import": false,
+  "retained_source_inventory": "retained-source-inventory.json",
+  "local_overlay": "local-overlay.json",
+  "preferred_grammar_patch": "../patches/grammar.patch",
+  "preferred_grammar_regeneration": "../patches/grammar-regeneration.json",
+  "preferred_parser_is_literal_authored_input": false
+}

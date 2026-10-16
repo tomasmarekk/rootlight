@@ -1,0 +1,144 @@
+--- upstream/authored-files/Cargo.toml
++++ Cargo.toml
+@@ -1,27 +1,21 @@
++# Local static binding for authenticated Julia native syntax inputs.
++# Original dependency manifests and lifecycle hooks remain inert under upstream/.
+ [package]
+ name = "tree-sitter-julia"
+-description = "Julia grammar for tree-sitter"
+ version = "0.25.0"
+-authors = ["Max Brunsfeld <maxbrunsfeld@gmail.com>"]
++edition = "2024"
++rust-version = "1.90"
+ license = "MIT"
+-readme = "README.md"
+-keywords = ["incremental", "parsing", "tree-sitter", "julia"]
+-categories = ["parsing", "text-editors"]
+ repository = "https://github.com/tree-sitter/tree-sitter-julia"
+-edition = "2021"
+-autoexamples = false
+-
++description = "Pinned Julia syntax tables with a reviewed local static binding"
++publish = false
+ build = "bindings/rust/build.rs"
+-include = ["/LICENSE", "bindings/rust/*", "grammar.js", "queries/*", "src/*", "tree-sitter.json"]
+ 
+ [lib]
+ path = "bindings/rust/lib.rs"
+ 
+ [dependencies]
+-tree-sitter-language = "0.1"
++tree-sitter-language = "=0.1.7"
+ 
+ [build-dependencies]
+-cc = "1.1"
+-
+-[dev-dependencies]
+-tree-sitter = "0.24"
++cc = "=1.2.67"
+--- upstream/authored-files/bindings/rust/build.rs
++++ bindings/rust/build.rs
+@@ -1,21 +1,23 @@
++//! Compiles authenticated Julia parser/scanner inputs with declared local tools.
++//! Upstream acquisition, generation and package lifecycle hooks stay inert.
++
+ fn main() {
+-    let src_dir = std::path::Path::new("src");
+-
+-    let mut c_config = cc::Build::new();
+-    c_config.std("c11").include(src_dir);
+-
++    let mut builder = cc::Build::new();
++    builder
++        .std("c11")
++        .include("src")
++        .file("src/parser.c")
++        .file("src/scanner.c");
+     #[cfg(target_env = "msvc")]
+-    c_config.flag("-utf-8");
+-
+-    let parser_path = src_dir.join("parser.c");
+-    c_config.file(&parser_path);
+-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
+-
+-    let scanner_path = src_dir.join("scanner.c");
+-    if scanner_path.exists() {
+-        c_config.file(&scanner_path);
+-        println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-julia");
++    for source in [
++        "src/parser.c",
++        "src/scanner.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
++    ] {
++        println!("cargo:rerun-if-changed={source}");
+     }
+-
+-    c_config.compile("tree-sitter-julia");
+ }
+--- upstream/authored-files/bindings/rust/lib.rs
++++ bindings/rust/lib.rs
+@@ -1,51 +1,17 @@
+-//! This crate provides Julia language support for the [tree-sitter] parsing library.
+-//!
+-//! Typically, you will use the [`LANGUAGE`] constant to add this language to a
+-//! tree-sitter [`Parser`], and then use the parser to parse some code:
+-//!
+-//! ```
+-//! let code = r#"
+-//! "#;
+-//! let mut parser = tree_sitter::Parser::new();
+-//! let language = tree_sitter_julia::LANGUAGE;
+-//! parser
+-//!     .set_language(&language.into())
+-//!     .expect("Error loading Julia parser");
+-//! let tree = parser.parse(code, None).unwrap();
+-//! assert!(!tree.root_node().has_error());
+-//! ```
+-//!
+-//! [`Parser`]: https://docs.rs/tree-sitter/0.25.10/tree_sitter/struct.Parser.html
+-//! [tree-sitter]: https://tree-sitter.github.io/
++//! Static language handle for authenticated Julia syntax tables and scanner.
++//! Parsing does not evaluate Julia code, imports, commands or macro expansions.
+ 
+ use tree_sitter_language::LanguageFn;
+ 
+-extern "C" {
++unsafe extern "C" {
+     fn tree_sitter_julia() -> *const ();
+ }
+ 
+-/// The tree-sitter [`LanguageFn`] for this grammar.
+-pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_julia) };
++/// Provides the process-lifetime generated ABI15 Julia language table.
++// SAFETY: The authenticated src/parser.c factory returns a static TSLanguage;
++// its external-token ordinals match the retained scanner. Loading the handle
++// remains subject to the Tree-sitter runtime's ABI compatibility check.
++pub const LANGUAGE_JULIA: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_julia) };
+ 
+-/// The content of the [`node-types.json`] file for this grammar.
+-///
+-/// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers/6-static-node-types
++/// Describes the exact generated named nodes and declaration-head structures.
+ pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
+-
+-// NOTE: uncomment these to include any queries that this grammar contains:
+-
+-pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");
+-pub const INJECTIONS_QUERY: &str = include_str!("../../queries/injections.scm");
+-pub const LOCALS_QUERY: &str = include_str!("../../queries/locals.scm");
+-// pub const TAGS_QUERY: &str = include_str!("../../queries/tags.scm");
+-
+-#[cfg(test)]
+-mod tests {
+-    #[test]
+-    fn test_can_load_grammar() {
+-        let mut parser = tree_sitter::Parser::new();
+-        parser
+-            .set_language(&super::LANGUAGE.into())
+-            .expect("Error loading Julia parser");
+-    }
+-}

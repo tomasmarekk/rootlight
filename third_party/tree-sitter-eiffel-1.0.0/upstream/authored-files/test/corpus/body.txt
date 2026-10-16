@@ -1,0 +1,698 @@
+===
+Body. Creation instruction
+===
+class A feature x
+  do
+    create {X} x.make
+    create x.make(True)
+    create Result
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (creation
+                  (manifest_type (class_type (class_name)))
+                  (identifier)
+                  (unqualified_call (identifier)))
+                (creation
+                  (identifier)
+                  (unqualified_call
+                    (identifier)
+                    (actuals
+                      (expression (boolean_constant)))))
+                (creation (result))))))))))
+
+===
+Call
+===
+class A feature x
+  do
+    a.b
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call
+                    (call
+                      (unqualified_call (identifier)))
+                  (unqualified_call (identifier)))))))))))
+
+===
+Arguments on next line
+===
+class A feature x
+  do
+    a.f
+      (True)
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call
+                  (call (unqualified_call (identifier)))
+                  (unqualified_call
+                    (identifier)
+                    (actuals
+                      (expression (boolean_constant)))))))))))))
+
+===
+Body. Assigner call
+===
+class A feature x
+  do
+    a := True
+    a.f := True
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (assignment
+                  (call
+                    (unqualified_call (identifier)))
+                  (expression (boolean_constant)))
+                (assignment
+                  (call
+                    (call (unqualified_call (identifier)))
+                    (unqualified_call (identifier)))
+                  (expression (boolean_constant)))))))))))
+
+===
+Body. Assign to Result
+===
+class A feature x
+  do
+    Result := 1
+  end
+end
+---
+(source_file
+  (class_declaration
+    (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (assignment
+                  (result)
+                  (expression (integer_constant (integer))))))))))))
+
+===
+Body. Assign to brackets
+===
+class A feature x
+  do
+    array [1] := 1
+  end
+end
+---
+(source_file
+  (class_declaration
+    (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (assignment
+                  (bracket_expression
+                    (call
+                      (unqualified_call
+                        (identifier)))
+                    (expression
+                      (integer_constant
+                        (integer))))
+                  (expression
+                    (integer_constant
+                      (integer))))))))))))
+
+===
+Body. Precursor instruction and Precursor expression
+===
+class A feature x
+  do
+    Precursor{A}(True)
+    a := Precursor
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (precursor
+                (class_name)
+                (actuals
+                  (expression (boolean_constant))))
+                (assignment
+                  (call (unqualified_call (identifier)))
+                  (expression (precursor)))))))))))
+
+===
+Body. Conditional instruction
+===
+class A feature x
+  do
+    if a then
+      fa
+    elseif b then
+      fb
+    else
+      felse
+    end
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (conditional
+                (then_part
+                  (expression (call (unqualified_call (identifier))))
+                  (call (unqualified_call (identifier))))
+                (then_part
+                  (expression (call (unqualified_call (identifier))))
+                  (call (unqualified_call (identifier))))
+                (else_part
+                  (call (unqualified_call (identifier)))))))))))))
+
+===
+Body. Conditional expression
+===
+class A feature x
+  do
+    a := if a then a elseif b then b else c end
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (assignment
+                (call (unqualified_call (identifier)))
+                (expression
+                  (conditional_expression
+                    (then_part_expression
+                      (expression (call (unqualified_call (identifier))))
+                      (expression (call (unqualified_call (identifier)))))
+                    (then_part_expression
+                      (expression (call (unqualified_call (identifier))))
+                      (expression (call (unqualified_call (identifier)))))
+                    (else_part_expression
+                      (expression (call (unqualified_call (identifier))))))))))))))))
+
+===
+Body. Multi-branch
+===
+class A feature x
+  do
+    inspect a
+    when 1 then
+    when 1..2 then
+    else
+    end
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (multi_branch
+                (expression (call (unqualified_call (identifier))))
+                (when_part (choice (integer_constant (integer))))
+                (when_part
+                  (choice
+                    (constant_interval
+                      (integer_constant (integer))
+                      (integer_constant (integer)))))
+                (else_part))))))))))
+
+===
+Body. Loop
+===
+class A feature x
+  do
+    across
+      a as i
+    from
+    invariant
+    until
+      e
+    loop
+    variant
+      j
+    end
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (loop
+                (iteration
+                  (expression
+                    (call (unqualified_call (identifier))))
+                    (identifier))
+                (initialization)
+                (invariant)
+                (exit_condition
+                  (expression (call (unqualified_call (identifier)))))
+                (loop_body)
+                (variant
+                  (expression
+                    (call (unqualified_call (identifier))))))))))))))
+
+===
+Body. Symbolic loop
+===
+class A feature x
+  do
+    ⟳ x: strings ¦ print (x) ⟲
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (loop
+                  (identifier)
+                  (expression (call (unqualified_call (identifier))))
+                  (call
+                    (unqualified_call
+                      (identifier)
+                      (actuals
+                        (expression
+                          (call
+                            (unqualified_call
+                              (identifier))))))))))))))))
+
+===
+Body. Cursor feature access
+===
+class A
+invariant
+  ∀ x: help_messages ¦ @ x.true
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (quantifier_loop
+            (identifier)
+            (expression
+              (call
+                (unqualified_call
+                  (identifier))))
+            (expression
+              (call
+                (at_cursor
+                  (identifier))
+                (unqualified_call
+                  (identifier))))))))))
+
+===
+Body. Debug
+===
+class A feature x
+  do
+    debug ("a")
+    end
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (debug (basic_manifest_string (string_content)))))))))))
+
+===
+Body. Check
+===
+class A feature x
+  do
+    check a b end
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (check
+                (assertion_clause
+                  (expression
+                    (call (unqualified_call (identifier)))))
+                (assertion_clause
+                  (expression
+                    (call (unqualified_call (identifier))))))))))))))
+
+===
+Body. Retry
+===
+class A feature x
+  do
+    retry
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (retry)))))))))
+
+===
+Body. Equality
+===
+class A feature x
+  do
+    a := 1 = 2
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (assignment
+                (call (unqualified_call (identifier)))
+                (expression
+                  (equality
+                    (expression (integer_constant (integer)))
+                    (comparison)
+                    (expression (integer_constant (integer))))))))))))))
+
+===
+Body. Parenthesized
+===
+class A feature x
+  do
+    a := (1)
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body
+          (effective_routine
+            (internal
+              (routine_mark)
+              (assignment
+                (call (unqualified_call (identifier)))
+                (expression
+                  (parenthesized
+                    (expression
+                      (integer_constant (integer))))))))))))))
+
+===
+Body. Old
+===
+class A feature x
+  deferred
+  ensure
+    old x
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+  (feature_clause
+    (feature_declaration
+      (new_feature (extended_feature_name (identifier)))
+      (attribute_or_routine
+        (feature_body)
+        (postcondition
+          (assertion_clause
+            (expression
+              (old
+                (expression
+                  (call
+                    (unqualified_call (identifier)))))))))))))
+
+===
+Body. Operator expressions
+===
+class A
+invariant
+  1 + -2
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (operator_expression
+            (expression (integer_constant (integer)))
+            (binary_plus_minus)
+            (expression
+              (operator_expression
+                (unary (unary_plus_minus))
+                (expression (integer_constant (integer)))))))))))
+
+===
+Body. Non-object call
+===
+class A feature x
+  do
+    {A}.f
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call
+                  (manifest_type (class_type (class_name)))
+                  (unqualified_call
+                    (identifier)))))))))))
+
+===
+Body. Check-then
+===
+class A feature x
+  do
+    check x then
+      f
+    end
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (check
+                  (assertion_clause
+                    (expression
+                      (call
+                        (unqualified_call
+                          (identifier)))))
+                  (call
+                    (unqualified_call
+                      (identifier))))))))))))
+
+===
+Body. Just semicolon
+===
+class A feature x
+  do
+    ;
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)))))))))
+
+===
+Body. Semicolon after instruction
+===
+class A feature x
+  do
+    f;
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call (unqualified_call (identifier)))))))))))
+
+===
+Body. Assignment attempt
+===
+class A feature x
+  do
+    a ?= b
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (assignment
+                  (call (unqualified_call (identifier)))
+                  (expression (call (unqualified_call (identifier)))))))))))))

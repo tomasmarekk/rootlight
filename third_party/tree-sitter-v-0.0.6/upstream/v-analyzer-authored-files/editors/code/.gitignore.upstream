@@ -1,0 +1,10 @@
+.vscode/ipch
+.idea/
+*.code-workspace
+node_modules/
+dist/
+*.exe
+*.tmp.json
+*.vsix
+.DS_Store
+package-lock.json

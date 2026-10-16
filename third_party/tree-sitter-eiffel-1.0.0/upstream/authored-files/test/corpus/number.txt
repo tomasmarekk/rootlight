@@ -1,0 +1,82 @@
+===
+Number. Sign in Expression is (unary)
+===
+class A
+invariant
+  (-1)
+  (-.2)
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (parenthesized
+            (expression
+              (operator_expression
+                (unary (unary_plus_minus))
+                (expression (integer_constant (integer))))))))
+      (assertion_clause
+        (expression
+          (parenthesized
+            (expression
+              (operator_expression
+                (unary (unary_plus_minus))
+                (expression (real_constant (real (integer))))))))))))
+
+===
+Number. Sign in Constant is (sign)
+===
+class A
+feature
+x: INTEGER = -1
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (class_type (class_name))
+        (explicit_value
+          (integer_constant
+            (sign)
+            (integer)))))))
+
+===
+Number. Real
+===
+class A
+invariant
+  -.3e-10
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (operator_expression
+            (unary (unary_plus_minus))
+            (expression
+              (real_constant
+                (real
+                  (integer)
+                  (real_exponent (sign) (integer)))))))))))
+
+===
+Number. Integer
+===
+class A
+invariant
+  12_000
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression (integer_constant (integer)))))))

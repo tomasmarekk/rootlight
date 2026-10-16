@@ -1,0 +1,730 @@
+[
+  {
+    "path": ".editorconfig",
+    "bytes": 597,
+    "sha256": "e4f2317c9785e495a1684fc3d0265fa8789ac16b45da8bca6c6461daca89710d",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": ".editorconfig"
+  },
+  {
+    "path": ".gitattributes",
+    "bytes": 1055,
+    "sha256": "a1ab6bc007b93c007fdbfd5c4ff785a4aacd300fc8e2972b338b62eafba877fc",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": ".gitattributes.upstream"
+  },
+  {
+    "path": ".gitignore",
+    "bytes": 447,
+    "sha256": "6659e7801cb9c7e1bbd9a93fd22c028ddd0aac2410242a880ad4d23ff2cc79a3",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": ".gitignore.upstream"
+  },
+  {
+    "path": "CMakeLists.txt",
+    "bytes": 3495,
+    "sha256": "9aae56a2d7c5a31c7aa2071a25d4bc5c95418e3cd04cd1054761ea28f31ae71a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "CMakeLists.txt"
+  },
+  {
+    "path": "CST-Example/dark-mode.png",
+    "bytes": 705941,
+    "sha256": "166eb456c5bcbc260e8d57527e41538493f66cfbfe066a5e093ba169b7ef9f20",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "CST-Example/dark-mode.png"
+  },
+  {
+    "path": "CST-Example/light-mode.png",
+    "bytes": 700781,
+    "sha256": "3d728b9bdba07485c288ed832948aa1ba26be88b0d92e75f42e44c3689ed3b19",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "CST-Example/light-mode.png"
+  },
+  {
+    "path": "Cargo.toml",
+    "bytes": 726,
+    "sha256": "7e593a043149253a646fdef6265ac1ccc2fca513d41a51cb14223f2911ae1f32",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "Cargo.toml"
+  },
+  {
+    "path": "Makefile",
+    "bytes": 4151,
+    "sha256": "920ee39d3856ce2930325f8bb77ff0e221f74b7c5051bf4156c81cf10111682d",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "Makefile"
+  },
+  {
+    "path": "Package.swift",
+    "bytes": 1101,
+    "sha256": "8fb8acd669de7895be8d4e9f490a064ed84f0b5d79efef000b54a5cf2b226ddd",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "Package.swift"
+  },
+  {
+    "path": "README.md",
+    "bytes": 6718,
+    "sha256": "eb2aa1cf38335d1a62998adb41bc578e7435e4ce17e42f931449112b7a30f5db",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "README.md"
+  },
+  {
+    "path": "binding.gyp",
+    "bytes": 763,
+    "sha256": "7ea05f0d9f446449e9b28e777d51a6a57ffb98797030ea36bd4c0f1714501d0b",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "binding.gyp"
+  },
+  {
+    "path": "bindings/c/tree-sitter-rocq.pc.in",
+    "bytes": 293,
+    "sha256": "a0d1c9e3a198fb9a4b66830478555ba1d11494086c065b7f17ab6d6684966f7c",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/c/tree-sitter-rocq.pc.in"
+  },
+  {
+    "path": "bindings/c/tree_sitter/tree-sitter-rocq.h",
+    "bytes": 238,
+    "sha256": "512d33d648693b4b06d45a36402b8a19face3448c465e3c9099992278e96ec41",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/c/tree_sitter/tree-sitter-rocq.h"
+  },
+  {
+    "path": "bindings/go/binding.go",
+    "bytes": 337,
+    "sha256": "1cc4f15da71b99ccaa29ad43b13646d8d3ae54b2ea94b75acdbafc357423b9f8",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/go/binding.go"
+  },
+  {
+    "path": "bindings/go/binding_test.go",
+    "bytes": 354,
+    "sha256": "2217dbd5ef04aeb159c698bc321a87da7efa78b4755195a0d3fe84dd7b118c7a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/go/binding_test.go"
+  },
+  {
+    "path": "bindings/node/binding.cc",
+    "bytes": 523,
+    "sha256": "27a4da9e660ac1d619d99d55eb0971d472e03d18fcb439ec3167ffeea4c3a97a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/node/binding.cc"
+  },
+  {
+    "path": "bindings/node/binding_test.js",
+    "bytes": 310,
+    "sha256": "d21db69cd974fafa44724a73dd9788d3b393a4d6af68f65a58486548e5b00f58",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/node/binding_test.js"
+  },
+  {
+    "path": "bindings/node/index.d.ts",
+    "bytes": 1334,
+    "sha256": "55487c0e07884122590ab0771721d2a5a590fde14130862299769f9a35cd9204",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/node/index.d.ts"
+  },
+  {
+    "path": "bindings/node/index.js",
+    "bytes": 1167,
+    "sha256": "adec38ff48b90cd9798c201110a5e47019027f98e0553a771bf0a0e1332b590d",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/node/index.js"
+  },
+  {
+    "path": "bindings/python/tests/test_binding.py",
+    "bytes": 314,
+    "sha256": "f4ae6c37803559264ffeb00cf156fca0401303104d6c7e1dc77b5fdb6f3aa2ff",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/python/tests/test_binding.py"
+  },
+  {
+    "path": "bindings/python/tree_sitter_rocq/__init__.py",
+    "bytes": 1166,
+    "sha256": "91a91b2c0595cb8a56c7cccc82e120e840894dedd73bb567306180ddf1be2900",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/python/tree_sitter_rocq/__init__.py"
+  },
+  {
+    "path": "bindings/python/tree_sitter_rocq/__init__.pyi",
+    "bytes": 504,
+    "sha256": "fceb2c08289d035296c8ce9df63df8df2e40cd2bcf72d7d9f601394ce7ff577c",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/python/tree_sitter_rocq/__init__.pyi"
+  },
+  {
+    "path": "bindings/python/tree_sitter_rocq/binding.c",
+    "bytes": 832,
+    "sha256": "d364d5aba473cae5c30e90dc437cd498e241466b77372bb028818b7b12da95c2",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/python/tree_sitter_rocq/binding.c"
+  },
+  {
+    "path": "bindings/python/tree_sitter_rocq/py.typed",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/python/tree_sitter_rocq/py.typed"
+  },
+  {
+    "path": "bindings/rust/build.rs",
+    "bytes": 2266,
+    "sha256": "aff319d2fa91ebfd5a49878b0971d6065e7d342f528dee2f7bf6c5bd7f02d0a0",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/rust/build.rs"
+  },
+  {
+    "path": "bindings/rust/lib.rs",
+    "bytes": 2051,
+    "sha256": "2956bc0a8f3d907b4339a74533bf71f9f6adb581ff191bd6ddb4aec15d357846",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/rust/lib.rs"
+  },
+  {
+    "path": "bindings/swift/TreeSitterRocq/rocq.h",
+    "bytes": 238,
+    "sha256": "512d33d648693b4b06d45a36402b8a19face3448c465e3c9099992278e96ec41",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/swift/TreeSitterRocq/rocq.h"
+  },
+  {
+    "path": "bindings/swift/TreeSitterRocqTests/TreeSitterRocqTests.swift",
+    "bytes": 359,
+    "sha256": "f44c6ab8da9fdb787b2759947b2d029c0fed039763237102c26ea90d30807b7a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "bindings/swift/TreeSitterRocqTests/TreeSitterRocqTests.swift"
+  },
+  {
+    "path": "go.mod",
+    "bytes": 111,
+    "sha256": "9d0aa817246bc67d58175a6309ba32e93aa5ba3894e20a018ad35d568643f824",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "go.mod"
+  },
+  {
+    "path": "grammar.js",
+    "bytes": 33116,
+    "sha256": "524083214332089dc2aed61cfe7ddc18761678eb685dd1f8e83e82a389716c94",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "grammar.js"
+  },
+  {
+    "path": "package.json",
+    "bytes": 1218,
+    "sha256": "a8b28936961ca2ee0c39ef16238d18f1136d6783f8cc432fe8188a8924e1ada1",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "package.json"
+  },
+  {
+    "path": "pnpm-lock.yaml",
+    "bytes": 6519,
+    "sha256": "ade91d8b4d1a939fabba999f8c7e9f7ad546de57ef36e58deb6896d0a3c243ae",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "pnpm-lock.yaml"
+  },
+  {
+    "path": "pyproject.toml",
+    "bytes": 788,
+    "sha256": "e4b69862088e7502133cf8d988561dd222a6d3ffeffad47e8cc911151e15487b",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "pyproject.toml"
+  },
+  {
+    "path": "queries/highlights.scm",
+    "bytes": 5801,
+    "sha256": "f61a22555a2eac91285a4b04c01ead009dff7644da3cafef260029ffc86b6da2",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "queries/highlights.scm"
+  },
+  {
+    "path": "setup.py",
+    "bytes": 2350,
+    "sha256": "984a74c79fe055c29cc23dcd3b6add5e2fbf489b9509ade1c5c1afe6e07b3a24",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "setup.py"
+  },
+  {
+    "path": "src/grammar.json",
+    "bytes": 185552,
+    "sha256": "df221327a8a598d1c7a1af665889cee4a8cabbad26a9183e2fd5df6e9165e7ac",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "src/grammar.json"
+  },
+  {
+    "path": "src/node-types.json",
+    "bytes": 197161,
+    "sha256": "bc6f3dce75d804cc2c73b598408adb0597b81975bacfb9fa138c8b28fab13117",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "src/node-types.json"
+  },
+  {
+    "path": "src/parser.c",
+    "bytes": 16861608,
+    "sha256": "fc714e6d0dbecff5264dbea99768d1b44474d1de69726f6ce4cc2121125d8c9c",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "src/parser.c"
+  },
+  {
+    "path": "src/tree_sitter/alloc.h",
+    "bytes": 985,
+    "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "src/tree_sitter/alloc.h"
+  },
+  {
+    "path": "src/tree_sitter/array.h",
+    "bytes": 13453,
+    "sha256": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "src/tree_sitter/array.h"
+  },
+  {
+    "path": "src/tree_sitter/parser.h",
+    "bytes": 7624,
+    "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "src/tree_sitter/parser.h"
+  },
+  {
+    "path": "test/corpus/add_command.txt",
+    "bytes": 471,
+    "sha256": "bbe010c075467782033360e3198dacd3479357bbfda1bba1201292b281c829f2",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/add_command.txt"
+  },
+  {
+    "path": "test/corpus/application.txt",
+    "bytes": 287,
+    "sha256": "f118c724404f3de3c673d1799adf388f11a44a50f8fda83513b466a37604c18b",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/application.txt"
+  },
+  {
+    "path": "test/corpus/arguments_decl.txt",
+    "bytes": 984,
+    "sha256": "4263139fcde64633eb3b9f587ddb0dca8ef23793440b51165c728ae1d1e441f9",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/arguments_decl.txt"
+  },
+  {
+    "path": "test/corpus/assumption_decl.txt",
+    "bytes": 3755,
+    "sha256": "03ef9fa563f5b4950856a4a12f56eec6d8b10a0f6765ea9105d1f38e2e692fe7",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/assumption_decl.txt"
+  },
+  {
+    "path": "test/corpus/attributes.txt",
+    "bytes": 3314,
+    "sha256": "05290b9c27158c3643ef7dd7a74ac1c6c1c46d1ad48100b43d4b5d4ca0794849",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/attributes.txt"
+  },
+  {
+    "path": "test/corpus/bullet.txt",
+    "bytes": 203,
+    "sha256": "2a873019fddd8c3cdf67a99ef180b9453144455da3a0dcb4a522dc76e555ae73",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/bullet.txt"
+  },
+  {
+    "path": "test/corpus/close_scope_command.txt",
+    "bytes": 152,
+    "sha256": "2039d5396615261a9c45c154961c916ede28224e61640fb2e73fec6df6faa95f",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/close_scope_command.txt"
+  },
+  {
+    "path": "test/corpus/coercion_command.txt",
+    "bytes": 1332,
+    "sha256": "f00578ba80895b06414a5a56d74db54f5287c2c30562b1ab4b35adc55a71422a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/coercion_command.txt"
+  },
+  {
+    "path": "test/corpus/comments.txt",
+    "bytes": 1730,
+    "sha256": "e09564098838ee62f43bfe9f96f4c3ce158a5653eaf82c47c0da8190e83e925d",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/comments.txt"
+  },
+  {
+    "path": "test/corpus/create_hindtdb_command.txt",
+    "bytes": 395,
+    "sha256": "24a0e44a46d021b6d9c0f03c83e200b67ef3a41cc391de60ca98a871a75a96b6",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/create_hindtdb_command.txt"
+  },
+  {
+    "path": "test/corpus/create_rewrite_hindtdb_command.txt",
+    "bytes": 185,
+    "sha256": "6a2a8eb1e5d128ec0bf468231a9c5e0119da069bc991fc52f865dc065144d14e",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/create_rewrite_hindtdb_command.txt"
+  },
+  {
+    "path": "test/corpus/declare_command.txt",
+    "bytes": 313,
+    "sha256": "bd83bda398b82d9aa2eef764568133c1472761f3e32364cf02fcae641aa9bee3",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/declare_command.txt"
+  },
+  {
+    "path": "test/corpus/definition_decl.txt",
+    "bytes": 4066,
+    "sha256": "2f24968acd25299f7bc6126899401e42289f62dc3b84b86fab07dd4d42da7cb0",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/definition_decl.txt"
+  },
+  {
+    "path": "test/corpus/evaluation_command.txt",
+    "bytes": 1154,
+    "sha256": "c8db096477f3a7f2168de51eab96ec14e1569b2659843e5a71bacc22aa8a029a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/evaluation_command.txt"
+  },
+  {
+    "path": "test/corpus/export_command.txt",
+    "bytes": 685,
+    "sha256": "21f33b6e3295e9a4b8b4c1c039a7542cdc0b8c5a8f5aaf26c280245d93359fec",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/export_command.txt"
+  },
+  {
+    "path": "test/corpus/extract_command.txt",
+    "bytes": 905,
+    "sha256": "57d8738db9544c92a1caa2429381f93b2ccb34267eea39b22e586427477e19c9",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/extract_command.txt"
+  },
+  {
+    "path": "test/corpus/extraction_command.txt",
+    "bytes": 507,
+    "sha256": "1a92788652dee21dffafca349069f83b67622f8e09821073e8c6e547d62afb2b",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/extraction_command.txt"
+  },
+  {
+    "path": "test/corpus/fixpoint_decl.txt",
+    "bytes": 5338,
+    "sha256": "08f1da37505174211675965617580c5623a054da5f1e987d6f3a17b1673221b8",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/fixpoint_decl.txt"
+  },
+  {
+    "path": "test/corpus/hint_command.txt",
+    "bytes": 2540,
+    "sha256": "6c8ca379c6e5cb21115a61d631cb4c0f00a7d8efa41c8f845d934767b56d0844",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/hint_command.txt"
+  },
+  {
+    "path": "test/corpus/if_expression.txt",
+    "bytes": 408,
+    "sha256": "bc1d22bee61303ffa233e4823cb3b430b1e5d9fa1dd34d16c6af55c1f6457018",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/if_expression.txt"
+  },
+  {
+    "path": "test/corpus/import_command.txt",
+    "bytes": 2766,
+    "sha256": "42d82f6f6f9669640a60b9bf0a414d1894a4d88fadf22082abd50e53f52dccbd",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/import_command.txt"
+  },
+  {
+    "path": "test/corpus/inductive_decl.txt",
+    "bytes": 3561,
+    "sha256": "f14d7061d3617318aa37f7a6f2dd51ce3342305ee5a474bee637e15296c544a4",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/inductive_decl.txt"
+  },
+  {
+    "path": "test/corpus/infix_operations.txt",
+    "bytes": 1973,
+    "sha256": "45ddb7aeb2934f9b0c3804493aa9793a91177ecd1a740488aaac6ff6be5e50c1",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/infix_operations.txt"
+  },
+  {
+    "path": "test/corpus/let_expression.txt",
+    "bytes": 3413,
+    "sha256": "1b3c2941ae60520a79c648001cfffe6ac9b73661384784f50b3a2f4f63c8ed84",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/let_expression.txt"
+  },
+  {
+    "path": "test/corpus/lexical-tokens.txt",
+    "bytes": 2489,
+    "sha256": "7e2c2d101fd94cef02158ae5286f01064fefca3d8298cdfbf0fd70c375214444",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/lexical-tokens.txt"
+  },
+  {
+    "path": "test/corpus/ltac_definition.txt",
+    "bytes": 3637,
+    "sha256": "ea35e3aa3871ff3ed5b4b0d4c79c43e0ff2a37bfdffce76af94d1e959c6d6793",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/ltac_definition.txt"
+  },
+  {
+    "path": "test/corpus/match_expression.txt",
+    "bytes": 2079,
+    "sha256": "cbc938bdc752bf59c8f7be448609b2c9a5803aade5da17cd9b457e4011a2fc13",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/match_expression.txt"
+  },
+  {
+    "path": "test/corpus/match_goal.txt",
+    "bytes": 3258,
+    "sha256": "6ccc3803c99e985d884ae4ca072293dcf4daa81e4df58d0a28335d0a78c467b7",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/match_goal.txt"
+  },
+  {
+    "path": "test/corpus/module_decl.txt",
+    "bytes": 982,
+    "sha256": "27df5e141df77d9c987fa0e2b83fafdc6457a4a5f0b5d0d25741ab6c0483b33f",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/module_decl.txt"
+  },
+  {
+    "path": "test/corpus/notation_command.txt",
+    "bytes": 20070,
+    "sha256": "5d8b710c6d3562a8725dd0a5bd28df3ee15b270c3efb7579b88c420e44c25e7a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/notation_command.txt"
+  },
+  {
+    "path": "test/corpus/open_scope_command.txt",
+    "bytes": 149,
+    "sha256": "841fa2ac6b4084c9e64e03ef9d0ad84cfdb0d153bd767351705e5adfcb6c04fe",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/open_scope_command.txt"
+  },
+  {
+    "path": "test/corpus/parameters_and_binders.txt",
+    "bytes": 1831,
+    "sha256": "0540dbae333d5510bbbe7b5cef41756523d35817169af9b185262a776878964c",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/parameters_and_binders.txt"
+  },
+  {
+    "path": "test/corpus/patterns.txt",
+    "bytes": 2803,
+    "sha256": "f0c8e40c66fbb3edf83d1310df343062dba780d7747ab89e90ac7a5c779b6640",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/patterns.txt"
+  },
+  {
+    "path": "test/corpus/remove_command.txt",
+    "bytes": 496,
+    "sha256": "9118111ccd876988d43543d49e5f8926f5d15d2f263e28f9259b3f3e4adf7ebd",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/remove_command.txt"
+  },
+  {
+    "path": "test/corpus/require_command.txt",
+    "bytes": 1052,
+    "sha256": "65ada91140e1f630e0c6e0fae09071a589c27fa1f962e73f5d54621c7e27ef8e",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/require_command.txt"
+  },
+  {
+    "path": "test/corpus/reserved_notation_decl.txt",
+    "bytes": 758,
+    "sha256": "818d9dfacfeade8e240fccf01b2b9e4630d642965e122b102a69976288f53843",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/reserved_notation_decl.txt"
+  },
+  {
+    "path": "test/corpus/section_decl.txt",
+    "bytes": 516,
+    "sha256": "f141274e6b96897129a1e9310fa81a55c1f45f1e0c11b80daddb757454676a99",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/section_decl.txt"
+  },
+  {
+    "path": "test/corpus/selector.txt",
+    "bytes": 1393,
+    "sha256": "fd6c472787e7993ba1897423f02e19c45a4d241aa2b430623ee46955dec80a53",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/selector.txt"
+  },
+  {
+    "path": "test/corpus/set_command.txt",
+    "bytes": 554,
+    "sha256": "9c04ce9a424460971299a2467480c1c8a72111af16c5385aa7e76504220c620c",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/set_command.txt"
+  },
+  {
+    "path": "test/corpus/software_foundations_imp.txt",
+    "bytes": 3312,
+    "sha256": "18096abca791307349a5eabfb5612729d55cae713ad0335dde945481a07f0db8",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/software_foundations_imp.txt"
+  },
+  {
+    "path": "test/corpus/tactic_clauses.txt",
+    "bytes": 3558,
+    "sha256": "8e25009cddb7b93d01f9e6fa6633a4e067a99b52919a173b652d4cf6386edfc5",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/tactic_clauses.txt"
+  },
+  {
+    "path": "test/corpus/tactics.txt",
+    "bytes": 46928,
+    "sha256": "460f5d8d0e61c46c87fda0632fc7659913bb5209b6c9da6b3dde6e3f7ae58691",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/tactics.txt"
+  },
+  {
+    "path": "test/corpus/terms.txt",
+    "bytes": 3332,
+    "sha256": "05fc99d13caae078561be686a5c85dd426c3ee14938b118d25b1ce712c8c2aea",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/terms.txt"
+  },
+  {
+    "path": "test/corpus/test_command.txt",
+    "bytes": 666,
+    "sha256": "8894916fe78d0798129e6e7864fd75488859e740c8d7f50249dc357ce46e1da2",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/test_command.txt"
+  },
+  {
+    "path": "test/corpus/theorem_decl.txt",
+    "bytes": 2605,
+    "sha256": "6a7acbbfae31dbd131d06082b82cab9de3f7522e4199f1631735190bd3e86471",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/theorem_decl.txt"
+  },
+  {
+    "path": "test/corpus/top_level_modifiers.txt",
+    "bytes": 2185,
+    "sha256": "ba7d1a68a89b82957de1efaede8641302df928f6f1d9b018639ebeaf9b55852c",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/top_level_modifiers.txt"
+  },
+  {
+    "path": "test/corpus/tuples_and_list.txt",
+    "bytes": 1818,
+    "sha256": "0dd8c06bcee06bf58442f1bf49bdf9e4d85e7c0bbc304f9e538adba635645caa",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/tuples_and_list.txt"
+  },
+  {
+    "path": "test/corpus/unset_command.txt",
+    "bytes": 370,
+    "sha256": "d280725e3800e4b55ad90f49986aa44439ffc8fc3186290c13edf46006bcc399",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/unset_command.txt"
+  },
+  {
+    "path": "test/corpus/where_clause.txt",
+    "bytes": 3241,
+    "sha256": "070d3ce16a44939e010aea8935b0d02dcde34c42681e628a85a1b040f7c1f122",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "test/corpus/where_clause.txt"
+  },
+  {
+    "path": "tree-sitter.json",
+    "bytes": 867,
+    "sha256": "d728e24424d065cd2e5a9e705ad6a1891b249d9a607aae6f7b845c7f6b6bf56a",
+    "upstream_mode": "0o664",
+    "executable_intent": false,
+    "retained_path": "tree-sitter.json"
+  }
+]

@@ -1,0 +1,21 @@
+# Local static binding for authenticated Julia native syntax inputs.
+# Original dependency manifests and lifecycle hooks remain inert under upstream/.
+[package]
+name = "tree-sitter-julia"
+version = "0.25.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/tree-sitter/tree-sitter-julia"
+description = "Pinned Julia syntax tables with a reviewed local static binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

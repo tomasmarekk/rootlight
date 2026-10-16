@@ -1,0 +1,42 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "systemverilog",
+      "camelcase": "SystemVerilog",
+      "title": "SystemVerilog",
+      "scope": "source.systemverilog",
+      "file-types": [
+        "sv", "svh", "v", "vh"
+      ],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^systemverilog$",
+      "class-name": "TreeSitterSystemverilog"
+    }
+  ],
+  "metadata": {
+    "version": "0.4.1",
+    "license": "MIT",
+    "description": "SystemVerilog 1800-2023 Parser",
+    "authors": [
+      {
+        "name": "Gonzalo M. Larumbe",
+        "email": "gonzalomlarumbe@gmail.com",
+        "url": "https://gmlarumbe.com/"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/gmlarumbe/tree-sitter-systemverilog",
+      "funding": "https://github.com/sponsors/gmlarumbe"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true,
+    "zig": false
+  }
+}

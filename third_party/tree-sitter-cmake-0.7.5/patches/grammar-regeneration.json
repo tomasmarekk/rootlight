@@ -1,0 +1,68 @@
+{
+  "schema": "rootlight.cmake-grammar-regeneration/1",
+  "generator": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "environment_role": "declared maintenance build tool; not invoked by compilation or packaging",
+    "javascript_runtime": "native",
+    "observed_platform": "x86_64-pc-windows-msvc",
+    "observed_executable_bytes": 9720320,
+    "observed_executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+  },
+  "command": [
+    "tree-sitter",
+    "generate",
+    "--abi",
+    "14",
+    "--js-runtime",
+    "native"
+  ],
+  "inputs": [
+    {
+      "path": "grammar.js",
+      "bytes": 4728,
+      "sha256": "b58cfa7a2acfd6a9fed7674065a68921c8db750e52c6753e3387b12d4cc7ff61"
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 778,
+      "sha256": "dadb91eddd15ea1fd7749b47d78c582ce2677d43b585c77af068f727b918139a"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "src/parser.c",
+      "bytes": 552114,
+      "sha256": "35011d21c98b1435645d6e41ec77e40b0629c819e04b0ede6a9ffc46e17861f1"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 23621,
+      "sha256": "49df6b527b459b21f16139fcfde43cae6591740cb99625e172c4cfded4856d21"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 15514,
+      "sha256": "5ed17149f4e900ce151e33b969d722ce798c38fd4f1421c283a5ba57dc5d9aaf"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    }
+  ],
+  "independent_fresh_directory_replays": 2,
+  "generated_files_hand_edited": false,
+  "original_upstream_inputs_preserved": true,
+  "executed_during_compilation_or_packaging": false
+}

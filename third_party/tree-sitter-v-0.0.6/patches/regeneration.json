@@ -1,0 +1,67 @@
+{
+  "schema": "rootlight.grammar-regeneration/1",
+  "manual_preparation_only": true,
+  "tool": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "platform": "x86_64-pc-windows-msvc",
+    "bytes": 9720320,
+    "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+  },
+  "arguments": [
+    "generate",
+    "--abi",
+    "15",
+    "--js-runtime",
+    "native"
+  ],
+  "independent_generations": 2,
+  "identical_generated_outputs": true,
+  "original_grammar": {
+    "path": "upstream/v-analyzer-authored-files/tree_sitter_v/grammar.js",
+    "bytes": 33126,
+    "sha256": "179e74624d56527c0e4016b96da24e9600602d06c2ed6ed9f0ac295c195f6e8f"
+  },
+  "preferred_grammar": {
+    "path": "grammar.js",
+    "bytes": 33162,
+    "sha256": "4c7191fd6aa84a0c94bceb9063cdf80df73b5126908bce8db8fc520815944c97"
+  },
+  "patch": {
+    "path": "patches/grammar.patch",
+    "bytes": 1148,
+    "sha256": "e8734805d2ddb0bfc461832749ac8670f5becae9d28cbadfcac5573eb178773d"
+  },
+  "outputs": [
+    {
+      "path": "src/grammar.json",
+      "bytes": 211830,
+      "sha256": "acfad6bde2b77d4572d89f495f06035b3cd6ed111b356b0ce7f7c09f57968336"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 85716,
+      "sha256": "888137f467ecbda878481fe381848b12a57e92766740b94265690826ee55e7e2"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 12234009,
+      "sha256": "6c25b5ec57aa91ec0d6204208f388be315e9368f6d0e8298f79a12d6dc183040"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ]
+}

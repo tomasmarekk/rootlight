@@ -12,6 +12,7 @@ rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
+rootlight-vfs = { path = "../rootlight-vfs" }
 protobuf.workspace = true
 scip.workspace = true
 serde.workspace = true
@@ -20,7 +21,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
-rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 
 [lints]

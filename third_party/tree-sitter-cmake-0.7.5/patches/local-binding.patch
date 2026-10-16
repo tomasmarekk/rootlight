@@ -1,0 +1,188 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,34 +1,21 @@
++# Local unpublished binding for retained MIT CMake written-syntax sources.
++# Builds static ABI14 inputs without downloads or parser generation.
+ [package]
+ name = "tree-sitter-cmake"
+-description = "CMake grammar for tree-sitter"
+ version = "0.7.5"
+-authors = ["Uy Ha"]
++edition = "2024"
++rust-version = "1.90"
+ license = "MIT"
+-readme = "README.rst"
+-keywords = ["incremental", "parsing", "tree-sitter", "cmake"]
+-categories = ["parser-implementations", "parsing", "text-editors"]
+ repository = "https://github.com/uyha/tree-sitter-cmake"
+-edition = "2021"
+-autoexamples = false
+-
++description = "Pinned CMake written syntax with a reviewed local scanner"
++publish = false
+ build = "bindings/rust/build.rs"
+-include = [
+-  "bindings/rust/*",
+-  "grammar.js",
+-  "queries/*",
+-  "src/*",
+-  "tree-sitter.json",
+-  "/LICENSE",
+-]
+ 
+ [lib]
+ path = "bindings/rust/lib.rs"
+ 
+ [dependencies]
+-tree-sitter-language = "0.1"
++tree-sitter-language = "=0.1.7"
+ 
+ [build-dependencies]
+-cc = "1.2"
+-
+-[dev-dependencies]
+-tree-sitter = "0.25.2"
++cc = "=1.2.67"
+--- a/bindings/rust/build.rs
++++ b/bindings/rust/build.rs
+@@ -1,56 +1,23 @@
++//! Compiles retained CMake parser/scanner inputs with the declared local tools.
++//! Archived upstream build, acquisition and generation hooks are never invoked.
++
+ fn main() {
+-    let src_dir = std::path::Path::new("src");
+-
+-    let mut c_config = cc::Build::new();
+-    c_config.std("c11").include(src_dir);
+-
++    let mut builder = cc::Build::new();
++    builder
++        .std("c11")
++        .include("src")
++        .file("src/parser.c")
++        .file("src/scanner.c");
+     #[cfg(target_env = "msvc")]
+-    c_config.flag("-utf-8");
+-
+-    if std::env::var("TARGET").unwrap() == "wasm32-unknown-unknown" {
+-        let Ok(wasm_headers) = std::env::var("DEP_TREE_SITTER_LANGUAGE_WASM_HEADERS") else {
+-            panic!("Environment variable DEP_TREE_SITTER_LANGUAGE_WASM_HEADERS must be set by the language crate");
+-        };
+-        let Ok(wasm_src) =
+-            std::env::var("DEP_TREE_SITTER_LANGUAGE_WASM_SRC").map(std::path::PathBuf::from)
+-        else {
+-            panic!("Environment variable DEP_TREE_SITTER_LANGUAGE_WASM_SRC must be set by the language crate");
+-        };
+-
+-        c_config.include(&wasm_headers);
+-        c_config.files([
+-            wasm_src.join("stdio.c"),
+-            wasm_src.join("stdlib.c"),
+-            wasm_src.join("string.c"),
+-        ]);
+-    }
+-
+-    let parser_path = src_dir.join("parser.c");
+-    c_config.file(&parser_path);
+-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
+-
+-    let scanner_path = src_dir.join("scanner.c");
+-    if scanner_path.exists() {
+-        c_config.file(&scanner_path);
+-        println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
+-    }
+-
+-    c_config.compile("tree-sitter-cmake");
+-
+-    println!("cargo:rustc-check-cfg=cfg(with_highlights_query)");
+-    if !"queries/highlights.scm".is_empty() && std::path::Path::new("queries/highlights.scm").exists() {
+-        println!("cargo:rustc-cfg=with_highlights_query");
+-    }
+-    println!("cargo:rustc-check-cfg=cfg(with_injections_query)");
+-    if !"queries/injections.scm".is_empty() && std::path::Path::new("queries/injections.scm").exists() {
+-        println!("cargo:rustc-cfg=with_injections_query");
+-    }
+-    println!("cargo:rustc-check-cfg=cfg(with_locals_query)");
+-    if !"queries/locals.scm".is_empty() && std::path::Path::new("queries/locals.scm").exists() {
+-        println!("cargo:rustc-cfg=with_locals_query");
+-    }
+-    println!("cargo:rustc-check-cfg=cfg(with_tags_query)");
+-    if !"queries/tags.scm".is_empty() && std::path::Path::new("queries/tags.scm").exists() {
+-        println!("cargo:rustc-cfg=with_tags_query");
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-cmake");
++    for source in [
++        "src/parser.c",
++        "src/scanner.c",
++        "src/tree_sitter/parser.h",
++        "src/tree_sitter/alloc.h",
++        "src/tree_sitter/array.h",
++    ] {
++        println!("cargo:rerun-if-changed={source}");
+     }
+ }
+--- a/bindings/rust/lib.rs
++++ b/bindings/rust/lib.rs
+@@ -1,53 +1,17 @@
+-//! This crate provides Cmake language support for the [tree-sitter][] parsing library.
+-//!
+-//! Typically, you will use the [LANGUAGE][] constant to add this language to a
+-//! tree-sitter [Parser][], and then use the parser to parse some code:
+-//!
+-//! ```
+-//! let code = r#"
+-//! "#;
+-//! let mut parser = tree_sitter::Parser::new();
+-//! let language = tree_sitter_cmake::LANGUAGE;
+-//! parser
+-//!     .set_language(&language.into())
+-//!     .expect("Error loading Cmake parser");
+-//! let tree = parser.parse(code, None).unwrap();
+-//! assert!(!tree.root_node().has_error());
+-//! ```
+-//!
+-//! [Parser]: https://docs.rs/tree-sitter/*/tree_sitter/struct.Parser.html
+-//! [tree-sitter]: https://tree-sitter.github.io/
++//! Static language handle for the pinned CMake written-syntax grammar.
++//! Parsing does not evaluate commands, variables, macros or build configuration.
+ 
+ use tree_sitter_language::LanguageFn;
+ 
+-extern "C" {
++unsafe extern "C" {
+     fn tree_sitter_cmake() -> *const ();
+ }
+ 
+-/// The tree-sitter [`LanguageFn`][LanguageFn] for this grammar.
+-///
+-/// [LanguageFn]: https://docs.rs/tree-sitter-language/*/tree_sitter_language/struct.LanguageFn.html
+-pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_cmake) };
++/// Provides the immutable process-lifetime generated ABI14 CMake language table.
++// SAFETY: src/parser.c defines this exact factory returning a static TSLanguage.
++// The reviewed scanner is paired with its external token ordinals; loading the
++// LanguageFn remains subject to the runtime's ABI compatibility check.
++pub const LANGUAGE_CMAKE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_cmake) };
+ 
+-/// The content of the [`node-types.json`][] file for this grammar.
+-///
+-/// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers/6-static-node-types
++/// Describes the exact generated named nodes; this grammar declares no fields.
+ pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
+-
+-// NOTE: uncomment these to include any queries that this grammar contains:
+-
+-pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");
+-pub const INJECTIONS_QUERY: &str = include_str!("../../queries/injections.scm");
+-// pub const LOCALS_QUERY: &str = include_str!("../../queries/locals.scm");
+-// pub const TAGS_QUERY: &str = include_str!("../../queries/tags.scm");
+-
+-#[cfg(test)]
+-mod tests {
+-    #[test]
+-    fn test_can_load_grammar() {
+-        let mut parser = tree_sitter::Parser::new();
+-        parser
+-            .set_language(&super::LANGUAGE.into())
+-            .expect("Error loading Cmake parser");
+-    }
+-}

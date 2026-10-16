@@ -1,0 +1,480 @@
+===
+Feature blocks
+===
+class A
+feature
+feature
+end
+---
+(source_file
+  (class_declaration (class_name)
+      (feature_clause)
+      (feature_clause)))
+
+===
+Feature field
+===
+class A
+feature
+  x: INTEGER
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      declarations: (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (class_type (class_name))))))
+
+===
+Feature. Arguments
+===
+class A feature
+  f(x, y: INTEGER; z: BOOLEAN)
+    do
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      declarations: (feature_declaration
+          (new_feature (extended_feature_name (identifier)))
+          (formal_arguments
+            (entity_declaration_group
+              (identifier)
+              (identifier)
+              (class_type (class_name)))
+            (entity_declaration_group
+              (identifier)
+              (class_type (class_name))))
+           (attribute_or_routine
+             (feature_body (effective_routine (internal (routine_mark)))))))))
+
+===
+Clients
+===
+class A
+feature {NONE, ANY, A, B}
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (clients (class_name) (class_name) (class_name) (class_name)))))
+
+===
+Feature header comment
+===
+class A
+feature
+  -- Header comment
+  -- continuation
+
+  -- Normal comment
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (header_comment)
+      (header_comment))
+    (comment)))
+
+===
+Normal comment after empty line after feature keyword
+===
+class A
+feature
+
+-- Normal comment
+-- Normal comment again
+
+feature
+
+  -- Normal comment
+end
+---
+(source_file
+  (class_declaration
+    (class_name)
+    (feature_clause)
+    (comment)
+    (comment)
+    (feature_clause)
+    (comment)))
+===
+Feature declaration header comment
+===
+class A
+feature
+  x: INTEGER
+    -- Header comment
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (class_type (class_name))
+        (header_comment)))))
+
+===
+Feature. Obsolete
+===
+class A
+feature
+  x
+    obsolete "msg"
+    do
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (obsolete
+          (basic_manifest_string
+            (string_content)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)))))))))
+
+===
+Feature. Obsolete after header comment
+===
+class A feature
+  x(a: INTEGER): INTEGER
+      -- Header comment
+    obsolete
+      "Obsolete message"
+    do
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (formal_arguments
+          (entity_declaration_group
+            (identifier)
+            (class_type
+              (class_name))))
+        (class_type
+          (class_name))
+        (header_comment)
+        (obsolete
+          (basic_manifest_string
+            (string_content)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)))))))))
+
+===
+Feature. Frozen
+===
+class A
+feature
+  frozen a: INTEGER
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name (identifier)))
+        (class_type (class_name))))))
+
+===
+Feature. Explicit value
+===
+class A
+feature
+  x: INTEGER = 1
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (class_type (class_name))
+        (explicit_value (integer_constant (integer)))))))
+
+===
+Feature. Precondition
+===
+class A feature
+  x
+    require
+      True
+    do
+    end
+
+  y
+    require else
+    do
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (precondition
+            (assertion_clause (expression (boolean_constant))))
+          (feature_body (effective_routine (internal (routine_mark))))))
+        (feature_declaration
+          (new_feature (extended_feature_name (identifier)))
+          (attribute_or_routine
+            (precondition)
+            (feature_body (effective_routine (internal (routine_mark)))))))))
+
+===
+Feature. Locals
+===
+class A feature
+  x
+    local
+      a: INTEGER
+      b: STRING
+    do
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (local_declarations
+            (entity_declaration_group
+              (identifier)
+              (class_type (class_name)))
+            (entity_declaration_group
+              (identifier)
+              (class_type (class_name))))
+          (feature_body
+            (effective_routine (internal (routine_mark)))))))))
+
+===
+Feature. Postcondition
+===
+class A feature
+  x
+    do
+    ensure then
+      True
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body (effective_routine (internal (routine_mark))))
+          (postcondition
+            (assertion_clause (expression (boolean_constant)))))))))
+
+===
+Postcondition only clause
+===
+class A feature
+  x
+    do
+    ensure
+    only a, b
+  end
+end
+---
+(source_file
+  (class_declaration
+    (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark))))
+          (postcondition
+            (only
+              (identifier)
+              (identifier))))))))
+
+===
+Feature. Rescue
+===
+class A feature
+  x
+    do
+    rescue
+      x := False
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body (effective_routine (internal (routine_mark))))
+          (rescue
+            (assignment
+              (call (unqualified_call (identifier)))
+              (expression (boolean_constant)))))))))
+
+===
+Feature. Attribute
+===
+class A feature
+  x: INTEGER
+    attribute
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (class_type (class_name))
+        (attribute_or_routine
+          (feature_body
+            (attribute)))))))
+
+===
+Feature. External
+===
+class A feature
+  x
+    external
+      "C"
+    alias
+      "c_function"
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (external
+                (basic_manifest_string (string_content))
+                (basic_manifest_string (string_content))))))))))
+
+===
+Feature. Notes
+===
+class A feature
+  x
+    note
+    do
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (notes)
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)))))))))
+
+===
+Feature. Once
+===
+class A feature
+  x
+    once ("a")
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark
+                  (once (basic_manifest_string (string_content))))))))))))
+
+===
+Feature. Agent require once
+===
+class A
+invariant
+  agent require once end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (agent
+            (inline_agent
+              (attribute_or_routine
+                (precondition)
+                (feature_body
+                  (effective_routine
+                    (internal
+                      (routine_mark
+                        (once)))))))))))))
+
+===
+Feature. Assign
+===
+class A feature
+  item: G assign put
+ end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (class_type
+          (class_name))
+        (assigner_mark
+          (identifier))))))

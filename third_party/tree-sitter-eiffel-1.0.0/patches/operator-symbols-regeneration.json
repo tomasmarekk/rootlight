@@ -1,0 +1,51 @@
+{
+  "schema": "rootlight.eiffel-operator-symbols-regeneration/1",
+  "unicode_version": "16.0.0",
+  "source_package": "regex-syntax 0.8.11",
+  "source_license": "MIT OR Apache-2.0",
+  "source_input": "source-inputs/cargo/regex-syntax-0.8.11/src/unicode_tables/general_category.rs",
+  "primary_source": "https://docs.rs/crate/regex-syntax/0.8.11/source/src/unicode_tables/general_category.rs",
+  "selection": "Unicode Mark, Number, Punctuation and Symbol categories excluding ASCII identifier digits and Eiffel punctuation; lexical delimiters and reserved tokens remain scanner decisions",
+  "generator": {
+    "name": "Python",
+    "version": "3.14.5",
+    "environment_role": "declared maintenance tool; not invoked by compilation or packaging"
+  },
+  "command": [
+    "python",
+    "patches/generate_operator_symbols.py",
+    "src/operator_symbols.h"
+  ],
+  "inputs": [
+    {
+      "path": "patches/generate_operator_symbols.py",
+      "bytes": 2681,
+      "sha256": "36291cd185176792ed75080105864dcef7ac225a35eb4f89d611a5b6fdd95d0a"
+    },
+    {
+      "path": "patches/unicode/regex-syntax-general-category.rs",
+      "bytes": 158564,
+      "sha256": "9488e3721f7c2ae20e1b77fcff9a59b4ed8f22954b8645ea6d8592eac1856423"
+    },
+    {
+      "path": "patches/unicode/LICENSE-MIT",
+      "bytes": 1071,
+      "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+    },
+    {
+      "path": "patches/unicode/LICENSE-APACHE",
+      "bytes": 10847,
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "src/operator_symbols.h",
+      "bytes": 12638,
+      "sha256": "b7706d501671ce1614b4d609a5024a831c4d33616a05b69a07c231f449d02f78"
+    }
+  ],
+  "independent_fresh_directory_replays": 2,
+  "generated_files_hand_edited": false,
+  "executed_during_compilation_or_packaging": false
+}

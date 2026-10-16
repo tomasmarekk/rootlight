@@ -1,0 +1,21 @@
+# Local static binding for the pinned unreleased Eiffel source revision.
+# Original manifests and lifecycle hooks remain inert under upstream/.
+[package]
+name = "tree-sitter-eiffel"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/imustafin/tree-sitter-eiffel"
+description = "Pinned Eiffel syntax tables with a reviewed local static binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

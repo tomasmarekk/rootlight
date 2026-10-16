@@ -1,0 +1,313 @@
+{
+	"name": "vscode-v-analyzer",
+	"displayName": "v-analyzer",
+	"description": "V language support (syntax highlighting, formatter, language server) for Visual Studio Code.",
+	"publisher": "VOSCA",
+	"icon": "icons/icon.png",
+	"version": "0.0.6",
+	"engines": {
+		"vscode": "^1.66.0"
+	},
+	"homepage": "https://github.com/vlang/v-analyzer",
+	"license": "MIT",
+	"bugs": {
+		"url": "https://github.com/vlang/v-analyzer/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/vlang/v-analyzer"
+	},
+	"keywords": [
+		"V",
+		"v",
+		"v language",
+		"vlang"
+	],
+	"scripts": {
+		"compile": "node ./scripts/build.js",
+		"compile-dev": "node ./scripts/build.js --dev",
+		"compile-watch": "node ./scripts/build.js --watch",
+		"test": "npm run testgrammar",
+		"lint": "eslint .",
+		"lintmd": "markdownlint *.md -i CHANGELOG.md",
+		"vscode:prepublish": "node ./scripts/minify_json.js && npm run compile",
+		"watch": "tsc -watch -p ./",
+		"package": "npx vsce package",
+		"postpackage": "node ./scripts/minify_json.js --restore",
+		"testgrammar": "vscode-tmgrammar-test -g syntaxes/v.tmLanguage.json \"syntaxes/tests/*.vv\"",
+		"format": "prettier --write \"scripts/**/*.js\" \"src/**/*.ts\""
+	},
+	"main": "dist/extension.js",
+	"dependencies": {
+		"axios": "^1.6.8",
+		"semver": "^7.6.0",
+		"vscode-languageclient": "^9.0.1"
+	},
+	"devDependencies": {
+		"@types/node": "^20.11.28",
+		"@types/semver": "^7.5.8",
+		"@types/vscode": "~1.66.0",
+		"@typescript-eslint/eslint-plugin": "^7.2.0",
+		"@typescript-eslint/parser": "^7.2.0",
+		"@vscode/vsce": "^2.24.0",
+		"esbuild": "^0.20.2",
+		"eslint": "^8.57.0",
+		"markdownlint-cli": "^0.39.0",
+		"prettier": "^3.2.5",
+		"typescript": "^5.4.2",
+		"vscode-tmgrammar-test": "^0.1.3"
+	},
+	"activationEvents": [
+		"workspaceContains:**/*.v",
+		"workspaceContains:**/*.vv",
+		"workspaceContains:**/*.vsh",
+		"workspaceContains:**/v.mod",
+		"onCommand:v.runWorkspace",
+		"onCommand:v.runFile",
+		"onCommand:v.runTests",
+		"onCommand:v.version",
+		"onCommand:v.serverVersion"
+	],
+	"categories": [
+		"Programming Languages"
+	],
+	"extensionPack": [
+		"ms-vscode.cpptools"
+	],
+	"contributes": {
+		"languages": [
+			{
+				"id": "v",
+				"aliases": [
+					"V"
+				],
+				"extensions": [
+					".v",
+					".vsh",
+					".vv"
+				],
+				"configuration": "languages/v-language-configuration.json"
+			},
+			{
+				"id": "v.mod",
+				"language": "v.mod",
+				"scopeName": "source.v.mod",
+				"extensions": [
+					".mod"
+				],
+				"configuration": "languages/vmod-language-configuration.json"
+			},
+			{
+				"id": "stree",
+				"scopeName": "source.stree",
+				"extensions": [
+					".stree"
+				]
+			}
+		],
+		"grammars": [
+			{
+				"language": "v",
+				"scopeName": "source.v",
+				"path": "syntaxes/v.tmLanguage.json"
+			},
+			{
+				"language": "v.mod",
+				"scopeName": "source.v.mod",
+				"path": "syntaxes/v.mod.tmLanguage.json"
+			},
+			{
+				"language": "stree",
+				"scopeName": "source.stree",
+				"path": "syntaxes/stree.tmGrammar.json"
+			}
+		],
+		"configuration": {
+			"title": "v-analyzer",
+			"properties": {
+				"v.executablePath": {
+					"scope": "resource",
+					"type": "string",
+					"description": "Custom path to the V compiler executable (`v`).\nNOTE: Setting this won't change the VROOT path in v-analyzer."
+				},
+				"v-analyzer.customVrootPath": {
+					"scope": "resource",
+					"type": "string",
+					"default": "",
+					"description": "Custom path to the V installation directory (VROOT).\nNOTE: Setting this won't change the V compiler executable to be used."
+				},
+				"v-analyzer.serverPath": {
+					"scope": "resource",
+					"type": "string",
+					"default": "",
+					"description": "Custom path to the v-analyzer executable (if empty uses `v-analyzer` executable from PATH)."
+				},
+				"v-analyzer.connectionMode": {
+					"scope": "resource",
+					"type": "string",
+					"default": "stdio",
+					"enum": [
+						"stdio",
+						"tcp"
+					],
+					"description": "Specify the mode to be used when connecting to v-analyzer.",
+					"enumDescriptions": [
+						"Connects to the language server via standard input/output. (Default)",
+						"Connects to the language server via TCP (you need to run analyzer manually with `--socket` flag, debug only!)."
+					]
+				},
+				"v-analyzer.tcpMode.port": {
+					"scope": "resource",
+					"type": "number",
+					"default": 5007,
+					"description": "Port to be used when connecting to the language server. (Only in TCP mode)"
+				},
+				"v-analyzer.customArgs": {
+					"scope": "resource",
+					"type": "string",
+					"description": "Custom arguments to be passed to the v-analyzer executable."
+				}
+			}
+		},
+		"configurationDefaults": {
+			"[v]": {
+				"editor.insertSpaces": false
+			}
+		},
+		"keybindings": [
+			{
+				"command": "v.fmt",
+				"key": "ctrl+i ctrl+i"
+			}
+		],
+		"commands": [
+			{
+				"command": "v.run",
+				"title": "Run current directory",
+				"category": "V"
+			},
+			{
+				"command": "v.fmt",
+				"title": "Format current file",
+				"category": "V"
+			},
+			{
+				"command": "v.prod",
+				"title": "Build an optimized executable from current file",
+				"category": "V"
+			},
+			{
+				"command": "v-analyzer.version",
+				"title": "Show language version",
+				"category": "V"
+			},
+			{
+				"command": "v-analyzer.serverVersion",
+				"title": "Show v-analyzer server version",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.startServer",
+				"title": "Start server",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.stopServer",
+				"title": "Stop server",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.restartServer",
+				"title": "Restart server",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.showReferences",
+				"title": "Show References",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.viewStubTree",
+				"title": "View Stub Tree",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.uploadToPlayground",
+				"title": "Upload to V Playground",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.showWelcome",
+				"title": "Show Welcome",
+				"description": "Open the welcome page for the v-analyzer extension.",
+				"category": "v-analyzer"
+			},
+			{
+				"command": "v-analyzer.openGlobalConfig",
+				"title": "Open Global Config",
+				"description": "Open the global config file for the v-analyzer server.",
+				"category": "v-analyzer"
+			}
+		],
+		"menus": {
+			"commandPalette": [
+				{
+					"command": "v.run",
+					"when": "inVlangProject"
+				},
+				{
+					"command": "v.fmt",
+					"when": "inVlangProject"
+				},
+				{
+					"command": "v.prod",
+					"when": "inVlangProject"
+				},
+				{
+					"command": "v-analyzer.serverVersion",
+					"when": "inVlangProject"
+				},
+				{
+					"command": "v-analyzer.stopServer",
+					"when": "inVlangProject"
+				},
+				{
+					"command": "v-analyzer.restartServer",
+					"when": "inVlangProject"
+				},
+				{
+					"command": "v-analyzer.uploadToPlayground",
+					"when": "inVlangProject"
+				}
+			]
+		},
+		"breakpoints": [
+			{
+				"language": "v"
+			}
+		],
+		"semanticTokenModifiers": [
+			{
+				"id": "mutable",
+				"description": "Style for mutable variables/parameters/receivers"
+			},
+			{
+				"id": "global",
+				"description": "Style for global variables"
+			}
+		],
+		"semanticTokenScopes": [
+			{
+				"language": "v",
+				"scopes": {
+					"*.mutable": [
+						"markup.underline"
+					],
+					"*.global": [
+						"markup.bold"
+					]
+				}
+			}
+		]
+	}
+}

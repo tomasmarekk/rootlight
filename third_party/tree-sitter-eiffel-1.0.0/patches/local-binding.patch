@@ -1,0 +1,150 @@
+--- upstream/authored-files/Cargo.toml
++++ Cargo.toml
+@@ -1,34 +1,21 @@
++# Local static binding for the pinned unreleased Eiffel source revision.
++# Original manifests and lifecycle hooks remain inert under upstream/.
+ [package]
+ name = "tree-sitter-eiffel"
+-description = "Eiffel grammar for tree-sitter"
+ version = "1.0.0"
+-authors = ["Ilgiz Mustafin <ilgimustafin@gmail.com>"]
++edition = "2024"
++rust-version = "1.90"
+ license = "MIT"
+-readme = "README.md"
+-keywords = ["incremental", "parsing", "tree-sitter", "eiffel"]
+-categories = ["parser-implementations", "parsing", "text-editors"]
+ repository = "https://github.com/imustafin/tree-sitter-eiffel"
+-edition = "2021"
+-autoexamples = false
+-
++description = "Pinned Eiffel syntax tables with a reviewed local static binding"
++publish = false
+ build = "bindings/rust/build.rs"
+-include = [
+-  "bindings/rust/*",
+-  "grammar.js",
+-  "queries/*",
+-  "src/*",
+-  "tree-sitter.json",
+-  "LICENSE",
+-]
+ 
+ [lib]
+ path = "bindings/rust/lib.rs"
+ 
+ [dependencies]
+-tree-sitter-language = "0.1"
++tree-sitter-language = "=0.1.7"
+ 
+ [build-dependencies]
+-cc = "1.2"
+-
+-[dev-dependencies]
+-tree-sitter = "0.25.1"
++cc = "=1.2.67"
+--- upstream/authored-files/bindings/rust/build.rs
++++ bindings/rust/build.rs
+@@ -1,21 +1,21 @@
++//! Compiles retained Eiffel parser and scanner inputs without acquisition or generation.
++
+ fn main() {
+-    let src_dir = std::path::Path::new("src");
+-
+-    let mut c_config = cc::Build::new();
+-    c_config.std("c11").include(src_dir);
+-
++    let mut builder = cc::Build::new();
++    builder
++        .std("c11")
++        .include("src")
++        .file("src/parser.c")
++        .file("src/scanner.c");
+     #[cfg(target_env = "msvc")]
+-    c_config.flag("-utf-8");
+-
+-    let parser_path = src_dir.join("parser.c");
+-    c_config.file(&parser_path);
+-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
+-
+-    let scanner_path = src_dir.join("scanner.c");
+-    if scanner_path.exists() {
+-        c_config.file(&scanner_path);
+-        println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-eiffel");
++    for source in [
++        "src/parser.c",
++        "src/scanner.c",
++        "src/operator_symbols.h",
++        "src/tree_sitter/parser.h",
++    ] {
++        println!("cargo:rerun-if-changed={source}");
+     }
+-
+-    c_config.compile("tree-sitter-eiffel");
+ }
+--- upstream/authored-files/bindings/rust/lib.rs
++++ bindings/rust/lib.rs
+@@ -1,53 +1,16 @@
+-//! This crate provides Eiffel language support for the [tree-sitter][] parsing library.
+-//!
+-//! Typically, you will use the [LANGUAGE][] constant to add this language to a
+-//! tree-sitter [Parser][], and then use the parser to parse some code:
+-//!
+-//! ```
+-//! let code = r#"
+-//! "#;
+-//! let mut parser = tree_sitter::Parser::new();
+-//! let language = tree_sitter_eiffel::LANGUAGE;
+-//! parser
+-//!     .set_language(&language.into())
+-//!     .expect("Error loading Eiffel parser");
+-//! let tree = parser.parse(code, None).unwrap();
+-//! assert!(!tree.root_node().has_error());
+-//! ```
+-//!
+-//! [Parser]: https://docs.rs/tree-sitter/*/tree_sitter/struct.Parser.html
+-//! [tree-sitter]: https://tree-sitter.github.io/
++//! Static Eiffel syntax tables from an authenticated upstream revision.
++//! Parsing does not execute Eiffel routines, contracts, agents or externals.
+ 
+ use tree_sitter_language::LanguageFn;
+ 
+-extern "C" {
++unsafe extern "C" {
+     fn tree_sitter_eiffel() -> *const ();
+ }
+ 
+-/// The tree-sitter [`LanguageFn`][LanguageFn] for this grammar.
+-///
+-/// [LanguageFn]: https://docs.rs/tree-sitter-language/*/tree_sitter_language/struct.LanguageFn.html
+-pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_eiffel) };
++/// Provides the process-lifetime generated ABI15 Eiffel language table.
++// SAFETY: The retained parser factory returns a static TSLanguage with a stateless
++// operator scanner. Loading still checks the runtime's compatible ABI range.
++pub const LANGUAGE_EIFFEL: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_eiffel) };
+ 
+-/// The content of the [`node-types.json`][] file for this grammar.
+-///
+-/// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers/6-static-node-types
++/// Describes the named syntax nodes in the pinned generated parser.
+ pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
+-
+-// NOTE: uncomment these to include any queries that this grammar contains:
+-
+-// pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");
+-// pub const INJECTIONS_QUERY: &str = include_str!("../../queries/injections.scm");
+-// pub const LOCALS_QUERY: &str = include_str!("../../queries/locals.scm");
+-// pub const TAGS_QUERY: &str = include_str!("../../queries/tags.scm");
+-
+-#[cfg(test)]
+-mod tests {
+-    #[test]
+-    fn test_can_load_grammar() {
+-        let mut parser = tree_sitter::Parser::new();
+-        parser
+-            .set_language(&super::LANGUAGE.into())
+-            .expect("Error loading Eiffel parser");
+-    }
+-}

@@ -1,0 +1,21 @@
+# Local unpublished binding for retained MIT CMake written-syntax sources.
+# Builds static ABI14 inputs without downloads or parser generation.
+[package]
+name = "tree-sitter-cmake"
+version = "0.7.5"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/uyha/tree-sitter-cmake"
+description = "Pinned CMake written syntax with a reviewed local scanner"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

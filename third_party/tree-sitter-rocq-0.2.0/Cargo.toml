@@ -1,0 +1,20 @@
+# Local static binding for the authenticated authored parser, not an upstream release.
+[package]
+name = "tree-sitter-rocq"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/aruzdh/tree-sitter-rocq"
+description = "Pinned Rocq syntax tables with an unpublished local static binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

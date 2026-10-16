@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - grammar.js
+      - queries/**
+      - src/**
+      - test/**
+      - bindings/**
+      - binding.gyp
+
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test parser
+    runs-on: ${{matrix.os}}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up tree-sitter
+        uses: tree-sitter/setup-action/cli@v2
+      - name: Run tests
+        uses: tree-sitter/parser-test-action@v2
+        with:
+          generate: false
+          test-rust: ${{runner.os == 'Linux'}}
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to create release
+      id-token: write # required for OIDC token exchange
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy rustfmt
+      - name: Obtain crates.io token
+        uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+        id: auth
+      - name: Publish to crate
+        run: |
+          cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

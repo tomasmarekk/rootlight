@@ -1,0 +1,720 @@
+{
+  "schema": "rootlight.eiffel-retained-acquisition/1",
+  "upstream_revision": "ec098b67b98b7f5da10f8d66bdb6c52fc91341fc",
+  "upstream_git_tree": "b9cf17dff75b9582b74849df0d7b7004843e2cda",
+  "authored_git_blob_inventory_authenticated": true,
+  "authored_inventory": [
+    {
+      "path": ".editorconfig",
+      "bytes": 502,
+      "sha256": "9b6da2df3a325dbed2f93e1909dccdda3efa2eba84565b6ef7f0295c5551b770",
+      "git_blob_sha1": "d3a8b5b697f7e3deaa408879c1dc1e362b705e1f",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.editorconfig",
+      "retained_path": ".editorconfig"
+    },
+    {
+      "path": ".gitattributes",
+      "bytes": 177,
+      "sha256": "d88b6b9e2ef335d1291d99f4e1b21b676b4085924ca2e37a49fe5bc8e6ad20d6",
+      "git_blob_sha1": "28b9b785ec4178d5fabd7e53b3ddc26f85ecb312",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.gitattributes",
+      "retained_path": ".gitattributes.upstream"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "bytes": 2437,
+      "sha256": "c4d4d3687b3ae7d0993bf2684f305545707039b9f2a653cb2fd215855ab196ac",
+      "git_blob_sha1": "f4d60c5d900dba9b801acdf29d58449be13cd648",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.github/ISSUE_TEMPLATE/bug_report.yml",
+      "retained_path": ".github/ISSUE_TEMPLATE/bug_report.yml"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "bytes": 28,
+      "sha256": "1f103c6a9dd07cd13a9a6f17ace6b813f47747eb9cb7e00488cb2073caaf91bb",
+      "git_blob_sha1": "3ba13e0cec6cbbfd462e9ebf529dd2093148cd69",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.github/ISSUE_TEMPLATE/config.yml",
+      "retained_path": ".github/ISSUE_TEMPLATE/config.yml"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/feature_request.yml",
+      "bytes": 1654,
+      "sha256": "2ec2ccfc6fd5f8aa588c98d49a49dfc92b0fdbf9683be72ca48fae8c5259e30a",
+      "git_blob_sha1": "f992a8c785210a48418deecf6ef388f53ace9e27",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.github/ISSUE_TEMPLATE/feature_request.yml",
+      "retained_path": ".github/ISSUE_TEMPLATE/feature_request.yml"
+    },
+    {
+      "path": ".github/dependabot.yml",
+      "bytes": 511,
+      "sha256": "7d012ba4ffb0f4cf849f163f34be6e3d7a32b0fa354a30a73e1f6987ff88f5cb",
+      "git_blob_sha1": "7f18fbc9896ec49da8846e8305bb61aee42af36d",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.github/dependabot.yml",
+      "retained_path": ".github/dependabot.yml"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 1671,
+      "sha256": "8fa8a9d8478a8d07b29232b40a2b5b9a2aec1dd4d84fa87fd706c2ff90dcd953",
+      "git_blob_sha1": "332f3a93de7af53fdabd477b5fef8e1f065b988b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.github/workflows/ci.yml",
+      "retained_path": ".github/workflows/ci.yml"
+    },
+    {
+      "path": ".github/workflows/regenerate.yml",
+      "bytes": 329,
+      "sha256": "2675634d40657691c1495ccad3948780a8cc9265c6bc6bfe45797fc931ed3f9d",
+      "git_blob_sha1": "0f23563db480ba71c8b1f6b288b64248d395740d",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.github/workflows/regenerate.yml",
+      "retained_path": ".github/workflows/regenerate.yml"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 400,
+      "sha256": "e588cbc258b2a9cbb2f8cbe80fe43dfc96783b5fa94772bd20529d08e06f3ad5",
+      "git_blob_sha1": "fcb492c83b39f397b863dcd6e9dd533fb4d7a143",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/.gitignore",
+      "retained_path": ".gitignore.upstream"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "bytes": 3206,
+      "sha256": "dbfe2f14ffc85c31689ad3190fe5a1b1894b2f198cbc6bbd08957f723d496484",
+      "git_blob_sha1": "901f7f2d4a0101b7cd9e74c63be4dac7c7f676e7",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/CHANGELOG.md",
+      "retained_path": "CHANGELOG.md"
+    },
+    {
+      "path": "CMakeLists.txt",
+      "bytes": 2837,
+      "sha256": "cd691507499aa22eadddb285347c8fcc71f769e27cefdc6fcf452ddbcb80bb50",
+      "git_blob_sha1": "9097064154e7f07e10e7c798dcd504307dccff5b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/CMakeLists.txt",
+      "retained_path": "CMakeLists.txt"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 729,
+      "sha256": "0f4c92d6e66bfcc9cdb39bd18c90ff3b4f4e0b8160db8b91fa9821c8a89663f1",
+      "git_blob_sha1": "7d8ca2b8c19f2a35946b7fdb55f4d339681035ce",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/Cargo.toml",
+      "retained_path": "Cargo.toml"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1076,
+      "sha256": "8a138713a72dc117037c40c7b5a587649a7e96aa0dc4c4517fc947173348c0c7",
+      "git_blob_sha1": "e23319c04a50b14083e8acdbda806b692eff1f50",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/LICENSE",
+      "retained_path": "LICENSE"
+    },
+    {
+      "path": "Makefile",
+      "bytes": 3408,
+      "sha256": "d7c1776678aa788f7266e20aa437485c52a286070ccd45c73109314e49ffe172",
+      "git_blob_sha1": "780ddd69afcbae381857694ea8d67d5d99c20a30",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/Makefile",
+      "retained_path": "Makefile"
+    },
+    {
+      "path": "Package.swift",
+      "bytes": 1090,
+      "sha256": "72f4b93987d37378c6772086c8baeb910f1886dab80863357e3f4ea7037d431a",
+      "git_blob_sha1": "243cc887743758f410b4434a9889714b3ba1e925",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/Package.swift",
+      "retained_path": "Package.swift"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2182,
+      "sha256": "b3be6f0bcd93bf9a0bf2983430406400c5db439538e83c7615cbb994cd5e25c8",
+      "git_blob_sha1": "3c2080182e126c619650ac00386ea028d3064112",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/README.md",
+      "retained_path": "README.md"
+    },
+    {
+      "path": "binding.gyp",
+      "bytes": 765,
+      "sha256": "e2f8d0aac5d2e02f5e78ec8c4efed9bea4339e1da44d049414adab955b8e7816",
+      "git_blob_sha1": "19b616fb1b0369d3031565274663918f0659fb3b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/binding.gyp",
+      "retained_path": "binding.gyp"
+    },
+    {
+      "path": "bindings/c/tree-sitter-eiffel.pc.in",
+      "bytes": 297,
+      "sha256": "e73d22e759bc4641471fd55d41e251c67caafb4f48b6b02629a8d6b51e64f350",
+      "git_blob_sha1": "46d2dc2d0a657295d4ec0669033825e287498a32",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/c/tree-sitter-eiffel.pc.in",
+      "retained_path": "bindings/c/tree-sitter-eiffel.pc.in"
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-eiffel.h",
+      "bytes": 246,
+      "sha256": "d8a496d800dbb746ae0718e29ee22a3a7ea07a5f511e76881a4b307317f37b12",
+      "git_blob_sha1": "8efbbcb2334b5ec47b67264d6fa6ddd20dda09cb",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/c/tree_sitter/tree-sitter-eiffel.h",
+      "retained_path": "bindings/c/tree_sitter/tree-sitter-eiffel.h"
+    },
+    {
+      "path": "bindings/go/binding.go",
+      "bytes": 341,
+      "sha256": "684733d09782fa54e6cec7b8984db03405de5e72fcb7c3f92726604e3f1f5a90",
+      "git_blob_sha1": "2dd3322d2a1ee2b7f90559c259dab4c26bbb1b29",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/go/binding.go",
+      "retained_path": "bindings/go/binding.go"
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "bytes": 362,
+      "sha256": "4ade3129fe01e68ada3d3fac92667e8bcbc89c7e4fb6a1e12dba1961fa2ff33a",
+      "git_blob_sha1": "9264dc3ef6616878dd925e271e8f72b262bcd80e",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/go/binding_test.go",
+      "retained_path": "bindings/go/binding_test.go"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 529,
+      "sha256": "44066ca538ed85d2681bba67d5f593db6cbec210e883bafa4875615912699c9c",
+      "git_blob_sha1": "8c0e8328e8cae0bc9a10659080bf56057b7e8a2b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/node/binding.cc",
+      "retained_path": "bindings/node/binding.cc"
+    },
+    {
+      "path": "bindings/node/binding_test.js",
+      "bytes": 250,
+      "sha256": "c35f2aaec5d06fa42a4cea226fa4cb841a04a7506e70086c2ea5d9fd67d8c482",
+      "git_blob_sha1": "55becacfb0c7f5eeb85c8dd9ddcab336503434da",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/node/binding_test.js",
+      "retained_path": "bindings/node/binding_test.js"
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "bytes": 436,
+      "sha256": "6d2edc31741aa299535a8a1d7c38707cd746da88de2e88f242e8a354f7788eed",
+      "git_blob_sha1": "528e060f15ed2847a894ff64f8e80f3f432ffb44",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/node/index.d.ts",
+      "retained_path": "bindings/node/index.d.ts"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 455,
+      "sha256": "7d01666b8438cca9415ffb835ccc3d32487721361b8036da8167988e36a7acee",
+      "git_blob_sha1": "e55fb63e5db853870127c37a9a5d08c0e00a8006",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/node/index.js",
+      "retained_path": "bindings/node/index.js"
+    },
+    {
+      "path": "bindings/node/parsing_test.js",
+      "bytes": 692,
+      "sha256": "8de63db4f4c5420614bcf6fdf8ad7e20662f7c7810ee592487b3ecde9ab87b86",
+      "git_blob_sha1": "209ce8d8c255da29da66300622dfc1defdc5253b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/node/parsing_test.js",
+      "retained_path": "bindings/node/parsing_test.js"
+    },
+    {
+      "path": "bindings/python/tests/test_binding.py",
+      "bytes": 302,
+      "sha256": "042dbfef986c4ae2d1f7b516407aed2735910abe14938f3f580d73ecfce3bcae",
+      "git_blob_sha1": "a88c03670d7c8ddf4267c44c7f330f5319e0395b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/python/tests/test_binding.py",
+      "retained_path": "bindings/python/tests/test_binding.py"
+    },
+    {
+      "path": "bindings/python/tree_sitter_eiffel/__init__.py",
+      "bytes": 1155,
+      "sha256": "665fb8405e7be0f19eb9e6df8a20447365aa9169cd3191b7d410477c9dcfb16c",
+      "git_blob_sha1": "f22c6b993d7555c22f0b39c8ef601eed3fd7b370",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/python/tree_sitter_eiffel/__init__.py",
+      "retained_path": "bindings/python/tree_sitter_eiffel/__init__.py"
+    },
+    {
+      "path": "bindings/python/tree_sitter_eiffel/__init__.pyi",
+      "bytes": 247,
+      "sha256": "a22c459bc957b1965661ae5c4708fa6eb6ea877eff7f3376acb13e7665fdfeb0",
+      "git_blob_sha1": "abf6633f32670b50af307e8deb2e6ce2109d816f",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/python/tree_sitter_eiffel/__init__.pyi",
+      "retained_path": "bindings/python/tree_sitter_eiffel/__init__.pyi"
+    },
+    {
+      "path": "bindings/python/tree_sitter_eiffel/binding.c",
+      "bytes": 836,
+      "sha256": "dfe14297382ea0d0374e1180ac6c24e15125d6e414ecc7dcc66bf5afd439b015",
+      "git_blob_sha1": "1f46b31a9c086c145beb8e75506d46a9d5883e1d",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/python/tree_sitter_eiffel/binding.c",
+      "retained_path": "bindings/python/tree_sitter_eiffel/binding.c"
+    },
+    {
+      "path": "bindings/python/tree_sitter_eiffel/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "git_blob_sha1": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/python/tree_sitter_eiffel/py.typed",
+      "retained_path": "bindings/python/tree_sitter_eiffel/py.typed"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 613,
+      "sha256": "1ec71e65fcd389e0436a2ff2d6974eb318dc9dbcfd4c8896d4ae7a83600481f9",
+      "git_blob_sha1": "86c4434110cc61536f8f7ccd10261d21c4a56e12",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/rust/build.rs",
+      "retained_path": "bindings/rust/build.rs"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 1956,
+      "sha256": "6722ec290dc62bbc02652bcb413b32cc9c124dd33cd405e4af13c6dfe732402b",
+      "git_blob_sha1": "ad6b4453350a42c5b9a15635c3ed2d8e472a3f76",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/rust/lib.rs",
+      "retained_path": "bindings/rust/lib.rs"
+    },
+    {
+      "path": "bindings/swift/TreeSitterEiffel/eiffel.h",
+      "bytes": 246,
+      "sha256": "d8a496d800dbb746ae0718e29ee22a3a7ea07a5f511e76881a4b307317f37b12",
+      "git_blob_sha1": "8efbbcb2334b5ec47b67264d6fa6ddd20dda09cb",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/swift/TreeSitterEiffel/eiffel.h",
+      "retained_path": "bindings/swift/TreeSitterEiffel/eiffel.h"
+    },
+    {
+      "path": "bindings/swift/TreeSitterEiffelTests/TreeSitterEiffelTests.swift",
+      "bytes": 367,
+      "sha256": "cda10ab2bcfb31fb67d0f7df97599aa2431df2d694cfb8c9dd79e7e5c64ea92d",
+      "git_blob_sha1": "bae95405f35c08187cf45259d570e20b0d841612",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/bindings/swift/TreeSitterEiffelTests/TreeSitterEiffelTests.swift",
+      "retained_path": "bindings/swift/TreeSitterEiffelTests/TreeSitterEiffelTests.swift"
+    },
+    {
+      "path": "go.mod",
+      "bytes": 111,
+      "sha256": "6ecb17d83b0381687a2b28b4c52e19c965f67bd87094a245880fa6a3e066d8fa",
+      "git_blob_sha1": "6dd2c6d17f184620bfffe0781c2e64b5cbdfd049",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/go.mod",
+      "retained_path": "go.mod"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 21837,
+      "sha256": "5870a9ff808a5b9ded3b0c2b16a87e0ee866a6985b2786b1f72305cdf9809156",
+      "git_blob_sha1": "5781448ffacb206559be14372018186d8836c343",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/grammar.js",
+      "retained_path": "grammar.js"
+    },
+    {
+      "path": "package-lock.json",
+      "bytes": 12222,
+      "sha256": "aaca1eb231245af4657300116912c55225389f17f05abc9d1c636ec47c1e70be",
+      "git_blob_sha1": "bd67717574924bda6d33c3ec4b0061eac2656846",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/package-lock.json",
+      "retained_path": "package-lock.json"
+    },
+    {
+      "path": "package.json",
+      "bytes": 803,
+      "sha256": "5e038a5fd6209e820fbd59c12803c84292085b0bc916d77d127e473a2d5403ce",
+      "git_blob_sha1": "0fa3eb4731b9a355f0e44f7924bb6029558a752f",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/package.json",
+      "retained_path": "package.json"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 775,
+      "sha256": "27272a2e97499b2bc8db0759af44632e1c4e4c9353b57e3a40a322ed470adc87",
+      "git_blob_sha1": "b99c7cc46947b3b5884d678c5a39e4c5d278cbd5",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/pyproject.toml",
+      "retained_path": "pyproject.toml"
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 2050,
+      "sha256": "782ee6341ac74b54d32f87f962d0324723052c5b2fcde9f71aa54168e0665022",
+      "git_blob_sha1": "e218fb89f236e9b24ac97b01f4bd0c234d2d8294",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/queries/highlights.scm",
+      "retained_path": "queries/highlights.scm"
+    },
+    {
+      "path": "queries/indents.scm",
+      "bytes": 579,
+      "sha256": "40457633ed1908cd08bf6fe7c6b2418cd9f9b650da9fa3669447bef96144f71e",
+      "git_blob_sha1": "b35084cc1a8731f91ab76066e0e5528047a81eb6",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/queries/indents.scm",
+      "retained_path": "queries/indents.scm"
+    },
+    {
+      "path": "queries/textobjects.scm",
+      "bytes": 324,
+      "sha256": "1348edaf553685a53f56ae55ff3ca8842e55c1d8b85c02ef5e4dda76c47b0736",
+      "git_blob_sha1": "34693a0297736e432f60ba5a7c7c9311538404a7",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/queries/textobjects.scm",
+      "retained_path": "queries/textobjects.scm"
+    },
+    {
+      "path": "setup.py",
+      "bytes": 2066,
+      "sha256": "ae83067d3dafcc9290955a217c0ccfe1c083594017bf606a93b7483be369b60e",
+      "git_blob_sha1": "e60d33739314b6e703a6d0dddde93faa0d649418",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/setup.py",
+      "retained_path": "setup.py"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 113839,
+      "sha256": "7f56a6dffb5b685bdbb86637f4a1bd012743b6285a720e6d5f956e45b2d450a8",
+      "git_blob_sha1": "5bd29c30cb9a5fd5ba400f04607205b55d527950",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/src/grammar.json",
+      "retained_path": "src/grammar.json"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 64147,
+      "sha256": "b9a206856440b90a5c86f8fd3248899c1e337dd0deb75eceba835cac2e41a868",
+      "git_blob_sha1": "951e5b8ddef756641b5906014738ce63694ff704",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/src/node-types.json",
+      "retained_path": "src/node-types.json"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 2727352,
+      "sha256": "2129ec36a183be0c5eb02669837edcbef447a9be1bda3aa7497cfa8f52c816af",
+      "git_blob_sha1": "1c58dd7e10c55e28b0310c650c67ad19fffdc217",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/src/parser.c",
+      "retained_path": "src/parser.c"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "git_blob_sha1": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/src/tree_sitter/alloc.h",
+      "retained_path": "src/tree_sitter/alloc.h"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "git_blob_sha1": "a17a574f04e0c20c38463149640badc5126063f8",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/src/tree_sitter/array.h",
+      "retained_path": "src/tree_sitter/array.h"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "git_blob_sha1": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/src/tree_sitter/parser.h",
+      "retained_path": "src/tree_sitter/parser.h"
+    },
+    {
+      "path": "test/corpus/body.txt",
+      "bytes": 16127,
+      "sha256": "5c4b90b0dac2cd279a6642acdfa4e165b849be8e48dd658e9fa26dad6a92259e",
+      "git_blob_sha1": "1a29b1f10fb0c3498f2b6e97e54168a5f7ad55f8",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/body.txt",
+      "retained_path": "test/corpus/body.txt"
+    },
+    {
+      "path": "test/corpus/class.txt",
+      "bytes": 5289,
+      "sha256": "6ba64c90c9515a77cfa0e4445e498c43c717980f954764b0cfc2db6cda19c913",
+      "git_blob_sha1": "32fb7de475949c176a93fd6d7654630fa8358985",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/class.txt",
+      "retained_path": "test/corpus/class.txt"
+    },
+    {
+      "path": "test/corpus/comment.txt",
+      "bytes": 402,
+      "sha256": "7eb53ea49e13efaf9c0ea86941cebdc9c543d2f8c6e1ada20eade7a052f587ae",
+      "git_blob_sha1": "eae278845d454a7e28c00eb0c651e5f12a1eaa86",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/comment.txt",
+      "retained_path": "test/corpus/comment.txt"
+    },
+    {
+      "path": "test/corpus/comment_spaces.txt",
+      "bytes": 220,
+      "sha256": "e46e1a8c77015c0bcd4ee9ab793a06da537f557f5c31effc844028a4fae41e17",
+      "git_blob_sha1": "7d6d7af5b610fa19ae99503e39ff2728948c4ac7",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/comment_spaces.txt",
+      "retained_path": "test/corpus/comment_spaces.txt"
+    },
+    {
+      "path": "test/corpus/errors.txt",
+      "bytes": 234,
+      "sha256": "a02982e7cb3e1a75b4a6f8499653fa809bc25319b9c5a0f7df937227f411c931",
+      "git_blob_sha1": "91ba5bb04818ecb297a5ab9c6be824c6e2d9cacf",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/errors.txt",
+      "retained_path": "test/corpus/errors.txt"
+    },
+    {
+      "path": "test/corpus/expression.txt",
+      "bytes": 10151,
+      "sha256": "a80a47dbab9b0e01a44b437e166122f34ae060ebdb3d2eab4012b1562f2ec643",
+      "git_blob_sha1": "60903d4d8d010d05d6e3482bda0c55ca44edef98",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/expression.txt",
+      "retained_path": "test/corpus/expression.txt"
+    },
+    {
+      "path": "test/corpus/feature.txt",
+      "bytes": 9354,
+      "sha256": "18ef6b5176f11d327c6c0c85f45d55decc86910d3d51995e1bd70f310be29773",
+      "git_blob_sha1": "67d54aca7ac6d4d8dff3fea2e169557dcfa2bcc8",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/feature.txt",
+      "retained_path": "test/corpus/feature.txt"
+    },
+    {
+      "path": "test/corpus/instruction.txt",
+      "bytes": 912,
+      "sha256": "ecc90f8a996497ce97aec7befd107191084a4e5012cf63a17316f625beec6595",
+      "git_blob_sha1": "991dd324ad22d6034ad8a02c5bf5439e97e2545b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/instruction.txt",
+      "retained_path": "test/corpus/instruction.txt"
+    },
+    {
+      "path": "test/corpus/number.txt",
+      "bytes": 1613,
+      "sha256": "bbdb0e8074e851e4b231052f5e4e045fd91fcdc8d461e070c1e67ce1b523e120",
+      "git_blob_sha1": "30cf1fc096d4f4fb55be320bf795b55588c5789d",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/number.txt",
+      "retained_path": "test/corpus/number.txt"
+    },
+    {
+      "path": "test/corpus/string.txt",
+      "bytes": 5735,
+      "sha256": "9fe5322dd8d8e265f2f194e3695f745a63bc14a86baae5065793396a203e130c",
+      "git_blob_sha1": "da16af0eb01585c89a78e24ae83eeb158c883280",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/string.txt",
+      "retained_path": "test/corpus/string.txt"
+    },
+    {
+      "path": "test/corpus/types.txt",
+      "bytes": 775,
+      "sha256": "f47e50a34ada546fe7321ed66a2005aaff461dd675aec4e0e27f9f41385793ed",
+      "git_blob_sha1": "c7ea44a68918fbf69c56a829955816b6a9276623",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/corpus/types.txt",
+      "retained_path": "test/corpus/types.txt"
+    },
+    {
+      "path": "test/highlight/keywords.e",
+      "bytes": 40,
+      "sha256": "4e531dbbb3a9585be7d31dc3773fbad3ee462db186cbaefdfd35a067dece577a",
+      "git_blob_sha1": "4522cd0e01e23daa1c12a6fb00655050b13f000e",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/highlight/keywords.e",
+      "retained_path": "test/highlight/keywords.e"
+    },
+    {
+      "path": "test/parsing/creation_clause_identifier.e",
+      "bytes": 21,
+      "sha256": "fd8f4d72c95357452f2f4f3a316ba4e78a2c4310669840a8def871e16a663d72",
+      "git_blob_sha1": "76f8b6414f4a8fd03c82585a7216eccf4baf6e71",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/parsing/creation_clause_identifier.e",
+      "retained_path": "test/parsing/creation_clause_identifier.e"
+    },
+    {
+      "path": "test/parsing/creation_clause_identifier.out",
+      "bytes": 174,
+      "sha256": "16b1d53a00b63cb76d1e5717fd75ddb62b98f17c6aa428f8fed43dfe8f5cf24b",
+      "git_blob_sha1": "1d0ad7aa3169815b54caa1f4ce4a43e6b2484ade",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/parsing/creation_clause_identifier.out",
+      "retained_path": "test/parsing/creation_clause_identifier.out"
+    },
+    {
+      "path": "test/parsing/feature_do.e",
+      "bytes": 47,
+      "sha256": "c0bd181009eb1de851be100342a1e0844521b024ec312a0389ccc1b10a61d999",
+      "git_blob_sha1": "30a23e2d221004f200015984609355725db16e1b",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/parsing/feature_do.e",
+      "retained_path": "test/parsing/feature_do.e"
+    },
+    {
+      "path": "test/parsing/feature_do.out",
+      "bytes": 590,
+      "sha256": "d618bf7db8e6971b35dd002cde7ee749ad04781206db250c9fc7b743b5e779a7",
+      "git_blob_sha1": "b1093d3363b46600441480fa477bc8ba330f36c5",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/parsing/feature_do.out",
+      "retained_path": "test/parsing/feature_do.out"
+    },
+    {
+      "path": "test/parsing/unfinished_comment.e",
+      "bytes": 27,
+      "sha256": "9affe357691bf768b03d1f7d0ce9d3de223b6996b72fad9593fab2d7e631a5a2",
+      "git_blob_sha1": "178f33b168b928fce18416accb8ae2a26707ec99",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/parsing/unfinished_comment.e",
+      "retained_path": "test/parsing/unfinished_comment.e"
+    },
+    {
+      "path": "test/parsing/unfinished_comment.out",
+      "bytes": 60,
+      "sha256": "45bc8649bf2f63d60f1df3da0aa41ca9e7c070bdff98b9f938841c7f9da29801",
+      "git_blob_sha1": "b05eea6795f695fc650bb2ad31267af920ab2908",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/test/parsing/unfinished_comment.out",
+      "retained_path": "test/parsing/unfinished_comment.out"
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 970,
+      "sha256": "a81844940505c9b587a1aa484a8b49a75ca48970529d97ce092078fb1911cd1f",
+      "git_blob_sha1": "813f330ff0bf9cea1552ecafc2af717efa907cd8",
+      "archive_mode": 436,
+      "executable_intent": false,
+      "original_archive_member": "tree-sitter-eiffel-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/tree-sitter.json",
+      "retained_path": "tree-sitter.json"
+    }
+  ],
+  "published_inventory": null,
+  "published_package_observation": "No crates.io or npm package; exact 404 bodies retained. Latest tagged release has no published source assets.",
+  "archive_modes_applied": false,
+  "path_mappings": [
+    {
+      "original_path": ".gitattributes",
+      "retained_path": ".gitattributes.upstream"
+    },
+    {
+      "original_path": ".gitignore",
+      "retained_path": ".gitignore.upstream"
+    }
+  ],
+  "upstream_code_executed": false,
+  "signature_verification": {
+    "verified": false
+  },
+  "source_references": [
+    "https://github.com/imustafin/tree-sitter-eiffel/commit/ec098b67b98b7f5da10f8d66bdb6c52fc91341fc",
+    "https://raw.githubusercontent.com/imustafin/tree-sitter-eiffel/ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/LICENSE",
+    "https://raw.githubusercontent.com/imustafin/tree-sitter-eiffel/ec098b67b98b7f5da10f8d66bdb6c52fc91341fc/CHANGELOG.md"
+  ]
+}

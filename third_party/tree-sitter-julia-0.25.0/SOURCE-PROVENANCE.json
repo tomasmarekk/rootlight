@@ -1,0 +1,87 @@
+{
+  "schema": "rootlight.julia-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-julia",
+    "version": "0.25.0",
+    "unpublished_local_binding": true,
+    "license": "MIT",
+    "rust_version": "1.90"
+  },
+  "upstream": {
+    "repository": "https://github.com/tree-sitter/tree-sitter-julia",
+    "revision": "e0f9dcd180fdcfcfa8d79a3531e11d99e79321d3",
+    "git_tree": "748cd55f16c836ad81cd3a4b50f603ed11665704",
+    "published_archive": {
+      "path": "upstream/tree-sitter-julia-0.25.0.tar.gz",
+      "url": "https://github.com/tree-sitter/tree-sitter-julia/releases/download/v0.25.0/tree-sitter-julia.tar.gz",
+      "bytes": 1180023,
+      "sha256": "edc0a6edcbaa6d183a0fc002319312dcbc3d04d86ffb9d6cfb6f83502b1b3e08"
+    },
+    "authored_archive": {
+      "path": "upstream/tree-sitter-julia-authored-e0f9dcd180fdcfcfa8d79a3531e11d99e79321d3.tar.gz",
+      "url": "https://codeload.github.com/tree-sitter/tree-sitter-julia/tar.gz/e0f9dcd180fdcfcfa8d79a3531e11d99e79321d3",
+      "bytes": 1180873,
+      "sha256": "13e604be147d4d42e3640857752acf57b99ab5df84f73a026a43558da7bc4e40"
+    },
+    "signature_verified": false,
+    "original_code_or_lifecycle_executed": false,
+    "preserved_authored_files": 61,
+    "preserved_published_files": 61,
+    "authored_published_bytes_identical": true,
+    "path_mappings": [
+      {
+        "original_path": ".gitattributes",
+        "retained_path": ".gitattributes.upstream"
+      },
+      {
+        "original_path": ".gitignore",
+        "retained_path": ".gitignore.upstream"
+      }
+    ]
+  },
+  "preferred_inputs": {
+    "parser": "src/parser.c",
+    "scanner": "src/scanner.c",
+    "grammar": "grammar.js",
+    "native_abi": 15,
+    "field_count": 6,
+    "parser_and_scanner_literal_upstream": true,
+    "generated_files_hand_edited": false,
+    "upstream_optimization_pragmas_retained": true,
+    "local_binding_patch": "patches/local-binding.patch"
+  },
+  "build": {
+    "acquisition_or_generation": false,
+    "direct_local_dependencies": [
+      {
+        "name": "tree-sitter-language",
+        "version": "0.1.7"
+      },
+      {
+        "name": "cc",
+        "version": "1.2.67",
+        "role": "build"
+      }
+    ],
+    "inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ],
+    "uses_upstream_lifecycle_hooks": false
+  },
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 33257,
+    "sha256": "f54622ef7ba5fe5251a6757655f4759eebe226735286a2526e96281c594b7b45"
+  },
+  "qualification": {
+    "whole_language_coverage_percent": null,
+    "installed_mcp_verified": false,
+    "empty_cache_independent_network_denial_verified": false,
+    "license_policy_or_legal_acceptance_verified": false,
+    "boundary": "Exact native-source inventories and finite native syntax tests are separate from product language and package acceptance."
+  }
+}

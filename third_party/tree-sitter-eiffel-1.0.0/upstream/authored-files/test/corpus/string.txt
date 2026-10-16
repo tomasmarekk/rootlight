@@ -1,0 +1,330 @@
+===
+String. Basic string
+===
+class A feature x
+  do
+    f("Hello, World!")
+  end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature (extended_feature_name (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)
+                (call
+                  (unqualified_call
+                    (identifier)
+                    (actuals
+                      (expression
+                        (basic_manifest_string (string_content))))))))))))))
+
+===
+String. Once string
+===
+class A
+invariant
+  once "a"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (once_string
+            (basic_manifest_string
+              (string_content))))))))
+
+===
+String. Verbatim string
+===
+class A
+invariant
+  "[
+    a
+    b
+    "
+    " ]
+    ]
+    ] "
+
+    end should be on its own line]"
+  ]"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (verbatim_string
+            (verbatim_string_opener)
+            (verbatim_string_content)
+            (verbatim_string_closer)))))))
+===
+String. One line string is not Verbatim
+===
+class A
+invariant
+  "[ ]"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (basic_manifest_string
+            (string_content)))))))
+
+===
+String. Empty content Verbatim string
+===
+class A
+invariant
+"[
+]"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (verbatim_string
+            (verbatim_string_opener)
+            (verbatim_string_closer)))))))
+
+===
+String. Single closing bracket in Verbatim string
+===
+class A
+invariant
+  "[
+]
+  ]"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (verbatim_string
+            (verbatim_string_opener)
+            (verbatim_string_content)
+            (verbatim_string_closer)))))))
+
+===
+String. Single closing bracket and CR in Verbatim string
+===
+class A
+invariant
+  "[
+next line has CR before new line
+]
+  ]"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (verbatim_string
+            (verbatim_string_opener)
+            (verbatim_string_content)
+            (verbatim_string_closer)))))))
+
+===
+String. One line Verbatim string
+===
+class A
+invariant
+  "[
+  a
+  ]"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (verbatim_string
+            (verbatim_string_opener)
+            (verbatim_string_content)
+            (verbatim_string_closer)))))))
+
+===
+String. Curly braces in Basic string
+===
+note
+  description: "Summary description for {APPLICATION}."
+class A
+end
+---
+(source_file
+  (class_declaration
+    (notes
+      (note_entry
+        (tag)
+        (basic_manifest_string (string_content))))
+    (class_name)))
+
+===
+String. Dollar in simple string
+===
+note
+  revision: "$Revision: 1 $"
+class A
+end
+---
+(source_file
+  (class_declaration
+    (notes
+      (note_entry
+        (tag)
+        (basic_manifest_string (string_content))))
+    (class_name)))
+
+===
+String. Empty line in verbatim
+===
+class A invariant
+"[
+
+]"
+end
+---
+(source_file
+(class_declaration (class_name)
+  (invariant
+    (assertion_clause
+      (expression
+        (verbatim_string
+          (verbatim_string_opener)
+          (verbatim_string_content)
+          (verbatim_string_closer)))))))
+
+===
+String. Single quote and backtick in string
+===
+class A invariant
+  {STRING_32} "Option `$1' conflicts with `$2'."
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (manifest_type
+            (class_type
+              (class_name)))
+          (basic_manifest_string
+            (string_content)))))))
+
+===
+String. Percent
+===
+class A invariant
+  "%%"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (basic_manifest_string
+            (string_content
+              (special_text))))))))
+
+===
+String. Hash
+===
+class A invariant
+  "#"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (basic_manifest_string
+            (string_content)))))))
+
+===
+String. At
+===
+class A invariant
+  "@"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (basic_manifest_string
+            (string_content)))))))
+
+===
+String. Dash-dash in string is not a comment
+===
+class A invariant
+  "--"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (basic_manifest_string
+            (string_content)))))))
+
+===
+String. Escape quote
+===
+class A invariant
+  "%"quoted%""
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (basic_manifest_string
+            (string_content
+              (special_text)
+              (special_text))))))))
+
+===
+Dash-dash in verbatim string is not comment
+===
+class A invariant
+"[
+-- Normal string content
+]"
+end
+---
+(source_file
+  (class_declaration
+    (class_name)
+    (invariant
+      (assertion_clause
+        (expression
+          (verbatim_string
+            (verbatim_string_opener)
+            (verbatim_string_content)
+            (verbatim_string_closer)))))))

@@ -1,0 +1,82 @@
+{
+  "schema": "rootlight.v-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-v",
+    "version": "0.0.6",
+    "unpublished_local_binding": true,
+    "published_release_claimed": false,
+    "license": "MIT"
+  },
+  "upstream": {
+    "repository": "https://github.com/vlang/v-analyzer",
+    "revision": "925d4570d1668746762a2cdf0ecb9a25be704a67",
+    "git_tree": "c36a585d2eae9c393136bb09d346c409a874a2d1",
+    "private_metadata": true,
+    "preserved_files": 527,
+    "archive": {
+      "path": "upstream/v-analyzer-authored.tar.gz",
+      "bytes": 1109705,
+      "sha256": "d8ae532649813e6668b1bbeb5101fe16583cd4eb8b537bac29940d21054937a6"
+    },
+    "signature_verified": false
+  },
+  "inactive_gitlink": {
+    "original_path": "tree_sitter_v/bindings/core",
+    "repository": "https://github.com/tree-sitter/tree-sitter",
+    "revision": "cd4b6e2ef996d4baca12caadb78dffc8b55bc869",
+    "git_tree": "5b88b70d3a11157a9b32f742a180d8c914667bab",
+    "preserved_files": 525,
+    "archive": {
+      "path": "upstream/tree-sitter-core-authored.tar.gz",
+      "bytes": 901235,
+      "sha256": "40421cbc0f3610779e8968d9e14bb2b2f6cf2e7c41151f249a3376144aad3574"
+    },
+    "used_by_local_binding": false
+  },
+  "preferred_inputs": {
+    "origin": "reviewed-local-grammar-overlay",
+    "parser": "src/parser.c",
+    "grammar": "grammar.js",
+    "scanner": null,
+    "declared_native_abi": 15,
+    "declared_field_count": 47,
+    "generated_files_hand_edited": false
+  },
+  "build": {
+    "acquisition_or_generation": false,
+    "upstream_lifecycle_hooks": false,
+    "inputs": [
+      "src/parser.c",
+      "src/tree_sitter/parser.h"
+    ],
+    "dependencies": {
+      "tree-sitter-language": "0.1.7",
+      "cc": "1.2.67"
+    }
+  },
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 222252,
+    "sha256": "66fecd80c8047cb55ab429dcd0b838f5bdbdec152624b96bf073467fa692970e"
+  },
+  "qualification": {
+    "native_runtime_compatibility_verified": false,
+    "whole_language_coverage_percent": null,
+    "installed_mcp_verified": false,
+    "empty_cache_independent_network_denial_verified": false
+  },
+  "local_overlay": {
+    "patch": {
+      "path": "patches/grammar.patch",
+      "bytes": 1148,
+      "sha256": "e8734805d2ddb0bfc461832749ac8670f5becae9d28cbadfcac5573eb178773d"
+    },
+    "regeneration": {
+      "path": "patches/regeneration.json",
+      "bytes": 1935,
+      "sha256": "659e888ea7906157aa6bbff835ce2b586b16c1810b572c85419d4a02f0ffb265"
+    },
+    "upstream_authored_inputs_unchanged": true,
+    "build_time_generation": false
+  }
+}

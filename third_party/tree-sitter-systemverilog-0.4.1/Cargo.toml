@@ -1,0 +1,21 @@
+# Local static binding for authenticated SystemVerilog native syntax inputs.
+# Original dependency manifests and lifecycle hooks remain inert under upstream/.
+[package]
+name = "tree-sitter-systemverilog"
+version = "0.4.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/gmlarumbe/tree-sitter-systemverilog"
+description = "Pinned Verilog and SystemVerilog syntax tables with a local static binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

@@ -1,0 +1,98 @@
+{
+  "schema": "rootlight.eiffel-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-eiffel",
+    "version": "1.0.0",
+    "unpublished_local_binding": true,
+    "license": "MIT",
+    "rust_version": "1.90"
+  },
+  "upstream": {
+    "repository": "https://github.com/imustafin/tree-sitter-eiffel",
+    "revision": "ec098b67b98b7f5da10f8d66bdb6c52fc91341fc",
+    "git_tree": "b9cf17dff75b9582b74849df0d7b7004843e2cda",
+    "release_status": "unreleased changes after v1.0.0",
+    "authored_archive": {
+      "path": "upstream/tree-sitter-eiffel-authored-ec098b67b98b7f5da10f8d66bdb6c52fc91341fc.tar.gz",
+      "url": "https://codeload.github.com/imustafin/tree-sitter-eiffel/tar.gz/ec098b67b98b7f5da10f8d66bdb6c52fc91341fc",
+      "bytes": 210660,
+      "sha256": "8e105e8f972ccacab458421291d887712aba25684191e2ded04c1f7535c0eee6"
+    },
+    "signature_verified": false,
+    "published_package": null,
+    "original_code_or_lifecycle_executed": false,
+    "preserved_authored_files": 69,
+    "path_mappings": [
+      {
+        "original_path": ".gitattributes",
+        "retained_path": ".gitattributes.upstream"
+      },
+      {
+        "original_path": ".gitignore",
+        "retained_path": ".gitignore.upstream"
+      }
+    ]
+  },
+  "preferred_inputs": {
+    "parser": "src/parser.c",
+    "scanner": "src/scanner.c",
+    "grammar": "grammar.js",
+    "native_abi": 15,
+    "field_count": 2,
+    "external_token_count": 1,
+    "parser_literal_upstream": false,
+    "generated_files_hand_edited": false,
+    "local_binding_patch": "patches/local-binding.patch",
+    "grammar_patch": "patches/grammar.patch",
+    "grammar_regeneration": "patches/grammar-regeneration.json",
+    "operator_symbols": "src/operator_symbols.h",
+    "operator_symbols_regeneration": "patches/operator-symbols-regeneration.json"
+  },
+  "build": {
+    "acquisition_or_generation": false,
+    "uses_upstream_lifecycle_hooks": false,
+    "inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/operator_symbols.h",
+      "src/tree_sitter/parser.h"
+    ],
+    "direct_local_dependencies": [
+      {
+        "name": "tree-sitter-language",
+        "version": "0.1.7"
+      },
+      {
+        "name": "cc",
+        "version": "1.2.67",
+        "role": "build"
+      }
+    ]
+  },
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 22132,
+    "sha256": "9a78bb1d434b6f0b1a1596e9a904a34086eea3abfe1a123a9a2efcab2e8e9e72"
+  },
+  "qualification": {
+    "whole_language_coverage_percent": null,
+    "installed_mcp_verified": false,
+    "empty_cache_independent_network_denial_verified": false,
+    "boundary": "Finite native tests and complete input provenance do not establish product language or package coverage"
+  },
+  "retained_unicode_input": {
+    "package": "regex-syntax",
+    "version": "0.8.11",
+    "unicode_version": "16.0.0",
+    "license": "MIT OR Apache-2.0",
+    "licenses": [
+      "patches/unicode/LICENSE-MIT",
+      "patches/unicode/LICENSE-APACHE"
+    ],
+    "input": {
+      "path": "patches/unicode/regex-syntax-general-category.rs",
+      "bytes": 158564,
+      "sha256": "9488e3721f7c2ae20e1b77fcff9a59b4ed8f22954b8645ea6d8592eac1856423"
+    }
+  }
+}

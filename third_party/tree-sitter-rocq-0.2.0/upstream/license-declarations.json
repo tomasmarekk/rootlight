@@ -1,0 +1,48 @@
+{
+  "schema": "rootlight.coq-authored-declaration-review/1",
+  "scope": "All files in the retained pinned grammar archive; text matching is only a provenance locator.",
+  "utf8_text_file_count": 89,
+  "binary_file_count": 2,
+  "binary_files_not_interpreted_as_text": [
+    "CST-Example/dark-mode.png",
+    "CST-Example/light-mode.png"
+  ],
+  "license_declaration_locations": [
+    {
+      "path": "Cargo.toml",
+      "line": 6,
+      "text": "license = \"MIT\""
+    },
+    {
+      "path": "grammar.js",
+      "line": 4,
+      "text": " * @license MIT"
+    },
+    {
+      "path": "package.json",
+      "line": 10,
+      "text": "  \"license\": \"MIT\","
+    },
+    {
+      "path": "pyproject.toml",
+      "line": 18,
+      "text": "license.text = \"MIT\""
+    },
+    {
+      "path": "tree-sitter.json",
+      "line": 18,
+      "text": "    \"license\": \"MIT\","
+    }
+  ],
+  "copyright_string_locations": [],
+  "mit_permission_phrase_locations": [],
+  "authored_header_exact_lines": [
+    "/**",
+    " * @file Rocq (formerly Coq) grammar for tree-sitter",
+    " * @author Aru Zdh <aruzdh@gmail.com>",
+    " * @license MIT",
+    " */"
+  ],
+  "authored_notice_overlay_recovered": false,
+  "spdx_is_external_reference_not_authored_notice": true
+}

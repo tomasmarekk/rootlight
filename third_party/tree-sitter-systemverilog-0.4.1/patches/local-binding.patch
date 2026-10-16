@@ -1,0 +1,143 @@
+--- upstream/Cargo.toml
++++ local/Cargo.toml
+@@ -1,34 +1,21 @@
++# Local static binding for authenticated SystemVerilog native syntax inputs.
++# Original dependency manifests and lifecycle hooks remain inert under upstream/.
+ [package]
+ name = "tree-sitter-systemverilog"
+-description = "SystemVerilog 1800-2023 Parser"
+ version = "0.4.1"
+-authors = ["Gonzalo M. Larumbe <gonzalomlarumbe@gmail.com>"]
++edition = "2024"
++rust-version = "1.90"
+ license = "MIT"
+-readme = "README.md"
+-keywords = ["incremental", "parsing", "tree-sitter", "systemverilog"]
+-categories = ["parser-implementations", "parsing", "text-editors"]
+ repository = "https://github.com/gmlarumbe/tree-sitter-systemverilog"
+-edition = "2021"
+-autoexamples = false
+-
++description = "Pinned Verilog and SystemVerilog syntax tables with a local static binding"
++publish = false
+ build = "bindings/rust/build.rs"
+-include = [
+-  "bindings/rust/*",
+-  "grammar.js",
+-  "queries/*",
+-  "src/*",
+-  "tree-sitter.json",
+-  "/LICENSE",
+-]
+ 
+ [lib]
+ path = "bindings/rust/lib.rs"
+ 
+ [dependencies]
+-tree-sitter-language = "0.1"
++tree-sitter-language = "=0.1.7"
+ 
+ [build-dependencies]
+-cc = "1.2"
+-
+-[dev-dependencies]
+-tree-sitter = "0.25.3"
++cc = "=1.2.67"
+--- upstream/bindings/rust/build.rs
++++ local/bindings/rust/build.rs
+@@ -1,21 +1,13 @@
++//! Compiles authenticated HDL parser inputs with declared local tools.
++//! Upstream acquisition, generation and package lifecycle hooks stay inert.
++
+ fn main() {
+-    let src_dir = std::path::Path::new("src");
+-
+-    let mut c_config = cc::Build::new();
+-    c_config.std("c11").include(src_dir);
+-
++    let mut builder = cc::Build::new();
++    builder.std("c11").include("src").file("src/parser.c");
+     #[cfg(target_env = "msvc")]
+-    c_config.flag("-utf-8");
+-
+-    let parser_path = src_dir.join("parser.c");
+-    c_config.file(&parser_path);
+-    println!("cargo:rerun-if-changed={}", parser_path.to_str().unwrap());
+-
+-    let scanner_path = src_dir.join("scanner.c");
+-    if scanner_path.exists() {
+-        c_config.file(&scanner_path);
+-        println!("cargo:rerun-if-changed={}", scanner_path.to_str().unwrap());
++    builder.flag("-utf-8");
++    builder.compile("tree-sitter-systemverilog");
++    for source in ["src/parser.c", "src/tree_sitter/parser.h"] {
++        println!("cargo:rerun-if-changed={source}");
+     }
+-
+-    c_config.compile("tree-sitter-systemverilog");
+ }
+--- upstream/bindings/rust/lib.rs
++++ local/bindings/rust/lib.rs
+@@ -1,53 +1,17 @@
+-//! This crate provides SystemVerilog language support for the [tree-sitter][] parsing library.
+-//!
+-//! Typically, you will use the [LANGUAGE][] constant to add this language to a
+-//! tree-sitter [Parser][], and then use the parser to parse some code:
+-//!
+-//! ```
+-//! let code = r#"
+-//! "#;
+-//! let mut parser = tree_sitter::Parser::new();
+-//! let language = tree_sitter_systemverilog::LANGUAGE;
+-//! parser
+-//!     .set_language(&language.into())
+-//!     .expect("Error loading SystemVerilog parser");
+-//! let tree = parser.parse(code, None).unwrap();
+-//! assert!(!tree.root_node().has_error());
+-//! ```
+-//!
+-//! [Parser]: https://docs.rs/tree-sitter/*/tree_sitter/struct.Parser.html
+-//! [tree-sitter]: https://tree-sitter.github.io/
++//! Static language handle for authenticated Verilog and SystemVerilog syntax.
++//! Parsing does not elaborate designs or resolve macro and include environments.
+ 
+ use tree_sitter_language::LanguageFn;
+ 
+-extern "C" {
++unsafe extern "C" {
+     fn tree_sitter_systemverilog() -> *const ();
+ }
+ 
+-/// The tree-sitter [`LanguageFn`][LanguageFn] for this grammar.
+-///
+-/// [LanguageFn]: https://docs.rs/tree-sitter-language/*/tree_sitter_language/struct.LanguageFn.html
+-pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_systemverilog) };
++/// Provides the process-lifetime generated ABI15 SystemVerilog language table.
++// SAFETY: The authenticated src/parser.c factory returns a static TSLanguage.
++// It has no external scanner; loading remains subject to the runtime ABI check.
++pub const LANGUAGE_SYSTEMVERILOG: LanguageFn =
++    unsafe { LanguageFn::from_raw(tree_sitter_systemverilog) };
+ 
+-/// The content of the [`node-types.json`][] file for this grammar.
+-///
+-/// [`node-types.json`]: https://tree-sitter.github.io/tree-sitter/using-parsers/6-static-node-types
++/// Describes the exact generated named nodes and written declaration fields.
+ pub const NODE_TYPES: &str = include_str!("../../src/node-types.json");
+-
+-// NOTE: uncomment these to include any queries that this grammar contains:
+-
+-// pub const HIGHLIGHTS_QUERY: &str = include_str!("../../queries/highlights.scm");
+-// pub const INJECTIONS_QUERY: &str = include_str!("../../queries/injections.scm");
+-// pub const LOCALS_QUERY: &str = include_str!("../../queries/locals.scm");
+-// pub const TAGS_QUERY: &str = include_str!("../../queries/tags.scm");
+-
+-#[cfg(test)]
+-mod tests {
+-    #[test]
+-    fn test_can_load_grammar() {
+-        let mut parser = tree_sitter::Parser::new();
+-        parser
+-            .set_language(&super::LANGUAGE.into())
+-            .expect("Error loading SystemVerilog parser");
+-    }
+-}

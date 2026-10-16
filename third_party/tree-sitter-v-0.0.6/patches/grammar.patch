@@ -1,0 +1,39 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -116,15 +116,15 @@
+ 				repeat(
+ 					choice(
+ 						seq($.import_list, optional(terminator)),
+-						seq($._top_level_declaration, optional(terminator)),
+-						seq($._statement, optional(terminator)),
++						seq($._top_level_declaration, optional(semi)),
++						seq($._statement, optional(semi)),
+ 					),
+ 				),
+ 			),
+ 
+ 		shebang: (_) => seq('#!', /.*/),
+ 
+-		line_comment: (_) => seq('//', /.*/),
++		line_comment: (_) => token(seq('//', /.*/)),
+ 
+ 		block_comment: (_) =>
+ 			seq(
+@@ -200,7 +200,7 @@
+ 			seq(
+ 				optional(field('attributes', $.attributes)),
+ 				'__global',
+-				choice($.global_var_definition, seq('(', repeat(seq($.global_var_definition, semi)), ')')),
++				choice($.global_var_definition, seq('(', repeat(seq($.global_var_definition, optional(semi))), ')')),
+ 			),
+ 
+ 		global_var_definition: ($) =>
+@@ -1124,7 +1124,7 @@
+ 
+ 		block: ($) => seq('{', repeat(seq($._block_element, optional(semi))), '}'),
+ 
+-		defer_statement: ($) => seq('defer', $.block),
++		defer_statement: ($) => seq('defer', optional(seq('(', 'fn', ')')), $.block),
+ 
+ 		label_reference: ($) => $.identifier,
+ 

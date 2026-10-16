@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tree-sitter-systemverilog"
+description = "SystemVerilog 1800-2023 Parser"
+version = "0.4.1"
+keywords = ["incremental", "parsing", "tree-sitter", "systemverilog"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Compilers",
+  "Topic :: Text Processing :: Linguistic",
+  "Typing :: Typed",
+]
+authors = [{ name = "Gonzalo M. Larumbe", email = "gonzalomlarumbe@gmail.com" }]
+requires-python = ">=3.10"
+license.text = "MIT"
+readme = "README.md"
+
+[project.urls]
+Homepage = "https://github.com/gmlarumbe/tree-sitter-systemverilog"
+Funding = "https://github.com/sponsors/gmlarumbe"
+
+[project.optional-dependencies]
+core = ["tree-sitter~=0.24"]
+
+[tool.cibuildwheel]
+build = "cp310-*"
+build-frontend = "build"

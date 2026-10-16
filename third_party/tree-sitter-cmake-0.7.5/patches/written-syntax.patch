@@ -1,0 +1,32 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -39,7 +39,8 @@
+     _escape_encoded: (_) => choice("\\t", "\\r", "\\n"),
+     _escape_semicolon: (_) => choice(";", "\\;"),
+ 
+-    variable: ($) => prec.left(repeat1(choice(/[a-zA-Z0-9/_.+-]/, $.escape_sequence, $.variable_ref))),
++    configure_placeholder: (_) => /@[A-Za-z_][A-Za-z0-9_]*@/,
++    variable: ($) => prec.left(repeat1(choice(/[a-zA-Z0-9/_.+-]/, $.escape_sequence, $.variable_ref, $.configure_placeholder))),
+     variable_ref: ($) => choice($.normal_var, $.env_var, $.cache_var),
+     normal_var: ($) => seq("$", "{", $.variable, "}"),
+     env_var: ($) => seq("$", "ENV", "{", $.variable, "}"),
+@@ -62,8 +63,8 @@
+     body: ($) => prec.right(repeat1($._untrimmed_command_invocation)),
+     argument_list: ($) => repeat1($._untrimmed_argument),
+ 
+-    if_command: ($) => command($.if, $.argument_list),
+-    elseif_command: ($) => command($.elseif, $.argument_list),
++    if_command: ($) => command($.if, optional($.argument_list)),
++    elseif_command: ($) => command($.elseif, optional($.argument_list)),
+     else_command: ($) => command($.else, optional($.argument_list)),
+     endif_command: ($) => command($.endif, optional($.argument_list)),
+     if_condition: ($) => seq($.if_command, repeat(choice($.body, $.elseif_command, $.else_command)), $.endif_command),
+@@ -92,7 +93,7 @@
+ 
+     _command_invocation: ($) =>
+       choice($.normal_command, $.if_condition, $.foreach_loop, $.while_loop, $.function_def, $.macro_def, $.block_def),
+-    _untrimmed_command_invocation: ($) => choice(/\s/, $.bracket_comment, $.line_comment, $._command_invocation),
++    _untrimmed_command_invocation: ($) => choice(/\s/, $.bracket_comment, $.line_comment, $.configure_placeholder, $._command_invocation),
+ 
+     ...commandNames(...commands),
+     identifier: (_) => /[A-Za-z_][A-Za-z0-9_]*/,

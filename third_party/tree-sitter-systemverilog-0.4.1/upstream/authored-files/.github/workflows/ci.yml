@@ -1,0 +1,40 @@
+name: CI
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0' # weekly
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest] # windows-latest still not supported by tree-sitter/setup-action@v1
+
+    steps:
+      - name: Clone tree-sitter-systemverilog
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup tree-sitter
+        uses: tree-sitter/setup-action@v2
+        with:
+          tree-sitter-ref: v0.26.9
+
+      - name: Generate parser
+        run: |
+          tree-sitter generate
+
+      - name: Run parse tests
+        run: |
+          tree-sitter test
+
+      - name: Run highlight tests
+        run: |
+          tree-sitter highlight --paths test/highlight_paths_file.txt
+

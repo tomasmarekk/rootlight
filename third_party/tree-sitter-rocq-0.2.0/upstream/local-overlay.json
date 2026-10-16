@@ -1,0 +1,195 @@
+{
+  "schema": "rootlight.rocq-local-static-binding-overlay/1",
+  "overlaid_files": [
+    {
+      "active": {
+        "path": "Cargo.toml",
+        "bytes": 528,
+        "sha256": "446dca68623008dbd4044fb89512b4a52cfa8c0fe25b4644fc6684c8ba3ddbe9"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/Cargo.toml",
+        "bytes": 726,
+        "sha256": "7e593a043149253a646fdef6265ac1ccc2fca513d41a51cb14223f2911ae1f32"
+      },
+      "purpose": "local pinned static Rust/C binding"
+    },
+    {
+      "active": {
+        "path": "bindings/rust/build.rs",
+        "bytes": 495,
+        "sha256": "124cc24051399c68837d0437957377d05939d1872a67c54b9a65c39db37a2893"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/bindings/rust/build.rs",
+        "bytes": 2266,
+        "sha256": "aff319d2fa91ebfd5a49878b0971d6065e7d342f528dee2f7bf6c5bd7f02d0a0"
+      },
+      "purpose": "local pinned static Rust/C binding"
+    },
+    {
+      "active": {
+        "path": "bindings/rust/lib.rs",
+        "bytes": 715,
+        "sha256": "b89aef72a2343cca84f0c047ea98e30c769056ab9853fde635675a593e1304ea"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/bindings/rust/lib.rs",
+        "bytes": 2051,
+        "sha256": "2956bc0a8f3d907b4339a74533bf71f9f6adb581ff191bd6ddb4aec15d357846"
+      },
+      "purpose": "local pinned static Rust/C binding"
+    },
+    {
+      "active": {
+        "path": "grammar.js",
+        "bytes": 41043,
+        "sha256": "583e4184cbee76dfe0c4535a23ce345c905a96ed4105d0e5a551c8971e943788"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/grammar.js",
+        "bytes": 33116,
+        "sha256": "524083214332089dc2aed61cfe7ddc18761678eb685dd1f8e83e82a389716c94"
+      },
+      "purpose": "reviewed named core grammar overlay"
+    },
+    {
+      "active": {
+        "path": "src/grammar.json",
+        "bytes": 236438,
+        "sha256": "661f25c8c7559ebfc8cfb3402c4b44393fa280448da01aae4f1aa84144859de4"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/src/grammar.json",
+        "bytes": 185552,
+        "sha256": "df221327a8a598d1c7a1af665889cee4a8cabbad26a9183e2fd5df6e9165e7ac"
+      },
+      "purpose": "reproducible local generated source"
+    },
+    {
+      "active": {
+        "path": "src/node-types.json",
+        "bytes": 250122,
+        "sha256": "562335150a88e02ffcaad898741226e5092be110f7a9d9685af64435fc5041b1"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/src/node-types.json",
+        "bytes": 197161,
+        "sha256": "bc6f3dce75d804cc2c73b598408adb0597b81975bacfb9fa138c8b28fab13117"
+      },
+      "purpose": "reproducible local generated source"
+    },
+    {
+      "active": {
+        "path": "src/parser.c",
+        "bytes": 23540969,
+        "sha256": "0f64dd190ed13303382087254e858ac2196c8d71aa3ab02e1b9cc3e119d6b9a3"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/src/parser.c",
+        "bytes": 16861608,
+        "sha256": "fc714e6d0dbecff5264dbea99768d1b44474d1de69726f6ce4cc2121125d8c9c"
+      },
+      "purpose": "reproducible local generated source"
+    },
+    {
+      "active": {
+        "path": "src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "purpose": "reproducible local generated source"
+    },
+    {
+      "active": {
+        "path": "src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/src/tree_sitter/array.h",
+        "bytes": 13453,
+        "sha256": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2"
+      },
+      "purpose": "reproducible local generated source"
+    },
+    {
+      "active": {
+        "path": "src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      },
+      "authored_original": {
+        "path": "upstream/original-inputs/src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      },
+      "purpose": "reproducible local generated source"
+    }
+  ],
+  "additional_local_documentation": [
+    {
+      "path": "LOCAL-SOURCE.md",
+      "bytes": 2273,
+      "sha256": "6c58602ae2c7c8a0bab1a32ca1317c46d5ebcdf6d006d1479b5d737607205634"
+    },
+    {
+      "path": "PATCHES.md",
+      "bytes": 6759,
+      "sha256": "ce28f412623157cde116cfadb20b6c68e2c2e6cbe0c9b5284bd873050ffc976d"
+    }
+  ],
+  "external_reference_not_authored_notice": [
+    {
+      "path": "LICENSE-MIT-REFERENCE.txt",
+      "bytes": 1096,
+      "sha256": "32303ab887b8c90b6e6fe49e2f031ca01b23b5190e236447d94e1944684dc769"
+    },
+    {
+      "path": "upstream/spdx-MIT-reference.json",
+      "bytes": 8433,
+      "sha256": "0c2b3c87a154a4aaac6bc6a735dd454dc29d9a78c23a85deedb080e0c65de1f8"
+    }
+  ],
+  "local_metadata": [
+    "upstream/source-origin.json",
+    "upstream/acquisition-inventory.json",
+    "upstream/retained-source-inventory.json",
+    "upstream/license-declarations.json",
+    "upstream/local-overlay.json",
+    "patches/grammar.patch",
+    "patches/grammar-regeneration.json"
+  ],
+  "binding_dependencies": {
+    "tree-sitter-language": "=0.1.7",
+    "cc": "=1.2.67"
+  },
+  "build_inputs": [
+    {
+      "path": "src/parser.c",
+      "bytes": 23540969,
+      "sha256": "0f64dd190ed13303382087254e858ac2196c8d71aa3ab02e1b9cc3e119d6b9a3"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 250122,
+      "sha256": "562335150a88e02ffcaad898741226e5092be110f7a9d9685af64435fc5041b1"
+    }
+  ],
+  "external_scanner": false,
+  "c_standard": "c11",
+  "msvc_source_encoding": "utf-8",
+  "generator_or_acquisition_at_build_time": false,
+  "authored_full_license_notice_present": false,
+  "copyright_placeholders_filled": false
+}

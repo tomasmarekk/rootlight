@@ -1,0 +1,81 @@
+{
+  "schema": "rootlight.rocq-named-core-grammar-regeneration/1",
+  "generator": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "environment_role": "declared pinned maintenance tool, not invoked by compilation or packaging",
+    "javascript_runtime": "native",
+    "observed_executable_bytes": 9720320,
+    "observed_executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "generator_and_QuickJS_rebuilt_from_local_sources": false
+  },
+  "command": [
+    "tree-sitter",
+    "generate",
+    "--abi",
+    "15",
+    "--js-runtime",
+    "native"
+  ],
+  "local_javascript_input_closure": [
+    {
+      "path": "grammar.js",
+      "bytes": 41043,
+      "sha256": "583e4184cbee76dfe0c4535a23ce345c905a96ed4105d0e5a551c8971e943788"
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 867,
+      "sha256": "d728e24424d065cd2e5a9e705ad6a1891b249d9a607aae6f7b845c7f6b6bf56a"
+    }
+  ],
+  "javascript_imports_or_package_lifecycle_hooks": false,
+  "outputs": [
+    {
+      "path": "src/parser.c",
+      "bytes": 23540969,
+      "sha256": "0f64dd190ed13303382087254e858ac2196c8d71aa3ab02e1b9cc3e119d6b9a3"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 236438,
+      "sha256": "661f25c8c7559ebfc8cfb3402c4b44393fa280448da01aae4f1aa84144859de4"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 250122,
+      "sha256": "562335150a88e02ffcaad898741226e5092be110f7a9d9685af64435fc5041b1"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    }
+  ],
+  "independent_fresh_directory_replays": 2,
+  "replay_outputs_identical": true,
+  "generated_C_or_schema_hand_edited": false,
+  "original_authored_inputs_preserved": true,
+  "executed_during_compilation_or_packaging": false,
+  "node_download_or_source_acquisition_executed": false,
+  "primary_references": [
+    "https://rocq-prover.org/doc/V9.2.0/refman/language/core/modules.html",
+    "https://staging.rocq-prover.org/doc/V9.1.0/refman/language/core/sections.html",
+    "https://rocq-prover.org/doc/v9.0/refman/language/extensions/implicit-arguments.html",
+    "https://rocq-prover.org/doc/V9.2.0/refman/addendum/type-classes.html",
+    "https://rocq-prover.org/doc/V9.2.0/refman/language/extensions/evars.html",
+    "https://rocq-prover.org/doc/V9.2.0/refman/language/core/records.html",
+    "https://rocq-prover.org/doc/V9.2.0/refman/user-extensions/syntax-extensions.html#tactic-notations",
+    "https://rocq-prover.org/doc/V9.2.0/refman/proof-engine/ltac.html"
+  ]
+}

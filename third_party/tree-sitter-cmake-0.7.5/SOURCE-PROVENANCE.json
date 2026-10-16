@@ -1,0 +1,87 @@
+{
+  "schema": "rootlight.cmake-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-cmake",
+    "version": "0.7.5",
+    "unpublished_local_binding": true,
+    "license": "MIT",
+    "rust_version": "1.90"
+  },
+  "upstream": {
+    "repository": "https://github.com/uyha/tree-sitter-cmake",
+    "revision": "e997bd0b275ca525ce9befecedf5299031183661",
+    "published_archive": {
+      "path": "tree-sitter-cmake-0.7.5.crate",
+      "url": "https://static.crates.io/crates/tree-sitter-cmake/tree-sitter-cmake-0.7.5.crate",
+      "bytes": 51073,
+      "sha256": "d22893fac54133fdb93497efc45713d53a96d93b035288c7a8ab0c2af77c0ddd"
+    },
+    "authored_archive": {
+      "path": "tree-sitter-cmake-authored-e997bd0b275ca525ce9befecedf5299031183661.tar.gz",
+      "url": "https://codeload.github.com/uyha/tree-sitter-cmake/tar.gz/e997bd0b275ca525ce9befecedf5299031183661",
+      "bytes": 66871,
+      "sha256": "18d0a9d81cea54e3be0fa7c6415c286098e760f7806a6d3f0af3c472e2e09324"
+    },
+    "signature_verified": false,
+    "original_code_or_lifecycle_executed": false,
+    "preserved_authored_files": 67,
+    "preserved_published_files": 21,
+    "path_mappings": [
+      {
+        "original_path": ".gitattributes",
+        "retained_path": ".gitattributes.upstream"
+      },
+      {
+        "original_path": ".gitignore",
+        "retained_path": ".gitignore.upstream"
+      }
+    ]
+  },
+  "preferred_inputs": {
+    "parser": "src/parser.c",
+    "scanner": "src/scanner.c",
+    "grammar": "grammar.js",
+    "native_abi": 14,
+    "field_count": 0,
+    "parser_and_schema_literal_upstream": false,
+    "generated_files_hand_edited": false,
+    "scanner_patch": "patches/scanner-safety.patch",
+    "local_binding_patch": "patches/local-binding.patch",
+    "grammar_patch": "patches/written-syntax.patch",
+    "grammar_regeneration": "patches/grammar-regeneration.json"
+  },
+  "build": {
+    "acquisition_or_generation": false,
+    "direct_local_dependencies": [
+      {
+        "name": "tree-sitter-language",
+        "version": "0.1.7"
+      },
+      {
+        "name": "cc",
+        "version": "1.2.67",
+        "role": "build"
+      }
+    ],
+    "inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ],
+    "uses_upstream_lifecycle_hooks": false
+  },
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 25285,
+    "sha256": "2943fba597ca7ca65a157cc775fff2855b15b17ad40e557402da95d42f7d0607"
+  },
+  "qualification": {
+    "whole_language_coverage_percent": null,
+    "installed_mcp_verified": false,
+    "empty_cache_independent_network_denial_verified": false,
+    "license_policy_or_legal_acceptance_verified": false,
+    "boundary": "Preferred-source inventory and finite native tests are separate from product language and package acceptance."
+  }
+}

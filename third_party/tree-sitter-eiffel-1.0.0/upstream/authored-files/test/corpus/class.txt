@@ -1,0 +1,292 @@
+===
+Class. Note after Invariant
+===
+note
+  demo_note: True
+  multi_note: True, False
+class DEMO_CLASS
+invariant
+  note
+    note_after_invariant: True
+end
+---
+(source_file
+  (class_declaration
+    (notes
+      (note_entry
+        (tag)
+        (boolean_constant))
+      (note_entry
+        (tag)
+        (boolean_constant)
+        (boolean_constant)))
+    (class_name)
+    (invariant)
+    (notes
+      (note_entry
+        (tag)
+        (boolean_constant)))))
+
+===
+Class. End Note without Invariant
+===
+class A
+note
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (notes)))
+
+===
+Class. End Note after feature with explicit value
+===
+class A
+feature
+  x: INTEGER = 1
+note
+  test: True
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (class_type
+          (class_name))
+        (explicit_value
+          (integer_constant
+            (integer)))))
+    (notes
+      (note_entry
+        (tag)
+        (boolean_constant)))))
+
+===
+Mark
+===
+deferred class DEMO end
+---
+(source_file
+  (class_declaration
+    mark: (header_mark)
+    (class_name)))
+
+===
+Class. Obsolete
+===
+class A
+  obsolete "msg"
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (obsolete (basic_manifest_string (string_content)))))
+
+===
+Class. Invariant
+===
+class A
+invariant
+  True
+  tagged: -- Tagged comment
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause (expression (boolean_constant)))
+      (assertion_clause
+        (tag_mark (tag))
+        (comment)))))
+
+===
+Class. Formal generics
+===
+class A [frozen X, K -> {P, Q} create make, construct end, T -> S rename a as b end]
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (formal_generics
+      (formal_generic (class_name))
+      (formal_generic
+        (class_name)
+        (constraint
+          (constraining_types
+            (multiple_constraint
+              (single_constraint (class_type (class_name)))
+              (single_constraint (class_type (class_name)))))
+          (constraint_creators (identifier) (identifier))))
+      (formal_generic
+        (class_name)
+        (constraint
+          (constraining_types
+            (single_constraint
+              (class_type (class_name))
+              (rename
+                (rename_pair
+                  (identifier)
+                  (extended_feature_name (identifier)))))))))))
+
+===
+Class. Inherit
+===
+class A
+inherit {NONE}
+  X Y Z
+
+inherit
+  W
+    undefine a
+    redefine c
+    rename e as f
+    export
+      {ANY}
+        -- Header comment
+        all
+    select g
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (inheritance
+      (non_conformance)
+      (parent (class_type (class_name)))
+      (parent (class_type (class_name)))
+      (parent (class_type (class_name))))
+    (inheritance
+      (parent
+        (class_type (class_name))
+        (feature_adaptation
+          (undefine (identifier))
+          (redefine (identifier))
+          (rename (rename_pair (identifier) (extended_feature_name (identifier))))
+          (new_exports
+            (new_export_item
+              (clients (class_name))
+              (header_comment)))
+          (select (identifier)))))))
+
+===
+Class. Create
+===
+class A
+create {NONE} a
+create b
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (creation_clause (clients (class_name)) (identifier))
+    (creation_clause (identifier))))
+
+===
+Class. Converters
+===
+class A
+convert
+  a ({X, Y}),
+  b: {G, H}
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (converters
+      (converter
+        (conversion_procedure
+          (identifier)
+          (class_type (class_name))
+          (class_type (class_name))))
+      (converter
+        (conversion_query
+          (identifier)
+          (class_type (class_name))
+          (class_type (class_name)))))))
+
+===
+Class. Inheritance Export then Undefine
+===
+class A
+inherit
+  EB_CONSTANTS
+    export
+      {NONE} all
+    undefine
+      copy,
+      default_create,
+      is_equal
+    end
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (inheritance
+      (parent
+        (class_type
+          (class_name))
+        (feature_adaptation
+          (new_exports
+            (new_export_item
+              (clients
+                (class_name))))
+          (undefine
+            (identifier)
+            (identifier)
+            (identifier)))))))
+
+===
+Class. Semicolon after feature body
+===
+class A
+feature
+  f
+    do
+    end;
+end
+---
+(source_file
+  (class_declaration
+    (class_name)
+    (feature_clause
+      (feature_declaration
+        (new_feature
+          (extended_feature_name
+            (identifier)))
+        (attribute_or_routine
+          (feature_body
+            (effective_routine
+              (internal
+                (routine_mark)))))))))
+
+
+===
+Class. Assertions with semicolon
+===
+class A
+invariant
+  True; False
+end
+---
+(source_file
+  (class_declaration (class_name)
+    (invariant
+      (assertion_clause
+        (expression (boolean_constant)))
+      (assertion_clause
+        (expression (boolean_constant))))))
+
+===
+Class. Once class
+===
+once class A
+end
+---
+(source_file
+  (class_declaration
+    (header_mark)
+    (class_name)))
