@@ -34,7 +34,14 @@ const MAX_DEPTH: usize = 128;
 const MEMORY_POLICY: MemoryAdmissionPolicy =
     MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
 
-const CASES: [(&str, &str, &[u8]); 55] = [
+const CASES: [(&str, &str, &[u8]); 63] = [
+    ("written.v", "coq", b"(* marker *)\r\nDefinition written_value : nat := 1.\r\nLemma statement : True. Proof. exact I. Qed.\r\n"),
+    ("source.v", "v", b"module written\nstruct Box { value int }\nfn measure(value int) int { return value }\n"),
+    ("written.v", "verilog", b"module Written(input wire clk); wire value; endmodule\n"),
+    ("written.sv", "systemverilog", b"interface Written(input logic clk); logic value; endinterface\n"),
+    ("written.e", "eiffel", b"class BOX\nfeature\n value: INTEGER\nend\n"),
+    ("written.cmake", "cmake", b"function(Written value)\nset(local ${value})\nendfunction()\n"),
+    ("written.jl", "julia", b"module Written\nmeasure(value::Int) = value + 1\nend\n"),
     ("written.ml", "ocaml", b"let increment x = x + 1\n"),
     ("written.mli", "ocaml-interface", b"val increment : int -> int\n"),
     ("written.scm", "scheme", b"(define (measure value) (+ value 1))\n"),
@@ -150,6 +157,7 @@ const CASES: [(&str, &str, &[u8]); 55] = [
     ("sample.yaml", "yaml", b"name: sample\n"),
     ("sample.toml", "toml", b"name = 'sample'\n"),
     ("sample.json", "json", br#"{"name":"sample"}"#),
+    ("sample.jsonc", "jsonc", br#"{/*comment*/"name":"sample",}"#),
     ("sample.sh", "bash", b"sample() { :; }\n"),
     (
         "sample.lua",
@@ -359,12 +367,6 @@ fn deferred_admission_rejects_invalid_requests_before_retaining_state() {
     for (request, memory_policy, cancellation, error) in [
         (
             &request,
-            MEMORY_POLICY,
-            Cancellation::new(),
-            RequestError::DeadlineRequired,
-        ),
-        (
-            &request,
             MemoryAdmissionPolicy::RequireHardOrAccounted,
             deadline(),
             RequestError::MemoryEnforcementUnavailable,
@@ -383,7 +385,7 @@ fn deferred_admission_rejects_invalid_requests_before_retaining_state() {
         assert_eq!(provider.stats(), initial);
     }
     assert!(
-        !execute_parse(&provider, &request, MEMORY_POLICY, &deadline())
+        !execute_parse(&provider, &request, MEMORY_POLICY, &Cancellation::new())
             .unwrap()
             .facts()
             .is_empty()

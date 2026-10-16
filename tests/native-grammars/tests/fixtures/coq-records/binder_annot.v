@@ -1,0 +1,1 @@
+Record binder_annot (A : Type) := mkBindAnn { binder_name : A; binder_relevance : relevance }.

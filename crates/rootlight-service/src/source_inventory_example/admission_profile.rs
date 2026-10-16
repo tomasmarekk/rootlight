@@ -12,8 +12,8 @@ use rootlight_ir::IrLimits;
 /// Returns a checked limit error for an invalid source capacity.
 pub(crate) fn analysis_limits(maximum_source_bytes: usize) -> Result<AnalysisLimits, LimitError> {
     let stream = StreamLimits::new(
-        8_192,
-        1_048_576,
+        512 * 1024 * 1024,
+        512 * 1024 * 1024,
         512 * 1024 * 1024,
         16_384,
         16 * 1024 * 1024,
@@ -22,8 +22,8 @@ pub(crate) fn analysis_limits(maximum_source_bytes: usize) -> Result<AnalysisLim
     )?;
     AnalysisLimits::new(
         maximum_source_bytes,
-        1_048_576,
-        128,
+        usize::MAX,
+        4096,
         32,
         512 * 1024 * 1024,
         stream.clone(),
@@ -41,8 +41,8 @@ pub(crate) fn parser_config(
 ) -> Result<RuntimeConfig, RuntimeConfigError> {
     RuntimeConfig::new(
         maximum_source_bytes,
-        1_048_576,
-        128,
+        usize::MAX,
+        4096,
         32,
         64,
         1,

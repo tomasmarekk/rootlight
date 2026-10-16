@@ -37,6 +37,133 @@ mod fsharp_binding;
 #[path = "scope_resolution/groovy_import.rs"]
 mod groovy_import;
 
+#[path = "scope_resolution/rust_binding.rs"]
+mod rust_binding;
+
+#[test]
+fn coq_written_references_keep_shadowed_sources_and_producer_proven_targets() {
+    let source = "Definition chosen := 0.\nDefinition consumer (chosen : nat) : nat := chosen.\n";
+    let consumer_start = source.find("Definition consumer").unwrap();
+    let binder_start = source.find("(chosen").unwrap() + 1;
+    let reference_start = source.rfind("chosen").unwrap();
+    assert_eq!(&source[binder_start..binder_start + 6], "chosen");
+    assert_eq!(&source[reference_start..reference_start + 6], "chosen");
+    for producer_proven in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.content_hash = content_hash(source.as_bytes());
+        let full_source = source_ref(
+            fixture.document.repository,
+            fixture.document.generation,
+            fixture.primary_file,
+            fixture.content_hash,
+            0,
+            u64::try_from(source.len()).unwrap(),
+        );
+        let file = &mut fixture.document.files[0];
+        file.language = "coq".to_owned();
+        file.path = "src/proof.v".to_owned();
+        file.content_hash = fixture.content_hash;
+        file.byte_length = u64::try_from(source.len()).unwrap();
+        file.evidence.source = Some(full_source.clone());
+        let provenance = &mut fixture.document.provenance[0];
+        provenance.language = "coq".to_owned();
+        provenance.tier = AnalysisTier::TierD;
+        provenance.input_sources = vec![full_source.clone()];
+        provenance.evidence_sources = vec![full_source];
+
+        fixture.add_entity(
+            10,
+            "chosen",
+            fixture.primary_file,
+            EntityKind::Constant,
+            None,
+        );
+        let consumer = fixture.add_entity(
+            11,
+            "consumer",
+            fixture.primary_file,
+            EntityKind::Constant,
+            None,
+        );
+        let mut ranges = vec![
+            (0, source.find('.').unwrap()),
+            (consumer_start, source.len() - 2),
+        ];
+        let proven_target = producer_proven.then(|| {
+            ranges.push((binder_start, binder_start + 6));
+            fixture.add_entity(
+                12,
+                "chosen",
+                fixture.primary_file,
+                EntityKind::Parameter,
+                Some(consumer),
+            )
+        });
+        for (entity, (start, end)) in fixture.document.entities.iter_mut().zip(ranges) {
+            entity.language = "coq".to_owned();
+            entity.tier = AnalysisTier::TierD;
+            entity.evidence.source = Some(source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                u64::try_from(start).unwrap(),
+                u64::try_from(end).unwrap(),
+            ));
+        }
+        fixture.add_occurrence(
+            20,
+            "chosen",
+            fixture.primary_file,
+            OccurrenceRole::Reference,
+            Some(consumer),
+        );
+        let occurrence = &mut fixture.document.occurrences[0];
+        occurrence.source = source_ref(
+            fixture.document.repository,
+            fixture.document.generation,
+            fixture.primary_file,
+            fixture.content_hash,
+            u64::try_from(reference_start).unwrap(),
+            u64::try_from(reference_start + 6).unwrap(),
+        );
+        occurrence.evidence.source = Some(occurrence.source.clone());
+        occurrence.syntax_kind = "coq.written_reference.reference".to_owned();
+        if let Some(symbol) = proven_target {
+            occurrence.target = OccurrenceTarget::Resolved { symbol };
+        }
+        let original = occurrence.clone();
+        fixture.validate();
+        let engine = ResolutionEngine::default();
+        let cancellation = Cancellation::new();
+        let estimate = engine
+            .estimate_work(&fixture.document, &cancellation)
+            .unwrap();
+        let context = ResolverFactContext::new(fixture.content_hash);
+        let applied = engine
+            .apply(fixture.document.clone(), context, &cancellation)
+            .unwrap();
+        assert_eq!(
+            applied.document.occurrences.as_slice(),
+            std::slice::from_ref(&original),
+            "a written Coq name must not borrow an unrelated global candidate"
+        );
+        assert!(applied.batch.decisions.is_empty());
+        assert_eq!(estimate.required, 0);
+        let streamed = engine
+            .apply_document(fixture.document.clone(), context, &cancellation)
+            .unwrap();
+        let (bounded, bounded_estimate) = engine
+            .apply_document_bounded(fixture.document, context, &cancellation)
+            .unwrap();
+        assert_eq!(bounded_estimate, estimate);
+        assert_eq!(bounded, streamed);
+        assert_eq!(streamed, applied.document);
+        assert_eq!(bounded.occurrences, [original]);
+        assert!(bounded.relations.is_empty());
+    }
+}
+
 #[test]
 fn assembly_written_uses_require_assembler_owned_target_proof() {
     for (syntax, role, kind) in [
@@ -602,6 +729,43 @@ fn embedded_code_uses_its_language_and_does_not_bind_other_markdown_examples() {
         fixture.validate();
         let engine = ResolutionEngine::default();
         let cancellation = Cancellation::new();
+        if language == "rust" {
+            assert_eq!(
+                engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap()
+                    .required,
+                0
+            );
+            assert!(
+                engine
+                    .resolve(&fixture.document, &cancellation)
+                    .unwrap()
+                    .decisions
+                    .is_empty()
+            );
+            let original = fixture.document.occurrences.clone();
+            let unresolved = engine
+                .apply_document(
+                    fixture.document.clone(),
+                    ResolverFactContext::new(fixture.content_hash),
+                    &cancellation,
+                )
+                .unwrap();
+            assert_eq!(unresolved.occurrences, original);
+            fixture.document.occurrences[0].target = OccurrenceTarget::Resolved { symbol: local };
+            fixture.document.occurrences[1].target = OccurrenceTarget::Resolved { symbol: sibling };
+            let proven = fixture.document.occurrences.clone();
+            let applied = engine
+                .apply_document(
+                    fixture.document,
+                    ResolverFactContext::new(fixture.content_hash),
+                    &cancellation,
+                )
+                .unwrap();
+            assert_eq!(applied.occurrences, proven);
+            continue;
+        }
         assert_eq!(
             engine
                 .estimate_work(&fixture.document, &cancellation)
@@ -830,7 +994,7 @@ fn r_parameter_call_binding_is_not_exact_even_with_strong_provenance() {
 }
 
 #[test]
-fn parameter_scope_filter_does_not_change_other_language_candidates() {
+fn parameter_scope_filter_preserves_language_owned_rules() {
     for language in ["rust", "python"] {
         let mut fixture = Fixture::new();
         let file = fixture.primary_file;
@@ -848,10 +1012,32 @@ fn parameter_scope_filter_does_not_change_other_language_candidates() {
         let batch = ResolutionEngine::default()
             .resolve(&fixture.document, &Cancellation::new())
             .unwrap();
-        assert!(
-            matches!(&batch.decisions[0].outcome, ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter])
-        );
-        assert_eq!(batch.decisions[0].explanation.rejected_total, 0);
+        if language == "rust" {
+            assert!(matches!(
+                batch.decisions[0].outcome,
+                ResolutionOutcome::Unresolved { .. }
+            ));
+            assert_eq!(
+                batch.decisions[0].explanation.rejected_candidates[0].reason,
+                RejectionReason::MissingLexicalEvidence
+            );
+            fixture.document.occurrences[0].target =
+                OccurrenceTarget::Resolved { symbol: parameter };
+            let original = fixture.document.occurrences[0].clone();
+            let applied = ResolutionEngine::default()
+                .apply_document(
+                    fixture.document,
+                    ResolverFactContext::new(fixture.content_hash),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            assert_eq!(applied.occurrences[0], original);
+        } else {
+            assert!(
+                matches!(&batch.decisions[0].outcome, ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter])
+            );
+            assert_eq!(batch.decisions[0].explanation.rejected_total, 0);
+        }
     }
 }
 
@@ -1634,10 +1820,10 @@ fn preserves_cross_file_import_ambiguity() {
 }
 
 #[test]
-fn resolves_a_unique_scoped_cross_file_call() {
+fn rust_scoped_calls_preserve_missing_path_evidence() {
     let mut fixture = Fixture::new();
     let target_file = fixture.add_file(4, "src/service.rs");
-    let target = fixture.add_entity(13, "transform", target_file, EntityKind::Function, None);
+    fixture.add_entity(13, "transform", target_file, EntityKind::Function, None);
     fixture.add_occurrence(
         22,
         "transform",
@@ -1657,23 +1843,23 @@ fn resolves_a_unique_scoped_cross_file_call() {
         .resolve(&fixture.document, &Cancellation::new())
         .expect("valid scoped call resolves");
 
+    assert!(batch.decisions.is_empty());
     assert_eq!(
-        batch.decisions[0].outcome,
-        ResolutionOutcome::Resolved {
-            symbol: target,
-            confidence: Confidence::new(900).expect("fixture confidence is valid"),
-        }
+        ResolutionEngine::default()
+            .estimate_work(&fixture.document, &Cancellation::new())
+            .unwrap()
+            .required,
+        0
     );
-    assert!(
-        batch.decisions[0].explanation.candidates[0]
-            .positive_signals
-            .contains(&ResolutionSignal::UniqueScopedCallCandidate)
-    );
-    assert!(
-        batch.decisions[0].explanation.candidates[0]
-            .penalties
-            .contains(&ResolutionPenalty::CrossFile)
-    );
+    let original = fixture.document.occurrences[0].clone();
+    let applied = ResolutionEngine::default()
+        .apply_document(
+            fixture.document,
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .unwrap();
+    assert_eq!(applied.occurrences[0], original);
 }
 
 #[test]

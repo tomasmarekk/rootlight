@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "146833da8a4b2f0a02c10213c36bf6df29e80eb7354c1de265496e2156b19c31";
+    "2939b4d5701c81235973ca49aa209c57716cb5c83624faa626d0af9a736d93c4";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -38,6 +38,10 @@ const LUA_LICENSE_SHA256: &str = "9a32b02e4c917b1ce6b5e79d8ea81e25cefd7f27d89c72
 const RUBY_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-ruby-0.23.1-LICENSE";
 const RUBY_LICENSE_SHA256: &str =
     "ee006f02a3d856df282e409be2a86e24a65bb573a98b9c28343771141351bb6b";
+const COQ_LICENSE_DECLARATIONS_PATH: &str =
+    "third_party/tree-sitter-rocq-0.2.0/upstream/license-declarations.json";
+const COQ_LICENSE_DECLARATIONS_SHA256: &str =
+    "c820cf5ea9a442518dd554464086e9b733948518c9de4b6b9deb2168fb8ab57e";
 
 const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     (
@@ -217,7 +221,43 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 15] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 21] = [
+    (
+        "tree-sitter-rocq",
+        "0.2.0",
+        "third_party/tree-sitter-rocq-0.2.0",
+        "784a5319e136d5917ac3f171f3f48f15e88785cf72f961707c9bbe2888b975de",
+    ),
+    (
+        "tree-sitter-v",
+        "0.0.6",
+        "third_party/tree-sitter-v-0.0.6",
+        "41b362b3f2796828ad87b08f44083ec10c280f0bb4cbf838d83d447591ef5624",
+    ),
+    (
+        "tree-sitter-systemverilog",
+        "0.4.1",
+        "third_party/tree-sitter-systemverilog-0.4.1",
+        "85929d95aed3c1f0b6137d80e22d6fbd852d464bc09e7915480320ffa139855a",
+    ),
+    (
+        "tree-sitter-eiffel",
+        "1.0.0",
+        "third_party/tree-sitter-eiffel-1.0.0",
+        "ba0e42b1159dcca70d425be406085b7db30c17746d3fe5d8ff668ea3da54a24a",
+    ),
+    (
+        "tree-sitter-julia",
+        "0.25.0",
+        "third_party/tree-sitter-julia-0.25.0",
+        "4a66664bee7741c0b7d75a3e384338888895e0c2c911a6b05afb6faeec563f6f",
+    ),
+    (
+        "tree-sitter-cmake",
+        "0.7.5",
+        "third_party/tree-sitter-cmake-0.7.5",
+        "49cb0fc86bafe35be60abd17eece4a21bc9a4abb4ab74dbd105fb413b4e65a4c",
+    ),
     (
         "tree-sitter-sas",
         "0.4.2",
@@ -330,12 +370,42 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_cargo_lock(root, &manifest)?;
     validate_vendored_sources(metadata, root, &manifest)?;
 
+    validate_local_license(
+        root,
+        COQ_LICENSE_DECLARATIONS_PATH,
+        COQ_LICENSE_DECLARATIONS_SHA256,
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-v-0.0.6-LICENSE",
+        "abfabe98680cd5bef27c8ca64549b2f45df38f028509fe6f9eca7a52a5af72f6",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-systemverilog-0.4.1-LICENSE",
+        "f4ceaa91e73e623d6b30895a3b644e0e277754a81c8b28655b75d7a9113f1ac4",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-eiffel-1.0.0-LICENSE",
+        "8a138713a72dc117037c40c7b5a587649a7e96aa0dc4c4517fc947173348c0c7",
+    )?;
     validate_local_license(root, JAVA_LICENSE_PATH, JAVA_LICENSE_SHA256)?;
     validate_local_license(root, TYPESCRIPT_LICENSE_PATH, TYPESCRIPT_LICENSE_SHA256)?;
     validate_local_license(root, CPP_LICENSE_PATH, CPP_LICENSE_SHA256)?;
     validate_local_license(root, KOTLIN_LICENSE_PATH, KOTLIN_LICENSE_SHA256)?;
     validate_local_license(root, LUA_LICENSE_PATH, LUA_LICENSE_SHA256)?;
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-julia-0.25.0-LICENSE",
+        "74f800107f200f4e28da33e9c3f86230d37d8f4c0a4916f7111e800c395ee3a2",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-cmake-0.7.5-LICENSE",
+        "97334c0f9c0962b33cbe03223f584b8ed64c2d14419ce80cc2e945eb8d367d28",
+    )?;
     validate_local_license(
         root,
         "third_party/tree-sitter-asm-0.24.0/notices/LICENSE",
@@ -506,7 +576,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 54 {
+    if manifest.grammars.len() != 61 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -531,6 +601,13 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "coq",
+        "v",
+        "verilog",
+        "systemverilog",
+        "eiffel",
+        "julia",
+        "cmake",
         "apex",
         "assembly",
         "astro",
@@ -726,6 +803,19 @@ fn validate_grammar(grammar: &GrammarEvidence) -> Result<(), GrammarLockError> {
         && (grammar.audit_notes.len() != 3 || grammar.license_source != RUBY_LICENSE_PATH)
     {
         return Err(GrammarLockError::MissingAuditCaveat("ruby"));
+    }
+    if grammar.language == "coq"
+        && (grammar.license != "MIT"
+            || grammar.license_source != COQ_LICENSE_DECLARATIONS_PATH
+            || grammar.license_sha256 != COQ_LICENSE_DECLARATIONS_SHA256
+            || grammar
+                .vendored
+                .as_ref()
+                .and_then(|vendored| vendored.license_path.as_deref())
+                != Some("upstream/license-declarations.json")
+            || grammar.audit_notes.len() != 4)
+    {
+        return Err(GrammarLockError::MissingAuditCaveat("coq"));
     }
     Ok(())
 }
@@ -1282,7 +1372,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 54")]
+    #[error("grammar lock contains {0} grammars instead of 61")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1398,6 +1488,743 @@ mod tests {
         let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
             .expect("grammar lock parses");
         validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");
+    }
+
+    #[test]
+    fn coq_retains_authored_sources_and_distinguishes_the_external_license_reference() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-rocq-0.2.0");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "coq")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        validate_cargo_lock(&root, &manifest).unwrap();
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        let inventory: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("upstream/retained-source-inventory.json")).unwrap(),
+        )
+        .unwrap();
+        let members = inventory["files"].as_array().unwrap();
+        assert_eq!(members.len(), 91);
+        let mut paths = BTreeSet::new();
+        for member in members {
+            assert!(paths.insert(member["path"].as_str().unwrap()));
+            assert_eq!(member["authored_bytes_unchanged"], true);
+            assert!(member["upstream_mode"].as_str().is_some());
+            assert!(member["executable_intent"].as_bool().is_some());
+            let retained = member["retained_path"].as_str().unwrap();
+            let bytes = fs::read(directory.join(retained)).unwrap();
+            assert_eq!(
+                u64::try_from(bytes.len()).unwrap(),
+                member["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&bytes), member["sha256"].as_str().unwrap());
+            assert_eq!(sources.files.get(retained), Some(&sha256_hex(&bytes)));
+        }
+        let origin: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("upstream/source-origin.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(origin["authored_full_license_notice_present"], false);
+        assert_eq!(
+            origin["external_license_reference"]["upstream_authored_notice"],
+            false
+        );
+        assert_eq!(
+            origin["external_license_reference"]["copyright_placeholders_filled"],
+            false
+        );
+        assert_eq!(origin["upstream_code_executed_during_import"], false);
+        let archive = origin["archive"]["path"].as_str().unwrap();
+        let archive_bytes = fs::read(directory.join("upstream").join(archive)).unwrap();
+        assert_eq!(
+            sha256_hex(&archive_bytes),
+            origin["archive"]["sha256"].as_str().unwrap()
+        );
+        let declarations: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join(COQ_LICENSE_DECLARATIONS_PATH)).unwrap())
+                .unwrap();
+        assert_eq!(
+            declarations["license_declaration_locations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(declarations["authored_notice_overlay_recovered"], false);
+        assert_eq!(
+            declarations["spdx_is_external_reference_not_authored_notice"],
+            true
+        );
+        let reference: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("upstream/spdx-MIT-reference.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reference["licenseId"], "MIT");
+        let reference_text =
+            fs::read_to_string(directory.join("LICENSE-MIT-REFERENCE.txt")).unwrap();
+        // The separately locked text file retains CRLF; SPDX JSON retains LF.
+        assert_eq!(
+            reference["licenseText"].as_str().unwrap(),
+            reference_text.replace("\r\n", "\n"),
+        );
+        let regeneration: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("patches/grammar-regeneration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(regeneration["independent_fresh_directory_replays"], 2);
+        assert_eq!(regeneration["generated_C_or_schema_hand_edited"], false);
+        assert_eq!(
+            regeneration["executed_during_compilation_or_packaging"],
+            false
+        );
+        for item in regeneration["local_javascript_input_closure"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(regeneration["outputs"].as_array().unwrap())
+        {
+            let bytes = fs::read(directory.join(item["path"].as_str().unwrap())).unwrap();
+            assert_eq!(
+                u64::try_from(bytes.len()).unwrap(),
+                item["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&bytes), item["sha256"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn coq_license_provenance_rejects_substitution_with_the_external_reference() {
+        let mut manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter_mut()
+            .find(|grammar| grammar.language == "coq")
+            .unwrap();
+        grammar.license_source =
+            "third_party/tree-sitter-rocq-0.2.0/LICENSE-MIT-REFERENCE.txt".to_owned();
+        assert!(matches!(
+            validate_grammar(grammar),
+            Err(GrammarLockError::MissingAuditCaveat("coq"))
+        ));
+    }
+
+    #[test]
+    fn eiffel_retains_exact_authored_inventory_and_scanner_inputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-eiffel-1.0.0");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "eiffel")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(sources.files.len(), 96);
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        assert_eq!(
+            grammar.scanner_sha256,
+            sha256_hex(&fs::read(directory.join("src/scanner.c")).unwrap())
+        );
+        let acquisition: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("upstream/acquisition-inventory.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            acquisition["upstream_revision"],
+            "ec098b67b98b7f5da10f8d66bdb6c52fc91341fc"
+        );
+        assert_eq!(
+            acquisition["upstream_git_tree"],
+            "b9cf17dff75b9582b74849df0d7b7004843e2cda"
+        );
+        assert_eq!(
+            acquisition["authored_git_blob_inventory_authenticated"],
+            true
+        );
+        assert!(acquisition["published_inventory"].is_null());
+        assert_eq!(acquisition["archive_modes_applied"], false);
+        assert_eq!(acquisition["upstream_code_executed"], false);
+        let members = acquisition["authored_inventory"].as_array().unwrap();
+        assert_eq!(members.len(), 69);
+        let mut originals = BTreeSet::new();
+        for member in members {
+            let original = member["path"].as_str().unwrap();
+            assert!(originals.insert(original));
+            let relative = match original {
+                ".gitignore" => ".gitignore.upstream",
+                ".gitattributes" => ".gitattributes.upstream",
+                path => path,
+            };
+            assert_eq!(member["retained_path"], relative);
+            let raw = fs::read(directory.join("upstream/authored-files").join(relative)).unwrap();
+            assert_eq!(
+                u64::try_from(raw.len()).unwrap(),
+                member["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+            assert_eq!(
+                member["executable_intent"].as_bool().unwrap(),
+                member["archive_mode"].as_u64().unwrap() & 0o111 != 0
+            );
+        }
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-INVENTORY.json")).unwrap())
+                .unwrap();
+        let mut payload = BTreeMap::new();
+        for member in inventory["files"].as_array().unwrap() {
+            let path = member["path"].as_str().unwrap();
+            let raw = fs::read(directory.join(path)).unwrap();
+            assert_eq!(
+                u64::try_from(raw.len()).unwrap(),
+                member["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+            assert!(payload.insert(path.to_owned(), sha256_hex(&raw)).is_none());
+        }
+        let mut locked_payload = sources.files.clone();
+        locked_payload.remove("SOURCE-INVENTORY.json").unwrap();
+        locked_payload.remove("SOURCE-PROVENANCE.json").unwrap();
+        assert_eq!(payload, locked_payload);
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-PROVENANCE.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            provenance["inventory"]["sha256"],
+            sha256_hex(&fs::read(directory.join("SOURCE-INVENTORY.json")).unwrap())
+        );
+        assert_eq!(
+            provenance["preferred_inputs"]["generated_files_hand_edited"],
+            false
+        );
+        assert_eq!(
+            provenance["preferred_inputs"]["parser_literal_upstream"],
+            false
+        );
+        assert_eq!(provenance["preferred_inputs"]["external_token_count"], 1);
+        assert_eq!(provenance["preferred_inputs"]["scanner"], "src/scanner.c");
+        assert_eq!(
+            provenance["build"]["inputs"],
+            serde_json::json!([
+                "src/parser.c",
+                "src/scanner.c",
+                "src/operator_symbols.h",
+                "src/tree_sitter/parser.h"
+            ])
+        );
+        assert_eq!(provenance["build"]["acquisition_or_generation"], false);
+        assert_eq!(provenance["build"]["uses_upstream_lifecycle_hooks"], false);
+        for path in ["LICENSE", "tree-sitter.json"] {
+            assert_eq!(
+                fs::read(directory.join(path)).unwrap(),
+                fs::read(directory.join("upstream/authored-files").join(path)).unwrap()
+            );
+        }
+        let regeneration: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("patches/grammar-regeneration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(regeneration["generator"]["version"], "0.26.8");
+        assert_eq!(regeneration["generator"]["javascript_runtime"], "native");
+        assert_eq!(regeneration["independent_fresh_directory_replays"], 2);
+        assert_eq!(regeneration["generated_files_hand_edited"], false);
+        assert_eq!(regeneration["original_upstream_inputs_preserved"], true);
+        assert_eq!(
+            regeneration["executed_during_compilation_or_packaging"],
+            false
+        );
+        assert_eq!(
+            regeneration["command"],
+            serde_json::json!([
+                "tree-sitter",
+                "generate",
+                "--abi",
+                "15",
+                "--js-runtime",
+                "native"
+            ])
+        );
+        let outputs = regeneration["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 6);
+        for member in regeneration["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(outputs)
+        {
+            let raw = fs::read(directory.join(member["path"].as_str().unwrap())).unwrap();
+            assert_eq!(
+                u64::try_from(raw.len()).unwrap(),
+                member["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+        }
+        let parser = fs::read_to_string(directory.join("src/parser.c")).unwrap();
+        let header = fs::read_to_string(directory.join("src/tree_sitter/parser.h")).unwrap();
+        let bounds = native_table_bounds::validate(&parser, &header).unwrap();
+        assert!(bounds.action_references > 0);
+        assert!(bounds.state_references > 0);
+        assert_ne!(
+            fs::read(directory.join("src/parser.c")).unwrap(),
+            fs::read(directory.join("upstream/authored-files/src/parser.c")).unwrap()
+        );
+        let symbols: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("patches/operator-symbols-regeneration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(symbols["unicode_version"], "16.0.0");
+        assert_eq!(symbols["independent_fresh_directory_replays"], 2);
+        assert_eq!(symbols["executed_during_compilation_or_packaging"], false);
+        for member in symbols["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(symbols["outputs"].as_array().unwrap())
+        {
+            let raw = fs::read(directory.join(member["path"].as_str().unwrap())).unwrap();
+            assert_eq!(raw.len() as u64, member["bytes"].as_u64().unwrap());
+            assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+        }
+        for (retained, original) in [
+            (
+                "regex-syntax-general-category.rs",
+                "src/unicode_tables/general_category.rs",
+            ),
+            ("LICENSE-MIT", "LICENSE-MIT"),
+            ("LICENSE-APACHE", "LICENSE-APACHE"),
+        ] {
+            assert_eq!(
+                fs::read(directory.join("patches/unicode").join(retained)).unwrap(),
+                fs::read(
+                    root.join("source-inputs/cargo/regex-syntax-0.8.11")
+                        .join(original)
+                )
+                .unwrap()
+            );
+        }
+        validate_local_license(
+            &root,
+            "adapters/licenses/tree-sitter-eiffel-1.0.0-LICENSE",
+            grammar.license_sha256.as_str(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hdl_retains_distinct_authored_and_published_sources_with_static_native_inputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-systemverilog-0.4.1");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        for language in ["verilog", "systemverilog"] {
+            let grammar = manifest
+                .grammars
+                .iter()
+                .find(|grammar| grammar.language == language)
+                .unwrap();
+            let sources = grammar.vendored.as_ref().unwrap();
+            assert_eq!(sources.files.len(), 117);
+            assert_eq!(grammar.abi, 15);
+            assert_eq!(grammar.scanner_sha256, "none");
+            assert_eq!(grammar.commit, "3390da8c76a976b6f47d19667accc43e81a1483b");
+            assert_eq!(grammar.parser_sha256, sources.files["src/parser.c"]);
+            assert!(
+                sources
+                    .files
+                    .contains_key("upstream/tree-sitter-systemverilog-published.tar.gz")
+            );
+            assert!(
+                sources
+                    .files
+                    .contains_key("upstream/tree-sitter-systemverilog-authored.tar.gz")
+            );
+            validate_local_license(
+                &root,
+                "adapters/licenses/tree-sitter-systemverilog-0.4.1-LICENSE",
+                &grammar.license_sha256,
+            )
+            .unwrap();
+        }
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-INVENTORY.json")).unwrap())
+                .unwrap();
+        for row in inventory["files"].as_array().unwrap() {
+            let path = row["path"].as_str().unwrap();
+            let bytes = fs::read(directory.join(path)).unwrap();
+            assert_eq!(bytes.len() as u64, row["bytes"].as_u64().unwrap(), "{path}");
+            require_digest(
+                "HDL source inventory",
+                &bytes,
+                row["sha256"].as_str().unwrap(),
+            )
+            .unwrap();
+        }
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-PROVENANCE.json")).unwrap())
+                .unwrap();
+        assert_eq!(provenance["upstream"]["preserved_authored_files"], 47);
+        assert_eq!(provenance["upstream"]["preserved_published_files"], 47);
+        assert_eq!(
+            provenance["upstream"]["differing_paths"],
+            serde_json::json!(["src/tree_sitter/array.h"])
+        );
+        assert_eq!(provenance["foreign_tests"]["retained_in_package"], false);
+        assert_eq!(
+            provenance["foreign_tests"]["blanket_redistribution_clearance"],
+            false
+        );
+        assert!(
+            fs::read_to_string(directory.join("bindings/rust/lib.rs"))
+                .unwrap()
+                .contains("LANGUAGE_SYSTEMVERILOG")
+        );
+        assert!(!directory.join("src/scanner.c").exists());
+    }
+
+    #[test]
+    fn v_retains_unpublished_binding_and_complete_authored_native_inputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-v-0.0.6");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "v")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(grammar.abi, 15);
+        assert_eq!(grammar.scanner_sha256, "none");
+        assert_eq!(grammar.commit, "925d4570d1668746762a2cdf0ecb9a25be704a67");
+        assert_eq!(grammar.parser_sha256, sources.files["src/parser.c"]);
+        for path in [
+            "upstream/v-analyzer-authored.tar.gz",
+            "upstream/tree-sitter-core-authored.tar.gz",
+            "bindings/rust/build.rs",
+            "bindings/rust/lib.rs",
+            "src/tree_sitter/parser.h",
+            "patches/grammar.patch",
+            "patches/regeneration.json",
+        ] {
+            assert!(sources.files.contains_key(path), "{path}");
+        }
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-INVENTORY.json")).unwrap())
+                .unwrap();
+        for row in inventory["files"].as_array().unwrap() {
+            let path = row["path"].as_str().unwrap();
+            let bytes = fs::read(directory.join(path)).unwrap();
+            assert_eq!(bytes.len() as u64, row["bytes"].as_u64().unwrap(), "{path}");
+            require_digest(
+                "V source inventory",
+                &bytes,
+                row["sha256"].as_str().unwrap(),
+            )
+            .unwrap();
+        }
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-PROVENANCE.json")).unwrap())
+                .unwrap();
+        assert_eq!(provenance["package"]["unpublished_local_binding"], true);
+        assert_eq!(provenance["package"]["published_release_claimed"], false);
+        assert_eq!(provenance["upstream"]["preserved_files"], 527);
+        assert_eq!(provenance["inactive_gitlink"]["preserved_files"], 525);
+        assert_eq!(
+            provenance["inactive_gitlink"]["used_by_local_binding"],
+            false
+        );
+        assert_eq!(provenance["build"]["acquisition_or_generation"], false);
+        assert!(!directory.join("src/scanner.c").exists());
+        validate_local_license(
+            &root,
+            "adapters/licenses/tree-sitter-v-0.0.6-LICENSE",
+            &grammar.license_sha256,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn julia_retains_exact_original_inventories_and_native_inputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-julia-0.25.0");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "julia")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(sources.files.len(), 142);
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        let acquisition: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("upstream/acquisition-inventory.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            acquisition["upstream_revision"],
+            "e0f9dcd180fdcfcfa8d79a3531e11d99e79321d3"
+        );
+        assert_eq!(
+            acquisition["upstream_git_tree"],
+            "748cd55f16c836ad81cd3a4b50f603ed11665704"
+        );
+        assert_eq!(
+            acquisition["authored_git_blob_inventory_authenticated"],
+            true
+        );
+        assert_eq!(acquisition["authored_published_bytes_identical"], true);
+        assert_eq!(acquisition["archive_modes_applied"], false);
+        assert_eq!(acquisition["upstream_code_executed"], false);
+        assert_eq!(acquisition["signature_verification"]["verified"], false);
+        for (label, retained) in [
+            ("authored_inventory", "authored-files"),
+            ("published_inventory", "published-files"),
+        ] {
+            let members = acquisition[label].as_array().unwrap();
+            assert_eq!(members.len(), 61);
+            let mut unique = BTreeSet::new();
+            for member in members {
+                let original = member["path"].as_str().unwrap();
+                assert!(unique.insert(original));
+                let relative = match original {
+                    ".gitignore" => ".gitignore.upstream",
+                    ".gitattributes" => ".gitattributes.upstream",
+                    path => path,
+                };
+                assert_eq!(member["retained_path"], relative);
+                let raw =
+                    fs::read(directory.join("upstream").join(retained).join(relative)).unwrap();
+                assert_eq!(
+                    u64::try_from(raw.len()).unwrap(),
+                    member["bytes"].as_u64().unwrap()
+                );
+                assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+                assert_eq!(
+                    member["executable_intent"].as_bool().unwrap(),
+                    member["archive_mode"].as_u64().unwrap() & 0o111 != 0
+                );
+                assert_eq!(
+                    raw,
+                    fs::read(directory.join("upstream/authored-files").join(relative)).unwrap()
+                );
+            }
+        }
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-INVENTORY.json")).unwrap())
+                .unwrap();
+        let mut payload = BTreeMap::new();
+        for member in inventory["files"].as_array().unwrap() {
+            let path = member["path"].as_str().unwrap();
+            let raw = fs::read(directory.join(path)).unwrap();
+            assert_eq!(
+                u64::try_from(raw.len()).unwrap(),
+                member["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+            assert!(payload.insert(path.to_owned(), sha256_hex(&raw)).is_none());
+        }
+        let mut locked_payload = sources.files.clone();
+        locked_payload.remove("SOURCE-INVENTORY.json").unwrap();
+        locked_payload.remove("SOURCE-PROVENANCE.json").unwrap();
+        assert_eq!(payload, locked_payload);
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-PROVENANCE.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            provenance["inventory"]["sha256"],
+            sha256_hex(&fs::read(directory.join("SOURCE-INVENTORY.json")).unwrap())
+        );
+        assert_eq!(
+            provenance["preferred_inputs"]["generated_files_hand_edited"],
+            false
+        );
+        assert_eq!(
+            provenance["preferred_inputs"]["parser_and_scanner_literal_upstream"],
+            true
+        );
+        assert_eq!(provenance["build"]["acquisition_or_generation"], false);
+        assert_eq!(provenance["build"]["uses_upstream_lifecycle_hooks"], false);
+        assert_eq!(provenance["qualification"]["installed_mcp_verified"], false);
+        assert_eq!(
+            provenance["qualification"]["empty_cache_independent_network_denial_verified"],
+            false
+        );
+        for path in [
+            "LICENSE",
+            "grammar.js",
+            "tree-sitter.json",
+            "src/parser.c",
+            "src/scanner.c",
+            "src/grammar.json",
+            "src/node-types.json",
+            "src/tree_sitter/parser.h",
+            "src/tree_sitter/alloc.h",
+            "src/tree_sitter/array.h",
+        ] {
+            assert_eq!(
+                fs::read(directory.join(path)).unwrap(),
+                fs::read(directory.join("upstream/authored-files").join(path)).unwrap()
+            );
+        }
+        let parser = fs::read_to_string(directory.join("src/parser.c")).unwrap();
+        let header = fs::read_to_string(directory.join("src/tree_sitter/parser.h")).unwrap();
+        let bounds = native_table_bounds::validate(&parser, &header).unwrap();
+        assert!(bounds.action_references > 0);
+        assert!(bounds.state_references > 0);
+        validate_local_license(
+            &root,
+            "adapters/licenses/tree-sitter-julia-0.25.0-LICENSE",
+            grammar.license_sha256.as_str(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cmake_retains_exact_original_inventories_and_reviewed_native_inputs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-cmake-0.7.5");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "cmake")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(sources.files.len(), 116);
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        let acquisition: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("upstream/acquisition-inventory.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            acquisition["upstream_revision"],
+            "e997bd0b275ca525ce9befecedf5299031183661"
+        );
+        assert_eq!(acquisition["archive_modes_applied"], false);
+        assert_eq!(acquisition["upstream_code_executed"], false);
+        assert_eq!(acquisition["signature_verification"]["verified"], false);
+        for (label, retained, expected) in [
+            ("authored_inventory", "authored-files", 67),
+            ("published_inventory", "published-files", 21),
+        ] {
+            let members = acquisition[label].as_array().unwrap();
+            assert_eq!(members.len(), expected);
+            let mut unique = BTreeSet::new();
+            for member in members {
+                let original = member["path"].as_str().unwrap();
+                assert!(unique.insert(original));
+                let relative = match original {
+                    ".gitignore" => ".gitignore.upstream",
+                    ".gitattributes" => ".gitattributes.upstream",
+                    path => path,
+                };
+                let raw =
+                    fs::read(directory.join("upstream").join(retained).join(relative)).unwrap();
+                assert_eq!(
+                    u64::try_from(raw.len()).unwrap(),
+                    member["bytes"].as_u64().unwrap()
+                );
+                assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+                assert!(member["archive_mode"].as_u64().is_some());
+            }
+        }
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-INVENTORY.json")).unwrap())
+                .unwrap();
+        let mut payload = BTreeMap::new();
+        for member in inventory["files"].as_array().unwrap() {
+            let path = member["path"].as_str().unwrap();
+            let raw = fs::read(directory.join(path)).unwrap();
+            assert_eq!(
+                u64::try_from(raw.len()).unwrap(),
+                member["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&raw), member["sha256"].as_str().unwrap());
+            assert!(payload.insert(path.to_owned(), sha256_hex(&raw)).is_none());
+        }
+        let mut locked_payload = sources.files.clone();
+        locked_payload.remove("SOURCE-INVENTORY.json").unwrap();
+        locked_payload.remove("SOURCE-PROVENANCE.json").unwrap();
+        assert_eq!(payload, locked_payload);
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-PROVENANCE.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            provenance["preferred_inputs"]["generated_files_hand_edited"],
+            false
+        );
+        assert_eq!(provenance["build"]["acquisition_or_generation"], false);
+        assert_eq!(provenance["build"]["uses_upstream_lifecycle_hooks"], false);
+        assert_eq!(provenance["qualification"]["installed_mcp_verified"], false);
+        assert_eq!(
+            provenance["qualification"]["empty_cache_independent_network_denial_verified"],
+            false
+        );
+        let parser = fs::read_to_string(directory.join("src/parser.c")).unwrap();
+        let header = fs::read_to_string(directory.join("src/tree_sitter/parser.h")).unwrap();
+        let bounds = native_table_bounds::validate(&parser, &header).unwrap();
+        assert!(bounds.action_references > 0);
+        assert!(bounds.state_references > 0);
+        assert_ne!(
+            fs::read(directory.join("src/parser.c")).unwrap(),
+            fs::read(directory.join("upstream/authored-files/src/parser.c")).unwrap()
+        );
+        assert_eq!(
+            provenance["preferred_inputs"]["parser_and_schema_literal_upstream"],
+            false
+        );
+        let regeneration: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join("patches/grammar-regeneration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(regeneration["generator"]["version"], "0.26.8");
+        assert_eq!(regeneration["generator"]["javascript_runtime"], "native");
+        assert_eq!(regeneration["independent_fresh_directory_replays"], 2);
+        assert_eq!(regeneration["generated_files_hand_edited"], false);
+        assert_eq!(
+            regeneration["executed_during_compilation_or_packaging"],
+            false
+        );
+        assert_eq!(
+            regeneration["command"],
+            serde_json::json!([
+                "tree-sitter",
+                "generate",
+                "--abi",
+                "14",
+                "--js-runtime",
+                "native"
+            ])
+        );
+        let outputs = regeneration["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 6);
+        for item in regeneration["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(outputs)
+        {
+            let raw = fs::read(directory.join(item["path"].as_str().unwrap())).unwrap();
+            assert_eq!(
+                u64::try_from(raw.len()).unwrap(),
+                item["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&raw), item["sha256"].as_str().unwrap());
+        }
+        validate_local_license(
+            &root,
+            "adapters/licenses/tree-sitter-cmake-0.7.5-LICENSE",
+            grammar.license_sha256.as_str(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3100,7 +3927,7 @@ mod tests {
 
     #[test]
     fn source_manifest_digest_binds_paths_and_content_with_portable_framing() {
-        let files = BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"source"))]);
+        let files = BTreeMap::from([("src/Î».bas".into(), sha256_hex(b"source"))]);
         // Independently computed from the documented UTF-8/NUL format, not TOML
         // serialization or host-native path separators.
         assert_eq!(
@@ -3111,7 +3938,7 @@ mod tests {
         for changed in [
             BTreeMap::new(),
             BTreeMap::from([("src/other.bas".into(), sha256_hex(b"source"))]),
-            BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"changed"))]),
+            BTreeMap::from([("src/Î».bas".into(), sha256_hex(b"changed"))]),
         ] {
             assert_ne!(vendored_source_digest(&changed).unwrap(), digest);
         }

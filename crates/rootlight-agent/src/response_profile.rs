@@ -753,6 +753,11 @@ pub fn shape_batch_child_data(
         BatchTool::CodeDead => project!(CodeDeadData),
         BatchTool::PlanChange => project!(PlanChangeData),
         BatchTool::ContextPack => project!(ContextPackData),
+        // Version 1.3 also accepts legacy chunks, so use its required total
+        // rather than chunk encoding and keep malformed current data strict.
+        BatchTool::SourceRead if canonical.get("total_text_bytes").is_some() => {
+            project!(SourceReadDataV1_3)
+        }
         BatchTool::SourceRead => project!(SourceReadDataV1_2),
     }
 }
@@ -1314,6 +1319,27 @@ mod tests {
         }
         assert_eq!(source_read["chunks"][0]["start_line"], 2);
         assert!(source_read["chunks"][0]["source_ref"]["line_hint"].is_object());
+
+        let mut current_legacy = source_read.clone();
+        current_legacy["total_text_bytes"] = Value::from(8);
+        for profile in [
+            ResponseProfile::Compact,
+            ResponseProfile::Standard,
+            ResponseProfile::Evidence,
+        ] {
+            let value = shape_batch_child_data(BatchTool::SourceRead, &current_legacy, profile)
+                .expect("current source-read data can retain the legacy chunk representation");
+            let shaped: SourceReadDataV1_3 = serde_json::from_value(value).unwrap();
+            assert_eq!(shaped.total_source_bytes, 8);
+            assert_eq!(shaped.total_text_bytes, 8);
+            assert!(matches!(shaped.chunks[0], SourceChunkV1_3::Legacy(_)));
+            let mut invalid = current_legacy.clone();
+            invalid["total_text_bytes"] = Value::Null;
+            assert!(matches!(
+                shape_batch_child_data(BatchTool::SourceRead, &invalid, profile),
+                Err(BatchProfileProjectionError::InvalidData(_))
+            ));
+        }
     }
 
     #[test]
@@ -1480,6 +1506,7 @@ mod tests {
                     conditional_activity,
                 };
                 raw.validate_conditional_activity().unwrap();
+                let canonical = serde_json::to_value(&raw).unwrap();
                 for profile in [
                     ResponseProfile::Compact,
                     ResponseProfile::Standard,
@@ -1514,10 +1541,25 @@ mod tests {
                         assert_eq!((chunk.start_line, chunk.end_line), (Some(2), Some(3)));
                     }
                     serde_json::from_value::<SourceReadDataV1_3>(
-                        serde_json::to_value(shaped).unwrap(),
+                        serde_json::to_value(&shaped).unwrap(),
                     )
                     .unwrap();
+                    let projected =
+                        shape_batch_child_data(BatchTool::SourceRead, &canonical, profile).expect(
+                            "current lossless source reads must remain valid batch children",
+                        );
+                    assert_eq!(
+                        serde_json::from_value::<SourceReadDataV1_3>(projected).unwrap(),
+                        shaped
+                    );
+                    let mut invalid = canonical.clone();
+                    invalid["total_text_bytes"] = Value::from(10);
+                    assert!(matches!(
+                        shape_batch_child_data(BatchTool::SourceRead, &invalid, profile),
+                        Err(BatchProfileProjectionError::InvalidData(_))
+                    ));
                 }
+                assert_eq!(serde_json::to_value(raw).unwrap(), canonical);
             }
         }
     }

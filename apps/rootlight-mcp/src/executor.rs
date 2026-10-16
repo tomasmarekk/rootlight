@@ -160,6 +160,7 @@ const BATCH_OPERATION_FAILED_MESSAGE: &str = "batch operation failed";
 struct AnalyticalBudget {
     limits: BudgetLimits,
     options: client::RequestOptions,
+    source_duration: Option<bool>,
 }
 
 impl AnalyticalBudget {
@@ -179,7 +180,14 @@ impl AnalyticalBudget {
         if let Some(source_bytes) = source_bytes {
             maximums.source_bytes = maximums.source_bytes.min(u64::from(source_bytes));
         }
-        Self::from_limits(BudgetLimits::from_maximums(maximums))
+        Self::from_source_limits(
+            BudgetLimits::from_maximums(maximums),
+            requested.is_some_and(|budget| budget.timeout_ms.is_some()),
+        )
+    }
+
+    fn new_source(requested: Option<&ResponseBudget>) -> Result<Self, ToolExecutionError> {
+        Self::with_source_limit(requested, None)
     }
 
     fn validate(requested: Option<&ResponseBudget>) -> Result<(), ToolExecutionError> {
@@ -190,16 +198,31 @@ impl AnalyticalBudget {
     }
 
     fn from_limits(limits: BudgetLimits) -> Result<Self, ToolExecutionError> {
+        Self::from_limits_with_source_duration(limits, None)
+    }
+
+    fn from_source_limits(
+        limits: BudgetLimits,
+        explicit: bool,
+    ) -> Result<Self, ToolExecutionError> {
+        Self::from_limits_with_source_duration(limits, Some(explicit))
+    }
+
+    fn from_limits_with_source_duration(
+        limits: BudgetLimits,
+        source_duration: Option<bool>,
+    ) -> Result<Self, ToolExecutionError> {
         let maximums = limits.maximums();
         let execution_duration = Duration::from_millis(maximums.time_ms);
-        // The transport deadline also covers connection negotiation and
-        // response framing, while the effective budget bounds daemon work.
+        // An explicit transport deadline also covers negotiation and response
+        // framing. Source-only requests with omitted duration retain all byte
+        // and memory ceilings but do not invent a full-verification timeout.
         let transport_duration = execution_duration
             .checked_add(ANALYTICAL_TRANSPORT_OVERHEAD)
             .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
         let timeout = client::RequestTimeout::new(transport_duration)
             .map_err(|_| internal(ToolExecutionFailure::Executor))?;
-        let effective = client::EffectiveBudget::new(client::EffectiveBudgetLimits {
+        let mut effective = client::EffectiveBudget::new(client::EffectiveBudgetLimits {
             rows: maximums.rows,
             edges: maximums.traversal_facts,
             results: maximums.results,
@@ -212,11 +235,17 @@ impl AnalyticalBudget {
             paths: Some(maximums.paths),
         })
         .map_err(|_| internal(ToolExecutionFailure::Executor))?;
+        if let Some(explicit) = source_duration {
+            effective = effective.with_source_verification_duration_explicit(explicit);
+        }
+        let mut options = client::RequestOptions::new().with_effective_budget(effective);
+        if source_duration != Some(false) {
+            options = options.with_timeout(timeout);
+        }
         Ok(Self {
             limits,
-            options: client::RequestOptions::new()
-                .with_timeout(timeout)
-                .with_effective_budget(effective),
+            options,
+            source_duration,
         })
     }
 }
@@ -224,6 +253,8 @@ impl AnalyticalBudget {
 /// Future returned by one injected first-slice client-port operation.
 pub type ClientPortFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, ClientPortError>> + Send + 'static>>;
+
+pub use source_find::SourceFindPortRequest;
 
 /// Client-free `plan.change` request admitted by the agent boundary.
 pub type PlanChangePortRequest = PlanChangeRequest;
@@ -235,6 +266,19 @@ pub type PlanChangePortRequest = PlanChangeRequest;
 /// future when that signal fires. The response wrappers carry mandatory MCP
 /// facts that the current `rootlight-client` DTOs do not yet expose.
 pub trait FirstSliceClientPort: Send + Sync + 'static {
+    /// Finds exact literals in one generation-pinned file without source bodies.
+    fn source_find(
+        &self,
+        _request: SourceFindPortRequest,
+        _options: client::RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<client::SourceFindResult> {
+        Box::pin(async {
+            Err(ClientPortError::Public(Box::new(authoritative_error(
+                MappedDomainFailure::unsupported_capability("source.find"),
+            ))))
+        })
+    }
     /// Establishes daemon readiness before tool execution accounting begins.
     ///
     /// In-memory and unavailable ports need no preparation. Production uses
@@ -2140,6 +2184,19 @@ where
                         cancellation,
                         &unsupported,
                         &invalid_arguments,
+                    )
+                    .await
+                }
+                VerticalTool::SourceFind => {
+                    execute_source_find(
+                        port,
+                        arguments,
+                        exposure_profile,
+                        cancellation,
+                        &unsupported,
+                        &invalid_arguments,
+                        &invalid_cursor,
+                        cursor_key,
                     )
                     .await
                 }
@@ -6866,7 +6923,7 @@ where
     let started_at = prepare_port(&port, &cancellation).await?;
     if explain_only {
         let output = explain_source_read(port, request, cancellation).await?;
-        return serialize_source_read_success(output, response_profile, started_at, budget.limits);
+        return serialize_source_read_success(output, response_profile, started_at, budget);
     }
     let request = resolve_source_read_symbols(
         &port,
@@ -6880,7 +6937,7 @@ where
     let future = port.source_read(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
     let output = map_source_read(response, &expected)?;
-    serialize_source_read_success(output, response_profile, started_at, budget.limits)
+    serialize_source_read_success(output, response_profile, started_at, budget)
 }
 
 async fn execute_lossless_source_read<P>(
@@ -6927,7 +6984,9 @@ where
             },
         )?;
         rootlight_agent::response_profile::shape_read_envelope(&mut output, response_profile);
-        return serialize_measured_read_success(output, started_at, budget.limits);
+        return serialize_measured_source_success(output, started_at, budget, |output| {
+            &mut output.usage
+        });
     }
     let request = resolve_source_read_symbols(
         &port,
@@ -6945,7 +7004,7 @@ where
     .await?;
     let mut output = map_lossless_source_read(response, &expected)?;
     rootlight_agent::response_profile::shape_read_envelope(&mut output, response_profile);
-    serialize_measured_read_success(output, started_at, budget.limits)
+    serialize_measured_source_success(output, started_at, budget, |output| &mut output.usage)
 }
 
 async fn await_port<T>(
@@ -9848,10 +9907,10 @@ fn serialize_source_read_success(
     mut output: ReadEnvelope<SourceReadData>,
     profile: ResponseProfile,
     started_at: Instant,
-    limits: BudgetLimits,
+    budget: AnalyticalBudget,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
     rootlight_agent::response_profile::shape_read_envelope(&mut output, profile);
-    serialize_measured_read_success(output, started_at, limits)
+    serialize_measured_source_success(output, started_at, budget, |output| &mut output.usage)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9867,9 +9926,42 @@ struct CursorPresentation {
 }
 
 fn serialize_measured_success<T, F>(
+    output: T,
+    started_at: Instant,
+    limits: BudgetLimits,
+    usage: F,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    T: Serialize,
+    F: for<'a> Fn(&'a mut T) -> &'a mut UsageSummary,
+{
+    serialize_measured_success_with_duration(output, started_at, limits, true, usage)
+}
+
+fn serialize_measured_source_success<T, F>(
+    output: T,
+    started_at: Instant,
+    budget: AnalyticalBudget,
+    usage: F,
+) -> Result<Map<String, Value>, ToolExecutionError>
+where
+    T: Serialize,
+    F: for<'a> Fn(&'a mut T) -> &'a mut UsageSummary,
+{
+    serialize_measured_success_with_duration(
+        output,
+        started_at,
+        budget.limits,
+        budget.source_duration != Some(false),
+        usage,
+    )
+}
+
+fn serialize_measured_success_with_duration<T, F>(
     mut output: T,
     started_at: Instant,
     limits: BudgetLimits,
+    enforce_duration: bool,
     usage: F,
 ) -> Result<Map<String, Value>, ToolExecutionError>
 where
@@ -9907,7 +9999,7 @@ where
                 // safety upper bound. Exact UTF-8 bytes are the conservative
                 // provider-neutral token ceiling used for hard admission.
                 || usage.json_bytes > maximums.tokens
-                || usage.wall_time_ms > maximums.time_ms
+                || enforce_duration && usage.wall_time_ms > maximums.time_ms
             {
                 return Err(ToolExecutionError::new(authoritative_error(
                     MappedDomainFailure::budget_exceeded(),
@@ -9942,6 +10034,34 @@ const fn internal(failure: ToolExecutionFailure) -> ToolExecutionError {
 }
 
 mod context_evidence;
+mod source_find;
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cursor authentication and source-free public errors remain explicit at dispatch"
+)]
+async fn execute_source_find<P: FirstSliceClientPort>(
+    port: Arc<P>,
+    arguments: Map<String, Value>,
+    exposure_profile: ExposureProfile,
+    cancellation: RequestCancellation,
+    unsupported: &PublicError,
+    invalid_arguments: &PublicError,
+    invalid_cursor: &PublicError,
+    cursor_key: CursorSigningKey,
+) -> Result<Map<String, Value>, ToolExecutionError> {
+    source_find::execute(
+        port,
+        arguments,
+        exposure_profile,
+        cancellation,
+        unsupported,
+        invalid_arguments,
+        invalid_cursor,
+        cursor_key,
+    )
+    .await
+}
 
 #[cfg(test)]
 mod tests;

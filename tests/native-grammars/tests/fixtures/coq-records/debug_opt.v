@@ -1,0 +1,1 @@
+Class debug_opt : Set := debug : bool.

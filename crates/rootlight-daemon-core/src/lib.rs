@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+mod source_find;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -87,6 +89,7 @@ const CAPABILITIES: &[&str] = &[
     "repository.index.clean-rebuild.v1",
     "repository.index.v1",
     "repository.status.logical-snapshot.v1",
+    "source.find.v1",
     "source.read.v1",
     "symbol.explain.v1",
     "support.bundle.v1",
@@ -185,6 +188,8 @@ pub enum FirstSliceIpcRequest {
     CodeLocate(daemon::CodeLocateRequest),
     /// Explain one or more stable symbols.
     SymbolExplain(daemon::SymbolExplainRequest),
+    /// Find exact literal spans in one generation-owned source file.
+    SourceFind(daemon::SourceFindRequest),
     /// Read exact immutable source references.
     SourceRead(daemon::SourceReadRequest),
     /// Quote resident fixed metadata for a later lossless prefix read.
@@ -236,6 +241,8 @@ pub enum FirstSliceIpcResponse {
     CodeLocate(daemon::CodeLocateResponse),
     /// Generation-pinned symbol explanations.
     SymbolExplain(daemon::SymbolExplainResponse),
+    /// Exact literal match spans and explicit forward source coverage.
+    SourceFind(daemon::SourceFindResponse),
     /// Verified immutable source chunks.
     SourceRead(daemon::SourceReadResponse),
     /// Ordered resident metadata bounds with measured quote work.
@@ -288,6 +295,7 @@ impl FirstSliceIpcResponse {
                 daemon::response_envelope::Response::SymbolExplain(response)
             }
             Self::SourceRead(response) => daemon::response_envelope::Response::SourceRead(response),
+            Self::SourceFind(response) => daemon::response_envelope::Response::SourceFind(response),
             Self::SourceTextPrefixMetadataQuote(response) => {
                 daemon::response_envelope::Response::SourceTextPrefixMetadataQuote(response)
             }
@@ -346,8 +354,9 @@ pub struct FirstSliceIpcContext {
     pub selected_protocol_minor: u32,
     /// Cooperative cancellation token carrying the bounded request deadline.
     pub cancellation: rootlight_operations::Cancellation,
-    /// Absolute monotonic deadline enforced by the daemon transport.
-    pub deadline: Instant,
+    /// Monotonic request deadline; absent only for negotiated source requests
+    /// that explicitly preserve omission of a caller duration.
+    pub deadline: Option<Instant>,
     /// Optional complete client-reduced budget validated by the transport.
     pub effective_budget: Option<FirstSliceEffectiveBudget>,
     /// Admission state that linearizes peer cancellation with index publication.
@@ -367,6 +376,7 @@ pub struct FirstSliceEffectiveBudget {
     duration: Duration,
     depth: Option<u64>,
     paths: Option<u64>,
+    source_verification_duration_explicit: bool,
 }
 
 impl FirstSliceEffectiveBudget {
@@ -416,6 +426,13 @@ impl FirstSliceEffectiveBudget {
     #[must_use]
     pub const fn duration(self) -> Duration {
         self.duration
+    }
+
+    /// Reports whether source verification must honor this duration ceiling.
+    /// Legacy budgets without provenance remain explicit.
+    #[must_use]
+    pub const fn source_verification_duration_explicit(self) -> bool {
+        self.source_verification_duration_explicit
     }
 
     /// Returns the optional admitted traversal-depth ceiling.
@@ -6432,6 +6449,9 @@ impl ControlService {
                         "support.bundle.v6" => selected_minor >= 13,
                         "support.bundle.v7" => selected_minor >= 14,
                         "support.bundle.v8" => selected_minor >= 15,
+                        "source.find.v1" => {
+                            selected_minor >= rootlight_protocol::SOURCE_FIND_PROTOCOL_MINOR
+                        }
                         "repository.index.clean-rebuild.v1"
                         | "repository.status.logical-snapshot.v1" => selected_minor >= 16,
                         "operation.status.incremental-planning.v1" => selected_minor >= 17,
@@ -7102,7 +7122,7 @@ pub async fn handle_connection_async_with_first_slice(
     let index_admission = transport_cancel
         .as_ref()
         .map(|cancellation| cancellation.admission.clone());
-    let timing = RequestTiming::start(&service, &envelope);
+    let timing = RequestTiming::start(&service, &envelope, selected_protocol_minor);
     let cancellation = timing
         .deadline
         .map_or_else(Cancellation::new, Cancellation::with_deadline);
@@ -7180,10 +7200,25 @@ struct IndexTransportCancellation {
     admission: FirstSliceAdmission,
 }
 
+fn source_request_without_duration(
+    request: Option<&daemon::request_envelope::Request>,
+    budget: Option<&daemon::FirstSliceEffectiveBudget>,
+) -> bool {
+    matches!(
+        request,
+        Some(
+            daemon::request_envelope::Request::SourceRead(_)
+                | daemon::request_envelope::Request::SourceFind(_)
+                | daemon::request_envelope::Request::SourceTextPrefixMetadataQuote(_)
+        )
+    ) && budget.is_none_or(|budget| budget.source_verification_duration_explicit == Some(false))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RequestTiming {
     started: Instant,
     deadline: Option<Instant>,
+    unbounded_source: bool,
 }
 
 struct AsyncDispatchContext {
@@ -7195,8 +7230,19 @@ struct AsyncDispatchContext {
 }
 
 impl RequestTiming {
-    fn start(service: &ControlService, envelope: &daemon::RequestEnvelope) -> Self {
+    fn start(
+        service: &ControlService,
+        envelope: &daemon::RequestEnvelope,
+        selected_protocol_minor: u32,
+    ) -> Self {
         let started = Instant::now();
+        let unbounded_source = selected_protocol_minor
+            >= rootlight_protocol::SOURCE_VERIFICATION_DURATION_PROTOCOL_MINOR
+            && envelope.timeout_ms.is_none()
+            && source_request_without_duration(
+                envelope.request.as_ref(),
+                envelope.effective_budget.as_ref(),
+            );
         let timeout =
             envelope
                 .timeout_ms
@@ -7206,7 +7252,12 @@ impl RequestTiming {
                 });
         Self {
             started,
-            deadline: started.checked_add(timeout),
+            deadline: if unbounded_source {
+                None
+            } else {
+                started.checked_add(timeout)
+            },
+            unbounded_source,
         }
     }
 
@@ -7233,7 +7284,7 @@ async fn cancel_peer_abandoned_index(
         client_instance_id,
         selected_protocol_minor,
         cancellation: Cancellation::with_deadline(deadline),
-        deadline,
+        deadline: Some(deadline),
         effective_budget: None,
         index_admission: None,
     };
@@ -7317,14 +7368,12 @@ async fn dispatch_async(
             &permission_denied("daemon instance nonce does not match"),
             context.selected_protocol_minor,
         ))
-    } else if request_deadline.is_none() {
+    } else if request_deadline.is_none() && !context.timing.unbounded_source {
         daemon::response_envelope::Response::Error(public_error_to_wire_for_minor(
             &request_timed_out(),
             context.selected_protocol_minor,
         ))
     } else {
-        let request_deadline =
-            request_deadline.unwrap_or_else(|| unreachable!("deadline was checked above"));
         match first_slice_request_from_wire(envelope.request) {
             Ok(Some(request)) => {
                 match first_slice_effective_budget_from_wire(
@@ -7371,6 +7420,8 @@ async fn dispatch_async(
                 ))
             }
             Err(request) => {
+                let request_deadline = request_deadline
+                    .unwrap_or_else(|| unreachable!("ordinary request deadline was checked above"));
                 match request_from_wire(
                     Some(request),
                     context.client_instance_id,
@@ -7579,6 +7630,9 @@ fn first_slice_request_from_wire(
         Some(daemon::request_envelope::Request::SymbolExplain(request)) => {
             Ok(Some(FirstSliceIpcRequest::SymbolExplain(request)))
         }
+        Some(daemon::request_envelope::Request::SourceFind(request)) => {
+            Ok(Some(FirstSliceIpcRequest::SourceFind(request)))
+        }
         Some(daemon::request_envelope::Request::SourceRead(request)) => {
             Ok(Some(FirstSliceIpcRequest::SourceRead(request)))
         }
@@ -7692,11 +7746,20 @@ fn first_slice_effective_budget_from_wire(
             "effective budget limits are invalid",
         )));
     }
+    if budget.source_verification_duration_explicit.is_some()
+        && selected_protocol_minor < rootlight_protocol::SOURCE_VERIFICATION_DURATION_PROTOCOL_MINOR
+    {
+        return Err(Box::new(protocol_mismatch(
+            "source duration provenance requires a newer protocol",
+        )));
+    }
+    let source_verification_duration_explicit =
+        budget.source_verification_duration_explicit.unwrap_or(true);
     let duration = Duration::from_micros(budget.duration_micros);
-    let Some(transport_timeout) = transport_timeout else {
+    if transport_timeout.is_none() && source_verification_duration_explicit {
         return Err(Box::new(request_timed_out()));
-    };
-    if duration > transport_timeout {
+    }
+    if transport_timeout.is_some_and(|timeout| duration > timeout) {
         return Err(Box::new(invalid_argument(
             "effective budget duration exceeds the transport deadline",
         )));
@@ -7712,6 +7775,7 @@ fn first_slice_effective_budget_from_wire(
         duration,
         depth: budget.depth,
         paths: budget.paths,
+        source_verification_duration_explicit,
     }))
 }
 
@@ -7721,6 +7785,7 @@ async fn dispatch_first_slice(
     context: FirstSliceIpcContext,
 ) -> daemon::response_envelope::Response {
     let required_protocol_minor = match &request {
+        FirstSliceIpcRequest::SourceFind(_) => rootlight_protocol::SOURCE_FIND_PROTOCOL_MINOR,
         FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(_) => {
             rootlight_protocol::SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR
         }
@@ -7752,6 +7817,9 @@ async fn dispatch_first_slice(
     };
     if context.selected_protocol_minor < required_protocol_minor {
         let message = match required_protocol_minor {
+            rootlight_protocol::SOURCE_FIND_PROTOCOL_MINOR => {
+                "literal source search needs protocol minor twenty-seven"
+            }
             rootlight_protocol::SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR => {
                 "source metadata quotes need protocol minor twenty-six"
             }
@@ -7783,11 +7851,27 @@ async fn dispatch_first_slice(
             &invalid_argument("effective budgets are unsupported for this first-slice request"),
         ));
     }
+    if context.deadline.is_none()
+        && !(context.selected_protocol_minor
+            >= rootlight_protocol::SOURCE_VERIFICATION_DURATION_PROTOCOL_MINOR
+            && matches!(
+                &request,
+                FirstSliceIpcRequest::SourceRead(_)
+                    | FirstSliceIpcRequest::SourceFind(_)
+                    | FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(_)
+            )
+            && context
+                .effective_budget
+                .is_none_or(|budget| !budget.source_verification_duration_explicit()))
+    {
+        return daemon::response_envelope::Response::Error(public_error_to_wire(
+            &invalid_argument("an omitted deadline requires a negotiated source request"),
+        ));
+    }
     if !context.cancellation.has_deadline()
         && context
-            .cancellation
-            .extend_deadline(context.deadline)
-            .is_err()
+            .deadline
+            .is_some_and(|deadline| context.cancellation.extend_deadline(deadline).is_err())
         && context.cancellation.reason().is_none()
     {
         return daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()));
@@ -7798,12 +7882,24 @@ async fn dispatch_first_slice(
     // Retain the already-bounded request so the daemon can reject an internal
     // handler response that is well typed but belongs to another identity.
     let correlation_request = request.clone();
-    match tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        handler.dispatch(request, context),
-    )
-    .await
-    {
+    let effective_budget = context.effective_budget;
+    let dispatch = handler.dispatch(request, context);
+    let result = match deadline {
+        Some(deadline) => {
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), dispatch).await
+        }
+        None => Ok(dispatch.await),
+    };
+    match result {
+        Ok(Ok(response))
+            if !source_find::budget_correlates(
+                &correlation_request,
+                &response,
+                effective_budget,
+            ) =>
+        {
+            daemon::response_envelope::Response::Error(public_error_to_wire(&internal_error()))
+        }
         Ok(Ok(response)) => correlated_first_slice_response_for_minor(
             &correlation_request,
             response,
@@ -7826,6 +7922,7 @@ fn first_slice_request_supports_budget(request: &FirstSliceIpcRequest) -> bool {
         request,
         FirstSliceIpcRequest::CodeLocate(_)
             | FirstSliceIpcRequest::SymbolExplain(_)
+            | FirstSliceIpcRequest::SourceFind(_)
             | FirstSliceIpcRequest::SourceRead(_)
             | FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(_)
             | FirstSliceIpcRequest::SymbolRelationships(_)
@@ -7919,6 +8016,10 @@ fn first_slice_response_correlates_for_minor(
     selected_protocol_minor: u32,
 ) -> bool {
     match (request, response) {
+        (
+            FirstSliceIpcRequest::SourceFind(request),
+            FirstSliceIpcResponse::SourceFind(response),
+        ) => source_find::correlates(request, response, selected_protocol_minor),
         (
             FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(request),
             FirstSliceIpcResponse::SourceTextPrefixMetadataQuote(response),
@@ -10154,6 +10255,7 @@ fn validate_first_slice_request(request: &FirstSliceIpcRequest) -> Result<(), Bo
                 }
             }
         }
+        FirstSliceIpcRequest::SourceFind(request) => source_find::validate_request(request)?,
         FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(request) => {
             require_first_slice_schema(request.schema_version.as_ref())?;
             require_wire_id(
@@ -10952,6 +11054,7 @@ fn control_method_from_wire(request: Option<&daemon::request_envelope::Request>)
         Some(daemon::request_envelope::Request::CodeLocate(_)) => ControlMethod::CodeLocate,
         Some(daemon::request_envelope::Request::SymbolExplain(_)) => ControlMethod::SymbolExplain,
         Some(daemon::request_envelope::Request::SourceRead(_)) => ControlMethod::SourceRead,
+        Some(daemon::request_envelope::Request::SourceFind(_)) => ControlMethod::Unknown,
         Some(daemon::request_envelope::Request::SourceTextPrefixMetadataQuote(_)) => {
             ControlMethod::Unknown
         }
@@ -11572,6 +11675,7 @@ fn request_from_wire(
             | daemon::request_envelope::Request::RepositoryOperationStatus(_)
             | daemon::request_envelope::Request::CodeLocate(_)
             | daemon::request_envelope::Request::SymbolExplain(_)
+            | daemon::request_envelope::Request::SourceFind(_)
             | daemon::request_envelope::Request::SourceRead(_)
             | daemon::request_envelope::Request::SourceTextPrefixMetadataQuote(_),
         ) => Err(Box::new(first_slice_unavailable())),
@@ -12708,7 +12812,7 @@ mod tests {
             client_instance_id,
             selected_protocol_minor: PROTOCOL_MINOR,
             cancellation: Cancellation::new(),
-            timing: RequestTiming::start(service, envelope),
+            timing: RequestTiming::start(service, envelope, PROTOCOL_MINOR),
             index_admission: None,
         }
     }
@@ -12726,6 +12830,7 @@ mod tests {
             duration_micros: 500_000,
             depth: Some(4),
             paths: Some(8),
+            source_verification_duration_explicit: None,
         }
     }
 
@@ -12918,7 +13023,7 @@ mod tests {
             *self
                 .observed
                 .lock()
-                .expect("deadline capture lock is healthy") = Some(context.deadline);
+                .expect("deadline capture lock is healthy") = context.deadline;
             *self.budget.lock().expect("budget capture lock is healthy") = context.effective_budget;
             Box::pin(async { Err(first_slice_unavailable()) })
         }
@@ -13473,6 +13578,7 @@ mod tests {
                     "support.bundle.v6" => minor >= 13,
                     "support.bundle.v7" => minor >= 14,
                     "support.bundle.v8" => minor >= 15,
+                    "source.find.v1" => minor >= rootlight_protocol::SOURCE_FIND_PROTOCOL_MINOR,
                     "repository.index.clean-rebuild.v1"
                     | "repository.status.logical-snapshot.v1" => minor >= 16,
                     "operation.status.incremental-planning.v1" => minor >= 17,
@@ -14531,7 +14637,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([92; 16]),
                 selected_protocol_minor: PROTOCOL_MINOR,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: Some(effective_budget),
                 index_admission: None,
             },
@@ -14580,7 +14686,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([96; 16]),
                 selected_protocol_minor: PROTOCOL_MINOR,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: Some(FirstSliceAdmission::default()),
             },
@@ -14629,7 +14735,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([92; 16]),
                 selected_protocol_minor: PROTOCOL_MINOR,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: Some(effective_budget),
                 index_admission: None,
             },
@@ -19814,7 +19920,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 5,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -19827,7 +19933,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 6,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -19867,7 +19973,7 @@ mod tests {
                     client_instance_id: ClientInstanceId::SYSTEM,
                     selected_protocol_minor,
                     cancellation: Cancellation::new(),
-                    deadline,
+                    deadline: Some(deadline),
                     effective_budget: None,
                     index_admission: None,
                 },
@@ -19912,7 +20018,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 10,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -19925,7 +20031,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 11,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -19971,7 +20077,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 7,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -19984,7 +20090,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: 8,
                 cancellation: Cancellation::new(),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -20031,7 +20137,7 @@ mod tests {
                         client_instance_id: ClientInstanceId::SYSTEM,
                         selected_protocol_minor: minor,
                         cancellation: Cancellation::new(),
-                        deadline: Instant::now() + Duration::from_secs(1),
+                        deadline: Some(Instant::now() + Duration::from_secs(1)),
                         effective_budget: None,
                         index_admission: None,
                     },
@@ -20562,7 +20668,7 @@ mod tests {
                     client_instance_id: ClientInstanceId::SYSTEM,
                     selected_protocol_minor: minor,
                     cancellation: Cancellation::new(),
-                    deadline: Instant::now() + Duration::from_secs(1),
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
                     effective_budget: None,
                     index_admission: None,
                 },
@@ -20762,7 +20868,7 @@ mod tests {
                     client_instance_id: ClientInstanceId::SYSTEM,
                     selected_protocol_minor: minor,
                     cancellation: Cancellation::new(),
-                    deadline: Instant::now() + Duration::from_secs(1),
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
                     effective_budget: None,
                     index_admission: None,
                 },
@@ -20995,7 +21101,7 @@ mod tests {
                     client_instance_id: ClientInstanceId::SYSTEM,
                     selected_protocol_minor: minor,
                     cancellation: Cancellation::new(),
-                    deadline: Instant::now() + Duration::from_secs(1),
+                    deadline: Some(Instant::now() + Duration::from_secs(1)),
                     effective_budget: None,
                     index_admission: None,
                 },
@@ -22247,5 +22353,114 @@ mod tests {
         assert_eq!(error.code, common::ErrorCode::Internal as i32);
         assert_eq!(error.message, "internal operation failed");
         assert!(error.details.is_empty());
+    }
+    #[test]
+    fn source_transport_duration_requires_negotiated_omission_and_retains_explicit_limits() {
+        let service = service();
+        let mut envelope = daemon::RequestEnvelope {
+            request_id: 1,
+            instance_nonce: vec![7; 16],
+            timeout_ms: None,
+            effective_budget: None,
+            request: Some(daemon::request_envelope::Request::SourceRead(
+                daemon::SourceReadRequest::default(),
+            )),
+        };
+        let current = RequestTiming::start(&service, &envelope, 28);
+        assert!(current.unbounded_source);
+        assert_eq!(current.deadline, None);
+        let legacy = RequestTiming::start(&service, &envelope, 27);
+        assert!(!legacy.unbounded_source);
+        assert_eq!(
+            legacy.transport_timeout(),
+            Some(service.limits.request_timeout())
+        );
+        for millis in [2_000, 5_000] {
+            envelope.timeout_ms = Some(millis);
+            let timing = RequestTiming::start(&service, &envelope, 28);
+            assert!(!timing.unbounded_source);
+            assert_eq!(
+                timing.transport_timeout(),
+                Some(
+                    Duration::from_millis(u64::from(millis)).min(service.limits.request_timeout())
+                )
+            );
+        }
+        envelope.timeout_ms = None;
+        let mut budget = wire_effective_budget();
+        envelope.effective_budget = Some(budget);
+        assert!(!RequestTiming::start(&service, &envelope, 28).unbounded_source);
+        assert!(first_slice_effective_budget_from_wire(Some(&budget), 28, None).is_err());
+        budget.source_verification_duration_explicit = Some(false);
+        let admitted = first_slice_effective_budget_from_wire(Some(&budget), 28, None)
+            .unwrap()
+            .unwrap();
+        assert!(!admitted.source_verification_duration_explicit());
+        assert!(first_slice_effective_budget_from_wire(Some(&budget), 27, None).is_err());
+        envelope.effective_budget = Some(budget);
+        assert!(RequestTiming::start(&service, &envelope, 28).unbounded_source);
+        envelope.request = Some(daemon::request_envelope::Request::Health(
+            daemon::HealthRequest {},
+        ));
+        assert!(!RequestTiming::start(&service, &envelope, 28).unbounded_source);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn source_dispatch_omitted_deadline_survives_six_seconds_and_explicit_deadline_still_limits()
+     {
+        #[derive(Clone)]
+        struct DelayedSource(daemon::SourceReadResponse);
+        impl FirstSliceIpcHandler for DelayedSource {
+            fn dispatch(
+                &self,
+                _request: FirstSliceIpcRequest,
+                context: FirstSliceIpcContext,
+            ) -> FirstSliceIpcFuture {
+                let response = self.0.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                    if context.cancellation.reason().is_some() {
+                        return Err(request_timed_out());
+                    }
+                    Ok(FirstSliceIpcResponse::SourceRead(response))
+                })
+            }
+        }
+        let (request, response) =
+            lossless_source_read_fixture(daemon::SourcePhysicalEncoding::Utf8, "text", 4);
+        let handler = DelayedSource(response);
+        let omitted = dispatch_first_slice(
+            &handler,
+            FirstSliceIpcRequest::SourceRead(request.clone()),
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 28,
+                cancellation: Cancellation::new(),
+                deadline: None,
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            omitted,
+            daemon::response_envelope::Response::SourceRead(_)
+        ));
+        let limited = dispatch_first_slice(
+            &handler,
+            FirstSliceIpcRequest::SourceRead(request),
+            FirstSliceIpcContext {
+                client_instance_id: ClientInstanceId::SYSTEM,
+                selected_protocol_minor: 28,
+                cancellation: Cancellation::new(),
+                deadline: Some(Instant::now() + Duration::from_secs(2)),
+                effective_budget: None,
+                index_admission: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            limited,
+            daemon::response_envelope::Response::Error(_)
+        ));
     }
 }

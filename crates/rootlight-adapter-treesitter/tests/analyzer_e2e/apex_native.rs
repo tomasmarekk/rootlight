@@ -982,18 +982,14 @@ fn apex_local_reads_before_declaration_and_in_self_initializer_stay_unresolved()
 }
 
 #[test]
-fn apex_unsupported_local_groups_block_only_their_written_names() {
+fn apex_local_groups_keep_conflicting_names_unresolved() {
     let source = "public class GroupBox { public Integer Read(Integer Input, Integer Kept) {\
         Integer Input = 1, Extra = 2; Consume(Input); return Kept; } }";
     let result = output(source);
     assert_unqualified(&result);
-    assert!(
-        !result
-            .document()
-            .entities
-            .iter()
-            .any(|entity| entity.kind == EntityKind::Variable)
-    );
+    for name in ["Input", "Extra"] {
+        assert_definition(&result, source, named(&result, name, EntityKind::Variable));
+    }
     let uses = lexical_uses(&result);
     assert_eq!(uses.len(), 1);
     assert_eq!(text(source, &uses[0].source), "Kept");
@@ -1002,8 +998,186 @@ fn apex_unsupported_local_groups_block_only_their_written_names() {
             .document()
             .skipped_regions
             .iter()
-            .any(|gap| gap.detail == "apex-local-owner-and-binding-analysis-unavailable")
+            .any(|gap| gap.detail == "apex-shared-local-header-association-unavailable")
     );
+}
+
+#[test]
+fn apex_local_groups_keep_separate_sources_and_sequential_initializer_reads() {
+    let source = "public class GroupBox { public Integer Read(Integer Input) {\
+        Integer First = Input, Second = First + 1; return Second; } }";
+    let result = output(source);
+    let method = named(&result, "Read", EntityKind::Method);
+    let first = named(&result, "First", EntityKind::Variable);
+    let second = named(&result, "Second", EntityKind::Variable);
+    assert_ne!(first.id, second.id);
+    for (local, witness) in [(first, "First = Input"), (second, "Second = First + 1")] {
+        assert_definition(&result, source, local);
+        assert_child(&result, method, local);
+        assert_eq!(
+            text(source, local.evidence.source.as_ref().unwrap()),
+            witness
+        );
+        assert!(signatures(&result, source, local).is_empty());
+        assert!(lexical_uses(&result).iter().any(|occurrence| {
+            text(source, &occurrence.source) == local.canonical_name
+                && occurrence.target == (OccurrenceTarget::Resolved { symbol: local.id })
+        }));
+    }
+    assert_eq!(lexical_uses(&result).len(), 3);
+    let gaps = result
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "apex-shared-local-header-association-unavailable")
+        .collect::<Vec<_>>();
+    assert!(!gaps.is_empty());
+    for gap in gaps {
+        assert_eq!(
+            text(source, gap.evidence.source.as_ref().unwrap()),
+            "Integer First = Input, Second = First + 1;"
+        );
+    }
+    assert!(!result.document().skipped_regions.iter().any(|gap| {
+        gap.detail == "apex-local-owner-and-binding-analysis-unavailable"
+            || gap.detail == "signature-capture-unavailable"
+                && gap.evidence.source.as_ref().is_some_and(|reference| {
+                    ["First = Input", "Second = First + 1"].contains(&text(source, reference))
+                })
+    }));
+    assert_unqualified(&result);
+}
+
+#[test]
+fn apex_group_reads_before_declaration_and_self_initializers_stay_unresolved() {
+    let source = "public class OrderBox { public Integer Read(Integer Input) {\
+        Consume(First); Integer First = First + Second + Input, Second = First;\
+        Consume(Second); return First; } }";
+    let result = output(source);
+    assert_unqualified(&result);
+    let second_start = source.find("Second = First").unwrap();
+    let references = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.role == OccurrenceRole::Reference
+                && ["First", "Second"].contains(&text(source, &occurrence.source))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 6);
+    for reference in references {
+        let position = usize::try_from(reference.source.span().start_byte()).unwrap();
+        if position < second_start {
+            assert!(matches!(
+                reference.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+        } else {
+            let local = named(
+                &result,
+                text(source, &reference.source),
+                EntityKind::Variable,
+            );
+            assert_eq!(
+                reference.target,
+                OccurrenceTarget::Resolved { symbol: local.id }
+            );
+        }
+    }
+    assert_eq!(lexical_uses(&result).len(), 4);
+}
+
+#[test]
+fn apex_malformed_and_loop_local_groups_remain_explicit_gaps() {
+    for body in [
+        "Integer First = 1, = 2; return First;",
+        "for (Integer First = 0, Second = 1; First < Second; First++) { Consume(First); } return 0;",
+    ] {
+        let source = format!("class Rejected {{ Integer Read() {{ {body} }} }}");
+        let result = output(&source);
+        assert_unqualified(&result);
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| { entity.kind == EntityKind::Variable })
+        );
+        assert!(lexical_uses(&result).is_empty());
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.detail == "apex-local-owner-and-binding-analysis-unavailable"
+                || gap.detail == "apex-source-identity-unavailable"
+        }));
+    }
+}
+
+#[test]
+fn apex_local_groups_preserve_disjoint_scopes_and_reject_case_aliases() {
+    for declaration in [
+        "Integer Value = 1, Value = 2; return Value;",
+        "Integer Value = 1, value = 2; return Value;",
+    ] {
+        let source = format!("class Aliases {{ Integer Read() {{ {declaration} }} }}");
+        let result = output(&source);
+        assert_unqualified(&result);
+        assert_eq!(
+            result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| { entity.kind == EntityKind::Variable })
+                .count(),
+            2
+        );
+        assert!(lexical_uses(&result).is_empty());
+    }
+    let source = "class Blocks { Integer Read(Integer Input) {\
+        { Integer Item = Input, Next = Item; Consume(Next); }\
+        { Integer Item = Input, Next = Item; Consume(Next); } return Item; } }";
+    let result = output(source);
+    assert_unqualified(&result);
+    assert_eq!(lexical_uses(&result).len(), 6);
+    let outside = source.rfind("Item").unwrap();
+    assert!(result.document().occurrences.iter().any(|occurrence| {
+        usize::try_from(occurrence.source.span().start_byte()).unwrap() == outside
+            && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    }));
+    for name in ["Item", "Next"] {
+        let locals = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(locals.len(), 2);
+        assert_ne!(locals[0].id, locals[1].id);
+        for local in locals {
+            assert_definition(&result, source, local);
+            assert!(signatures(&result, source, local).is_empty());
+        }
+    }
+}
+
+#[test]
+fn apex_local_group_initializer_edits_preserve_each_identity() {
+    let source = "class Edits { Integer Read(Integer Input) {\
+        Integer First = Input + 1, Second = First; return Second; } }";
+    let changed_source = source.replace("Input + 1", "Input + 270");
+    let before = output(source);
+    let after = output(&changed_source);
+    for name in ["First", "Second"] {
+        let first = named(&before, name, EntityKind::Variable);
+        let second = named(&after, name, EntityKind::Variable);
+        assert_eq!(first.id, second.id);
+        assert_definition(&after, &changed_source, second);
+        assert_ne!(
+            first.evidence.source.as_ref().unwrap().content_hash(),
+            second.evidence.source.as_ref().unwrap().content_hash()
+        );
+    }
+    assert_eq!(lexical_uses(&after).len(), 3);
+    assert_unqualified(&after);
 }
 
 #[test]

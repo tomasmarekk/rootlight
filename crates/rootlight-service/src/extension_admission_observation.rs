@@ -8,7 +8,6 @@ use std::{
     io::{self, Write},
     marker::PhantomData,
     rc::Rc,
-    time::{Duration, Instant},
 };
 
 use rootlight_ir::{
@@ -908,11 +907,13 @@ fn safe_error(error: &FirstSliceError) -> serde_json::Value {
         FirstSliceError::CatalogMigrationRequired => "catalog_migration_required",
         FirstSliceError::Search => "search",
         FirstSliceError::Source => "source",
+        FirstSliceError::SourceEncodingUnsupported => "source_encoding_unsupported",
         FirstSliceError::Query => "query",
         FirstSliceError::Sharing => "sharing",
         FirstSliceError::RuntimeTrace(_) => "runtime_trace",
         FirstSliceError::SymbolNotFound => "symbol_not_found",
         FirstSliceError::BudgetExceeded => "budget_exceeded",
+        FirstSliceError::QueryTermBudget { .. } => "query_term_budget",
         FirstSliceError::RepositoryNotFound => "repository_not_found",
         FirstSliceError::GenerationNotFound => "generation_not_found",
         FirstSliceError::GenerationMismatch => "generation_mismatch",
@@ -976,11 +977,7 @@ fn observe_repository_failed_extension_admission() {
         .expect("explicit repository identity is required")
         .parse()
         .expect("repository identity is valid");
-    let cancellation = Cancellation::with_deadline(
-        Instant::now()
-            .checked_add(Duration::from_secs(3600))
-            .unwrap(),
-    );
+    let cancellation = Cancellation::new();
     let canonical = canonical_repository_root(&root, &cancellation).unwrap();
     let output = std::path::absolute(output).unwrap();
     let parent = std::fs::canonicalize(output.parent().expect("output has a parent")).unwrap();

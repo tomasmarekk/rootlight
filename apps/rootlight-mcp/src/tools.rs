@@ -7,6 +7,7 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 
 use rootlight_agent::policy::BudgetLimits;
 use rootlight_json_schema::{self as jsonschema, Validator};
+use rootlight_mcp_contract::source_find::{SourceFindInput, SourceFindOutput};
 use rootlight_mcp_contract::source_text::{
     SourceChunkV1_3, SourceReadInputV1_3, SourceReadOutputV1_3, SourceTextEncodingRequest,
 };
@@ -85,6 +86,8 @@ const MAX_OPERATION_STATUS_ARGUMENT_BYTES: usize = 16 * 1_024;
 const MAX_CODE_LOCATE_ARGUMENT_BYTES: usize = 64 * 1_024;
 const MAX_SYMBOL_EXPLAIN_ARGUMENT_BYTES: usize = 64 * 1_024;
 const MAX_SOURCE_READ_ARGUMENT_BYTES: usize = 64 * 1_024;
+// JSON escaping can expand a valid 64 KiB literal sixfold before controls.
+const MAX_SOURCE_FIND_ARGUMENT_BYTES: usize = 512 * 1_024;
 const MAX_JSON_RPC_RESPONSE_OVERHEAD: usize = (MAX_REQUEST_ID_BYTES * 6) + 256;
 const TOOL_CONTRACT_VERSION_META_KEY: &str = "rootlight/toolContractVersion";
 const MAX_TOOL_CONTRACT_VERSION_BYTES: usize = 32;
@@ -1859,6 +1862,7 @@ enum TypedInput {
     RepoList(RepoListInput),
     SourceRead(SourceReadInput),
     SourceReadCurrent(SourceReadInputV1_3),
+    SourceFind(SourceFindInput),
     ContextPack(ContextPackInput),
     QueryAdvanced(QueryAdvancedInput),
     QueryBatch(QueryBatchInput),
@@ -1904,6 +1908,9 @@ fn decode_typed_input(tool: VerticalTool, input: &Value) -> Result<TypedInput, (
             .map_err(|_| ()),
         VerticalTool::SourceRead => SourceReadInput::deserialize(input)
             .map(TypedInput::SourceRead)
+            .map_err(|_| ()),
+        VerticalTool::SourceFind => SourceFindInput::deserialize(input)
+            .map(TypedInput::SourceFind)
             .map_err(|_| ()),
     }
 }
@@ -2193,6 +2200,7 @@ fn tool_argument_bytes_are_valid(tool: VerticalTool, input: &Value) -> bool {
         VerticalTool::CodeLocate => MAX_CODE_LOCATE_ARGUMENT_BYTES,
         VerticalTool::SymbolExplain => MAX_SYMBOL_EXPLAIN_ARGUMENT_BYTES,
         VerticalTool::SourceRead => MAX_SOURCE_READ_ARGUMENT_BYTES,
+        VerticalTool::SourceFind => MAX_SOURCE_FIND_ARGUMENT_BYTES,
         _ => MAX_CODE_LOCATE_ARGUMENT_BYTES,
     };
     serialized_json_fits(input, maximum)
@@ -2216,6 +2224,15 @@ fn tool_specific_input_limits_are_valid(tool: VerticalTool, input: &Value) -> bo
             .get("query")
             .and_then(Value::as_str)
             .is_some_and(|query| query.len() <= MAX_LOCATE_QUERY_BYTES),
+        VerticalTool::SourceFind => {
+            input
+                .get("literal")
+                .and_then(Value::as_str)
+                .is_some_and(|literal| {
+                    literal.len()
+                        <= rootlight_mcp_contract::source_find::MAX_SOURCE_FIND_QUERY_BYTES
+                })
+        }
         VerticalTool::RepoStatus
         | VerticalTool::RepoList
         | VerticalTool::OperationStatus
@@ -2439,6 +2456,7 @@ fn typed_output_is_valid(tool: VerticalTool, input: &TypedInput, output: &Value)
     // The Rust output types also reapply source-free PublicError invariants
     // that intentionally cannot be represented by generated JSON Schema.
     match tool {
+        VerticalTool::SourceFind => source_find_output_is_valid(input, output),
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
         VerticalTool::RepoStatus => RepoStatusOutput::deserialize(output).is_ok(),
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
@@ -3134,8 +3152,59 @@ fn requires_entity_contract(
     }
 }
 
+fn source_find_output_is_valid(input: &TypedInput, output: &Value) -> bool {
+    let Ok(output) = SourceFindOutput::deserialize(output) else {
+        return false;
+    };
+    let SourceFindOutput::Success(output) = output else {
+        return true;
+    };
+    let TypedInput::SourceFind(input) = input else {
+        return false;
+    };
+    let RepositorySelector::ById(repository) = &input.repository else {
+        return false;
+    };
+    let width = match output.data.file.encoding {
+        rootlight_mcp_contract::source_text::SourceTextEncoding::Utf8 => {
+            u64::try_from(input.literal.len()).ok()
+        }
+        rootlight_mcp_contract::source_text::SourceTextEncoding::Utf16Le
+        | rootlight_mcp_contract::source_text::SourceTextEncoding::Utf16Be => {
+            u64::try_from(input.literal.encode_utf16().count())
+                .ok()
+                .and_then(|units| units.checked_mul(2))
+        }
+    };
+    repository.repository_id == output.repository.repository_id
+        && input.file_id == output.data.file.id
+        && input
+            .generation
+            .as_ref()
+            .is_none_or(|selected| match selected {
+                GenerationSelector::Explicit(generation) => *generation == output.generation,
+                GenerationSelector::Active(_) => true,
+            })
+        && output.data.matches.len() <= usize::from(input.effective_maximum_matches())
+        && input
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.max_results)
+            .is_none_or(|maximum| output.data.matches.len() <= usize::from(maximum))
+        && output.data.scanned_end_byte - output.data.scanned_start_byte
+            <= input.effective_maximum_scan_bytes()
+        && output.data.matches.iter().all(|source| {
+            source
+                .span()
+                .end_byte()
+                .checked_sub(source.span().start_byte())
+                == width
+        })
+}
+
 fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
     match tool {
+        VerticalTool::SourceFind => SourceFindOutput::deserialize(output).is_ok(),
         VerticalTool::RepoIndex => RepoIndexOutput::deserialize(output).is_ok(),
         VerticalTool::RepoStatus => RepoStatusOutput::deserialize(output).is_ok(),
         VerticalTool::RepoList | VerticalTool::FlowTrace | VerticalTool::QueryBatch => true,
@@ -3796,6 +3865,10 @@ pub enum ToolRegistryError {
     #[error("built-in MCP public error is invalid")]
     BuildPublicError(#[source] rootlight_mcp_contract::PublicErrorBuildError),
 }
+
+#[cfg(test)]
+#[path = "tools/source_find_tests.rs"]
+mod source_find_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5007,7 +5080,11 @@ mod tests {
                 "{} current type rejects the shared checked error",
                 capability.tool.name()
             );
-            let retained = retained_input(capability.tool.name());
+            let retained = if tool == VerticalTool::SourceFind {
+                source_find_tests::input("abc").as_object().unwrap().clone()
+            } else {
+                retained_input(capability.tool.name())
+            };
             let mut cases = Vec::with_capacity(2);
 
             let mut unknown = retained.clone();
@@ -5396,16 +5473,16 @@ mod tests {
             observed,
             [
                 (
-                    249_311,
-                    "7acc9f3508e253b474945fa332f065944254b56218fc25f00873dd76ffc46562".to_owned(),
+                    271_480,
+                    "7a274baffa83cf73e10d3b2dd76fefd009ba332ba28fbcd3c5eb2678a0165e79".to_owned(),
                 ),
                 (
-                    519_070,
-                    "cea895cd366ea99ae5d30e73c22d0f6c49fe3d0c9b2ad4c94b89480e1ee1589e".to_owned(),
+                    541_239,
+                    "dc931700ec774fa3c33a41b9d7ade5894839b8298f8a19a9045b07fedf38f64d".to_owned(),
                 ),
                 (
-                    723_450,
-                    "dd9fcf97e06ad0d0fc2291d24ee2b1e2ae7c5786d225325c69e4b602b3eb70f0".to_owned(),
+                    745_619,
+                    "543fa0b562589358295a113d60bd0a46eb7325e6d94d4d7c403badf88f1cd76e".to_owned(),
                 ),
             ],
             "update the reviewed Scout, Analysis, and Developer tools/list goldens"
@@ -8415,7 +8492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scout_session_tools_list_exposes_exactly_the_six_scout_tools() {
+    async fn scout_session_tools_list_exposes_exactly_the_seven_scout_tools() {
         let router = ToolRouter::new(FixtureExecutor::default(), ExposureProfile::Scout)
             .expect("registry compiles");
         let response = router
@@ -8430,6 +8507,7 @@ mod tests {
                 "context.pack",
                 "source.read",
                 "query.batch",
+                "source.find",
             ]
         );
     }
@@ -8470,14 +8548,14 @@ mod tests {
         let developer = router
             .handle(request("tools/list", json!({})), cancellation())
             .await;
-        assert_eq!(listed_tool_names(&success(developer)).len(), 19);
+        assert_eq!(listed_tool_names(&success(developer)).len(), 20);
 
         // A negotiated profile change is observed without recompiling contracts.
         sender.send_replace(ExposureProfile::Scout);
         let scout = router
             .handle(request("tools/list", json!({})), cancellation())
             .await;
-        assert_eq!(listed_tool_names(&success(scout)).len(), 6);
+        assert_eq!(listed_tool_names(&success(scout)).len(), 7);
     }
 
     #[tokio::test]
@@ -8494,7 +8572,7 @@ mod tests {
         let response = router
             .handle(request("tools/list", json!({})), cancellation())
             .await;
-        assert_eq!(listed_tool_names(&success(response)).len(), 6);
+        assert_eq!(listed_tool_names(&success(response)).len(), 7);
     }
 
     use rootlight_mcp_contract::context::{ContextSeedSelector, QueryPredicate, QueryValue};

@@ -52,7 +52,7 @@ pub struct RequestEnvelope {
     pub effective_budget: ::core::option::Option<FirstSliceEffectiveBudget>,
     #[prost(
         oneof = "request_envelope::Request",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53"
     )]
     #[allow(missing_docs)]
     pub request: ::core::option::Option<request_envelope::Request>,
@@ -152,6 +152,9 @@ pub mod request_envelope {
         #[prost(message, tag = "52")]
         #[allow(missing_docs)]
         SourceTextPrefixMetadataQuote(super::SourceTextPrefixMetadataQuoteRequest),
+        #[prost(message, tag = "53")]
+        #[allow(missing_docs)]
+        SourceFind(super::SourceFindRequest),
     }
 }
 /// Complete validated resource ceilings for one first-slice request.
@@ -190,6 +193,10 @@ pub struct FirstSliceEffectiveBudget {
     #[prost(uint64, optional, tag = "11")]
     #[allow(missing_docs)]
     pub paths: ::core::option::Option<u64>,
+    /// Absent preserves legacy explicit duration; false omits only an implicit source ceiling.
+    #[prost(bool, optional, tag = "12")]
+    #[allow(missing_docs)]
+    pub source_verification_duration_explicit: ::core::option::Option<bool>,
 }
 /// Bounded response envelope paired with one request identifier.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -199,7 +206,7 @@ pub struct ResponseEnvelope {
     pub request_id: u64,
     #[prost(
         oneof = "response_envelope::Response",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 51, 52, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 51, 52, 53, 20"
     )]
     #[allow(missing_docs)]
     pub response: ::core::option::Option<response_envelope::Response>,
@@ -296,6 +303,9 @@ pub mod response_envelope {
         #[prost(message, tag = "52")]
         #[allow(missing_docs)]
         SourceTextPrefixMetadataQuote(super::SourceTextPrefixMetadataQuoteResponse),
+        #[prost(message, tag = "53")]
+        #[allow(missing_docs)]
+        SourceFind(super::SourceFindResponse),
         #[prost(message, tag = "20")]
         #[allow(missing_docs)]
         Error(super::super::super::common::v1::PublicError),
@@ -1865,6 +1875,119 @@ pub struct SourceTextPrefixMetadataQuoteResponse {
     #[prost(message, optional, tag = "5")]
     #[allow(missing_docs)]
     pub completeness: ::core::option::Option<FirstSliceCompleteness>,
+}
+/// Forward scalar state is revalidated against the selected immutable source.
+/// MCP additionally authenticates file, generation, query, and request controls.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SourceFindCursor {
+    #[prost(uint64, tag = "1")]
+    #[allow(missing_docs)]
+    pub next_byte: u64,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub matched_prefix: u64,
+}
+/// Requests exact, case-sensitive literal matches in one generation-owned file.
+/// Scan work is independent of the source bytes returned by source.read.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SourceFindRequest {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<GenerationSelector>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(string, tag = "5")]
+    #[allow(missing_docs)]
+    pub literal: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "6")]
+    #[allow(missing_docs)]
+    pub cursor: ::core::option::Option<SourceFindCursor>,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub maximum_scan_bytes: u64,
+    #[prost(uint32, tag = "8")]
+    #[allow(missing_docs)]
+    pub maximum_matches: u32,
+}
+/// One verified file supplies shared metadata for all exact match references.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SourceFindFile {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(string, tag = "2")]
+    #[allow(missing_docs)]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    #[allow(missing_docs)]
+    pub language: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub content_hash: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub byte_length: u64,
+    #[prost(enumeration = "SourcePhysicalEncoding", tag = "6")]
+    #[allow(missing_docs)]
+    pub encoding: i32,
+    #[prost(bool, tag = "7")]
+    #[allow(missing_docs)]
+    pub generated: bool,
+    #[prost(message, optional, tag = "8")]
+    #[allow(missing_docs)]
+    pub extracted_from: ::core::option::Option<FirstSliceSourceRef>,
+}
+/// Contains exact physical-byte evidence and separate forward/restoration work.
+/// UTF-16's leading encoding BOM is metadata; UTF-8 retains its BOM scalar.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceFindResponse {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub schema_version: ::core::option::Option<
+        super::super::common::v1::ContractVersion,
+    >,
+    #[prost(message, optional, tag = "2")]
+    #[allow(missing_docs)]
+    pub repository: ::core::option::Option<super::super::common::v1::RepositoryId>,
+    #[prost(message, optional, tag = "3")]
+    #[allow(missing_docs)]
+    pub generation: ::core::option::Option<super::super::common::v1::GenerationId>,
+    #[prost(message, optional, tag = "4")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<SourceFindFile>,
+    #[prost(message, repeated, tag = "5")]
+    #[allow(missing_docs)]
+    pub matches: ::prost::alloc::vec::Vec<FirstSliceSourceRef>,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub scanned_start_byte: u64,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub scanned_end_byte: u64,
+    #[prost(uint64, tag = "8")]
+    #[allow(missing_docs)]
+    pub restoration_bytes: u64,
+    #[prost(enumeration = "SourceFindStop", tag = "9")]
+    #[allow(missing_docs)]
+    pub stop: i32,
+    #[prost(message, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub continuation: ::core::option::Option<SourceFindCursor>,
+    #[prost(uint64, tag = "11")]
+    #[allow(missing_docs)]
+    pub total_metadata_bytes: u64,
+    #[prost(uint64, tag = "12")]
+    #[allow(missing_docs)]
+    pub total_response_memory_bytes: u64,
 }
 /// Requests the bounded list of repositories known to this daemon process.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -5314,6 +5437,52 @@ impl SourcePhysicalEncoding {
             "SOURCE_PHYSICAL_ENCODING_UTF8" => Some(Self::Utf8),
             "SOURCE_PHYSICAL_ENCODING_UTF16_LE" => Some(Self::Utf16Le),
             "SOURCE_PHYSICAL_ENCODING_UTF16_BE" => Some(Self::Utf16Be),
+            _ => None,
+        }
+    }
+}
+/// The stop reason is authoritative; totals are not inferred before EOF.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SourceFindStop {
+    #[allow(missing_docs)]
+    EndOfSource = 0,
+    #[allow(missing_docs)]
+    ScanLimit = 1,
+    #[allow(missing_docs)]
+    MatchLimit = 2,
+    #[allow(missing_docs)]
+    MatcherMemoryLimit = 3,
+    #[allow(missing_docs)]
+    ResponseMemoryLimit = 4,
+    #[allow(missing_docs)]
+    ResultLimit = 5,
+}
+impl SourceFindStop {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::EndOfSource => "SOURCE_FIND_STOP_END_OF_SOURCE",
+            Self::ScanLimit => "SOURCE_FIND_STOP_SCAN_LIMIT",
+            Self::MatchLimit => "SOURCE_FIND_STOP_MATCH_LIMIT",
+            Self::MatcherMemoryLimit => "SOURCE_FIND_STOP_MATCHER_MEMORY_LIMIT",
+            Self::ResponseMemoryLimit => "SOURCE_FIND_STOP_RESPONSE_MEMORY_LIMIT",
+            Self::ResultLimit => "SOURCE_FIND_STOP_RESULT_LIMIT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SOURCE_FIND_STOP_END_OF_SOURCE" => Some(Self::EndOfSource),
+            "SOURCE_FIND_STOP_SCAN_LIMIT" => Some(Self::ScanLimit),
+            "SOURCE_FIND_STOP_MATCH_LIMIT" => Some(Self::MatchLimit),
+            "SOURCE_FIND_STOP_MATCHER_MEMORY_LIMIT" => Some(Self::MatcherMemoryLimit),
+            "SOURCE_FIND_STOP_RESPONSE_MEMORY_LIMIT" => Some(Self::ResponseMemoryLimit),
+            "SOURCE_FIND_STOP_RESULT_LIMIT" => Some(Self::ResultLimit),
             _ => None,
         }
     }

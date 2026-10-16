@@ -8,7 +8,6 @@ use rootlight_adapter_sdk::{DescriptorError, LabelError};
 use crate::RegistryError;
 
 const HARD_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
-const HARD_MAX_SYNTAX_NODES: usize = 16 * 1024 * 1024;
 const HARD_MAX_SYNTAX_DEPTH: usize = 4096;
 const HARD_MAX_INCLUDED_RANGES: usize = 65_536;
 const HARD_MAX_INCREMENTAL_EDITS: usize = 65_536;
@@ -65,6 +64,8 @@ impl RuntimeConfig {
     /// logical tree weight. Tree-sitter's safe API cannot hard-cap its native
     /// allocator, so the provider still advertises unavailable memory
     /// enforcement until out-of-process adapter isolation is available.
+    /// Syntax-node credit counts visited nodes and does not reserve storage;
+    /// callers can use `usize::MAX` to leave that traversal count unrestricted.
     ///
     /// # Errors
     ///
@@ -101,7 +102,6 @@ impl RuntimeConfig {
         }
         for (field, value, maximum) in [
             ("max_source_bytes", max_source_bytes, HARD_MAX_SOURCE_BYTES),
-            ("max_syntax_nodes", max_syntax_nodes, HARD_MAX_SYNTAX_NODES),
             ("max_syntax_depth", max_syntax_depth, HARD_MAX_SYNTAX_DEPTH),
             (
                 "max_included_ranges",

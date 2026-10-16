@@ -21,10 +21,16 @@
   (union_specifier name: (type_identifier) @definition)
   (enum_specifier name: (type_identifier) @definition)
   (type_definition declarator: (type_identifier) @definition)
+  (preproc_def name: (identifier) @definition)
+  (preproc_function_def name: (identifier) @definition)
 ]
 
 (preproc_include) @import
 (parameter_list) @signature
+[(preproc_def) (preproc_function_def)] @signature
+; Written branches remain available while their selection is unevaluated.
+[(preproc_if) (preproc_ifdef)] @signature
+[(preproc_def) (preproc_function_def)] @string
 (compound_statement) @scope
 (call_expression) @call
 [

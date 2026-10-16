@@ -159,6 +159,9 @@ impl ResolutionEngine {
         if let Some(decision) = index.perl.resolve(occurrence) {
             return Ok(decision);
         }
+        if let Some(decision) = index.rust.resolve(occurrence) {
+            return Ok(decision);
+        }
         if let Some(decision) = index.fsharp.resolve(occurrence) {
             return Ok(decision);
         }
@@ -255,6 +258,13 @@ impl ResolutionEngine {
             } else if entity.language == "typescript" && entity.kind == EntityKind::TypeParameter {
                 // Native generic scopes, including anonymous type signatures,
                 // must establish these bindings before language-neutral scoring.
+                Some(RejectionReason::MissingLexicalEvidence)
+            } else if entity.language == "rust"
+                && (entity.kind == EntityKind::Parameter
+                    || index.rust_lexical_symbols.contains(&entity.id))
+            {
+                // Source order, pattern namespaces and capture barriers are
+                // producer-owned; a same-file score cannot prove visibility.
                 Some(RejectionReason::MissingLexicalEvidence)
             } else if example.is_some_and(|example| {
                 example.is_none()
@@ -726,6 +736,7 @@ impl ResolutionContextKey {
             || is_javascript_lexical_reference(occurrence, index)
             || index.classic.proof(occurrence).is_some()
             || index.perl.eligible(occurrence)
+            || index.rust.eligible(occurrence)
             || index.fsharp.eligible(occurrence)
             || index.groovy.proof(occurrence).is_some()
             || index.groovy.inherited_entry(occurrence).is_some()
@@ -882,12 +893,14 @@ pub(crate) struct CandidateIndex<'a> {
     pub(crate) classic: crate::classic::ClassicIndex<'a>,
     pub(crate) groovy: crate::groovy::GroovyIndex<'a>,
     pub(crate) perl: crate::perl::PerlIndex<'a>,
+    pub(crate) rust: crate::rust::RustIndex<'a>,
     pub(crate) fsharp: crate::fsharp::FSharpIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
     javascript_by_scope: BTreeMap<(ContentHash, FileId, ContainerRef), Vec<IndexedCandidate<'a>>>,
     pub(crate) entities: BTreeMap<SymbolId, &'a EntityRecord>,
     pub(crate) files: BTreeMap<FileId, &'a FileRecord>,
     pub(crate) provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
+    rust_lexical_symbols: BTreeSet<SymbolId>,
     syntax_kinds: BTreeMap<String, usize>,
 }
 
@@ -997,6 +1010,14 @@ impl<'a> CandidateIndex<'a> {
                 extension_records,
                 cancellation,
             )?,
+            rust: crate::rust::RustIndex::build(
+                &files,
+                &entities,
+                &provenance,
+                extension_records,
+                occurrence_records,
+                cancellation,
+            )?,
             fsharp: crate::fsharp::FSharpIndex::build(
                 &files,
                 &entities,
@@ -1009,10 +1030,29 @@ impl<'a> CandidateIndex<'a> {
             entities,
             files,
             provenance,
+            rust_lexical_symbols: BTreeSet::new(),
             syntax_kinds: BTreeMap::new(),
         };
         for occurrence in occurrence_records {
             cancellation.check()?;
+            if matches!(
+                occurrence.role,
+                OccurrenceRole::Definition | OccurrenceRole::Declaration
+            ) && matches!(
+                occurrence.syntax_kind.as_str(),
+                "rust.local_variable.definition"
+                    | "rust.local_variable.declaration"
+                    | "rust.parameter.definition"
+                    | "rust.parameter.declaration"
+                    | "rust.anonymous_function.declaration"
+            ) && let OccurrenceTarget::Resolved { symbol } = occurrence.target
+                && index
+                    .entities
+                    .get(&symbol)
+                    .is_some_and(|entity| entity.language == "rust")
+            {
+                index.rust_lexical_symbols.insert(symbol);
+            }
             if ResolutionContextKey::reusable(occurrence, &index)
                 && !index
                     .syntax_kinds
@@ -1049,6 +1089,7 @@ impl<'a> CandidateIndex<'a> {
         }
         if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
             && (self.perl.eligible(occurrence)
+                || self.rust.eligible(occurrence)
                 || self.fsharp.eligible(occurrence)
                 || self.groovy.proof(occurrence).is_some()
                 || self.classic.proof(occurrence).is_some())
@@ -1399,6 +1440,58 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // Rust paths, value/type namespaces and dispatch require language-owned
+    // proof. Preserve written uncertainty, including producer-owned candidates,
+    // instead of substituting an unrelated same-name item.
+    if occurrence.syntax_kind.starts_with("rust.")
+        && (occurrence.syntax_kind.ends_with(".reference")
+            || occurrence.syntax_kind.ends_with(".call")
+            || occurrence.syntax_kind.ends_with(".scoped_call"))
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Written V spelling cannot establish receiver, import or compile-time binding.
+    if occurrence.syntax_kind.starts_with("v.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // Written Coq terms leave local binders, modules and elaboration unresolved.
+    // A same-name global is not a justified candidate for these source uses.
+    if occurrence.syntax_kind == "coq.written_reference.reference"
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // Authored HDL names do not establish preprocessing, elaboration or library binding.
+    if (occurrence.syntax_kind.starts_with("verilog.")
+        || occurrence.syntax_kind.starts_with("systemverilog."))
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // Eiffel inheritance, renaming and dynamic feature dispatch need language-owned
+    // proof; generic name scores cannot supply an adapter's missing binding.
+    if occurrence.syntax_kind.starts_with("eiffel.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // Written Julia spelling does not prove macro expansion, module loading or
+    // multiple-dispatch targets; only the language-owned proof may resolve these.
+    if occurrence.syntax_kind.starts_with("julia.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
+    // CMake command, macro and variable evaluation requires language-owned proof.
+    // Physical spelling alone cannot supply a target left unresolved by the adapter.
+    if occurrence.syntax_kind.starts_with("cmake.")
+        && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    {
+        return false;
+    }
     // Written XML/DTD Names do not prove namespace, end-tag or entity targets.
     if (occurrence.syntax_kind.starts_with("xml.") || occurrence.syntax_kind.starts_with("dtd."))
         && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
@@ -1745,6 +1838,39 @@ mod source_owned_target_tests {
             },
         };
         for syntax in [
+            "rust.value.reference",
+            "rust.identifier.reference",
+            "rust.type_identifier.reference",
+            "rust.macro_token.reference",
+            "rust.call.call",
+            "rust.scoped_call.call",
+            "rust.generic_call.call",
+            "rust.identifier.call",
+            "rust.field_identifier.call",
+            "rust.scoped_call.scoped_call",
+            "rust.path_name.reference",
+            "rust.pattern_binding_unavailable.reference",
+            "v.written_call.call",
+            "v.identifier.reference",
+            "v.type.reference",
+            "v.written_import.import",
+            "eiffel.written_call.call",
+            "eiffel.identifier.reference",
+            "verilog.identifier.reference",
+            "verilog.type.reference",
+            "verilog.written_call.call",
+            "systemverilog.identifier.reference",
+            "systemverilog.type.reference",
+            "systemverilog.written_call.call",
+            "eiffel.type.reference",
+            "julia.written_call.call",
+            "julia.identifier.reference",
+            "julia.written_import.import",
+            "cmake.command.call",
+            "cmake.normal_variable.reference",
+            "cmake.cache_variable.reference",
+            "cmake.environment_variable.reference",
+            "cmake.written_import.import",
             "assembly.identifier.reference",
             "assembly.macro.reference",
             "assembly.label.reference",
@@ -1791,6 +1917,29 @@ mod source_owned_target_tests {
             symbol: SymbolId::from_bytes([6; 20]),
         };
         for syntax in [
+            "rust.value.reference",
+            "rust.type_identifier.reference",
+            "rust.identifier.call",
+            "rust.scoped_call.scoped_call",
+            "v.written_call.call",
+            "v.identifier.reference",
+            "v.type.reference",
+            "v.written_import.import",
+            "eiffel.written_call.call",
+            "eiffel.identifier.reference",
+            "verilog.identifier.reference",
+            "verilog.type.reference",
+            "verilog.written_call.call",
+            "systemverilog.identifier.reference",
+            "systemverilog.type.reference",
+            "systemverilog.written_call.call",
+            "eiffel.type.reference",
+            "julia.written_call.call",
+            "julia.identifier.reference",
+            "julia.written_import.import",
+            "cmake.command.call",
+            "cmake.normal_variable.reference",
+            "cmake.written_import.import",
             "assembly.unproven_call.reference",
             "common_lisp.function.scoped_call",
             "scheme.symbol.reference",
@@ -1827,6 +1976,29 @@ mod source_owned_target_tests {
             completeness: CoverageStatus::Complete,
         };
         for syntax in [
+            "rust.value.reference",
+            "rust.type_identifier.reference",
+            "rust.identifier.call",
+            "rust.scoped_call.scoped_call",
+            "v.written_call.call",
+            "v.identifier.reference",
+            "v.type.reference",
+            "v.written_import.import",
+            "eiffel.written_call.call",
+            "eiffel.identifier.reference",
+            "verilog.identifier.reference",
+            "verilog.type.reference",
+            "verilog.written_call.call",
+            "systemverilog.identifier.reference",
+            "systemverilog.type.reference",
+            "systemverilog.written_call.call",
+            "eiffel.type.reference",
+            "julia.written_call.call",
+            "julia.identifier.reference",
+            "julia.written_import.import",
+            "cmake.command.call",
+            "cmake.cache_variable.reference",
+            "cmake.environment_variable.reference",
             "scheme.symbol.reference",
             "ocaml.value.reference",
             "ocaml.application.call",
@@ -1847,10 +2019,17 @@ mod source_owned_target_tests {
             "dtd.parameter_entity_name.reference",
         ] {
             occurrence.syntax_kind = syntax.to_owned();
-            assert!(
-                resolvable_occurrence(&occurrence),
-                "independent ambiguity remains eligible"
-            );
+            if syntax.starts_with("rust.") {
+                assert!(
+                    !resolvable_occurrence(&occurrence),
+                    "Rust written candidates remain unchanged"
+                );
+            } else {
+                assert!(
+                    resolvable_occurrence(&occurrence),
+                    "independent ambiguity remains eligible"
+                );
+            }
         }
         occurrence.role = OccurrenceRole::Definition;
         assert!(!resolvable_occurrence(&occurrence));

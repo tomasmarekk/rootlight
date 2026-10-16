@@ -121,16 +121,18 @@ impl TreeSitterProvider {
             // The host already admitted its text view and supplies the exact native
             // point; revalidating or rescanning its prefix per fence is redundant.
             context.range_origin = (body.start_byte(), body.start_position());
-            let child_tree = match self.parse_native_tree(
+            let parsed = match self.parse_native_tree_with_input(
                 &child_request,
                 &language_for(native_family),
                 None,
                 self.config.default_settings(),
                 source,
                 Some(&mut *context),
+                None,
+                0,
                 cancellation,
             ) {
-                Ok(tree) => tree,
+                Ok(parsed) => parsed,
                 Err(AdapterError::ProviderFailed { code })
                     if matches!(
                         code.as_str(),
@@ -145,19 +147,58 @@ impl TreeSitterProvider {
                 }
                 Err(error) => return Err(error),
             };
-            let child = inspect_tree(
-                &child_tree,
+            let child = inspect_parsed_tree(
+                &parsed,
                 &child_request,
                 source,
                 remaining_nodes,
                 limits.max_syntax_depth(),
                 cancellation,
             )?;
+            let child_tree = parsed.tree;
             traversal.processed_nodes = traversal
                 .processed_nodes
                 .checked_add(child.processed_nodes)
                 .ok_or_else(|| provider_failure("markdown-node-accounting"))?;
             traversal.max_depth = traversal.max_depth.max(child.max_depth);
+            if parsed.projection_unavailable {
+                traversal.coverage = CoverageStatus::Unknown;
+                traversal.skipped_regions = traversal
+                    .skipped_regions
+                    .checked_add(1)
+                    .ok_or(SinkError::AccountingOverflow)?;
+                candidates[index].start = body.start_byte();
+                candidates[index].end = body.end_byte();
+                candidates[index].syntax = if family == GrammarFamily::Cpp {
+                    "cpp.preprocessor_projection_unavailable"
+                } else {
+                    "c.preprocessor_projection_unavailable"
+                };
+                // The body-bound module attributes its gap to the C-family child while
+                // the Markdown host and independent fences remain available.
+                try_reserve_cancellable(
+                    candidates,
+                    1,
+                    cancellation,
+                    "markdown-c-module-allocation",
+                )?;
+                candidates.push(QueryCandidate {
+                    start: body.start_byte(),
+                    end: body.end_byte(),
+                    role: StructuralRole::Module,
+                    syntax: if family == GrammarFamily::Cpp {
+                        "cpp.file"
+                    } else {
+                        "c.file"
+                    },
+                    required: true,
+                    native_depth: candidate
+                        .native_depth
+                        .checked_add(1)
+                        .ok_or(SinkError::AccountingOverflow)?,
+                });
+                continue;
+            }
             if let Some(diagnostic) = child.primary_diagnostic {
                 traversal.primary_diagnostic.get_or_insert(diagnostic);
                 traversal.skipped_regions = traversal
@@ -165,7 +206,8 @@ impl TreeSitterProvider {
                     .checked_add(1)
                     .ok_or_else(|| provider_failure("markdown-coverage-accounting"))?;
                 traversal.coverage = match diagnostic {
-                    PrimaryDiagnostic::ErrorRecovery { .. } => CoverageStatus::Unknown,
+                    PrimaryDiagnostic::ErrorRecovery { .. }
+                    | PrimaryDiagnostic::CProjectionUnavailable { .. } => CoverageStatus::Unknown,
                     _ if traversal.coverage == CoverageStatus::Unknown => CoverageStatus::Unknown,
                     _ => CoverageStatus::Bounded,
                 };

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod graph_projection;
+mod source_find;
 mod source_metadata_quote;
 mod source_text;
 mod update;
@@ -19,6 +20,9 @@ pub use graph_projection::{
 };
 pub use rootlight_ids::{
     ContentHash, FactId, FileId, GenerationId, OperationId, RepositoryId, SymbolId,
+};
+pub use source_find::{
+    SourceFindCursor, SourceFindFile, SourceFindOptions, SourceFindResult, SourceFindStop,
 };
 pub use source_metadata_quote::{
     SourceTextPrefixFixedUpper, SourceTextPrefixMetadataQuoteEntry,
@@ -60,8 +64,9 @@ use rootlight_crypto::Sha256;
 use rootlight_error::{DetailKey, ErrorCode, NextAction, PublicError, PublicValue, SafeLabel};
 use rootlight_ipc::{
     Endpoint, FrameCodec, IpcError, connect, connect_async, read_response, read_response_async,
-    read_server_hello, read_server_hello_async, wait_for_peer_close_async, write_client_hello,
-    write_client_hello_async, write_request, write_request_async,
+    read_response_waiting, read_response_waiting_async, read_server_hello, read_server_hello_async,
+    wait_for_peer_close_async, write_client_hello, write_client_hello_async, write_request,
+    write_request_async,
 };
 use rootlight_observability::{
     CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION, ControlMethod, DURATION_BUCKET_UPPER_US,
@@ -111,6 +116,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
     "repository.index.clean-rebuild.v1",
     "repository.index.v1",
     "repository.status.logical-snapshot.v1",
+    "source.find.v1",
     "source.read.v1",
     "symbol.explain.v1",
     "support.bundle.v1",
@@ -3059,7 +3065,7 @@ pub struct EffectiveBudgetLimits {
 
 /// A complete client-reduced resource budget accepted by daemon protocol 1.8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EffectiveBudget(EffectiveBudgetLimits);
+pub struct EffectiveBudget(EffectiveBudgetLimits, Option<bool>);
 
 impl EffectiveBudget {
     /// Validates a complete set of resource ceilings against transport maxima.
@@ -3098,13 +3104,29 @@ impl EffectiveBudget {
         {
             return Err(ClientError::InvalidEffectiveBudget);
         }
-        Ok(Self(limits))
+        Ok(Self(limits, None))
     }
 
     /// Returns the complete validated resource ceilings.
     #[must_use]
     pub const fn limits(self) -> EffectiveBudgetLimits {
         self.0
+    }
+
+    /// Preserves whether a source verification duration was explicitly requested.
+    ///
+    /// Absence retains legacy deadline behavior. `false` is meaningful only for
+    /// source operations; other operations keep their ordinary duration limits.
+    #[must_use]
+    pub const fn with_source_verification_duration_explicit(mut self, explicit: bool) -> Self {
+        self.1 = Some(explicit);
+        self
+    }
+
+    /// Returns source duration provenance, absent for legacy explicit budgets.
+    #[must_use]
+    pub const fn source_verification_duration_explicit(self) -> Option<bool> {
+        self.1
     }
 }
 
@@ -3116,7 +3138,9 @@ pub struct RequestOptions {
 }
 
 impl RequestOptions {
-    /// Creates options that retain the client's default transport deadline.
+    /// Creates options with the ordinary default transport deadline.
+    /// Negotiated source operations omit that implicit deadline on protocol
+    /// 1.28 and newer; older peers retain their legacy default behavior.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -3428,7 +3452,9 @@ impl Client {
     /// A validated existing daemon that is restoring durable generations is
     /// returned immediately so callers can observe typed recovery responses.
     /// A daemon started by this call still crosses the coordinated readiness
-    /// barrier before it is returned.
+    /// barrier before it is returned. After that exact child announces active
+    /// generation restoration, readiness has no elapsed ceiling; child exit,
+    /// invalid startup signals, and failed authenticated probes still fail startup.
     ///
     /// # Errors
     ///
@@ -3483,6 +3509,7 @@ impl Client {
     /// daemon they launched without signaling a discovery PID.
     /// An existing daemon that is restoring durable generations is returned
     /// without ownership so callers can observe typed recovery responses.
+    /// Announced restoration uses the readiness contract of [`Self::connect_or_start`].
     ///
     /// # Errors
     ///
@@ -7218,9 +7245,7 @@ impl Client {
             .checked_add(Duration::from_secs(1))
             .ok_or(ClientError::InvalidRequestTimeout)?;
         let codec = FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, io_timeout)?;
-        let timeout_ms = request_timeout_ms(timeout)?;
-        let effective_budget = effective_budget_to_wire(options.effective_budget, timeout)?;
-        ensure_budget_within_transport_timeout(effective_budget.as_ref(), timeout)?;
+
         let mut stream = connect(&self.endpoint)?;
         write_client_hello(
             codec,
@@ -7231,19 +7256,29 @@ impl Client {
         let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
         ensure_request_supported(&request, selected_protocol_minor)?;
         ensure_request_capability(&request, &hello.capabilities)?;
+        let transport_timeout =
+            source_transport_timeout(&request, options, selected_protocol_minor);
+        let timeout_ms = transport_timeout.map(request_timeout_ms).transpose()?;
+        let effective_budget =
+            effective_budget_to_wire(options.effective_budget, transport_timeout)?;
         ensure_effective_budget_supported(effective_budget.as_ref(), selected_protocol_minor)?;
+        ensure_budget_within_transport_timeout(effective_budget.as_ref(), transport_timeout)?;
         write_request(
             codec,
             &mut stream,
             &daemon::RequestEnvelope {
                 request_id,
                 instance_nonce: self.instance_nonce.to_vec(),
-                timeout_ms: Some(timeout_ms),
+                timeout_ms,
                 effective_budget,
                 request: Some(request),
             },
         )?;
-        let response = read_response(codec, &mut stream)?;
+        let response = if transport_timeout.is_none() {
+            read_response_waiting(codec, &mut stream)?
+        } else {
+            read_response(codec, &mut stream)?
+        };
         match correlated_response(response, request_id)? {
             daemon::response_envelope::Response::Error(error) => {
                 Err(ClientError::Public(Box::new(parse_public_error_for_minor(
@@ -7296,23 +7331,15 @@ impl Client {
             .checked_add(timeout)
             .ok_or(ClientError::InvalidRequestTimeout)?;
         let codec = FrameCodec::new(rootlight_ipc::MAX_FRAME_BYTES, timeout)?;
-        let effective_budget = effective_budget_to_wire(options.effective_budget, timeout)?;
-        match tokio::time::timeout_at(
-            deadline,
-            self.request_async_until(request, effective_budget, deadline, codec),
-        )
-        .await
-        {
-            Ok(response) => finish_async_request(deadline, TokioInstant::now(), response),
-            Err(_) => Err(ClientError::RequestTimedOut),
-        }
+        self.request_async_until(request, options, deadline, codec)
+            .await
     }
 
     async fn request_async_until(
         &self,
         request: daemon::request_envelope::Request,
-        effective_budget: Option<daemon::FirstSliceEffectiveBudget>,
-        deadline: TokioInstant,
+        options: RequestOptions,
+        handshake_deadline: TokioInstant,
         codec: FrameCodec,
     ) -> Result<(daemon::response_envelope::Response, u32), ClientError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
@@ -7322,46 +7349,94 @@ impl Client {
 
         // The unsplit stream stays owned by this future so cancellation by drop
         // closes the daemon peer instead of leaving detached transport work.
-        let mut stream = connect_async(&self.endpoint).await?;
-        write_client_hello_async(
-            codec,
-            &mut stream,
-            &client_hello(self.instance_nonce, self.client_instance_id),
-        )
-        .await?;
-        let hello = read_server_hello_async(codec, &mut stream).await?;
+        let (mut stream, hello) = tokio::time::timeout_at(handshake_deadline, async {
+            let mut stream = connect_async(&self.endpoint).await?;
+            write_client_hello_async(
+                codec,
+                &mut stream,
+                &client_hello(self.instance_nonce, self.client_instance_id),
+            )
+            .await?;
+            let hello = read_server_hello_async(codec, &mut stream).await?;
+            Ok::<_, ClientError>((stream, hello))
+        })
+        .await
+        .map_err(|_| ClientError::RequestTimedOut)??;
         let selected_protocol_minor = validate_server_hello(&hello, self.instance_nonce)?;
         ensure_request_supported(&request, selected_protocol_minor)?;
         ensure_request_capability(&request, &hello.capabilities)?;
+        let deadline = source_transport_timeout(&request, options, selected_protocol_minor)
+            .map(|_| handshake_deadline);
+        let timeout_ms = deadline
+            .map(|deadline| remaining_timeout_ms(deadline, TokioInstant::now()))
+            .transpose()?;
+        let transport_timeout =
+            timeout_ms.map(|milliseconds| Duration::from_millis(u64::from(milliseconds)));
+        let effective_budget =
+            effective_budget_to_wire(options.effective_budget, transport_timeout)?;
         ensure_effective_budget_supported(effective_budget.as_ref(), selected_protocol_minor)?;
-        let timeout_ms = remaining_timeout_ms(deadline, TokioInstant::now())?;
-        ensure_budget_within_transport_timeout(
-            effective_budget.as_ref(),
-            Duration::from_millis(u64::from(timeout_ms)),
-        )?;
-        write_request_async(
-            codec,
-            &mut stream,
-            &daemon::RequestEnvelope {
-                request_id,
-                instance_nonce: self.instance_nonce.to_vec(),
-                timeout_ms: Some(timeout_ms),
-                effective_budget,
-                request: Some(request),
-            },
-        )
-        .await?;
-        let response = read_response_async(codec, &mut stream).await?;
-        wait_for_peer_close_async(&mut stream).await?;
-        match correlated_response(response, request_id)? {
-            daemon::response_envelope::Response::Error(error) => {
-                Err(ClientError::Public(Box::new(parse_public_error_for_minor(
-                    error,
-                    selected_protocol_minor,
-                )?)))
+        ensure_budget_within_transport_timeout(effective_budget.as_ref(), transport_timeout)?;
+        let exchange = async {
+            write_request_async(
+                codec,
+                &mut stream,
+                &daemon::RequestEnvelope {
+                    request_id,
+                    instance_nonce: self.instance_nonce.to_vec(),
+                    timeout_ms,
+                    effective_budget,
+                    request: Some(request),
+                },
+            )
+            .await?;
+            let response = if deadline.is_none() {
+                read_response_waiting_async(codec, &mut stream).await?
+            } else {
+                read_response_async(codec, &mut stream).await?
+            };
+            wait_for_peer_close_async(&mut stream).await?;
+            match correlated_response(response, request_id)? {
+                daemon::response_envelope::Response::Error(error) => {
+                    Err(ClientError::Public(Box::new(parse_public_error_for_minor(
+                        error,
+                        selected_protocol_minor,
+                    )?)))
+                }
+                response => Ok((response, selected_protocol_minor)),
             }
-            response => Ok((response, selected_protocol_minor)),
+        };
+        match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, exchange).await {
+                Ok(response) => finish_async_request(deadline, TokioInstant::now(), response),
+                Err(_) => Err(ClientError::RequestTimedOut),
+            },
+            None => exchange.await,
         }
+    }
+}
+
+fn source_transport_timeout(
+    request: &daemon::request_envelope::Request,
+    options: RequestOptions,
+    selected_protocol_minor: u32,
+) -> Option<Duration> {
+    let source = matches!(
+        request,
+        daemon::request_envelope::Request::SourceRead(_)
+            | daemon::request_envelope::Request::SourceFind(_)
+            | daemon::request_envelope::Request::SourceTextPrefixMetadataQuote(_)
+    );
+    if source
+        && selected_protocol_minor
+            >= rootlight_protocol::SOURCE_VERIFICATION_DURATION_PROTOCOL_MINOR
+        && options.timeout.is_none()
+        && options
+            .effective_budget
+            .is_none_or(|budget| budget.source_verification_duration_explicit() == Some(false))
+    {
+        None
+    } else {
+        Some(request_options_timeout(options))
     }
 }
 
@@ -7382,13 +7457,13 @@ fn request_timeout_ms(timeout: Duration) -> Result<u32, ClientError> {
 
 fn effective_budget_to_wire(
     budget: Option<EffectiveBudget>,
-    transport_timeout: Duration,
+    transport_timeout: Option<Duration>,
 ) -> Result<Option<daemon::FirstSliceEffectiveBudget>, ClientError> {
     let Some(budget) = budget else {
         return Ok(None);
     };
     let limits = budget.limits();
-    if limits.duration > transport_timeout {
+    if transport_timeout.is_some_and(|timeout| limits.duration > timeout) {
         return Err(ClientError::InvalidEffectiveBudget);
     }
     let duration_micros = u64::try_from(limits.duration.as_micros())
@@ -7405,14 +7480,18 @@ fn effective_budget_to_wire(
         duration_micros,
         depth: limits.depth,
         paths: limits.paths,
+        source_verification_duration_explicit: budget.source_verification_duration_explicit(),
     }))
 }
 
 fn ensure_budget_within_transport_timeout(
     budget: Option<&daemon::FirstSliceEffectiveBudget>,
-    transport_timeout: Duration,
+    transport_timeout: Option<Duration>,
 ) -> Result<(), ClientError> {
     let Some(budget) = budget else {
+        return Ok(());
+    };
+    let Some(transport_timeout) = transport_timeout else {
         return Ok(());
     };
     let transport_micros = u64::try_from(transport_timeout.as_micros())
@@ -7427,6 +7506,11 @@ fn ensure_effective_budget_supported(
     budget: Option<&daemon::FirstSliceEffectiveBudget>,
     selected_protocol_minor: u32,
 ) -> Result<(), ClientError> {
+    if budget.is_some_and(|budget| budget.source_verification_duration_explicit.is_some())
+        && selected_protocol_minor < rootlight_protocol::SOURCE_VERIFICATION_DURATION_PROTOCOL_MINOR
+    {
+        return Err(ClientError::ProtocolFeatureUnavailable);
+    }
     if budget.is_some() && selected_protocol_minor < 7 {
         return Err(ClientError::ProtocolFeatureUnavailable);
     }
@@ -7483,13 +7567,7 @@ fn coordinate_start(
                     return Err(ClientError::DaemonStartTimedOut);
                 }
                 let startup = CoordinatedStartup::spawn(launch, ownership, paths)?;
-                return wait_for_ready_daemon(
-                    paths,
-                    client_instance_id,
-                    deadlines,
-                    startup,
-                    readiness,
-                );
+                return wait_for_ready_daemon(paths, client_instance_id, startup, readiness);
             }
             Err(rootlight_runtime::RuntimeError::LaunchBusy) => {
                 match probe_ready_client(paths, client_instance_id)? {
@@ -7522,7 +7600,6 @@ fn coordinate_start(
 fn wait_for_ready_daemon(
     paths: &RuntimePaths,
     client_instance_id: [u8; 16],
-    mut deadlines: StartupDeadlines,
     mut startup: CoordinatedStartup,
     readiness: StartupReadiness,
 ) -> Result<StartupConnection, ClientError> {
@@ -7530,32 +7607,10 @@ fn wait_for_ready_daemon(
         if startup.child_exited()? {
             return Err(ClientError::DaemonLaunchFailed);
         }
-        let startup_signal = match startup.poll_startup_signal() {
-            Ok(signal) => signal,
-            Err(error) => {
-                startup.terminate()?;
-                return Err(error);
-            }
-        };
-        if startup_signal == Some(CoordinatedStartupSignal::ActiveGenerationRestore)
-            && let Err(error) = deadlines.authorize_recovery(Instant::now())
-        {
-            startup.terminate()?;
-            return Err(error);
-        }
-        let probe = probe_ready_client(paths, client_instance_id);
-        if matches!(probe, Ok(ProbeOutcome::Recovering(_)))
-            && let Err(error) = deadlines.authorize_recovery(Instant::now())
-        {
-            startup.terminate()?;
-            return Err(error);
-        }
-        let action = match classify_startup_probe(
-            probe,
-            startup.startup_signal_pending(),
-            Instant::now(),
-            deadlines,
+        let action = match startup.poll_readiness(
+            || probe_ready_client(paths, client_instance_id),
             readiness,
+            Instant::now,
         ) {
             Ok(action) => action,
             Err(error) => {
@@ -7575,7 +7630,7 @@ fn wait_for_ready_daemon(
                 });
             }
             StartupProbeAction::Continue => {
-                std::thread::sleep(deadlines.poll_interval());
+                std::thread::sleep(startup.deadlines.poll_interval());
             }
             StartupProbeAction::TimedOut => {
                 startup.terminate()?;
@@ -7634,9 +7689,15 @@ fn classify_startup_probe(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupRecoveryDeadline {
+    AuthenticatedProbe(Instant),
+    ExactChildAnnouncement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StartupDeadlines {
     initial: Instant,
-    recovery: Option<Instant>,
+    recovery: Option<StartupRecoveryDeadline>,
 }
 
 impl StartupDeadlines {
@@ -7649,17 +7710,29 @@ impl StartupDeadlines {
 
     fn authorize_recovery(&mut self, observed_at: Instant) -> Result<(), ClientError> {
         if self.recovery.is_none() {
-            self.recovery = Some(
+            self.recovery = Some(StartupRecoveryDeadline::AuthenticatedProbe(
                 observed_at
                     .checked_add(STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT)
                     .ok_or(ClientError::InvalidRequestTimeout)?,
-            );
+            ));
         }
         Ok(())
     }
 
+    fn authorize_announced_recovery(&mut self) {
+        self.recovery = Some(StartupRecoveryDeadline::ExactChildAnnouncement);
+    }
+
+    fn deadline(self) -> Option<Instant> {
+        match self.recovery {
+            Some(StartupRecoveryDeadline::ExactChildAnnouncement) => None,
+            Some(StartupRecoveryDeadline::AuthenticatedProbe(deadline)) => Some(deadline),
+            None => Some(self.initial),
+        }
+    }
+
     fn expired(self, now: Instant) -> bool {
-        now >= self.recovery.unwrap_or(self.initial)
+        self.deadline().is_some_and(|deadline| now >= deadline)
     }
 
     fn poll_interval(self) -> Duration {
@@ -7695,6 +7768,7 @@ struct CoordinatedStartup {
     authority: Option<LaunchLock>,
     ownership: StartupOwnership,
     child: Option<CoordinatedDaemonProcess>,
+    deadlines: StartupDeadlines,
 }
 
 impl CoordinatedStartup {
@@ -7704,11 +7778,43 @@ impl CoordinatedStartup {
         paths: &RuntimePaths,
     ) -> Result<Self, ClientError> {
         let child = spawn_coordinated_daemon(ownership, paths)?;
+        Self::from_spawned_child(authority, ownership, child)
+    }
+
+    fn from_spawned_child(
+        authority: LaunchLock,
+        ownership: StartupOwnership,
+        child: CoordinatedDaemonProcess,
+    ) -> Result<Self, ClientError> {
+        // A contender's earlier recovery observation belongs to that daemon;
+        // every newly owned child must first prove its own startup announcement.
+        let deadlines = StartupDeadlines::new(Instant::now())?;
         Ok(Self {
             authority: Some(authority),
             ownership,
             child: Some(child),
+            deadlines,
         })
+    }
+
+    fn poll_readiness(
+        &mut self,
+        probe: impl FnOnce() -> Result<ProbeOutcome, ClientError>,
+        readiness: StartupReadiness,
+        now: impl FnOnce() -> Instant,
+    ) -> Result<StartupProbeAction, ClientError> {
+        if self.poll_startup_signal()? == Some(CoordinatedStartupSignal::ActiveGenerationRestore) {
+            // Only this child's validated pipe signal permits an unlimited
+            // restore wait. Its exact process handle is still checked each poll.
+            self.deadlines.authorize_announced_recovery();
+        }
+        classify_startup_probe(
+            probe(),
+            self.startup_signal_pending(),
+            now(),
+            self.deadlines,
+            readiness,
+        )
     }
 
     fn poll_startup_signal(&mut self) -> Result<Option<CoordinatedStartupSignal>, ClientError> {
@@ -7992,17 +8098,12 @@ fn wait_before_startup_probe(
         return Err(ClientError::DaemonStartTimedOut);
     }
     let remaining = deadlines
-        .recovery
-        .unwrap_or(deadlines.initial)
-        .saturating_duration_since(now);
+        .deadline()
+        .map(|deadline| deadline.saturating_duration_since(now));
     // Contenders must leave CPU for the launch owner's child instead of
     // saturating a constrained host with filesystem and health probes.
-    std::thread::sleep(
-        deadlines
-            .poll_interval()
-            .max(*contention_interval)
-            .min(remaining),
-    );
+    let interval = deadlines.poll_interval().max(*contention_interval);
+    std::thread::sleep(remaining.map_or(interval, |remaining| interval.min(remaining)));
     *contention_interval = next_startup_contention_interval(*contention_interval);
     Ok(())
 }
@@ -8187,6 +8288,9 @@ fn ensure_request_supported(
         source_text::validate_source_text_prefix_request(request)?;
     }
     let required_minor = match request {
+        daemon::request_envelope::Request::SourceFind(_) => {
+            rootlight_protocol::SOURCE_FIND_PROTOCOL_MINOR
+        }
         daemon::request_envelope::Request::SourceTextPrefixMetadataQuote(_) => {
             rootlight_protocol::SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR
         }
@@ -8266,6 +8370,13 @@ fn ensure_request_capability(
     request: &daemon::request_envelope::Request,
     capabilities: &[String],
 ) -> Result<(), ClientError> {
+    if matches!(request, daemon::request_envelope::Request::SourceFind(_))
+        && !capabilities
+            .iter()
+            .any(|capability| capability == "source.find.v1")
+    {
+        return Err(ClientError::ProtocolFeatureUnavailable);
+    }
     if matches!(
         request,
         daemon::request_envelope::Request::GraphProjectionOpen(_)
@@ -17417,7 +17528,7 @@ mod tests {
         let budget = EffectiveBudget::new(limits).expect("budget validates");
         assert_eq!(budget.limits(), limits);
 
-        let wire = effective_budget_to_wire(Some(budget), Duration::from_secs(1))
+        let wire = effective_budget_to_wire(Some(budget), Some(Duration::from_secs(1)))
             .expect("budget encodes")
             .expect("budget is present");
         assert_eq!(
@@ -17440,8 +17551,11 @@ mod tests {
         );
         assert!(ensure_effective_budget_supported(Some(&wire), 7).is_ok());
         assert!(
-            ensure_budget_within_transport_timeout(Some(&wire), Duration::from_micros(499_999))
-                .is_err()
+            ensure_budget_within_transport_timeout(
+                Some(&wire),
+                Some(Duration::from_micros(499_999))
+            )
+            .is_err()
         );
 
         let mut invalid = limits;
@@ -17951,7 +18065,7 @@ mod tests {
             .expect("legacy symbol explain succeeds");
 
         let requests = server.await.expect("server task joins");
-        let expected = effective_budget_to_wire(Some(budget), timeout.duration())
+        let expected = effective_budget_to_wire(Some(budget), Some(timeout.duration()))
             .expect("budget encodes")
             .expect("budget is present");
         assert_eq!(requests[0].effective_budget.as_ref(), Some(&expected));
@@ -18243,6 +18357,12 @@ mod tests {
             authority: Some(authority),
             ownership: StartupOwnership::Detached,
             child: Some(child),
+            deadlines: StartupDeadlines {
+                initial: Instant::now()
+                    .checked_add(Duration::from_millis(250))
+                    .expect("startup deadline is representable"),
+                recovery: None,
+            },
         };
         let contender_paths = paths.clone();
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
@@ -18253,12 +18373,6 @@ mod tests {
             wait_for_ready_daemon(
                 &contender_paths,
                 [91; 16],
-                StartupDeadlines {
-                    initial: Instant::now()
-                        .checked_add(Duration::from_millis(250))
-                        .expect("startup deadline is representable"),
-                    recovery: None,
-                },
                 startup,
                 StartupReadiness::RequireReady,
             )
@@ -18304,6 +18418,7 @@ mod tests {
             authority: Some(authority),
             ownership: StartupOwnership::Detached,
             child: Some(child),
+            deadlines: StartupDeadlines::new(Instant::now()).unwrap(),
         };
         assert!(
             startup
@@ -18371,6 +18486,7 @@ mod tests {
             authority: Some(authority),
             ownership: StartupOwnership::Detached,
             child: Some(child),
+            deadlines: StartupDeadlines::new(Instant::now()).unwrap(),
         };
 
         assert!(
@@ -18522,7 +18638,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_child_recovery_signal_extends_only_its_fresh_attempt() {
+    fn authenticated_recovery_probe_remains_bounded() {
         let started_at = Instant::now();
         let mut deadlines =
             StartupDeadlines::new(started_at).expect("startup deadline is representable");
@@ -18564,13 +18680,148 @@ mod tests {
             classify_startup_probe(
                 Ok(ProbeOutcome::Unavailable),
                 false,
-                deadlines.recovery.expect("recovery deadline exists"),
+                deadlines
+                    .deadline()
+                    .expect("authenticated recovery deadline exists"),
                 deadlines,
                 StartupReadiness::RequireReady,
             )
             .expect("unavailable probe reaches its final bound"),
             StartupProbeAction::TimedOut
         ));
+    }
+
+    fn owned_startup_fixture(
+        base: &std::path::Path,
+    ) -> (CoordinatedStartup, RuntimePaths, RuntimePaths) {
+        let paths = RuntimePaths::new(base.join("owner-state"), base.join("owner-runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("runtime paths are private");
+        let authority = paths
+            .acquire_launch_lock()
+            .expect("startup authority is acquired");
+        let (child, child_paths) = spawn_cleanup_child(&base.join("child"));
+        let startup =
+            CoordinatedStartup::from_spawned_child(authority, StartupOwnership::Detached, child)
+                .expect("owned child receives a fresh startup window");
+        (startup, paths, child_paths)
+    }
+
+    #[test]
+    fn owned_child_recovery_probe_cannot_bypass_its_pending_announcement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut startup, paths, child_paths) = owned_startup_fixture(temporary.path());
+        let (signal, receiver) = mpsc::sync_channel(1);
+        let child = startup.child.as_mut().unwrap();
+        let pid = child.id();
+        child.startup_signal = Some(receiver);
+        let after_initial = startup.deadlines.initial + Duration::from_secs(1);
+        let recovering = || {
+            Ok(ProbeOutcome::Recovering(ReadyDaemon {
+                client: Client::new(test_endpoint("pending-owned-recovery"), [13; 16], [14; 16]),
+                identity: ReadyDaemonIdentity {
+                    pid,
+                    instance_nonce: [13; 16],
+                },
+            }))
+        };
+        assert!(matches!(
+            startup
+                .poll_readiness(recovering, StartupReadiness::RequireReady, || after_initial)
+                .unwrap(),
+            StartupProbeAction::TimedOut
+        ));
+        assert!(startup.deadlines.recovery.is_none());
+        signal
+            .send(Ok(CoordinatedStartupSignal::NoRecovery))
+            .unwrap();
+        assert!(matches!(
+            startup
+                .poll_readiness(recovering, StartupReadiness::RequireReady, || after_initial)
+                .unwrap(),
+            StartupProbeAction::TimedOut
+        ));
+        assert!(startup.deadlines.recovery.is_none());
+        drop(startup);
+        paths
+            .acquire_launch_lock()
+            .expect("startup authority releases");
+        child_paths
+            .acquire_launch_lock()
+            .expect("exact child is reaped");
+    }
+
+    #[test]
+    fn announced_owned_restore_wait_has_no_elapsed_ceiling() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut startup, paths, child_paths) = owned_startup_fixture(temporary.path());
+        let (signal, receiver) = mpsc::sync_channel(1);
+        startup.child.as_mut().unwrap().startup_signal = Some(receiver);
+        signal
+            .send(Ok(CoordinatedStartupSignal::ActiveGenerationRestore))
+            .unwrap();
+        let after_old_limit = startup.deadlines.initial + Duration::from_secs(3 * 60 * 60);
+        for observed in [
+            after_old_limit,
+            after_old_limit + Duration::from_secs(24 * 60 * 60),
+        ] {
+            assert!(!startup.child_exited().unwrap());
+            assert!(matches!(
+                startup
+                    .poll_readiness(
+                        || Ok(ProbeOutcome::Unavailable),
+                        StartupReadiness::RequireReady,
+                        || observed
+                    )
+                    .unwrap(),
+                StartupProbeAction::Continue
+            ));
+            assert_eq!(startup.deadlines.deadline(), None);
+            assert_eq!(
+                startup.deadlines.poll_interval(),
+                START_RECOVERY_POLL_INTERVAL
+            );
+        }
+        drop(startup);
+        paths
+            .acquire_launch_lock()
+            .expect("startup authority releases");
+        child_paths
+            .acquire_launch_lock()
+            .expect("exact child is reaped");
+    }
+
+    #[test]
+    fn newly_spawned_owned_child_does_not_inherit_contender_recovery() {
+        let previous_start = Instant::now()
+            .checked_sub(Duration::from_secs(3 * 60 * 60))
+            .unwrap();
+        let mut contender = StartupDeadlines::new(previous_start).unwrap();
+        contender.authorize_recovery(Instant::now()).unwrap();
+        assert!(!contender.expired(Instant::now()));
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut startup, paths, child_paths) = owned_startup_fixture(temporary.path());
+        assert!(startup.deadlines.initial > contender.initial);
+        assert!(startup.deadlines.initial < contender.deadline().unwrap());
+        assert!(startup.deadlines.recovery.is_none());
+        let after_initial = startup.deadlines.initial + Duration::from_secs(1);
+        assert!(matches!(
+            startup
+                .poll_readiness(
+                    || Ok(ProbeOutcome::Unavailable),
+                    StartupReadiness::RequireReady,
+                    || after_initial
+                )
+                .unwrap(),
+            StartupProbeAction::TimedOut
+        ));
+        drop(startup);
+        paths
+            .acquire_launch_lock()
+            .expect("startup authority releases");
+        child_paths
+            .acquire_launch_lock()
+            .expect("exact child is reaped");
     }
 
     #[test]
@@ -18834,6 +19085,7 @@ mod tests {
                 "repository.index.clean-rebuild.v1",
                 "repository.index.v1",
                 "repository.status.logical-snapshot.v1",
+                "source.find.v1",
                 "source.read.v1",
                 "symbol.explain.v1",
                 "support.bundle.v1",
@@ -21812,5 +22064,188 @@ mod tests {
             validate_scoped_support_bundle(&support, test_repository()),
             Err(ClientError::InvalidSupportBundle)
         ));
+    }
+    #[test]
+    fn source_transport_duration_preserves_omission_explicit_values_and_legacy_peers() {
+        let request =
+            daemon::request_envelope::Request::SourceRead(daemon::SourceReadRequest::default());
+        assert_eq!(
+            source_transport_timeout(&request, RequestOptions::new(), 28),
+            None
+        );
+        assert_eq!(
+            source_transport_timeout(&request, RequestOptions::new(), 27),
+            Some(DEFAULT_REQUEST_TIMEOUT)
+        );
+        for duration in [Duration::from_secs(2), DEFAULT_REQUEST_TIMEOUT] {
+            let options =
+                RequestOptions::new().with_timeout(RequestTimeout::new(duration).unwrap());
+            assert_eq!(
+                source_transport_timeout(&request, options, 28),
+                Some(duration)
+            );
+        }
+        let health = daemon::request_envelope::Request::Health(daemon::HealthRequest {});
+        assert_eq!(
+            source_transport_timeout(&health, RequestOptions::new(), 28),
+            Some(DEFAULT_REQUEST_TIMEOUT)
+        );
+        let legacy = EffectiveBudget::new(valid_effective_budget_limits()).unwrap();
+        assert_eq!(legacy.source_verification_duration_explicit(), None);
+        assert_eq!(
+            source_transport_timeout(
+                &request,
+                RequestOptions::new().with_effective_budget(legacy),
+                28
+            ),
+            Some(DEFAULT_REQUEST_TIMEOUT)
+        );
+        for explicit in [false, true] {
+            let budget = legacy.with_source_verification_duration_explicit(explicit);
+            let options = RequestOptions::new().with_effective_budget(budget);
+            assert_eq!(
+                source_transport_timeout(&request, options, 28),
+                explicit.then_some(DEFAULT_REQUEST_TIMEOUT)
+            );
+            let wire = effective_budget_to_wire(Some(budget), None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(wire.source_verification_duration_explicit, Some(explicit));
+            assert!(matches!(
+                ensure_effective_budget_supported(Some(&wire), 27),
+                Err(ClientError::ProtocolFeatureUnavailable)
+            ));
+            assert!(ensure_effective_budget_supported(Some(&wire), 28).is_ok());
+            assert_eq!(
+                source_transport_timeout(&health, options, 28),
+                Some(DEFAULT_REQUEST_TIMEOUT)
+            );
+        }
+    }
+    #[tokio::test]
+    async fn source_transport_waits_beyond_five_seconds_only_when_duration_is_omitted() {
+        for explicit_seconds in [None, Some(2), Some(5)] {
+            let (_temporary, endpoint) = async_test_endpoint("source-omitted-duration");
+            let listener = AsyncLocalListener::bind(endpoint.clone()).unwrap();
+            let instance_nonce = [31; 16];
+            let client = Client::new(endpoint, instance_nonce, [32; 16]);
+            let source = test_source(4, 0, 3);
+            let response = wire_source_read(&source);
+            let server = tokio::spawn(async move {
+                let (mut stream, request) = receive_async_request(&listener, instance_nonce).await;
+                assert_eq!(request.timeout_ms.is_some(), explicit_seconds.is_some());
+                tokio::time::sleep(Duration::from_millis(5_200)).await;
+                let sent = write_response_async(
+                    FrameCodec::default(),
+                    &mut stream,
+                    &daemon::ResponseEnvelope {
+                        request_id: request.request_id,
+                        response: Some(daemon::response_envelope::Response::SourceRead(response)),
+                    },
+                )
+                .await;
+                if explicit_seconds.is_none() {
+                    sent.unwrap();
+                }
+            });
+            let mut options = RequestOptions::new();
+            if let Some(seconds) = explicit_seconds {
+                options = options
+                    .with_timeout(RequestTimeout::new(Duration::from_secs(seconds)).unwrap());
+            }
+            let started = std::time::Instant::now();
+            let result = client
+                .source_read_async_with_options(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    &[source],
+                    options,
+                )
+                .await;
+            if explicit_seconds.is_none() {
+                result.unwrap();
+                assert!(started.elapsed() >= Duration::from_secs(5));
+            } else {
+                assert!(matches!(result, Err(ClientError::RequestTimedOut)));
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn source_transport_legacy_peer_keeps_default_and_rejects_new_omission_marker() {
+        for explicit_omission in [false, true] {
+            let (_temporary, endpoint) = async_test_endpoint("source-legacy-duration");
+            let listener = AsyncLocalListener::bind(endpoint.clone()).unwrap();
+            let instance_nonce = [33; 16];
+            let client = Client::new(endpoint, instance_nonce, [34; 16]);
+            let source = test_source(4, 0, 3);
+            let response = wire_source_read(&source);
+            let server = tokio::spawn(async move {
+                let mut stream = listener
+                    .accept_timeout(Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                read_client_hello_async(FrameCodec::default(), &mut stream)
+                    .await
+                    .unwrap();
+                let mut hello = async_server_hello(instance_nonce);
+                hello.selected_protocol.as_mut().unwrap().minor = 27;
+                write_server_hello_async(FrameCodec::default(), &mut stream, &hello)
+                    .await
+                    .unwrap();
+                let request = read_request_async(FrameCodec::default(), &mut stream).await;
+                if explicit_omission {
+                    assert!(
+                        request.is_err(),
+                        "new omission semantics cannot be silently dropped"
+                    );
+                } else {
+                    let request = request.unwrap();
+                    assert!(
+                        request
+                            .timeout_ms
+                            .is_some_and(|millis| millis > 0 && millis <= 5_000)
+                    );
+                    write_response_async(
+                        FrameCodec::default(),
+                        &mut stream,
+                        &daemon::ResponseEnvelope {
+                            request_id: request.request_id,
+                            response: Some(daemon::response_envelope::Response::SourceRead(
+                                response,
+                            )),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            });
+            let mut options = RequestOptions::new();
+            if explicit_omission {
+                options = options.with_effective_budget(
+                    EffectiveBudget::new(valid_effective_budget_limits())
+                        .unwrap()
+                        .with_source_verification_duration_explicit(false),
+                );
+            }
+            let result = client
+                .source_read_async_with_options(
+                    test_repository(),
+                    GenerationSelector::Active,
+                    &[source],
+                    options,
+                )
+                .await;
+            if explicit_omission {
+                assert!(matches!(
+                    result,
+                    Err(ClientError::ProtocolFeatureUnavailable)
+                ));
+            } else {
+                result.unwrap();
+            }
+            server.await.unwrap();
+        }
     }
 }

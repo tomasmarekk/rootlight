@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "original_path": "pcuic/theories/PCUICReduction.v",
+  "start_byte": 42683,
+  "end_byte": 42902,
+  "source_sha256": "bec821ed6d4d6dc07efc2afbf0640e473d9397983f68b434e67ca1a7cb2a602f",
+  "bytes": 219,
+  "whole_original_sha256": "8f7804080e429ffd37a7b5867e5dfe2dab973b3f613e7e22f2def9e31a930c05",
+  "unchanged_original_excerpt": true,
+  "license": {
+    "path": "LICENSE",
+    "sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390"
+  }
+}

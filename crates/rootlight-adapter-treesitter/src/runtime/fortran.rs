@@ -464,7 +464,12 @@ mod tests {
         CachedParse {
             entry_id: 1,
             projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
+            c_preprocessor_projection_policy: crate::runtime::C_PREPROCESSOR_PROJECTION_POLICY,
             fortran_projection_policy: FORTRAN_TEMPLATE_PROJECTION_POLICY,
+            cmake_header_projection_policy: crate::runtime::CMAKE_HEADER_PROJECTION_POLICY,
+            cmake_patch_projection_policy: crate::runtime::CMAKE_PATCH_PROJECTION_POLICY,
+            cmake_command_template_projection_policy:
+                crate::runtime::CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             identity,
             source: Arc::new(source.to_vec()),
             tree: Some(native_tree(input.as_bytes())),

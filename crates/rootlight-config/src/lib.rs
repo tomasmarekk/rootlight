@@ -27,28 +27,33 @@ pub const CONFIG_VERSION: ContractVersion = ContractVersion::new(1, 3);
 pub const DEFAULT_MAX_SOURCE_RESPONSE_BYTES: u64 = 64 * 1024;
 /// Hard source-byte ceiling for one source-bearing response in configuration 1.1.
 pub const MAX_SOURCE_RESPONSE_BYTES: u64 = 512 * 1024;
-/// Default bytes accepted from one source file for discovery and analysis.
-pub const DEFAULT_MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Default bytes accepted from one source file under the current contract.
+/// Frozen 1.0 through 1.2 contracts retain their original eight-MiB default.
+pub const DEFAULT_MAX_SOURCE_FILE_BYTES: u64 = MAX_SOURCE_FILE_BYTES;
 /// Hard bytes accepted from one source file for discovery and analysis.
 pub const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const LEGACY_DEFAULT_MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// Default repository entries visited during one discovery.
 pub const DEFAULT_MAX_DISCOVERY_ENTRIES: u32 = 100_000;
 /// Minimum repository entries accepted for one discovery.
 pub const MIN_DISCOVERY_ENTRIES: u32 = 1;
 /// Hard repository-entry ceiling for one discovery.
 pub const MAX_DISCOVERY_ENTRIES: u32 = 1_000_000;
-/// Default durable bytes retained for one repository.
-pub const DEFAULT_MAXIMUM_REPOSITORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default repository storage ceiling; actual free space governs admission.
+pub const DEFAULT_MAXIMUM_REPOSITORY_BYTES: u64 = u64::MAX;
 /// Minimum durable-byte budget accepted for one repository.
 pub const MINIMUM_REPOSITORY_BYTES: u64 = 128 * 1024 * 1024;
-/// Hard durable-byte budget accepted for one repository.
-pub const MAXIMUM_REPOSITORY_BYTES: u64 = 512 * 1024 * 1024 * 1024;
-/// Default aggregate durable-byte budget for one catalog.
-pub const DEFAULT_MAXIMUM_CATALOG_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Largest representable configured repository storage ceiling.
+pub const MAXIMUM_REPOSITORY_BYTES: u64 = u64::MAX;
+/// Default catalog storage ceiling; actual free space governs admission.
+pub const DEFAULT_MAXIMUM_CATALOG_BYTES: u64 = u64::MAX;
 /// Minimum aggregate durable-byte budget accepted for one catalog.
 pub const MINIMUM_CATALOG_BYTES: u64 = 1024 * 1024 * 1024;
-/// Hard aggregate durable-byte budget accepted for one catalog.
-pub const MAXIMUM_CATALOG_BYTES: u64 = 512 * 1024 * 1024 * 1024;
+/// Largest representable configured catalog storage ceiling.
+pub const MAXIMUM_CATALOG_BYTES: u64 = u64::MAX;
+const LEGACY_DEFAULT_MAXIMUM_REPOSITORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const LEGACY_DEFAULT_MAXIMUM_CATALOG_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const LEGACY_MAXIMUM_STORAGE_BYTES: u64 = 512 * 1024 * 1024 * 1024;
 /// Default number of repository registrations retained in one catalog.
 pub const DEFAULT_MAXIMUM_REPOSITORIES: u32 = 4_096;
 /// Minimum repository-registration capacity accepted for one catalog.
@@ -317,16 +322,10 @@ impl Default for AnalysisConfig {
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     /// Maximum durable bytes retained for one repository.
-    #[cfg_attr(
-        feature = "schema",
-        schemars(range(min = 134_217_728_i64, max = 549_755_813_888_i64))
-    )]
+    #[cfg_attr(feature = "schema", schemars(range(min = 134_217_728_i64)))]
     pub maximum_repository_bytes: u64,
     /// Maximum durable bytes retained across one catalog.
-    #[cfg_attr(
-        feature = "schema",
-        schemars(range(min = 1_073_741_824_i64, max = 549_755_813_888_i64))
-    )]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1_073_741_824_i64)))]
     pub maximum_catalog_bytes: u64,
     /// Number of complete published generations retained per repository.
     #[cfg_attr(feature = "schema", schemars(range(min = 2, max = 8)))]
@@ -557,6 +556,9 @@ struct EffectiveConfig {
     provenance: BTreeMap<String, ConfigSource>,
     hard_denial_provenance: BTreeMap<String, ConfigSource>,
     newest_contract: Option<ConfigContract>,
+    source_file_bytes_configured: bool,
+    repository_storage_bytes_configured: bool,
+    catalog_storage_bytes_configured: bool,
 }
 
 impl EffectiveConfig {
@@ -593,6 +595,9 @@ impl EffectiveConfig {
             provenance,
             hard_denial_provenance: BTreeMap::new(),
             newest_contract: None,
+            source_file_bytes_configured: false,
+            repository_storage_bytes_configured: false,
+            catalog_storage_bytes_configured: false,
         }
     }
 
@@ -659,6 +664,7 @@ impl EffectiveConfig {
                     });
                 }
                 self.analysis.max_source_file_bytes = max_source_file_bytes;
+                self.source_file_bytes_configured = true;
                 self.provenance
                     .insert("analysis.max_source_file_bytes".to_owned(), source);
             }
@@ -678,7 +684,7 @@ impl EffectiveConfig {
             if !matches!(source, ConfigSource::System | ConfigSource::User) {
                 return Err(ConfigError::StorageAuthority { authority: source });
             }
-            self.apply_storage(source, storage)?;
+            self.apply_storage(source, wire.contract, storage)?;
         }
         for (namespace, extension) in wire.extensions {
             validate_namespace(&namespace)?;
@@ -715,6 +721,7 @@ impl EffectiveConfig {
     fn apply_storage(
         &mut self,
         source: ConfigSource,
+        contract: ConfigContract,
         storage: PartialStorageConfig,
     ) -> Result<(), ConfigError> {
         if let Some(value) = storage.maximum_repository_bytes {
@@ -722,9 +729,14 @@ impl EffectiveConfig {
                 "storage.maximum_repository_bytes",
                 value,
                 MINIMUM_REPOSITORY_BYTES,
-                MAXIMUM_REPOSITORY_BYTES,
+                if contract == ConfigContract::V1_2 {
+                    LEGACY_MAXIMUM_STORAGE_BYTES
+                } else {
+                    MAXIMUM_REPOSITORY_BYTES
+                },
             )?;
             self.storage.maximum_repository_bytes = value;
+            self.repository_storage_bytes_configured = true;
             self.provenance
                 .insert("storage.maximum_repository_bytes".to_owned(), source);
         }
@@ -733,9 +745,14 @@ impl EffectiveConfig {
                 "storage.maximum_catalog_bytes",
                 value,
                 MINIMUM_CATALOG_BYTES,
-                MAXIMUM_CATALOG_BYTES,
+                if contract == ConfigContract::V1_2 {
+                    LEGACY_MAXIMUM_STORAGE_BYTES
+                } else {
+                    MAXIMUM_CATALOG_BYTES
+                },
             )?;
             self.storage.maximum_catalog_bytes = value;
+            self.catalog_storage_bytes_configured = true;
             self.provenance
                 .insert("storage.maximum_catalog_bytes".to_owned(), source);
         }
@@ -846,6 +863,21 @@ impl EffectiveConfig {
     fn finish(mut self) -> Result<ConfigSnapshot, ConfigError> {
         let contract = self.newest_contract.unwrap_or(ConfigContract::V1_3);
         let version = contract.version();
+        // Older contracts retain their canonical default and digest so stored
+        // configurations remain reproducible after the current default expands.
+        if contract != ConfigContract::V1_3 && !self.source_file_bytes_configured {
+            self.analysis.max_source_file_bytes = LEGACY_DEFAULT_MAX_SOURCE_FILE_BYTES;
+        }
+        if contract != ConfigContract::V1_3 {
+            if !self.repository_storage_bytes_configured {
+                self.storage.maximum_repository_bytes = LEGACY_DEFAULT_MAXIMUM_REPOSITORY_BYTES;
+            }
+            if !self.catalog_storage_bytes_configured {
+                self.storage.maximum_catalog_bytes = LEGACY_DEFAULT_MAXIMUM_CATALOG_BYTES;
+            }
+        } else if !self.repository_storage_bytes_configured {
+            self.storage.maximum_repository_bytes = self.storage.maximum_catalog_bytes;
+        }
         if contract != ConfigContract::V1_0
             && self.resources.max_source_bytes > MAX_SOURCE_RESPONSE_BYTES
         {
@@ -853,7 +885,7 @@ impl EffectiveConfig {
                 field: "max_source_bytes",
             });
         }
-        validate_storage_invariants(self.storage)?;
+        validate_storage_invariants(self.storage, contract)?;
         let canonical = match contract {
             ConfigContract::V1_0 => {
                 self.provenance.remove("analysis.max_source_file_bytes");
@@ -951,16 +983,29 @@ where
     }
 }
 
-fn validate_storage_invariants(storage: StorageConfig) -> Result<(), ConfigError> {
+fn validate_storage_invariants(
+    storage: StorageConfig,
+    contract: ConfigContract,
+) -> Result<(), ConfigError> {
     if storage.maximum_repository_bytes > storage.maximum_catalog_bytes {
         return Err(ConfigError::StorageInvariant {
             field: "storage.maximum_repository_bytes",
         });
     }
-    if storage
-        .maximum_catalog_bytes
-        .checked_add(storage.minimum_free_disk_bytes)
-        .is_none_or(|required| required > MAXIMUM_CATALOG_BYTES)
+    // An absent quota uses the representation ceiling, independently of the
+    // free-space reserve checked against the filesystem at publication.
+    if (contract != ConfigContract::V1_3 || storage.maximum_catalog_bytes != u64::MAX)
+        && storage
+            .maximum_catalog_bytes
+            .checked_add(storage.minimum_free_disk_bytes)
+            .is_none_or(|required| {
+                required
+                    > if contract == ConfigContract::V1_3 {
+                        MAXIMUM_CATALOG_BYTES
+                    } else {
+                        LEGACY_MAXIMUM_STORAGE_BYTES
+                    }
+            })
     {
         return Err(ConfigError::StorageInvariant {
             field: "storage.maximum_catalog_bytes",
@@ -1440,15 +1485,9 @@ struct PartialStorageConfigV1_2 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct PartialStorageConfig {
-    #[cfg_attr(
-        feature = "schema",
-        schemars(range(min = 134_217_728_i64, max = 549_755_813_888_i64))
-    )]
+    #[cfg_attr(feature = "schema", schemars(range(min = 134_217_728_i64)))]
     maximum_repository_bytes: Option<u64>,
-    #[cfg_attr(
-        feature = "schema",
-        schemars(range(min = 1_073_741_824_i64, max = 549_755_813_888_i64))
-    )]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1_073_741_824_i64)))]
     maximum_catalog_bytes: Option<u64>,
     #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 4_096)))]
     maximum_repositories: Option<u32>,
@@ -1914,6 +1953,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_file_defaults_preserve_legacy_contracts_and_explicit_limits() {
+        let current = ConfigSnapshot::resolve(&[]).unwrap();
+        assert_eq!(
+            current.analysis().max_source_file_bytes,
+            MAX_SOURCE_FILE_BYTES
+        );
+        for version in ["1.0", "1.1", "1.2"] {
+            let contents = format!("version = \"{version}\"\n");
+            let legacy = ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: &contents,
+            }])
+            .unwrap();
+            assert_eq!(
+                legacy.analysis().max_source_file_bytes,
+                LEGACY_DEFAULT_MAX_SOURCE_FILE_BYTES
+            );
+        }
+        for version in ["1.1", "1.2", "1.3"] {
+            for maximum in [4096, MAX_SOURCE_FILE_BYTES] {
+                let contents = format!(
+                    "version = \"{version}\"\n[analysis]\nmax_source_file_bytes = {maximum}\n"
+                );
+                for source in [ConfigSource::Defaults, ConfigSource::User] {
+                    let configured = ConfigSnapshot::resolve(&[ConfigLayer {
+                        source,
+                        contents: &contents,
+                    }])
+                    .unwrap();
+                    assert_eq!(configured.analysis().max_source_file_bytes, maximum);
+                }
+            }
+        }
+        let explicit_current = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.3\"\n[analysis]\nmax_source_file_bytes = 67108864\n",
+        }])
+        .unwrap();
+        assert_eq!(current.hash(), explicit_current.hash());
+        assert_eq!(
+            current.canonical_bytes(),
+            explicit_current.canonical_bytes()
+        );
+    }
+
+    #[test]
     fn rejects_unknown_security_fields_without_echoing_values() {
         let error = ConfigSnapshot::resolve(&[ConfigLayer {
             source: ConfigSource::User,
@@ -2105,7 +2190,7 @@ max_source_bytes = 16777216
         );
         assert_eq!(
             snapshot.analysis().max_source_file_bytes,
-            DEFAULT_MAX_SOURCE_FILE_BYTES
+            LEGACY_DEFAULT_MAX_SOURCE_FILE_BYTES
         );
         assert!(
             !snapshot
@@ -2381,6 +2466,71 @@ maximum_repositories = 176
                     authority: observed
                 }) if observed == authority
             ));
+        }
+    }
+
+    #[test]
+    fn current_storage_defaults_use_free_space_and_keep_explicit_quotas() {
+        let current = ConfigSnapshot::resolve(&[]).expect("current defaults resolve");
+        assert_eq!(current.storage().maximum_repository_bytes, u64::MAX);
+        assert_eq!(current.storage().maximum_catalog_bytes, u64::MAX);
+        assert_eq!(
+            current.storage().minimum_free_disk_bytes,
+            DEFAULT_MINIMUM_FREE_DISK_BYTES
+        );
+        let explicit = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.3\"\n[storage]\nmaximum_catalog_bytes = 1073741824\n",
+        }])
+        .expect("an explicit catalog quota limits its default repository quota");
+        assert_eq!(explicit.storage().maximum_catalog_bytes, 1_073_741_824);
+        assert_eq!(explicit.storage().maximum_repository_bytes, 1_073_741_824);
+        let equivalent = ConfigSnapshot::resolve(&[ConfigLayer {
+            source: ConfigSource::User,
+            contents: "version = \"1.3\"\n[storage]\nmaximum_catalog_bytes = 1073741824\nmaximum_repository_bytes = 1073741824\n",
+        }])
+        .expect("equivalent explicit quotas resolve");
+        assert_eq!(explicit.canonical_bytes(), equivalent.canonical_bytes());
+        assert_eq!(explicit.hash(), equivalent.hash());
+
+        let large = "version = \"1.3\"\n[storage]\nmaximum_repository_bytes = 1099511627776\nmaximum_catalog_bytes = 2199023255552\n";
+        assert_eq!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: large,
+            }])
+            .expect("representable explicit quotas above the old ceiling resolve")
+            .storage()
+            .maximum_repository_bytes,
+            1_099_511_627_776
+        );
+        assert!(matches!(
+            ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: &large.replace("1.3", "1.2"),
+            }]),
+            Err(ConfigError::ResourceLimitOutOfRange {
+                field: "storage.maximum_repository_bytes"
+            })
+        ));
+    }
+
+    #[test]
+    fn frozen_storage_defaults_keep_their_effective_values_and_identity() {
+        for version in ["1.0", "1.1", "1.2"] {
+            let contents = format!("version = {version:?}\n");
+            let snapshot = ConfigSnapshot::resolve(&[ConfigLayer {
+                source: ConfigSource::User,
+                contents: &contents,
+            }])
+            .expect("frozen defaults resolve");
+            assert_eq!(snapshot.storage().maximum_repository_bytes, 8_589_934_592);
+            assert_eq!(snapshot.storage().maximum_catalog_bytes, 68_719_476_736);
+            if version == "1.2" {
+                let expected = r#"{"version":"1.2","security":{"network":"deny","repository_execution":"deny","in_process_native_plugins":"deny"},"resources":{"max_source_bytes":65536,"max_results":50},"analysis":{"default_tier":"structural","max_source_file_bytes":8388608},"storage":{"maximum_repository_bytes":8589934592,"maximum_catalog_bytes":68719476736,"retained_generations":2,"minimum_free_disk_bytes":67108864,"source_reservation_factor":25,"oracle_reservation_factor":8},"extensions":{}}"#;
+                assert_eq!(snapshot.canonical_bytes(), expected.as_bytes());
+                assert_eq!(snapshot.hash(), content_hash(expected.as_bytes()));
+            }
         }
     }
 

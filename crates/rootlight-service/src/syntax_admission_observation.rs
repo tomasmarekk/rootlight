@@ -8,7 +8,6 @@ use std::{
     io::{self, Write},
     marker::PhantomData,
     rc::Rc,
-    time::{Duration, Instant},
 };
 
 use rootlight_adapter_sdk::AnalysisLimits;
@@ -503,14 +502,6 @@ pub(super) fn observe(
     ))
 }
 
-fn deadline(seconds: u64) -> Cancellation {
-    Cancellation::with_deadline(
-        Instant::now()
-            .checked_add(Duration::from_secs(seconds))
-            .unwrap(),
-    )
-}
-
 #[test]
 fn public_prepare_observation_conserves_demands_without_publication() {
     use rootlight_ids::derive_repository;
@@ -527,7 +518,7 @@ fn public_prepare_observation_conserves_demands_without_publication() {
     ] {
         std::fs::write(root.path().join(path), text).unwrap();
     }
-    let cancellation = deadline(30);
+    let cancellation = Cancellation::new();
     let service = FirstSliceService::new(1).unwrap();
     let repository = derive_repository(b"syntax-admission-observer-contract").id();
     let canonical = canonical_repository_root(root.path(), &cancellation).unwrap();
@@ -648,7 +639,7 @@ fn mixed_prepare_observation_separates_shared_and_per_file_quotas() {
     for (path, text) in inputs {
         std::fs::write(root.path().join(path), text).unwrap();
     }
-    let cancellation = deadline(30);
+    let cancellation = Cancellation::new();
     let mut service = FirstSliceService::new(1).unwrap();
     service.analysis_limits =
         super::analysis_limits_with_syntax_records(&service.analysis_limits, 128).unwrap();
@@ -788,7 +779,7 @@ fn capture_guard_drop_and_nested_rejection_leave_normal_threads_unarmed() {
 
 #[test]
 fn observation_json_writer_rejects_growth_without_partial_success() {
-    let cancellation = deadline(30);
+    let cancellation = Cancellation::new();
     let mut output = BoundedJson {
         bytes: Vec::new(),
         maximum: 8,
@@ -822,7 +813,7 @@ fn observe_repository_syntax_admission() {
         .expect("explicit repository identity is required")
         .parse()
         .expect("repository identity is valid");
-    let cancellation = deadline(3600);
+    let cancellation = Cancellation::new();
     let canonical = canonical_repository_root(&root, &cancellation).unwrap();
     let output = std::path::absolute(output).unwrap();
     let parent = std::fs::canonicalize(output.parent().expect("output has a parent")).unwrap();

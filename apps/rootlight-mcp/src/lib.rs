@@ -54,10 +54,11 @@ pub use executor::{
     HistoryComparePortResponse, OperationStatusPortRequest, PlanChangePortRequest,
     PlanChangePortResponse, QueryAdvancedPortRequest, QueryAdvancedPortResponse,
     ReadResponseMetadata, RepositoryCatalogPagePortRequest, RepositoryIndexPortRequest,
-    RepositoryIndexPortResponse, RepositoryStatusPortRequest, SourceReadLosslessPortResponse,
-    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
-    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
-    TestsSelectPortRequest, TestsSelectPortResponse, ToolExecutorBuildError,
+    RepositoryIndexPortResponse, RepositoryStatusPortRequest, SourceFindPortRequest,
+    SourceReadLosslessPortResponse, SourceReadPortRequest, SourceReadPortResponse,
+    SymbolExplainPortRequest, SymbolExplainPortResponse, SymbolRelationshipsPortRequest,
+    SymbolRelationshipsPortResponse, TestsSelectPortRequest, TestsSelectPortResponse,
+    ToolExecutorBuildError,
 };
 pub use tools::{
     ToolExecutionError, ToolExecutionFailure, ToolExecutionFuture, ToolExecutor, ToolRegistryError,

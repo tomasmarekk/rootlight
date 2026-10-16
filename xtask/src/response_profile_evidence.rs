@@ -143,7 +143,8 @@ fn build_bundle() -> Result<EvidenceBundle, ResponseProfileEvidenceError> {
 
     if CAPABILITIES.len() != McpTool::ALL.len() || examples.len() != McpTool::ALL.len() {
         return Err(ResponseProfileEvidenceError::Contract(
-            "the response-profile source must contain the canonical 19-tool catalog".to_owned(),
+            "the response-profile source must contain the current canonical tool catalog"
+                .to_owned(),
         ));
     }
     let source_ref = examples
@@ -812,6 +813,7 @@ fn representative_output(
         | McpTool::RepoList
         | McpTool::OperationStatus
         | McpTool::SourceRead
+        | McpTool::SourceFind
         | McpTool::QueryAdvanced => return Ok(output),
     };
     let target = output.get_mut("data").ok_or_else(|| {
@@ -937,6 +939,7 @@ fn analytical_batch_tool(tool: McpTool) -> Option<BatchTool> {
         | McpTool::OperationStatus
         | McpTool::HistoryCompare
         | McpTool::QueryAdvanced
+        | McpTool::SourceFind
         | McpTool::QueryBatch => None,
     }
 }

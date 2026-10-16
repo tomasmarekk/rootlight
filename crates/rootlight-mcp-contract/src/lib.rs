@@ -16,6 +16,7 @@ pub mod json;
 pub mod pagination;
 pub mod repository;
 pub mod source_entity;
+pub mod source_find;
 pub mod source_text;
 pub mod vertical;
 
@@ -31,6 +32,7 @@ pub use rootlight_error::{
     DetailKey, ErrorCode, NextAction, PublicError, PublicErrorBuildError, PublicValue, SafeLabel,
     error_definition,
 };
+pub use source_find::{SourceFindInput, SourceFindOutput};
 pub use vertical::{
     CodeLocateInput, CodeLocateOutput, ContinuationCursor, GenerationSelector,
     OperationStatusInput, OperationStatusOutput, RepoIndexInput, RepoIndexOutput,

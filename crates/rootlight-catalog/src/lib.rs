@@ -296,8 +296,8 @@ pub struct OracleReader {
 /// Conservative materialization workspace for one validated oracle read.
 ///
 /// The plan is derived and admitted within the same read transaction. It keeps
-/// full record envelopes except for the closed, heap-free identity-registry keys,
-/// and separately reserves transient decoding of one opaque or locator payload.
+/// typed vector and validation workspaces for closed records, full envelopes for
+/// opaque and auxiliary rows, and transient decoding of one opaque or locator payload.
 /// It is a logical reservation, not an allocator, heap, or RSS measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OracleReadMemoryPlan {

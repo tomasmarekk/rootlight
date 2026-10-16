@@ -61,11 +61,13 @@ pub enum VerticalTool {
     QueryAdvanced,
     /// Executes up to sixteen read operations under one generation.
     QueryBatch,
+    /// Scans exact case-sensitive literals in one generation-pinned file.
+    SourceFind,
 }
 
 impl VerticalTool {
     /// Complete deterministic first-slice tool catalog.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::RepoIndex,
         Self::RepoStatus,
         Self::RepoList,
@@ -85,6 +87,7 @@ impl VerticalTool {
         Self::SourceRead,
         Self::QueryAdvanced,
         Self::QueryBatch,
+        Self::SourceFind,
     ];
 
     /// Stable tool name advertised through MCP.
@@ -110,6 +113,7 @@ impl VerticalTool {
             Self::SourceRead => "source.read",
             Self::QueryAdvanced => "query.advanced",
             Self::QueryBatch => "query.batch",
+            Self::SourceFind => "source.find",
         }
     }
 
@@ -119,6 +123,7 @@ impl VerticalTool {
         match self {
             Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
             Self::SourceRead => crate::source_text::SOURCE_READ_TEXT_VERSION,
+            Self::SourceFind => crate::source_find::SOURCE_FIND_VERSION,
             Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
             Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
@@ -222,6 +227,9 @@ impl VerticalTool {
             Self::QueryBatch => include_str!(
                 "../../../schemas/generated/json/mcp-query-batch-input-1.0.schema.json"
             ),
+            Self::SourceFind => include_str!(
+                "../../../schemas/generated/json/mcp-source-find-input-1.1.schema.json"
+            ),
         }
     }
 
@@ -285,6 +293,9 @@ impl VerticalTool {
             ),
             Self::QueryBatch => include_str!(
                 "../../../schemas/generated/json/mcp-query-batch-output-1.0.schema.json"
+            ),
+            Self::SourceFind => include_str!(
+                "../../../schemas/generated/json/mcp-source-find-output-1.1.schema.json"
             ),
         }
     }
@@ -4496,8 +4507,8 @@ mod tests {
             .expect("retained tool contracts contain a tool array");
         assert_eq!(
             tools.len(),
-            VerticalTool::ALL.len(),
-            "fixture must retain one example for every public tool"
+            19,
+            "the immutable fixture retains the original nineteen public tools"
         );
         let mut retained = BTreeSet::new();
 
@@ -4786,11 +4797,28 @@ mod tests {
         }
         assert_eq!(
             retained,
-            VerticalTool::ALL
-                .into_iter()
-                .map(VerticalTool::name)
-                .collect(),
-            "retained examples must match the complete public catalog"
+            BTreeSet::from([
+                "repo.index",
+                "repo.status",
+                "repo.list",
+                "operation.status",
+                "code.locate",
+                "symbol.explain",
+                "symbol.relationships",
+                "flow.trace",
+                "change.impact",
+                "tests.select",
+                "architecture.overview",
+                "architecture.cycles",
+                "code.dead",
+                "history.compare",
+                "plan.change",
+                "context.pack",
+                "source.read",
+                "query.advanced",
+                "query.batch",
+            ]),
+            "the frozen fixture must preserve the original nineteen contracts"
         );
 
         let current_repo_list: Value = serde_json::from_str(include_str!(

@@ -11,15 +11,14 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
 };
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisOutput, AnalysisRequest,
     BatchThresholds, DiagnosticCode, EncodingId, GenerationBoundSnapshot, IncludedRange,
     LanguageAnalyzer, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,
-    ParseCapabilities, ParseProvider, ParseReport, ParseRequest, RequestError, ResourceKind,
-    SinkError, StreamLimits, SyntaxFactBatch, SyntaxFactSink, execute_analysis,
+    ParseCapabilities, ParseProvider, ParseReport, ParseRequest, ResourceKind, SinkError,
+    StreamLimits, SyntaxFactBatch, SyntaxFactSink, execute_analysis,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
@@ -49,8 +48,16 @@ mod apex_native;
 mod assembly_native;
 #[path = "analyzer_e2e/astro_native.rs"]
 mod astro_native;
+#[path = "analyzer_e2e/cmake_native.rs"]
+mod cmake_native;
+#[path = "analyzer_e2e/cmake_patch.rs"]
+mod cmake_patch;
 #[path = "analyzer_e2e/common_lisp_native.rs"]
 mod common_lisp_native;
+#[path = "analyzer_e2e/coq_native.rs"]
+mod coq_native;
+#[path = "analyzer_e2e/cpp_preprocessor.rs"]
+mod cpp_preprocessor;
 #[path = "analyzer_e2e/dart_native.rs"]
 mod dart_native;
 #[path = "analyzer_e2e/dtd_native.rs"]
@@ -63,14 +70,22 @@ mod ecmascript_imports;
 mod ecmascript_native;
 #[path = "analyzer_e2e/ecmascript_references.rs"]
 mod ecmascript_references;
+#[path = "analyzer_e2e/eiffel_native.rs"]
+mod eiffel_native;
 #[path = "analyzer_e2e/glsl_native.rs"]
 mod glsl_native;
 #[path = "analyzer_e2e/groovy_native.rs"]
 mod groovy_native;
+#[path = "analyzer_e2e/hdl_native.rs"]
+mod hdl_native;
 #[path = "analyzer_e2e/hlsl_native.rs"]
 mod hlsl_native;
 #[path = "analyzer_e2e/html_native.rs"]
 mod html_native;
+#[path = "analyzer_e2e/jsonc_native.rs"]
+mod jsonc_native;
+#[path = "analyzer_e2e/julia_native.rs"]
+mod julia_native;
 #[path = "analyzer_e2e/markdown_native.rs"]
 mod markdown_native;
 #[path = "analyzer_e2e/matlab_native.rs"]
@@ -89,6 +104,8 @@ mod perl_native;
 mod powershell_native;
 #[path = "analyzer_e2e/r_native.rs"]
 mod r_native;
+#[path = "analyzer_e2e/rust_bindings.rs"]
+mod rust_bindings;
 #[path = "analyzer_e2e/sas_native.rs"]
 mod sas_native;
 #[path = "analyzer_e2e/scala_native.rs"]
@@ -99,6 +116,8 @@ mod scheme_native;
 mod solidity_native;
 #[path = "analyzer_e2e/sql_native.rs"]
 mod sql_native;
+#[path = "analyzer_e2e/v_native.rs"]
+mod v_native;
 #[path = "analyzer_e2e/vba_native.rs"]
 mod vba_native;
 #[path = "analyzer_e2e/wgsl_native.rs"]
@@ -1312,14 +1331,20 @@ fn prepared_artifact_rejects_batch_caps_that_drop_required_identity() {
     let analyzer = analyzer(&provider, case);
     let fixture = Fixture::new(case, source.as_bytes());
     let defaults = limits();
+    let full_request = request(&fixture.snapshot, &fixture.source, case, &defaults);
+    let required = provider
+        .required_syntax_fact_count(&full_request.to_parse_request(), &deadline())
+        .unwrap();
+    let batch_records = 10;
+
     let syntax_stream = StreamLimits::new(
-        2,
-        20,
+        required.div_ceil(batch_records),
+        required + 1,
         defaults.syntax_stream().max_output_bytes(),
         defaults.syntax_stream().max_diagnostics(),
         defaults.syntax_stream().max_diagnostic_bytes(),
         defaults.syntax_stream().max_string_bytes(),
-        BatchThresholds::new(10, 1024 * 1024, 32, 128 * 1024).unwrap(),
+        BatchThresholds::new(batch_records, 1024 * 1024, 32, 128 * 1024).unwrap(),
     )
     .unwrap();
     let bounded_limits = AnalysisLimits::new(
@@ -1339,17 +1364,30 @@ fn prepared_artifact_rejects_batch_caps_that_drop_required_identity() {
         .unwrap();
     assert!(source_demand > bounded_limits.syntax_stream().batch().max_records());
     assert!(source_demand <= bounded_limits.syntax_stream().max_records());
-    // The clipping diagnostic spends one batch. Publishing the old ten-fact
-    // prefix would lose mandatory identities rather than optional evidence.
-    assert!(matches!(
-        analyzer.prepare_artifact(&bounded_request, &deadline()),
+    assert!(
+        source_demand
+            > (bounded_limits.syntax_stream().max_batches() - 1)
+                * bounded_limits.syntax_stream().batch().max_records()
+    );
+    // Initial batch credit admits preflight; the clipping diagnostic then
+    // spends one record and one batch, making mandatory identity loss visible.
+    match analyzer.prepare_artifact(&bounded_request, &deadline()) {
         Err(AdapterError::Sink(SinkError::StreamLimit {
             resource: ResourceKind::Batches,
-            observed: 2,
-            limit: 1,
-        }))
-    ));
-    let full_request = request(&fixture.snapshot, &fixture.source, case, &defaults);
+            observed,
+            limit,
+        })) => {
+            assert_eq!(
+                observed,
+                source_demand.div_ceil(bounded_limits.syntax_stream().batch().max_records())
+            );
+            assert_eq!(limit, bounded_limits.syntax_stream().max_batches() - 1);
+        }
+        other => panic!(
+            "batch pressure must reject mandatory identity loss: {:?}",
+            other.err()
+        ),
+    }
     let artifact = analyzer
         .prepare_artifact(&full_request, &deadline())
         .unwrap();
@@ -1615,13 +1653,6 @@ fn prepared_artifact_preserves_sdk_admission_and_transactional_cancellation() {
     let limits = limits();
     let request = request(&fixture.snapshot, &fixture.source, case, &limits);
     let (analyzer, parser) = counting_analyzer(case, ParseTestBehavior::Native);
-    assert!(matches!(
-        analyzer.prepare_artifact(&request, &Cancellation::new()),
-        Err(AdapterError::RejectedRequest(
-            RequestError::DeadlineRequired
-        ))
-    ));
-    assert_eq!(parser.invocations.load(Ordering::Relaxed), 0);
     let cancelled = deadline();
     assert!(cancelled.cancel(CancellationReason::ClientRequest));
     assert!(matches!(
@@ -1631,6 +1662,12 @@ fn prepared_artifact_preserves_sdk_admission_and_transactional_cancellation() {
         })
     ));
     assert_eq!(parser.invocations.load(Ordering::Relaxed), 0);
+
+    let artifact = analyzer
+        .prepare_artifact(&request, &Cancellation::new())
+        .expect("explicit cancellation admits artifact preparation without a deadline");
+    assert!(artifact.syntax_fact_count() > 0);
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
 
     let (invalid_analyzer, invalid_parser) =
         counting_analyzer(case, ParseTestBehavior::InvalidSequence);
@@ -3332,7 +3369,7 @@ fn reviewed_rust_structural_profile_marks_tests_and_scoped_calls() {
         .iter()
         .find(|occurrence| {
             occurrence.role == OccurrenceRole::CallSite
-                && occurrence.syntactic_text_hash == content_hash(b"handle")
+                && occurrence.syntactic_text_hash == content_hash(b"crate::worker::handle")
         })
         .expect("qualified scoped call is captured");
     assert_eq!(
@@ -3342,6 +3379,24 @@ fn reviewed_rust_structural_profile_marks_tests_and_scoped_calls() {
     assert_eq!(
         scoped_call.source.span().end_byte() - scoped_call.source.span().start_byte(),
         u64::try_from("crate::worker::handle".len()).expect("fixture length fits")
+    );
+    assert!(matches!(
+        scoped_call.target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    let span = scoped_call.source.span();
+    assert_eq!(
+        &SOURCE.as_bytes()[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        b"crate::worker::handle"
+    );
+    assert!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.source.span() == span
+                && gap.detail == "rust-call-dispatch-target-unavailable")
     );
 }
 
@@ -3968,7 +4023,7 @@ fn assert_contract(
         if relation.predicate == RelationPredicate::Contains {
             continue;
         }
-        assert_eq!(case.name, "lua");
+        assert!(matches!(case.name, "lua" | "rust"));
         assert_eq!(relation.predicate, RelationPredicate::RefersTo);
         let RelationEndpoint::Occurrence(id) = relation.subject else {
             panic!("lexical relationship retains an occurrence endpoint");
@@ -4254,11 +4309,7 @@ fn direct_evidence(source: &SourceRef) -> FactEvidence {
 }
 
 fn deadline() -> Cancellation {
-    Cancellation::with_deadline(
-        Instant::now()
-            .checked_add(Duration::from_secs(30))
-            .expect("test deadline is representable"),
-    )
+    Cancellation::new()
 }
 
 struct Fixture {

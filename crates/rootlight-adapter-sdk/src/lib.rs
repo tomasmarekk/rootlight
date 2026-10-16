@@ -23,6 +23,7 @@ mod prolog_names;
 mod r_names;
 mod report;
 mod request;
+mod rust_bindings;
 mod sink;
 mod sql_names;
 mod structural;
@@ -65,6 +66,9 @@ pub use request::{
     AnalysisRequest, AnalysisUnitId, BuildTargetId, GeneratedOriginMapping,
     GenerationBoundSnapshot, IncludedRange, NativeVbaModuleKind, ParseRequest,
     ProjectAnalysisRequest, ProjectSourceInput, TransformationId,
+};
+pub use rust_bindings::{
+    RustBindingLookup, RustBindings, RustDirectDefinition, canonical_rust_identifier,
 };
 pub use sink::{
     AdapterDiagnostic, AnalysisOutput, BoundedIrSink, BoundedSyntaxSink, DiagnosticCode, IrBatch,

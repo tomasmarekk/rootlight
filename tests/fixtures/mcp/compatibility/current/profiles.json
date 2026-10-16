@@ -8,7 +8,8 @@
         "symbol.explain",
         "context.pack",
         "source.read",
-        "query.batch"
+        "query.batch",
+        "source.find"
       ]
     },
     {
@@ -26,7 +27,8 @@
         "code.dead",
         "context.pack",
         "source.read",
-        "query.batch"
+        "query.batch",
+        "source.find"
       ]
     },
     {
@@ -50,7 +52,8 @@
         "context.pack",
         "source.read",
         "query.advanced",
-        "query.batch"
+        "query.batch",
+        "source.find"
       ]
     }
   ],

@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "original_path": "utils/theories/MRUtils.v",
+  "source": {
+    "path": "tests/native-grammars/tests/fixtures/coq-tactic-notations/MRUtils.v",
+    "bytes": 7039,
+    "sha256": "873ba19c53438d87129d222a18c77f493a9b0d2165a18f0bf3cf708d48d4db27"
+  },
+  "license": {
+    "path": "tests/native-grammars/tests/fixtures/coq-tactic-notations/LICENSE",
+    "bytes": 1312,
+    "sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390"
+  },
+  "unaltered_complete_original": true
+}

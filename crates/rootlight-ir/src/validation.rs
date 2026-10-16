@@ -16,6 +16,7 @@ const DEFAULT_MAX_NESTED_ITEMS_PER_RECORD: usize = 4_096;
 const DEFAULT_MAX_STRING_BYTES: usize = 32_768;
 const DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_EXTENSION_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_RECORDS: usize = 10_000_000;
 const JSON_ESCAPE_EXPANSION: usize = 6;
 const MAX_ENCODED_FACT_REF_BYTES: usize = 320;
 const FIXED_ENVELOPE_WIRE_BYTES: usize = 4 * 1024;
@@ -115,10 +116,12 @@ impl Default for IrLimits {
             max_provenance_records: 2_000_000,
             max_source_mappings: 1_000_000,
             max_coverage_records: 500_000,
-            max_skipped_regions: 100_000,
+            // Concrete gap evidence competes for the aggregate record and byte
+            // capacities instead of losing later files to a separate count cap.
+            max_skipped_regions: DEFAULT_MAX_TOTAL_RECORDS,
             max_diagnostics: 10_000,
             max_extensions: 1_100_000,
-            max_total_records: 10_000_000,
+            max_total_records: DEFAULT_MAX_TOTAL_RECORDS,
             max_nested_items_per_record: DEFAULT_MAX_NESTED_ITEMS_PER_RECORD,
             max_total_nested_items: 20_000_000,
             max_string_bytes: DEFAULT_MAX_STRING_BYTES,
@@ -2245,6 +2248,33 @@ mod tests {
             hash,
             None,
         )
+    }
+
+    #[test]
+    fn default_gap_credit_shares_total_records_and_preserves_explicit_limits() {
+        let mut document = fixture();
+        document
+            .skipped_regions
+            .resize(100_001, document.skipped_regions[0].clone());
+        let limits = IrLimits::default();
+        let usage = IrDocumentUsage::measure(&document, &limits).unwrap();
+        assert_eq!(usage.skipped_regions(), 100_001);
+        assert!(usage.total_records() < limits.max_total_records);
+        let mut limited = limits.clone();
+        limited.max_skipped_regions = 100_000;
+        assert!(matches!(
+            IrDocumentUsage::measure(&document, &limited),
+            Err(IrDocumentUsageError::Validation(
+                IrDocumentValidationError::CollectionLimit {
+                    collection: "skipped_regions",
+                    observed: 100_001,
+                    limit: 100_000,
+                }
+            ))
+        ));
+        limited.max_skipped_regions = limits.max_skipped_regions;
+        limited.max_total_string_bytes = usage.total_string_bytes() - 1;
+        assert!(IrDocumentUsage::measure(&document, &limited).is_err());
     }
 
     #[test]

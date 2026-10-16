@@ -1,0 +1,84 @@
+{
+  "schema": "rootlight.original-command-excerpts/1",
+  "repository": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "license": "MIT",
+  "notice_file": "LICENSE",
+  "notice_sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390",
+  "source_bytes_unchanged": true,
+  "excerpts_are_syntax_controls_not_standalone_typechecked_programs": true,
+  "files": [
+    {
+      "fixture": "dirpath_eqdec.v",
+      "original_path": "common/theories/Kernames.v",
+      "original_sha256": "0210a7c90390611acd27574128b9f288ce5f80fd640a21371a4441729d2d4c4d",
+      "original_start_byte": 3284,
+      "original_end_byte": 3346,
+      "bytes": 62,
+      "sha256": "140abd3ff850128b8ea29660ac690a83cb3095fb3ed7a4d8b9e406eb76778c3b"
+    },
+    {
+      "fixture": "reflect_prim_int.v",
+      "original_path": "common/theories/Reflect.v",
+      "original_sha256": "c9f69203cee63c0282b3cc071f5fc2c831b44be8f060f696ea91bb804b3b6aa6",
+      "original_start_byte": 375,
+      "original_end_byte": 512,
+      "bytes": 137,
+      "sha256": "87d4e77815187660a325872cc9b3ae69295e88173f5f33a398ede6de14e00579"
+    },
+    {
+      "fixture": "subrel_config_impl_cmp.v",
+      "original_path": "pcuic/theories/PCUICWeakeningConfig.v",
+      "original_sha256": "b48a9ab0658177b21413e528ee56eb91b8da9f751eb44794d33a045aa9e7b877",
+      "original_start_byte": 523,
+      "original_end_byte": 690,
+      "bytes": 167,
+      "sha256": "e4d4d98e3b0df92a20b6ccb51cb4d6c379dbbd246ae9679ae6be570ce81d9011"
+    },
+    {
+      "fixture": "subst_instance_list.v",
+      "original_path": "pcuic/theories/Syntax/PCUICUnivSubst.v",
+      "original_sha256": "3b1d0887971abc934abbad7d982d2d9665ae5f0a8835148dd941ab5b7f16d760",
+      "original_start_byte": 225,
+      "original_end_byte": 335,
+      "bytes": 110,
+      "sha256": "0b992d3d18298cd9289453b7f6d7f5178f845800da669016f1737916772fe4f1"
+    },
+    {
+      "fixture": "quote_name.v",
+      "original_path": "quotation/theories/ToPCUIC/Common/BasicAst.v",
+      "original_sha256": "219193de9336edc468facd126c29d406c2cea95644d187dd36eaff79191fee45",
+      "original_start_byte": 465,
+      "original_end_byte": 548,
+      "bytes": 83,
+      "sha256": "94d55970bb0cdcf40022582f8c808a2a52db7ebf6e94d3643c0a9bebc5cdcb90"
+    },
+    {
+      "fixture": "ascii_eqdec.v",
+      "original_path": "utils/theories/MRPrelude.v",
+      "original_sha256": "9af70797dddca0f96c62406a919052325267060c7cd5e248804b1459d0ad2c5a",
+      "original_start_byte": 213,
+      "original_end_byte": 268,
+      "bytes": 55,
+      "sha256": "282dc8b377de5b77a92038f2eb636f6cbd91362ece50c65a9ff30ce0857f257b"
+    },
+    {
+      "fixture": "Monad_result.v",
+      "original_path": "utils/theories/ResultMonad.v",
+      "original_sha256": "b6794abba89fbc00d5bc76b7d82056971d2ad386c5b03b042296d0b7ca1b5a78",
+      "original_start_byte": 153,
+      "original_end_byte": 341,
+      "bytes": 188,
+      "sha256": "95990a00454b53c8f460369e1bbecdc2729c3aae0f05682723a484cbdd4d158d"
+    },
+    {
+      "fixture": "tmExistingInstance.v",
+      "original_path": "test-suite/tmExistingInstance.v",
+      "original_sha256": "d02c4f16d8504beadc269d2a0107b04a7f736be272393318329b75fd90b267e3",
+      "original_start_byte": 0,
+      "original_end_byte": 313,
+      "bytes": 313,
+      "sha256": "d02c4f16d8504beadc269d2a0107b04a7f736be272393318329b75fd90b267e3"
+    }
+  ]
+}

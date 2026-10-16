@@ -379,7 +379,7 @@ fn generated_origin_provenance_rule_retains_transformation_and_digest() {
 }
 
 #[test]
-fn project_execution_enforces_deadline_cancellation_and_output_quota() {
+fn project_execution_accepts_optional_deadlines_and_enforces_cancellation_and_output_quota() {
     let fixture = ProjectFixture::new();
     let limits = limits(ProjectAnalysisLimits::new(4, 4096, 1024, 8, 4096, 128, 128).unwrap());
     let context = b"{}";
@@ -396,18 +396,15 @@ fn project_execution_enforces_deadline_cancellation_and_output_quota() {
         1,
     );
 
-    let error = execute_project_analysis(
+    let output = execute_project_analysis(
         &analyzer,
         &project_request,
         ExtensionSupport::default(),
         MemoryAdmissionPolicy::RequireHardOrAccounted,
         &Cancellation::new(),
     )
-    .expect_err("deadline is mandatory");
-    assert_eq!(
-        error,
-        AdapterError::RejectedRequest(RequestError::DeadlineRequired)
-    );
+    .expect("explicit cancellation admits project analysis without a deadline");
+    assert_eq!(output.document().files.len(), fixture.inputs().len());
 
     let cancelled = MockProjectLanguageAnalyzer::new(
         analyzer.descriptor().clone(),

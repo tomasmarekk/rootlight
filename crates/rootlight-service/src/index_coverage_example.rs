@@ -3,6 +3,7 @@
 //! describe recorded evidence, not an independent semantic completeness oracle.
 //! Resume measures a reopened service; warm sequences keep one service alive and
 //! wait for external source edits between newline-delimited reports.
+//! Observations have no fixed wall-clock cutoff; failures retain their phase.
 //! Gap matches identify exact-span occurrences, not the semantic owner of a gap.
 //! Bounded gap text comes from verified source reads; omissions carry reasons.
 //! Opt-in source accounting verifies every retained source without exporting
@@ -15,7 +16,7 @@ use std::{
     fs,
     io::{BufRead, Read, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use rootlight_cancel::Cancellation;
@@ -26,7 +27,7 @@ use rootlight_ir::{
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
     FirstSliceBudget, FirstSliceIndexMode, FirstSliceIndexProgress, FirstSliceService,
-    FirstSliceStoragePolicy,
+    FirstSliceStoragePolicy, capture_first_slice_analysis_profile,
 };
 use rootlight_source::{SourceEncoding, SourceReadOptions};
 use serde_json::json;
@@ -60,6 +61,7 @@ struct Arguments<'a> {
     state_mode: StateMode,
     sequence: bool,
     report_mode: ReportMode,
+    analysis_profile: bool,
     paths: &'a [OsString],
 }
 
@@ -67,6 +69,7 @@ fn parse_arguments(args: &[OsString]) -> Result<Arguments<'_>, Box<dyn Error>> {
     let mut state_mode = StateMode::Fresh;
     let mut sequence = false;
     let mut report_mode = ReportMode::Full;
+    let mut analysis_profile = false;
     let mut lifetime_selected = false;
     let mut flags = 0;
     for argument in args {
@@ -91,6 +94,12 @@ fn parse_arguments(args: &[OsString]) -> Result<Arguments<'_>, Box<dyn Error>> {
                 }
                 report_mode = ReportMode::SourceAccounting;
             }
+            Some("--analysis-profile") => {
+                if analysis_profile {
+                    return Err("duplicate analysis-profile flag".into());
+                }
+                analysis_profile = true;
+            }
             _ => return Err("unknown diagnostic flag".into()),
         }
         flags += 1;
@@ -101,7 +110,7 @@ fn parse_arguments(args: &[OsString]) -> Result<Arguments<'_>, Box<dyn Error>> {
             .iter()
             .any(|argument| argument.to_string_lossy().starts_with("--"))
     {
-        return Err("usage: index_coverage [--resume | --warm-sequence] [--source-accounting] REPOSITORY STATE_DIRECTORY [CONFIG_FILE]".into());
+        return Err("usage: index_coverage [--resume | --warm-sequence] [--source-accounting] [--analysis-profile] REPOSITORY STATE_DIRECTORY [CONFIG_FILE]".into());
     }
     if sequence && report_mode == ReportMode::SourceAccounting {
         return Err("source-accounting does not support warm sequences".into());
@@ -110,6 +119,7 @@ fn parse_arguments(args: &[OsString]) -> Result<Arguments<'_>, Box<dyn Error>> {
         state_mode,
         sequence,
         report_mode,
+        analysis_profile,
         paths,
     })
 }
@@ -128,13 +138,7 @@ struct DiagnosticSession {
     open_wall_micros: u128,
     lifetime: ServiceLifetime,
     report_mode: ReportMode,
-}
-
-fn deadline() -> Result<Cancellation, Box<dyn Error>> {
-    let end = Instant::now()
-        .checked_add(Duration::from_secs(3600))
-        .ok_or("diagnostic deadline is not representable")?;
-    Ok(Cancellation::with_deadline(end))
+    analysis_profile: bool,
 }
 
 fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -169,6 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         state_mode: mode,
         sequence,
         report_mode,
+        analysis_profile,
         paths: args,
     } = parse_arguments(&args)?;
     let repository = PathBuf::from(&args[0]);
@@ -184,16 +189,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transpose()?;
     if sequence {
         let mut session = DiagnosticSession::open(&repository, &state, config.as_deref(), mode)?;
+        session.analysis_profile = analysis_profile;
         run_sequence(
             &mut session,
             &mut std::io::stdin().lock(),
             &mut std::io::stdout().lock(),
         )?;
     } else {
-        let report = match report_mode {
-            ReportMode::Full => inspect(&repository, &state, config.as_deref(), mode)?,
-            ReportMode::SourceAccounting => {
-                inspect_source_accounting(&repository, &state, config.as_deref(), mode)?
+        let report = if analysis_profile {
+            let mut session =
+                DiagnosticSession::open(&repository, &state, config.as_deref(), mode)?;
+            session.report_mode = report_mode;
+            session.analysis_profile = true;
+            session.inspect()?
+        } else {
+            match report_mode {
+                ReportMode::Full => inspect(&repository, &state, config.as_deref(), mode)?,
+                ReportMode::SourceAccounting => {
+                    inspect_source_accounting(&repository, &state, config.as_deref(), mode)?
+                }
             }
         };
         write_pretty_report(&report, &mut std::io::stdout().lock())?;
@@ -274,8 +288,11 @@ impl DiagnosticSession {
         let paths = RuntimePaths::new(state.join("state"), state.join("runtime"))?;
         paths.prepare_owner()?;
         let opened = Instant::now();
-        let service =
-            FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()?)?;
+        let service = FirstSliceService::new_durable_with_policy(
+            policy,
+            paths.state_dir(),
+            &Cancellation::new(),
+        )?;
         let open_wall_micros = opened.elapsed().as_micros();
         Ok(Self {
             service,
@@ -287,6 +304,7 @@ impl DiagnosticSession {
                 StateMode::Resume => ServiceLifetime::Reopened,
             },
             report_mode: ReportMode::Full,
+            analysis_profile: false,
         })
     }
 
@@ -298,6 +316,7 @@ impl DiagnosticSession {
             open_wall_micros,
             lifetime,
             report_mode,
+            analysis_profile,
         } = self;
         if *report_mode == ReportMode::SourceAccounting && matches!(lifetime, ServiceLifetime::Warm)
         {
@@ -307,7 +326,7 @@ impl DiagnosticSession {
             ServiceLifetime::Fresh => None,
             ServiceLifetime::Reopened | ServiceLifetime::Warm => {
                 let registered = service
-                    .registered_repository_for_root(repository, &deadline()?)?
+                    .registered_repository_for_root(repository, &Cancellation::new())?
                     .ok_or("resume repository is not registered in this state")?;
                 Some(
                     service
@@ -316,8 +335,12 @@ impl DiagnosticSession {
                 )
             }
         };
-        let (cold, cold_timing) = index_with_timing(service, repository)?;
-        let (no_op, no_op_timing) = index_with_timing(service, repository)?;
+        let (cold, cold_timing) =
+            index_with_optional_analysis_profile(service, repository, *analysis_profile)
+                .map_err(|error| format!("index operation failed: {error}"))?;
+        let (no_op, no_op_timing) =
+            index_with_optional_analysis_profile(service, repository, *analysis_profile)
+                .map_err(|error| format!("no-op verification failed: {error}"))?;
         if cold != no_op {
             return Err("unchanged repository produced a different receipt".into());
         }
@@ -326,7 +349,7 @@ impl DiagnosticSession {
             service.inspect_generation(
                 cold.repository,
                 Some(cold.generation),
-                &deadline()?,
+                &Cancellation::new(),
                 |snapshot| -> Result<_, Box<dyn Error>> {
                     if *report_mode == ReportMode::SourceAccounting {
                         let (rows, accounting) = inspect_source_files(
@@ -429,23 +452,75 @@ impl DiagnosticSession {
     }
 }
 
+fn index_with_optional_analysis_profile(
+    service: &mut FirstSliceService,
+    repository: &Path,
+    enabled: bool,
+) -> Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>> {
+    if !enabled {
+        return index_with_timing(service, repository);
+    }
+    let (result, profile) =
+        capture_first_slice_analysis_profile(|| index_with_timing(service, repository));
+    let profile = serde_json::to_value(profile).unwrap_or_else(|_| {
+        json!({
+            "events_complete":false,
+            "counts_complete":false,
+            "serialization_complete":false,
+            "error_code":"profile_serialization_failed"
+        })
+    });
+    finish_profiled_index_with_writer(result, profile, || std::io::stderr().lock())
+}
+
+fn finish_profiled_index_with_writer<Writer: Write>(
+    result: Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>>,
+    profile: serde_json::Value,
+    errors: impl FnOnce() -> Writer,
+) -> Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>> {
+    match result {
+        Ok((receipt, mut timing)) => {
+            timing["analysis_profile"] = profile;
+            Ok((receipt, timing))
+        }
+        Err(error) => {
+            // Diagnostic output failure cannot replace the original indexing result.
+            let record = json!({"schema":"rootlight-index-analysis-profile-failure/1", "index_result":"error", "profile_scope":"partial_failed_operation", "analysis_profile":profile});
+            let mut errors = errors();
+            let _ = serde_json::to_writer(&mut errors, &record)
+                .and_then(|()| errors.write_all(b"\n").map_err(serde_json::Error::io));
+            Err(error)
+        }
+    }
+}
+
 fn index_with_timing(
     service: &mut FirstSliceService,
     repository: &Path,
 ) -> Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>> {
-    let cancellation = deadline()?;
+    let cancellation = Cancellation::new();
     let started = Instant::now();
     let mut timeline = Vec::new();
-    let prepared = service.prepare_repository_with_mode_and_progress(
-        repository,
-        FirstSliceIndexMode::Structural,
-        &cancellation,
-        |progress: FirstSliceIndexProgress| {
-            timeline.push((Instant::now(), progress));
-        },
-    )?;
+    let prepared = service
+        .prepare_repository_with_mode_and_progress(
+            repository,
+            FirstSliceIndexMode::Structural,
+            &cancellation,
+            |progress: FirstSliceIndexProgress| {
+                timeline.push((Instant::now(), progress));
+            },
+        )
+        .map_err(|error| {
+            format!(
+                "preparation failed after {} microseconds; last progress: {:?}; cause: {error}",
+                started.elapsed().as_micros(),
+                timeline.last().map(|(_, progress)| progress)
+            )
+        })?;
     let prepared_at = Instant::now();
-    let commit = service.publish_prepared_with_metrics(prepared, &cancellation)?;
+    let commit = service
+        .publish_prepared_with_metrics(prepared, &cancellation)
+        .map_err(|error| format!("publication failed: {error}"))?;
     let published_at = Instant::now();
     let mut previous_event = started;
     let mut previous_completed = started;
@@ -627,7 +702,7 @@ impl<'a> FileSourceVerifier<'a> {
                     .with_context_lines_after(0)
                     .with_encoding(encoding),
                 FirstSliceBudget::default(),
-                &deadline()?,
+                &Cancellation::new(),
             )?;
             if read.data.generation != self.generation || read.data.chunks.len() != 1 {
                 return Err(format!(
@@ -1013,11 +1088,264 @@ mod tests {
         tempfile::tempdir_in(parent).unwrap()
     }
 
+    #[derive(Debug)]
+    struct OriginalIndexCancellation {
+        reason: rootlight_service::CancellationReason,
+    }
+
+    impl std::fmt::Display for OriginalIndexCancellation {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "original indexing cancellation: {:?}",
+                self.reason
+            )
+        }
+    }
+
+    impl Error for OriginalIndexCancellation {}
+
+    struct ProfileWriter {
+        bytes: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+        reject_json: bool,
+        reject_newline: bool,
+    }
+
+    impl Write for ProfileWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.reject_json || (self.reject_newline && bytes == b"\n") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "controlled profile output failure",
+                ));
+            }
+            self.bytes.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn analysis_profile_failure_output_preserves_original_error_on_json_or_newline_failure() {
+        for (reject_json, reject_newline) in [(true, false), (false, true), (false, false)] {
+            let original = Box::new(OriginalIndexCancellation {
+                reason: rootlight_service::CancellationReason::ClientRequest,
+            });
+            let address = std::ptr::from_ref(original.as_ref());
+            let bytes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let writer = ProfileWriter {
+                bytes: std::rc::Rc::clone(&bytes),
+                reject_json,
+                reject_newline,
+            };
+            let result = finish_profiled_index_with_writer(
+                Err(original),
+                json!({"events_complete":false,"counts_complete":false}),
+                || writer,
+            );
+            let returned = result
+                .unwrap_err()
+                .downcast::<OriginalIndexCancellation>()
+                .unwrap();
+            assert!(std::ptr::eq(address, returned.as_ref()));
+            assert_eq!(
+                returned.reason,
+                rootlight_service::CancellationReason::ClientRequest
+            );
+            let bytes = bytes.borrow();
+            if reject_json {
+                assert!(bytes.is_empty());
+            } else {
+                let line: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(line["schema"], "rootlight-index-analysis-profile-failure/1");
+                assert_eq!(line["index_result"], "error");
+                assert_eq!(line["analysis_profile"]["events_complete"], false);
+                assert_eq!(bytes.ends_with(b"\n"), !reject_newline);
+            }
+        }
+    }
+
+    #[test]
+    fn analysis_profile_success_preserves_receipt_and_timing_without_acquiring_stderr() {
+        let directory = tempdir();
+        fs::write(directory.path().join("lib.rs"), "pub fn profiled() {}\n").unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let (receipt, timing) = index_with_timing(&mut service, directory.path()).unwrap();
+        assert!(timing.get("analysis_profile").is_none());
+        let profile = json!({"events_complete":true,"counts_complete":true});
+        let (returned, mut updated) = finish_profiled_index_with_writer(
+            Ok((receipt.clone(), timing.clone())),
+            profile.clone(),
+            || -> Vec<u8> { panic!("successful indexing must not acquire the error writer") },
+        )
+        .unwrap();
+        assert_eq!(returned, receipt);
+        assert_eq!(
+            updated
+                .as_object_mut()
+                .unwrap()
+                .remove("analysis_profile")
+                .unwrap(),
+            profile
+        );
+        assert_eq!(updated, timing);
+    }
+
+    #[test]
+    fn analysis_profile_flag_is_opt_in_and_preserves_mode_validation() {
+        for flags in [
+            vec![],
+            vec!["--resume"],
+            vec!["--warm-sequence"],
+            vec!["--source-accounting"],
+        ] {
+            let args: Vec<_> = flags
+                .into_iter()
+                .chain(["repository", "state"])
+                .map(OsString::from)
+                .collect();
+            assert!(!parse_arguments(&args).unwrap().analysis_profile);
+        }
+        for flags in [
+            vec!["--analysis-profile"],
+            vec!["--resume", "--analysis-profile"],
+            vec!["--analysis-profile", "--warm-sequence"],
+            vec!["--source-accounting", "--analysis-profile"],
+        ] {
+            let args: Vec<_> = flags
+                .into_iter()
+                .chain(["repository", "state"])
+                .map(OsString::from)
+                .collect();
+            assert!(parse_arguments(&args).unwrap().analysis_profile);
+        }
+        for flags in [
+            vec!["--analysis-profile", "--analysis-profile"],
+            vec!["--analysis-profile", "--resume", "--warm-sequence"],
+            vec![
+                "--analysis-profile",
+                "--source-accounting",
+                "--warm-sequence",
+            ],
+        ] {
+            let args: Vec<_> = flags
+                .into_iter()
+                .chain(["repository", "state"])
+                .map(OsString::from)
+                .collect();
+            assert!(parse_arguments(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn analysis_profile_is_absent_by_default_in_fresh_warm_and_resume_reports() {
+        let directory = tempdir();
+        let repository = directory.path().join("repository");
+        let state = directory.path().join("state");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("lib.rs"), "pub fn profiled() -> u8 { 1 }\n").unwrap();
+        let mut session =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
+        let fresh = session.inspect().unwrap();
+        assert_eq!(fresh["schema"], "rootlight-index-coverage-diagnostic/4");
+        assert!(fresh["cold_timing"].get("analysis_profile").is_none());
+        assert!(fresh["no_op_timing"].get("analysis_profile").is_none());
+        fs::write(repository.join("lib.rs"), "pub fn profiled() -> u8 { 2 }\n").unwrap();
+        let warm = session.inspect().unwrap();
+        assert_eq!(warm["schema"], "rootlight-index-warm-update-diagnostic/1");
+        assert!(warm["update_timing"].get("analysis_profile").is_none());
+        assert!(warm["no_op_timing"].get("analysis_profile").is_none());
+        drop(session);
+        let mut resumed =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Resume).unwrap();
+        let report = resumed.inspect().unwrap();
+        assert_eq!(report["schema"], "rootlight-index-update-diagnostic/1");
+        assert!(report["update_timing"].get("analysis_profile").is_none());
+        assert!(report["no_op_timing"].get("analysis_profile").is_none());
+    }
+
+    #[test]
+    fn analysis_profile_reports_each_explicit_operation_and_noop_has_no_analysis_phases() {
+        let directory = tempdir();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("lib.rs"), "pub fn profiled() -> u8 { 1 }\n").unwrap();
+        let mut session = DiagnosticSession::open(
+            &repository,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        )
+        .unwrap();
+        session.analysis_profile = true;
+        let initial = session.inspect().unwrap();
+        assert_eq!(
+            initial["cold_timing"]["analysis_profile"]["counts_complete"],
+            true
+        );
+        assert!(
+            !initial["cold_timing"]["analysis_profile"]["phases"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            initial["no_op_timing"]["analysis_profile"]["phases"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        fs::write(repository.join("lib.rs"), "pub fn profiled() -> u8 { 2 }\n").unwrap();
+        let update = session.inspect().unwrap();
+        assert_eq!(
+            update["update_timing"]["analysis_profile"]["events_complete"],
+            true
+        );
+        assert!(
+            !update["update_timing"]["analysis_profile"]["phases"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            update["no_op_timing"]["analysis_profile"]["phases"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_index_reports_preparation_context_without_a_success_receipt() {
+        let directory = tempdir();
+        let missing_repository = directory.path().join("missing");
+        let mut service = FirstSliceService::new(2).unwrap();
+        let cause = service
+            .prepare_repository_with_mode_and_progress(
+                &missing_repository,
+                FirstSliceIndexMode::Structural,
+                &Cancellation::new(),
+                |_| {},
+            )
+            .err()
+            .unwrap()
+            .to_string();
+        let error = index_with_timing(&mut service, &missing_repository)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("preparation failed after "), "{error}");
+        assert!(error.contains("last progress: None"), "{error}");
+        assert!(error.ends_with(&format!("cause: {cause}")), "{error}");
+    }
+
     fn inspected_document(repository: &Path, state: &Path) -> rootlight_ir::NormalizedIrDocument {
         let session = DiagnosticSession::open(repository, state, None, StateMode::Resume).unwrap();
         let registered = session
             .service
-            .registered_repository_for_root(repository, &deadline().unwrap())
+            .registered_repository_for_root(repository, &Cancellation::new())
             .unwrap()
             .unwrap();
         let generation = session
@@ -1030,7 +1358,7 @@ mod tests {
             .inspect_generation(
                 registered,
                 Some(generation),
-                &deadline().unwrap(),
+                &Cancellation::new(),
                 |snapshot| snapshot.document().clone(),
             )
             .unwrap()
@@ -1868,7 +2196,7 @@ mod tests {
             .inspect_generation(
                 receipt.repository,
                 Some(receipt.generation),
-                &deadline().unwrap(),
+                &Cancellation::new(),
                 |snapshot| snapshot.document().clone(),
             )
             .unwrap();
@@ -2080,7 +2408,7 @@ mod tests {
             DiagnosticSession::open(&repository, &state, None, StateMode::Resume).unwrap();
         let registered = session
             .service
-            .registered_repository_for_root(&repository, &deadline().unwrap())
+            .registered_repository_for_root(&repository, &Cancellation::new())
             .unwrap()
             .unwrap();
         let generation = session
@@ -2093,7 +2421,7 @@ mod tests {
             .inspect_generation(
                 registered,
                 Some(generation),
-                &deadline().unwrap(),
+                &Cancellation::new(),
                 |snapshot| snapshot.document().clone(),
             )
             .unwrap();
@@ -2501,7 +2829,7 @@ mod tests {
         .unwrap();
         paths.prepare_owner().unwrap();
         let mut service =
-            FirstSliceService::new_durable(2, paths.state_dir(), &deadline().unwrap()).unwrap();
+            FirstSliceService::new_durable(2, paths.state_dir(), &Cancellation::new()).unwrap();
         let (cold, _) = index_with_timing(&mut service, &repository).unwrap();
         fs::write(&file, "pub fn value() -> i32 { 2 }\n").unwrap();
         let (changed, timing) = index_with_timing(&mut service, &repository).unwrap();
@@ -3014,7 +3342,7 @@ mod tests {
             DiagnosticSession::open(&repository, &state, None, StateMode::Resume).unwrap();
         let registered = session
             .service
-            .registered_repository_for_root(&repository, &deadline().unwrap())
+            .registered_repository_for_root(&repository, &Cancellation::new())
             .unwrap()
             .unwrap();
         let generation = session
@@ -3027,7 +3355,7 @@ mod tests {
             .inspect_generation(
                 registered,
                 Some(generation),
-                &deadline().unwrap(),
+                &Cancellation::new(),
                 |snapshot| {
                     inspect_source_files(snapshot, &session.service, &repository, generation)
                 },

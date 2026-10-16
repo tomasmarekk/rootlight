@@ -456,10 +456,96 @@ fn success_examples(root: &Path) -> Result<Value, CompatibilityError> {
     )?;
     upgrade_additive_success_example(&mut tools, "plan.change", "1.1", |_| Ok(()))?;
     upgrade_additive_success_example(&mut tools, "context.pack", "1.1", |_| Ok(()))?;
+    tools.push(source_find_success_example()?);
     validate_examples(&tools)?;
     Ok(json!({
         "schema": CURRENT_SCHEMA,
         "tools": tools,
+    }))
+}
+
+fn source_find_success_example() -> Result<Value, CompatibilityError> {
+    use rootlight_ids::{ContentHash, FileId, GenerationId, RepositoryId};
+    use rootlight_ir::{SourceRef, SourceSpan};
+    use rootlight_mcp_contract::{
+        TrustClassification,
+        source_find::{
+            SourceFindData, SourceFindEnvelope, SourceFindFile, SourceFindSchemaVersion,
+            SourceFindStop,
+        },
+        source_text::SourceTextEncoding,
+        vertical::{CacheStatus, RequiredNullable, ResolvedRepository, UsageSummary},
+    };
+
+    let repository = RepositoryId::from_bytes([1; 16]);
+    let generation = GenerationId::from_bytes([2; 20]);
+    let file = FileId::from_bytes([3; 20]);
+    let source = b"aaaaa";
+    let hash = ContentHash::from_bytes(*blake3::hash(source).as_bytes());
+    let output = SourceFindEnvelope {
+        schema_version: SourceFindSchemaVersion::V1_1,
+        repository: ResolvedRepository {
+            repository_id: repository,
+            display_name: "fixture".to_owned(),
+        },
+        generation,
+        data: SourceFindData {
+            file: SourceFindFile {
+                id: file,
+                path: "file.rs".to_owned(),
+                language: "rust".to_owned(),
+                content_hash: hash,
+                byte_length: 5,
+                encoding: SourceTextEncoding::Utf8,
+                generated: false,
+                trust: TrustClassification::UntrustedRepositoryData,
+                extracted_from: None,
+            },
+            matches: (0..3)
+                .map(|start| {
+                    SourceRef::new(
+                        repository,
+                        generation,
+                        SourceSpan::new(file, start, start + 3)
+                            .expect("authored literal spans are nonempty"),
+                        hash,
+                        None,
+                    )
+                })
+                .collect(),
+            scanned_start_byte: 0,
+            scanned_end_byte: 5,
+            restoration_bytes: 0,
+            stop: SourceFindStop::EndOfSource,
+            total_metadata_bytes: 11,
+            total_response_memory_bytes: 400,
+        },
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: UsageSummary {
+            rows: 4,
+            edges: 0,
+            source_bytes: 0,
+            json_bytes: 0,
+            estimated_tokens: 0,
+            wall_time_ms: 0,
+            cache_status: CacheStatus::NotApplicable,
+            trace_id: "source-find-example".to_owned(),
+        },
+        trust: TrustClassification::UntrustedRepositoryData,
+    };
+    output
+        .validate()
+        .map_err(|error| CompatibilityError::FixtureContract(error.to_string()))?;
+    Ok(json!({
+        "tool": "source.find",
+        "input": {
+            "repository": {"repository_id": repository},
+            "generation": generation,
+            "file_id": file,
+            "literal": "aaa",
+        },
+        "output": output,
     }))
 }
 
@@ -1440,7 +1526,7 @@ mod tests {
     fn checked_in_fixture_tree_verifies_offline() {
         let fixture = prepared_fixture();
         let summary = verify(&fixture.root).expect("fresh fixture verifies");
-        assert_eq!(summary.tool_count, 19);
+        assert_eq!(summary.tool_count, 20);
         assert_eq!(summary.required_prior_minors, 0);
     }
 
@@ -1491,7 +1577,7 @@ mod tests {
         assert!(matches!(
             validate_examples(tools),
             Err(CompatibilityError::FixtureContract(message))
-                if message.contains("expected 19")
+                if message.contains("expected 20")
         ));
     }
 

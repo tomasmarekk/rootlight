@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "source_path": "utils/theories/MRTactics/InHypUnderBindersDo.v",
+  "source_bytes": 4413,
+  "source_sha256": "4203dc84f7b0ac15646e8be6c7cfd0b6338732c02a0f4842307e4460ed9c2664",
+  "source_unchanged": true,
+  "license": "MIT",
+  "license_path": "LICENSE",
+  "purpose": "Original native ERROR-root recovery and zero-width missing-node regression data; not a complete Coq structural or semantic qualification"
+}

@@ -1,5 +1,5 @@
 //! Apex captures retain direct written declarations and conservative source uses.
-//! Shared field types remain separate source evidence; owner proofs are bounded
+//! Shared declaration types remain separate source evidence; owner proofs are bounded
 //! to one immutable scan and never turn parser recovery into class membership.
 
 use std::{collections::HashMap, ops::Range};
@@ -343,7 +343,9 @@ impl CaptureCache {
                     bindings.push(BindingProof {
                         name: name.byte_range(),
                         scope: scope.byte_range(),
-                        available: node.end_byte(),
+                        // Earlier declarators can supply later initializers;
+                        // a declaration still cannot justify its own value.
+                        available: declarator.end_byte(),
                         kind: if supported {
                             BindingKind::Local
                         } else {
@@ -580,17 +582,24 @@ fn owner_proof(
                 return Ok(None);
             }
             let mut cursor = node.walk();
-            let mut declarators = node.children_by_field_name("declarator", &mut cursor);
-            let Some(declarator) = declarators.next() else {
+            let mut first = None;
+            for declarator in node.children_by_field_name("declarator", &mut cursor) {
+                cancellation.check()?;
+                if declarator.parent() != Some(node)
+                    || !clean(declarator, source)
+                    || declarator.kind() != "variable_declarator"
+                    || field(declarator, "name").is_none_or(|name| !written_name(name, source))
+                {
+                    return Ok(None);
+                }
+                first.get_or_insert(declarator);
+                declarators = declarators
+                    .checked_add(1)
+                    .ok_or_else(|| query_failure("query-apex-declarator-accounting"))?;
+            }
+            let Some(declarator) = first else {
                 return Ok(None);
             };
-            if declarators.next().is_some()
-                || !clean(declarator, source)
-                || declarator.kind() != "variable_declarator"
-                || field(declarator, "name").is_none_or(|name| !written_name(name, source))
-            {
-                return Ok(None);
-            }
             let Some(name) = field(declarator, "name") else {
                 return Ok(None);
             };
@@ -801,9 +810,7 @@ pub(super) fn retain_capture(
             };
             return Ok(clean(node, source)
                 && definition_node(node).is_some_and(|name| written_name(name, source))
-                && (owner.kind() == "local_variable_declaration"
-                    || role != StructuralRole::Signature
-                    || proof.declarators == 1));
+                && (role != StructuralRole::Signature || proof.declarators == 1));
         }
         return Ok(owner_kind(node) && cache.owner(node, source, cancellation)?.is_some());
     }
@@ -814,7 +821,7 @@ pub(super) fn retain_capture(
 }
 
 /// Maps admitted captures to original byte ranges without rewriting source.
-/// Multi-field headers intentionally remain non-container expression evidence,
+/// Shared headers intentionally remain non-container expression evidence,
 /// and member/call spellings never establish target bindings. A lexical marker
 /// certifies only the native lexical proof; lowering still requires its entity.
 pub(super) fn candidate(
@@ -860,6 +867,13 @@ pub(super) fn candidate(
                 {
                     "apex.shared_field_header"
                 }
+                "local_variable_declaration"
+                    if cache
+                        .owner(node, source, cancellation)?
+                        .is_some_and(|proof| proof.declarators > 1) =>
+                {
+                    "apex.shared_local_header"
+                }
                 "method_invocation" => "apex.application",
                 "field_access" => "apex.member_access",
                 "annotation" => "apex.annotation_semantics",
@@ -874,13 +888,17 @@ pub(super) fn candidate(
             let proof = cache
                 .owner(owner, source, cancellation)?
                 .ok_or_else(|| query_failure("query-apex-local-owner"))?;
-            depth_node = owner;
-            range = if role == StructuralRole::Signature {
-                proof.header
+            if proof.declarators == 1 {
+                depth_node = owner;
+                range = if role == StructuralRole::Signature {
+                    proof.header
+                } else {
+                    proof.extent
+                };
+                "apex.local_variable"
             } else {
-                proof.extent
-            };
-            "apex.local_variable"
+                "apex.local_variable_fragment"
+            }
         } else if let Some(owner) = field_owner(node) {
             let proof = cache
                 .owner(owner, source, cancellation)?

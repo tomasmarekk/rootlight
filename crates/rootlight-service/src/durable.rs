@@ -19,7 +19,7 @@ use cap_std::{ambient_authority, fs::Dir};
 use flate2::{Compression, write::GzEncoder};
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_catalog::{OracleReadAdmissionError, OracleReader};
-use rootlight_config::DEFAULT_MAX_SOURCE_FILE_BYTES;
+use rootlight_config::MAX_SOURCE_FILE_BYTES;
 use rootlight_discovery::IncrementalDiscoveryBaseline;
 use rootlight_ids::{
     ContentHash, FactId, FileId, FileIdentity, GenerationId, RepositoryId, derive_file,
@@ -92,7 +92,9 @@ const LEGACY_INCREMENTAL_STATE_VERSION: u16 = 1;
 const COMPACT_INCREMENTAL_STATE_VERSION: u16 = 2;
 const INCREMENTAL_STATE_VERSION: u16 = 3;
 const LEGACY_SOURCE_FILE_CATALOG_VERSION: u16 = 1;
-const SOURCE_FILE_CATALOG_VERSION: u16 = 2;
+const UTF8_SOURCE_FILE_CATALOG_VERSION: u16 = 2;
+const TEXT_SOURCE_FILE_CATALOG_VERSION: u16 = 3;
+const SOURCE_FILE_CATALOG_VERSION: u16 = 4;
 const LEGACY_LOGICAL_SNAPSHOT_VERSION: u16 = 1;
 const LOGICAL_SNAPSHOT_VERSION: u16 = 2;
 const LEGACY_ACTIVATION_MANIFEST_VERSION: u16 = 1;
@@ -109,7 +111,9 @@ const MAX_SOURCE_FILE_CATALOG_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
 const MAX_LOGICAL_SNAPSHOT_BYTES: u64 = 4 * 1024;
 const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const MAX_SOURCE_PACK_INDEX_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
-const SOURCE_PACK_TARGET_BYTES: u64 = DEFAULT_MAX_SOURCE_FILE_BYTES;
+// Small sources amortize durability barriers; a larger supported source owns
+// its entire pack without widening the normal aggregation target.
+const SOURCE_PACK_TARGET_BYTES: u64 = 8 * 1024 * 1024;
 const PACKED_SOURCE_MIN_FILES: usize = 256;
 const SINGLE_PACK_MIN_FILES: usize = 16;
 const STREAMED_SOURCE_PARTITION_FILES: usize = 4_096;
@@ -266,9 +270,13 @@ pub(super) fn write_legacy_gzip_recovery_snapshot(
     )
 }
 
+mod streamed;
+
 pub(super) struct DurableCatalog {
     repositories: PrivateDirectory<'static>,
     quarantine: PrivateDirectory<'static>,
+    source_capture_parent: PrivateDirectory<'static>,
+    source_capture_owners: Mutex<Vec<super::FirstSliceEphemeralSources>>,
     repositories_path: PathBuf,
     maximum_generations_per_repository: usize,
     maximum_repositories: usize,
@@ -288,6 +296,7 @@ pub(super) struct DurablePreparedGeneration {
     incremental_state: Mutex<Option<DurableSidecarDescriptor>>,
     source_file_catalog: Mutex<Option<DurableSidecarDescriptor>>,
     source_storage: Mutex<Option<DurableSourceStorage>>,
+    lexical_streamed_limit: Mutex<Option<StreamedProjectionLimit>>,
     created_source_blobs: Mutex<BTreeSet<ContentHash>>,
     storage_accounting: Arc<Mutex<DurableStorageAccounting>>,
 }
@@ -353,6 +362,34 @@ enum DurableLexicalSourceProjection {
     AllFilesV1,
     #[serde(rename = "full-source-terms-v1")]
     FullSourceTermsV1,
+    #[serde(rename = "full-source-terms-with-snapshot-limit-v2")]
+    FullSourceTermsWithSnapshotLimitV2(StreamedProjectionLimit),
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct StreamedProjectionLimit {
+    snapshot_bytes: u64,
+}
+
+impl<'de> Deserialize<'de> for StreamedProjectionLimit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            snapshot_bytes: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.snapshot_bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+impl StreamedProjectionLimit {
+    fn new(snapshot_bytes: u64) -> Result<Self, FirstSliceError> {
+        if snapshot_bytes == 0 || snapshot_bytes > MAX_SNAPSHOT_BYTES {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
+        Ok(Self { snapshot_bytes })
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -656,6 +693,7 @@ impl Serialize for DurableSourceFileEntries<'_> {
                 content_hash: file.content_hash,
                 byte_length: file.byte_length,
                 language: &file.language,
+                encoding: &file.encoding,
                 generated: file.generated,
                 provenance: file.provenance,
             })?;
@@ -671,6 +709,7 @@ struct DurableSourceFileEntryRef<'entry> {
     content_hash: ContentHash,
     byte_length: u64,
     language: &'entry str,
+    encoding: &'entry str,
     generated: bool,
     provenance: FactId,
 }
@@ -763,8 +802,29 @@ struct DurableSourceFileEntry {
     content_hash: ContentHash,
     byte_length: u64,
     language: String,
+    #[serde(default)]
+    encoding: DurableSourceFileEncoding,
     generated: bool,
     provenance: FactId,
+}
+
+// Version2 omitted encoding because only UTF8 records were admitted. Keep
+// absence distinct from null or an explicit value when authenticating that
+// historical shape; version3 retains text encodings and version4 adds raw bytes.
+#[derive(Default)]
+enum DurableSourceFileEncoding {
+    #[default]
+    Missing,
+    Explicit(String),
+}
+
+impl<'de> Deserialize<'de> for DurableSourceFileEncoding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::Explicit)
+    }
 }
 
 impl LegacyDurableSourceFileCatalog {
@@ -783,7 +843,9 @@ impl LegacyDurableSourceFileCatalog {
             .try_reserve_exact(self.entries.len())
             .map_err(|_| FirstSliceError::Limits)?;
         for durable in self.entries {
-            if durable.claim.repository != repository {
+            if durable.claim.repository != repository
+                || !matches!(durable.encoding.as_str(), "utf-8" | "utf-16le" | "utf-16be")
+            {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
             let locator_encoding = FilePathLocatorEncoding::parse(&durable.locator_encoding)
@@ -831,8 +893,12 @@ impl DurableSourceFileCatalog {
         repository: RepositoryId,
         generation: GenerationId,
     ) -> Result<SourceFileCatalog, FirstSliceError> {
-        if self.version != SOURCE_FILE_CATALOG_VERSION
-            || self.entries.len() > MAX_SOURCE_BLOB_ENTRIES
+        if !matches!(
+            self.version,
+            UTF8_SOURCE_FILE_CATALOG_VERSION
+                | TEXT_SOURCE_FILE_CATALOG_VERSION
+                | SOURCE_FILE_CATALOG_VERSION
+        ) || self.entries.len() > MAX_SOURCE_BLOB_ENTRIES
         {
             return Err(FirstSliceError::CatalogCorrupt);
         }
@@ -841,6 +907,19 @@ impl DurableSourceFileCatalog {
             .try_reserve_exact(self.entries.len())
             .map_err(|_| FirstSliceError::Limits)?;
         for durable in self.entries {
+            let encoding = match (self.version, durable.encoding) {
+                (UTF8_SOURCE_FILE_CATALOG_VERSION, DurableSourceFileEncoding::Missing) => {
+                    "utf-8".to_owned()
+                }
+                (
+                    TEXT_SOURCE_FILE_CATALOG_VERSION,
+                    DurableSourceFileEncoding::Explicit(encoding),
+                ) if matches!(encoding.as_str(), "utf-8" | "utf-16le" | "utf-16be") => encoding,
+                (SOURCE_FILE_CATALOG_VERSION, DurableSourceFileEncoding::Explicit(encoding)) => {
+                    encoding
+                }
+                _ => return Err(FirstSliceError::CatalogCorrupt),
+            };
             let path_identity = decode_path_identity(&durable.path_identity)?;
             let relative = RelativePath::from_identity_bytes(&path_identity)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?;
@@ -875,7 +954,7 @@ impl DurableSourceFileCatalog {
                 content_hash: durable.content_hash,
                 byte_length: durable.byte_length,
                 language: durable.language,
-                encoding: "utf-8".to_owned(),
+                encoding,
                 generated: durable.generated,
                 provenance: durable.provenance,
                 evidence: FactEvidence {
@@ -1938,10 +2017,14 @@ impl DurableCatalog {
             ensure_private_directory(durable.capability(), OsStr::new(REPOSITORIES_DIRECTORY))?;
         let quarantine =
             ensure_private_directory(durable.capability(), OsStr::new(QUARANTINE_DIRECTORY))?;
+        let source_capture_parent =
+            ensure_private_directory(durable.capability(), OsStr::new("source-captures"))?;
         let repositories_path = durable_path.join(REPOSITORIES_DIRECTORY);
         Ok(Self {
             repositories,
             quarantine,
+            source_capture_parent,
+            source_capture_owners: Mutex::new(Vec::new()),
             repositories_path,
             maximum_generations_per_repository,
             maximum_repositories,
@@ -1949,6 +2032,96 @@ impl DurableCatalog {
             storage_accounting: Arc::new(Mutex::new(DurableStorageAccounting::default())),
             generation_cache: None,
         })
+    }
+
+    pub(super) fn create_source_owner(
+        &self,
+    ) -> Result<super::FirstSliceEphemeralSources, FirstSliceError> {
+        let _ = self.reap_source_capture_owners();
+        let available = rootlight_vfs::available_space(&self.repositories_path)
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let payload = available.saturating_sub(64 * 1024 * 1024).max(1);
+        let limits = super::FirstSliceStreamedStorageLimits::new(
+            payload,
+            payload,
+            super::MAX_DISCOVERY_ENTRIES,
+        )?;
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).map_err(|_| FirstSliceError::RandomUnavailable)?;
+        let name = format!("instance-{:032x}", u128::from_le_bytes(nonce));
+        let mut owners = self
+            .source_capture_owners
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        if owners.len() >= MAX_DURABLE_ENTRIES {
+            return Err(FirstSliceError::Retention);
+        }
+        owners
+            .try_reserve(1)
+            .map_err(|_| FirstSliceError::Retention)?;
+        let owner = super::FirstSliceEphemeralSources::create(
+            self.source_capture_parent.capability(),
+            OsStr::new(&name),
+            limits,
+        )?;
+        owners.push(owner.clone());
+        Ok(owner)
+    }
+
+    pub(super) fn reap_source_capture_owners(&self) -> Result<(), FirstSliceError> {
+        let mut owners = self
+            .source_capture_owners
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?;
+        let mut index = 0;
+        let mut first_error = None;
+        while index < owners.len() {
+            match owners[index].finish_if_idle() {
+                Ok(true) => {
+                    owners.swap_remove(index);
+                }
+                Ok(false) => index += 1,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error)
+                    }
+                    index += 1;
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    pub(super) fn source_capture_usage(
+        &self,
+    ) -> Result<super::FirstSliceStreamedStorageUsage, FirstSliceError> {
+        self.source_capture_owners
+            .lock()
+            .map_err(|_| FirstSliceError::Retention)?
+            .iter()
+            .try_fold(
+                super::FirstSliceStreamedStorageUsage {
+                    reserved_payload_bytes: 0,
+                    reserved_files: 0,
+                    pending_cleanup_directories: 0,
+                },
+                |mut total, owner| {
+                    let usage = owner.usage()?;
+                    total.reserved_payload_bytes = total
+                        .reserved_payload_bytes
+                        .checked_add(usage.reserved_payload_bytes)
+                        .ok_or(FirstSliceError::Limits)?;
+                    total.reserved_files = total
+                        .reserved_files
+                        .checked_add(usage.reserved_files)
+                        .ok_or(FirstSliceError::Limits)?;
+                    total.pending_cleanup_directories = total
+                        .pending_cleanup_directories
+                        .checked_add(usage.pending_cleanup_directories)
+                        .ok_or(FirstSliceError::Limits)?;
+                    Ok(total)
+                },
+            )
     }
 
     pub(super) fn with_generation_cache(
@@ -1998,6 +2171,7 @@ impl DurableCatalog {
             incremental_state: Mutex::new(None),
             source_file_catalog: Mutex::new(None),
             source_storage: Mutex::new(None),
+            lexical_streamed_limit: Mutex::new(None),
             created_source_blobs: Mutex::new(BTreeSet::new()),
             storage_accounting: Arc::clone(&self.storage_accounting),
         })
@@ -2370,6 +2544,7 @@ impl DurableCatalog {
             }
         };
         apply_storage_reservations(&mut inventory, &accounting.reservations)?;
+        self.account_source_captures(&mut inventory, &mut budget)?;
         budget.check()?;
         if accounting.reservations.entries.is_empty() {
             accounting.repositories = Some(repositories);
@@ -2391,7 +2566,9 @@ impl DurableCatalog {
         if accounting.dirty || accounting.repositories.is_none() {
             return Ok(None);
         }
-        inventory_from_accounting(&accounting, available_bytes).map(Some)
+        let mut inventory = inventory_from_accounting(&accounting, available_bytes)?;
+        self.account_source_captures(&mut inventory, &mut StorageScanBudget::new())?;
+        Ok(Some(inventory))
     }
 
     fn inventory_for_admission(
@@ -2421,6 +2598,7 @@ impl DurableCatalog {
                 available_bytes,
             )?;
             apply_storage_reservations(&mut inventory, &accounting.reservations)?;
+            self.account_source_captures(&mut inventory, &mut StorageScanBudget::new())?;
             accounting.repositories = Some(repositories);
             accounting.quarantine_bytes = quarantine_bytes;
             accounting.dirty = false;
@@ -2430,7 +2608,24 @@ impl DurableCatalog {
             }
             return Ok(inventory);
         }
-        inventory_from_accounting(accounting, available_bytes)
+        let mut inventory = inventory_from_accounting(accounting, available_bytes)?;
+        self.account_source_captures(&mut inventory, &mut StorageScanBudget::new())?;
+        Ok(inventory)
+    }
+
+    fn account_source_captures(
+        &self,
+        inventory: &mut DurableStorageInventory,
+        budget: &mut StorageScanBudget,
+    ) -> Result<(), FirstSliceError> {
+        // Other live services and failed last drops can retain instances. Observe
+        // them on each admission without adopting them or declaring reclamation.
+        // Inventory units remain logical file lengths, matching existing storage
+        // totals rather than claiming physical allocated extents.
+        let bytes = source_capture_tree_bytes(&self.source_capture_parent, budget)?;
+        checked_add_assign(&mut inventory.temporary_bytes, bytes)?;
+        checked_add_assign(&mut inventory.total_physical_bytes, bytes)?;
+        Ok(())
     }
 
     fn reconcile_repository_accounting(
@@ -3868,7 +4063,15 @@ impl DurablePreparedGeneration {
                 incremental_state,
                 source_file_catalog,
                 source_storage,
-                lexical_source_projection: Some(DurableLexicalSourceProjection::FullSourceTermsV1),
+                lexical_source_projection: Some(
+                    self.lexical_streamed_limit
+                        .lock()
+                        .map_err(|_| FirstSliceError::Catalog)?
+                        .map_or(
+                            DurableLexicalSourceProjection::FullSourceTermsV1,
+                            DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2,
+                        ),
+                ),
             };
             let bytes = serde_json::to_vec(&manifest).map_err(|_| FirstSliceError::Catalog)?;
             let retained_durable_bytes = retained_before_manifest
@@ -4062,14 +4265,19 @@ impl DurablePackedSourceWriter<'_> {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let bytes = u64::try_from(content.len()).map_err(|_| FirstSliceError::Limits)?;
-        if bytes > SOURCE_PACK_TARGET_BYTES {
+        if bytes > MAX_SOURCE_FILE_BYTES {
             return Err(FirstSliceError::Limits);
         }
         let pack_len = u64::try_from(self.pack.len()).map_err(|_| FirstSliceError::Limits)?;
-        if !self.pack.is_empty()
-            && pack_len
-                .checked_add(bytes)
-                .is_none_or(|total| total > SOURCE_PACK_TARGET_BYTES)
+        let pending_pack = self
+            .entries
+            .last()
+            .is_some_and(|entry| usize::try_from(entry.pack).ok() == Some(self.pack_sizes.len()));
+        if pending_pack
+            && (bytes > SOURCE_PACK_TARGET_BYTES
+                || pack_len
+                    .checked_add(bytes)
+                    .is_none_or(|total| total > SOURCE_PACK_TARGET_BYTES))
         {
             write_source_pack(&self.sources_directory, &self.pack, &mut self.pack_sizes)?;
             self.pack.clear();
@@ -4077,7 +4285,11 @@ impl DurablePackedSourceWriter<'_> {
         let offset = u64::try_from(self.pack.len()).map_err(|_| FirstSliceError::Limits)?;
         let pack_ordinal =
             u32::try_from(self.pack_sizes.len()).map_err(|_| FirstSliceError::Limits)?;
-        self.pack.extend_from_slice(content);
+        if bytes > SOURCE_PACK_TARGET_BYTES {
+            write_source_pack(&self.sources_directory, content, &mut self.pack_sizes)?;
+        } else {
+            self.pack.extend_from_slice(content);
+        }
         self.payload_bytes = self
             .payload_bytes
             .checked_add(bytes)
@@ -4098,7 +4310,11 @@ impl DurablePackedSourceWriter<'_> {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         // Empty sources still need the physical pack named by their index entries.
-        if !self.pack.is_empty() || self.pack_sizes.is_empty() {
+        if self
+            .entries
+            .last()
+            .is_some_and(|entry| usize::try_from(entry.pack).ok() == Some(self.pack_sizes.len()))
+        {
             write_source_pack(&self.sources_directory, &self.pack, &mut self.pack_sizes)?;
         }
         let index = DurablePackedSourceIndex {
@@ -4298,7 +4514,7 @@ fn write_source_pack(
     bytes: &[u8],
     pack_sizes: &mut Vec<u64>,
 ) -> Result<(), FirstSliceError> {
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > SOURCE_PACK_TARGET_BYTES {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SOURCE_FILE_BYTES {
         return Err(FirstSliceError::Limits);
     }
     let ordinal = u32::try_from(pack_sizes.len()).map_err(|_| FirstSliceError::Limits)?;
@@ -4492,7 +4708,7 @@ fn validate_packed_source_index(
         || index
             .pack_bytes
             .iter()
-            .any(|bytes| *bytes > SOURCE_PACK_TARGET_BYTES)
+            .any(|bytes| *bytes > MAX_SOURCE_FILE_BYTES)
         || index.pack_bytes.iter().try_fold(0_u64, |total, bytes| {
             check_cancellation(cancellation)?;
             total.checked_add(*bytes).ok_or(FirstSliceError::Limits)
@@ -4509,7 +4725,7 @@ fn validate_packed_source_index(
     let mut expected_offset = 0_u64;
     for entry in index.entries {
         check_cancellation(cancellation)?;
-        if entry.bytes > DEFAULT_MAX_SOURCE_FILE_BYTES {
+        if entry.bytes > MAX_SOURCE_FILE_BYTES {
             return Err(FirstSliceError::CatalogCorrupt);
         }
         if entry.pack != expected_pack {
@@ -4538,7 +4754,11 @@ fn validate_packed_source_index(
             .get(usize::try_from(entry.pack).map_err(|_| FirstSliceError::Limits)?)
             .copied()
             .ok_or(FirstSliceError::CatalogCorrupt)?;
-        if expected_offset > pack_size || entries.insert(entry.file, entry).is_some() {
+        if expected_offset > pack_size
+            || (pack_size > SOURCE_PACK_TARGET_BYTES
+                && (entry.offset != 0 || entry.bytes != pack_size))
+            || entries.insert(entry.file, entry).is_some()
+        {
             return Err(FirstSliceError::CatalogCorrupt);
         }
     }
@@ -5081,21 +5301,27 @@ fn scan_source_blob_storage(
             return Err(FirstSliceError::CatalogCorrupt);
         }
         let payload_bytes = payload_metadata.len();
-        if payload_bytes > MAX_SNAPSHOT_BYTES || payload_bytes > DEFAULT_MAX_SOURCE_FILE_BYTES {
-            return Err(FirstSliceError::CatalogCorrupt);
-        }
         let verification_key = (repository_id, digest);
         let metadata_before = source_blob_verification_metadata(&payload_metadata);
         if matches!(source_blob_scan, SourceBlobScan::VerifyContent)
             && (metadata_before.is_none()
                 || verified_source_blobs.get(&verification_key).copied() != metadata_before)
         {
-            let payload = blob
-                .read_file_bounded(OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME), payload_bytes)
-                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-            if content_hash_bytes(&payload) != digest {
-                return Err(FirstSliceError::CatalogCorrupt);
-            }
+            rootlight_vfs::visit_verified_source_bytes_cancellable(
+                &blob,
+                OsStr::new(SOURCE_BLOB_PAYLOAD_FILENAME),
+                rootlight_vfs::StreamedSourceBytesIdentity {
+                    byte_length: payload_bytes,
+                    content_hash: digest,
+                },
+                payload_bytes,
+                &budget.cancellation,
+                |_, _| Ok(()),
+            )
+            .map_err(|_| {
+                super::current_cancellation(&budget.cancellation)
+                    .unwrap_or(FirstSliceError::CatalogCorrupt)
+            })?;
             let metadata_after = blob
                 .capability()
                 .symlink_metadata(Path::new(SOURCE_BLOB_PAYLOAD_FILENAME))
@@ -5367,6 +5593,50 @@ fn directory_tree_bytes(
     budget: &mut StorageScanBudget,
 ) -> Result<u64, FirstSliceError> {
     directory_tree_bytes_and_metadata(directory, budget, None).map(|(bytes, _)| bytes)
+}
+
+fn source_capture_tree_bytes(
+    root: &PrivateDirectory<'_>,
+    budget: &mut StorageScanBudget,
+) -> Result<u64, FirstSliceError> {
+    let mut pending = Vec::<PrivateDirectory<'static>>::new();
+    let mut current = None;
+    let mut total = 0_u64;
+    loop {
+        let directory = current.as_ref().unwrap_or(root);
+        PrivateDirectory::verify_parent(directory.capability())
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        for name in budget.entry_names(directory)? {
+            budget.visit()?;
+            let metadata = directory
+                .capability()
+                .symlink_metadata(&name)
+                .map_err(|_| FirstSliceError::Catalog)?;
+            if metadata.file_type().is_symlink() {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+            if metadata.is_file() {
+                checked_add_assign(&mut total, metadata.len())?;
+            } else if metadata.is_dir() {
+                let child = PrivateDirectory::open(directory.capability(), &name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+                pending
+                    .try_reserve(1)
+                    .map_err(|_| FirstSliceError::Retention)?;
+                pending.push(child);
+            } else {
+                return Err(FirstSliceError::CatalogCorrupt);
+            }
+        }
+        PrivateDirectory::verify_parent(directory.capability())
+            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        current = pending.pop();
+        if current.is_none() {
+            break;
+        }
+    }
+    budget.check()?;
+    Ok(total)
 }
 
 fn directory_tree_bytes_and_metadata(
@@ -6196,13 +6466,14 @@ fn restore_normalized_search(
                 cancellation,
             )
         }
-        Some(DurableLexicalSourceProjection::FullSourceTermsV1) => {
-            LexicalProjectionBuilder::with_full_source_terms(
-                verified,
-                BuildBudget::default(),
-                cancellation,
-            )
-        }
+        Some(
+            DurableLexicalSourceProjection::FullSourceTermsV1
+            | DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(_),
+        ) => LexicalProjectionBuilder::with_full_source_terms(
+            verified,
+            BuildBudget::default(),
+            cancellation,
+        ),
     }
     .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
     // Retaining the validated directory capabilities avoids reopening the same
@@ -6221,6 +6492,17 @@ fn restore_normalized_search(
         let file = verified
             .find_file(file_id)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
+        if source_projection.is_some_and(|projection| match projection {
+            DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(limit) => {
+                file.byte_length > limit.snapshot_bytes
+            }
+            _ => false,
+        }) {
+            projection
+                .push_source_metadata(file_id, cancellation)
+                .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+            continue;
+        }
         let snapshot = source_reader
             .as_ref()
             .ok_or(FirstSliceError::CatalogCorrupt)?
@@ -6266,7 +6548,17 @@ fn restore_file_only_search(
         repository,
         source_layout,
     )?;
-    let text_limit = source_fallback_text_limit(verified)?;
+    let legacy_text_limit = if matches!(
+        source_projection,
+        Some(
+            DurableLexicalSourceProjection::FullSourceTermsV1
+                | DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(_)
+        )
+    ) {
+        None
+    } else {
+        Some(source_fallback_text_limit(verified)?)
+    };
     let budget = BuildBudget::default();
     let mut builder =
         EphemeralLexicalIndexBuilder::new(verified.metadata().generation(), budget, cancellation)
@@ -6298,22 +6590,36 @@ fn restore_file_only_search(
         let file = verified
             .find_file(file_id)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let snapshot = source_reader.read(file, cancellation)?;
-        let document = if matches!(
-            source_projection,
-            Some(DurableLexicalSourceProjection::FullSourceTermsV1)
-        ) {
-            rootlight_query::project_source_document_with_full_terms(
+        let metadata_only = source_projection.is_some_and(|projection| match projection {
+            DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(limit) => {
+                file.byte_length > limit.snapshot_bytes
+            }
+            _ => false,
+        });
+        let snapshot = if metadata_only {
+            None
+        } else {
+            Some(source_reader.read(file, cancellation)?)
+        };
+        let document = if metadata_only {
+            rootlight_query::project_source_metadata_document(
                 verified,
-                &snapshot,
+                file.id,
+                budget,
+                cancellation,
+            )
+        } else if let Some(text_limit) = legacy_text_limit {
+            project_source_fallback_document_with_text_limit(
+                verified,
+                snapshot.as_ref().ok_or(FirstSliceError::CatalogCorrupt)?,
+                text_limit,
                 budget,
                 cancellation,
             )
         } else {
-            project_source_fallback_document_with_text_limit(
+            rootlight_query::project_source_document_with_full_terms(
                 verified,
-                &snapshot,
-                text_limit,
+                snapshot.as_ref().ok_or(FirstSliceError::CatalogCorrupt)?,
                 budget,
                 cancellation,
             )
@@ -6422,7 +6728,9 @@ fn restore_source_file_catalog(
                 serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
             durable.into_catalog(repository, generation)
         }
-        SOURCE_FILE_CATALOG_VERSION => {
+        UTF8_SOURCE_FILE_CATALOG_VERSION
+        | TEXT_SOURCE_FILE_CATALOG_VERSION
+        | SOURCE_FILE_CATALOG_VERSION => {
             let durable: DurableSourceFileCatalog =
                 serde_json::from_slice(&bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
             durable.into_catalog(repository, generation)
@@ -6847,7 +7155,7 @@ impl PersistedSourceReader {
     ) -> Result<SourceSnapshot, FirstSliceError> {
         check_cancellation(cancellation)?;
         if file.repository != self.repository
-            || file.byte_length > DEFAULT_MAX_SOURCE_FILE_BYTES
+            || file.byte_length > MAX_SOURCE_FILE_BYTES
             || file.byte_length > MAX_SNAPSHOT_BYTES
         {
             return Err(FirstSliceError::CatalogCorrupt);
@@ -7156,6 +7464,125 @@ mod tests {
     }
 
     #[test]
+    fn streamed_projection_descriptor_requires_a_bounded_explicit_snapshot_limit() {
+        for limit in [1, 4096, MAX_SNAPSHOT_BYTES] {
+            let value = DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(
+                StreamedProjectionLimit::new(limit).unwrap(),
+            );
+            let encoded = serde_json::to_string(&value).unwrap();
+            assert_eq!(
+                encoded,
+                format!(
+                    "{{\"full-source-terms-with-snapshot-limit-v2\":{{\"snapshot_bytes\":{limit}}}}}"
+                )
+            );
+            let restored: DurableLexicalSourceProjection = serde_json::from_str(&encoded).unwrap();
+            assert!(
+                matches!(restored, DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(value) if value.snapshot_bytes == limit)
+            );
+        }
+        for payload in [
+            "{}",
+            "null",
+            "0",
+            "{\"snapshot_bytes\":0}",
+            "{\"snapshot_bytes\":67108865}",
+            "{\"snapshot_bytes\":null}",
+            "{\"snapshot_bytes\":1,\"extra\":0}",
+            "{\"snapshot_bytes\":1,\"snapshot_bytes\":2}",
+        ] {
+            let encoded = format!("{{\"full-source-terms-with-snapshot-limit-v2\":{payload}}}");
+            assert!(
+                serde_json::from_str::<DurableLexicalSourceProjection>(&encoded).is_err(),
+                "{encoded}"
+            );
+        }
+        assert!(
+            serde_json::from_str::<DurableLexicalSourceProjection>(
+                "\"full-source-terms-with-snapshot-limit-v2\""
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<DurableLexicalSourceProjection>(
+                "{\"full-source-terms-with-snapshot-limit-v3\":{\"snapshot_bytes\":1}}"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn capture_inventory_observes_foreign_instances_after_reopen_without_adopting_them() {
+        let temporary = durable_test_tempdir();
+        let paths = RuntimePaths::new(
+            temporary.path().join("state"),
+            temporary.path().join("runtime"),
+        )
+        .unwrap();
+        paths.prepare_owner().unwrap();
+        let catalog = open_test_catalog(paths.state_dir(), 3).unwrap();
+        assert_eq!(catalog.storage_inventory().unwrap().total_physical_bytes, 0);
+        let foreign = PrivateDirectory::create(
+            catalog.source_capture_parent.capability(),
+            OsStr::new("foreign-live-instance"),
+        )
+        .unwrap();
+        let identity = foreign.identity();
+        let mut payload = foreign.create_file(OsStr::new("payload")).unwrap();
+        payload.write_all(b"retained bytes").unwrap();
+        payload.sync_all().unwrap();
+        drop(payload);
+        let verify = |inventory: DurableStorageInventory| {
+            assert_eq!(inventory.total_physical_bytes, 14);
+            assert_eq!(inventory.temporary_bytes, 14);
+            assert_eq!(inventory.reclaimable_bytes, 0);
+            assert_eq!(inventory.quarantine_bytes, 0);
+            assert!(inventory.repositories.is_empty());
+        };
+        verify(catalog.storage_inventory_cached().unwrap().unwrap());
+        verify(catalog.storage_inventory().unwrap());
+        let mut budget = StorageScanBudget::new();
+        budget.visited_entries = MAX_STORAGE_INVENTORY_ENTRIES;
+        assert_eq!(
+            source_capture_tree_bytes(&catalog.source_capture_parent, &mut budget),
+            Err(FirstSliceError::Retention)
+        );
+        let cancellation = Cancellation::new();
+        let _ = cancellation.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            catalog
+                .reconcile_storage_inventory(&cancellation)
+                .unwrap_err(),
+            FirstSliceError::Cancelled(CancellationReason::ClientRequest)
+        );
+        drop(catalog);
+        let restored = open_test_catalog(paths.state_dir(), 3).unwrap();
+        verify(restored.storage_inventory().unwrap());
+        assert_eq!(
+            PrivateDirectory::open(
+                restored.source_capture_parent.capability(),
+                OsStr::new("foreign-live-instance")
+            )
+            .unwrap()
+            .identity(),
+            identity
+        );
+        assert_eq!(
+            foreign
+                .read_file_bounded(OsStr::new("payload"), 14)
+                .unwrap(),
+            b"retained bytes"
+        );
+        assert_eq!(
+            restored
+                .source_capture_usage()
+                .unwrap()
+                .reserved_payload_bytes,
+            0
+        );
+    }
+
+    #[test]
     fn storage_scan_budget_stops_after_inflight_cancellation() {
         for reason in [
             CancellationReason::Shutdown,
@@ -7341,11 +7768,7 @@ mod tests {
             "pub fn inventory_value() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -7504,11 +7927,7 @@ mod tests {
                 )
                 .expect("fixture source writes");
             }
-            let cancellation = Cancellation::with_deadline(
-                std::time::Instant::now()
-                    .checked_add(Duration::from_secs(300))
-                    .expect("watchdog fits"),
-            );
+            let cancellation = Cancellation::new();
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("service opens");
             let receipt = service
@@ -7582,7 +8001,7 @@ mod tests {
                         "separate_warm_subprobes": {"references_micros": references_micros,
                             "source_pool_micros": source_pool_micros, "accounting_micros": accounting_micros},
                         "activation_written_bytes": written, "physical_accounting_verified": true,
-                        "repeated_activation_same_generation": true, "watchdog_seconds": 300,
+                        "repeated_activation_same_generation": true,
                     })
                 );
             }
@@ -7955,6 +8374,72 @@ mod tests {
     }
 
     #[test]
+    fn raw_source_file_catalog_encoding_requires_version_four() {
+        let repository = derive_repository(b"raw-source-file-catalog").id();
+        let generation = GenerationId::from_bytes([7; 20]);
+        let (mut file, mut claim) = test_source_file_catalog(repository, generation).entries()[0]
+            .clone()
+            .into_parts();
+        let raw = [0xff, 0x00, 0x80];
+        file.encoding = "bytes".to_owned();
+        file.byte_length = u64::try_from(raw.len()).unwrap();
+        file.content_hash = content_hash_bytes(&raw);
+        claim.byte_length = file.byte_length;
+        claim.content_hash = file.content_hash;
+        file.evidence.source = Some(SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+            file.content_hash,
+            None,
+        ));
+        let entry = SourceFileCatalogEntry::new(file, claim).unwrap();
+        let catalog = SourceFileCatalog::new(vec![entry.clone()]).unwrap();
+        let encoded = serde_json::to_value(DurableSourceFileCatalogRef {
+            entries: catalog.entries(),
+        })
+        .unwrap();
+        assert_eq!(encoded["version"], 4);
+        assert_eq!(encoded["entries"][0]["encoding"], "bytes");
+        let decoded: DurableSourceFileCatalog = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.into_catalog(repository, generation), Ok(catalog));
+        for version in [
+            UTF8_SOURCE_FILE_CATALOG_VERSION,
+            TEXT_SOURCE_FILE_CATALOG_VERSION,
+            SOURCE_FILE_CATALOG_VERSION + 1,
+        ] {
+            let mut invalid = encoded.clone();
+            invalid["version"] = version.into();
+            let decoded: DurableSourceFileCatalog = serde_json::from_value(invalid).unwrap();
+            assert_eq!(
+                decoded.into_catalog(repository, generation),
+                Err(FirstSliceError::CatalogCorrupt),
+                "version {version}",
+            );
+        }
+        let file = entry.file();
+        let locator = file.path_locator.as_ref().unwrap();
+        let legacy = LegacyDurableSourceFileCatalog {
+            version: LEGACY_SOURCE_FILE_CATALOG_VERSION,
+            entries: vec![LegacyDurableSourceFileEntry {
+                claim: entry.identity_claim(),
+                locator_encoding: locator.encoding().as_str().to_owned(),
+                locator_components: locator.components().to_vec(),
+                language: file.language.clone(),
+                encoding: file.encoding.clone(),
+                generated: file.generated,
+                provenance: file.provenance,
+            }],
+        };
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        let decoded: LegacyDurableSourceFileCatalog = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            decoded.into_catalog(repository, generation),
+            Err(FirstSliceError::CatalogCorrupt),
+        );
+    }
+
+    #[test]
     fn source_file_catalog_sidecar_round_trips_and_rejects_corruption() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -8020,6 +8505,70 @@ mod tests {
             ),
             Ok(catalog.clone())
         );
+
+        let restore_variant = |value: &serde_json::Value| {
+            let bytes = serde_json::to_vec(value).unwrap();
+            fs::write(prepared.path().join(SOURCE_FILE_CATALOG_FILENAME), &bytes).unwrap();
+            restore_source_file_catalog(
+                prepared.staging(),
+                Some(DurableSidecarDescriptor {
+                    bytes: u64::try_from(bytes.len()).unwrap(),
+                    digest: content_hash_bytes(&bytes),
+                }),
+                repository,
+                generation,
+                &cancellation,
+            )
+        };
+        assert_eq!(current_entry["encoding"], "utf-8");
+        let mut version3 = current_json.clone();
+        version3["version"] = TEXT_SOURCE_FILE_CATALOG_VERSION.into();
+        assert_eq!(restore_variant(&version3), Ok(catalog.clone()));
+        let mut version2 = current_json.clone();
+        version2["version"] = UTF8_SOURCE_FILE_CATALOG_VERSION.into();
+        version2["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("encoding");
+        assert_eq!(restore_variant(&version2), Ok(catalog.clone()));
+        let mut missing_encoding = current_json.clone();
+        missing_encoding["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("encoding");
+        let mut unexpected_v2_encoding = version2.clone();
+        unexpected_v2_encoding["entries"][0]["encoding"] = "utf-8".into();
+        let mut null_v2_encoding = version2;
+        null_v2_encoding["entries"][0]["encoding"] = serde_json::Value::Null;
+        let mut unknown_field = current_json.clone();
+        unknown_field["entries"][0]["unknown"] = true.into();
+        for invalid in [
+            missing_encoding,
+            unexpected_v2_encoding,
+            null_v2_encoding,
+            unknown_field,
+        ] {
+            assert_eq!(
+                restore_variant(&invalid),
+                Err(FirstSliceError::CatalogCorrupt),
+                "{invalid}"
+            );
+        }
+        for encoding in [
+            serde_json::Value::Null,
+            "utf8".into(),
+            "utf-32le".into(),
+            "".into(),
+            16.into(),
+        ] {
+            let mut invalid = current_json.clone();
+            invalid["entries"][0]["encoding"] = encoding;
+            assert_eq!(
+                restore_variant(&invalid),
+                Err(FirstSliceError::CatalogCorrupt),
+                "{invalid}"
+            );
+        }
 
         let entry = &catalog.entries()[0];
         let file = entry.file();
@@ -8641,11 +9190,7 @@ mod tests {
             "pub fn logical_sidecar_fixture() -> u32 { 42 }\n",
         )
         .expect("fixture source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -8906,11 +9451,7 @@ mod tests {
             "pub fn logical_incremental_fixture() -> u32 { 1 }\n",
         )
         .expect("initial fixture source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let (first, second) = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("durable service initializes");
@@ -8965,11 +9506,7 @@ mod tests {
         let source = fixture.path().join("lib.rs");
         fs::write(&source, "pub fn logical_recompute_fixture() -> u32 { 1 }\n")
             .expect("initial fixture source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let (first, second) = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("durable service initializes");
@@ -9174,6 +9711,46 @@ mod tests {
                 admission_margin_bytes: 20,
             })
         );
+
+        let mut large_inventory = inventory;
+        large_inventory.repositories[0].physical_bytes = 5_939_727_724;
+        large_inventory.total_physical_bytes = 80 * 1024 * 1024 * 1024;
+        large_inventory.available_bytes = 4 * 1024 * 1024 * 1024;
+        let storage = crate::FirstSliceStoragePolicy::resolve_user_config(None, 2)
+            .expect("current default storage policy resolves");
+        let policy = DurableStorageAdmissionPolicy {
+            required_catalog_bytes: 2_967_687_037,
+            required_repository_bytes: 2_967_687_037,
+            maximum_repository_bytes: storage.maximum_repository_bytes,
+            maximum_storage_bytes: storage.maximum_catalog_bytes,
+            minimum_free_bytes: storage.minimum_free_disk_bytes,
+            repository_amplification: None,
+        };
+        assert!(
+            check_storage_admission(&large_inventory, repository, policy).is_ok(),
+            "default admission is independent of the former repository and catalog quotas"
+        );
+        let explicit = check_storage_admission(
+            &large_inventory,
+            repository,
+            DurableStorageAdmissionPolicy {
+                maximum_repository_bytes: 8 * 1024 * 1024 * 1024,
+                ..policy
+            },
+        )
+        .expect_err("explicit repository quotas still govern retained generations");
+        assert_eq!(
+            explicit.scope,
+            DurableStorageAdmissionScope::RepositoryBudget
+        );
+        assert_eq!(explicit.projected_bytes, 8_907_414_761);
+        large_inventory.available_bytes = policy.required_catalog_bytes;
+        assert_eq!(
+            check_storage_admission(&large_inventory, repository, policy)
+                .expect_err("the actual filesystem reserve remains mandatory")
+                .scope,
+            DurableStorageAdmissionScope::FilesystemFreeSpace
+        );
     }
 
     #[test]
@@ -9308,11 +9885,7 @@ mod tests {
             "pub fn changed_amplification_input() -> u32 { 1 }\n",
         )
         .expect("initial changed source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         service
@@ -9687,11 +10260,7 @@ mod tests {
             "pub fn activation_accounting() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -9790,19 +10359,98 @@ mod tests {
     }
 
     #[test]
+    fn large_source_pack_indexes_require_one_complete_supported_source() {
+        let large = SOURCE_PACK_TARGET_BYTES + 1;
+        let entry = DurablePackedSourceEntry {
+            file: FileId::from_bytes([1; 20]),
+            digest: content_hash_bytes(b"index validation fixture"),
+            pack: 0,
+            offset: 0,
+            bytes: large,
+        };
+        let validate = |bytes, entries: Vec<DurablePackedSourceEntry>| {
+            let storage = DurableSourceStorage {
+                version: SOURCE_STORAGE_VERSION,
+                files: Some(u64::try_from(entries.len()).unwrap()),
+                packs: Some(1),
+                index_bytes: None,
+                index_digest: None,
+                payload_bytes: Some(bytes),
+            };
+            validate_packed_source_index(
+                DurablePackedSourceIndex {
+                    version: SOURCE_PACK_INDEX_VERSION,
+                    payload_bytes: bytes,
+                    pack_bytes: vec![bytes],
+                    entries,
+                },
+                storage,
+                &Cancellation::new(),
+            )
+        };
+        assert!(validate(large, vec![entry]).is_ok());
+        assert!(
+            validate(
+                MAX_SOURCE_FILE_BYTES,
+                vec![DurablePackedSourceEntry {
+                    bytes: MAX_SOURCE_FILE_BYTES,
+                    ..entry
+                }]
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate(
+                MAX_SOURCE_FILE_BYTES + 1,
+                vec![DurablePackedSourceEntry {
+                    bytes: MAX_SOURCE_FILE_BYTES + 1,
+                    ..entry
+                }]
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert!(matches!(
+            validate(
+                large,
+                vec![
+                    DurablePackedSourceEntry {
+                        bytes: large - 1,
+                        ..entry
+                    },
+                    DurablePackedSourceEntry {
+                        file: FileId::from_bytes([2; 20]),
+                        offset: large - 1,
+                        bytes: 1,
+                        ..entry
+                    }
+                ]
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert!(matches!(
+            validate(large, vec![DurablePackedSourceEntry { offset: 1, ..entry }]),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+        assert!(matches!(
+            validate(
+                large,
+                vec![DurablePackedSourceEntry {
+                    bytes: large - 1,
+                    ..entry
+                }]
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        ));
+    }
+
+    #[test]
     fn source_layout_transitions_preserve_history_and_compaction() {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .expect("runtime paths");
         paths.prepare_owner().expect("private paths");
         let fixture = durable_test_tempdir();
-        let deadline = || {
-            Cancellation::with_deadline(
-                std::time::Instant::now()
-                    .checked_add(Duration::from_secs(60))
-                    .expect("test deadline"),
-            )
-        };
+        let deadline = || Cancellation::new();
         let mut history = Vec::new();
         for (revision, files) in [15, 16, 15].into_iter().enumerate() {
             if revision == 2 {
@@ -9913,11 +10561,7 @@ mod tests {
                 )
                 .expect("source fixture writes");
             }
-            let cancellation = Cancellation::with_deadline(
-                std::time::Instant::now()
-                    .checked_add(Duration::from_secs(60))
-                    .expect("test deadline is representable"),
-            );
+            let cancellation = Cancellation::new();
             let receipt = {
                 let mut service =
                     FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
@@ -9976,11 +10620,7 @@ mod tests {
             )
             .expect("source fixture writes");
         }
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(60))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let receipt = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("durable service initializes");
@@ -10074,11 +10714,7 @@ mod tests {
             "pub fn admission_reseed() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -10135,11 +10771,7 @@ mod tests {
             "pub fn dirty_reconcile() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -10192,11 +10824,7 @@ mod tests {
             "pub fn metadata_preflight() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -10255,11 +10883,7 @@ mod tests {
             "pub fn cached_accounting() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         service
@@ -10429,11 +11053,7 @@ mod tests {
         fs::write(fixture.path().join("src/stable.rs"), stable).expect("stable source writes");
         let changed_path = fixture.path().join("src/changed.rs");
         fs::write(&changed_path, first_changed).expect("initial changed source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
 
         let (first, second, third) = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
@@ -10576,11 +11196,7 @@ mod tests {
             "pub fn inventory_corruption() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let receipt = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("durable service initializes");
@@ -10643,11 +11259,7 @@ mod tests {
             "pub fn missing_inventory_blob() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -10698,11 +11310,7 @@ mod tests {
             "pub fn inventory_cache() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let receipt = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("durable service initializes");
@@ -10783,11 +11391,7 @@ mod tests {
             "pub fn targeted_cache() -> u32 { 1 }\n",
         )
         .expect("source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
             .expect("durable service initializes");
         let receipt = service
@@ -10847,11 +11451,7 @@ mod tests {
         let source = fixture.path().join("src/lib.rs");
         fs::write(&source, "pub fn quarantine_target() -> u32 { 1 }\n")
             .expect("initial source writes");
-        let cancellation = Cancellation::with_deadline(
-            std::time::Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .expect("deadline is representable"),
-        );
+        let cancellation = Cancellation::new();
         let (first, second) = {
             let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
                 .expect("durable service initializes");

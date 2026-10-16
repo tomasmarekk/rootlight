@@ -4,7 +4,7 @@
 //! single bounded transaction begins. Statements are fixed and parameterized.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     io::{self, Write},
 };
 
@@ -50,9 +50,9 @@ impl RegistryIdentity {
     }
 }
 
-pub(crate) struct WritePlan {
+pub(crate) struct WritePlan<'a> {
     pub(crate) identities: BTreeSet<RegistryIdentity>,
-    pub(crate) source_ordinals: BTreeMap<SourceRef, i64>,
+    pub(crate) source_ordinals: Vec<&'a SourceRef>,
     pub(crate) stats: GenerationStats,
 }
 
@@ -118,10 +118,10 @@ pub(crate) fn write_generation(
     Ok(plan.stats)
 }
 
-pub(crate) fn measure(
-    generation: &GenerationSnapshot,
+pub(crate) fn measure<'a>(
+    generation: &'a GenerationSnapshot,
     context: &GenerationContext<'_>,
-) -> Result<WritePlan, CatalogError> {
+) -> Result<WritePlan<'a>, CatalogError> {
     context.check().map_err(CatalogError::control)?;
     let document = generation.document();
     if document
@@ -133,7 +133,16 @@ pub(crate) fn measure(
             CatalogErrorKind::UnsupportedCriticalExtensions,
         ));
     }
-    let mut sources = BTreeSet::new();
+    let source_capacity = source_reference_inputs(document).try_fold(0_usize, |count, _| {
+        context.check().map_err(CatalogError::control)?;
+        count
+            .checked_add(1)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))
+    })?;
+    let mut sources = Vec::new();
+    sources
+        .try_reserve_exact(source_capacity)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
     let mut identities = BTreeSet::new();
     let mut child_rows = 0_u64;
     let mut text_bytes = 0_u64;
@@ -272,6 +281,11 @@ pub(crate) fn measure(
         add_serialized_text(&mut text_bytes, extension, context)?;
     }
 
+    if sources.len() != source_capacity {
+        return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
+    }
+    sort_source_references(&mut sources, context)?;
+    sources.dedup();
     let source_count = usize_to_u64(sources.len())?;
     context
         .require(GenerationResource::SourceReferences, source_count)
@@ -329,14 +343,9 @@ pub(crate) fn measure(
         text_bytes,
     )
     .map_err(CatalogError::invalid_generation)?;
-    let mut source_ordinals = BTreeMap::new();
-    for (ordinal, source) in sources.into_iter().enumerate() {
-        context.check().map_err(CatalogError::control)?;
-        source_ordinals.insert(source, usize_to_i64(ordinal)?);
-    }
     Ok(WritePlan {
         identities,
-        source_ordinals,
+        source_ordinals: sources,
         stats,
     })
 }
@@ -355,9 +364,9 @@ fn insert_measured_identity(
         .map_err(CatalogError::control)
 }
 
-fn collect_evidence(
-    evidence: &FactEvidence,
-    sources: &mut BTreeSet<SourceRef>,
+fn collect_evidence<'a>(
+    evidence: &'a FactEvidence,
+    sources: &mut Vec<&'a SourceRef>,
     child_rows: &mut u64,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
@@ -371,9 +380,9 @@ fn collect_evidence(
     )
 }
 
-fn collect_opaque_evidence_source(
-    evidence: &FactEvidence,
-    sources: &mut BTreeSet<SourceRef>,
+fn collect_opaque_evidence_source<'a>(
+    evidence: &'a FactEvidence,
+    sources: &mut Vec<&'a SourceRef>,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     if let Some(source) = &evidence.source {
@@ -382,19 +391,133 @@ fn collect_opaque_evidence_source(
     Ok(())
 }
 
-fn collect_source(
-    source: &SourceRef,
-    sources: &mut BTreeSet<SourceRef>,
+fn collect_source<'a>(
+    source: &'a SourceRef,
+    sources: &mut Vec<&'a SourceRef>,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     context.check().map_err(CatalogError::control)?;
-    sources.insert(source.clone());
-    context
-        .require(
-            GenerationResource::SourceReferences,
-            usize_to_u64(sources.len())?,
+    if sources.len() == sources.capacity() {
+        return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
+    }
+    sources.push(source);
+    Ok(())
+}
+
+// Source count limits apply after deduplication. The pre-counted borrowed buffer
+// retains duplicate input references without cloning their source values.
+fn source_reference_inputs(
+    document: &rootlight_ir::NormalizedIrDocument,
+) -> impl Iterator<Item = &SourceRef> {
+    let evidence = document
+        .files
+        .iter()
+        .filter_map(|record| record.evidence.source.as_ref())
+        .chain(
+            document
+                .entities
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
         )
-        .map_err(CatalogError::control)
+        .chain(
+            document
+                .occurrences
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
+        )
+        .chain(
+            document
+                .relations
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
+        )
+        .chain(
+            document
+                .source_mappings
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
+        )
+        .chain(
+            document
+                .coverage_records
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
+        )
+        .chain(
+            document
+                .skipped_regions
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
+        )
+        .chain(
+            document
+                .diagnostics
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
+        )
+        .chain(
+            document
+                .extensions
+                .iter()
+                .filter_map(|record| record.evidence.source.as_ref()),
+        );
+    evidence
+        .chain(document.occurrences.iter().map(|record| &record.source))
+        .chain(
+            document
+                .provenance
+                .iter()
+                .flat_map(|record| record.input_sources.iter().chain(&record.evidence_sources)),
+        )
+        .chain(
+            document
+                .source_mappings
+                .iter()
+                .flat_map(|record| [&record.from, &record.to]),
+        )
+        .chain(document.skipped_regions.iter().map(|record| &record.source))
+        .chain(
+            document
+                .diagnostics
+                .iter()
+                .filter_map(|record| record.source.as_ref()),
+        )
+}
+
+fn sort_source_references(
+    sources: &mut [&SourceRef],
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    for start in (0..sources.len() / 2).rev() {
+        sift_source_references(sources, start, sources.len(), context)?;
+    }
+    for end in (1..sources.len()).rev() {
+        context.check().map_err(CatalogError::control)?;
+        sources.swap(0, end);
+        sift_source_references(sources, 0, end, context)?;
+    }
+    Ok(())
+}
+
+fn sift_source_references(
+    sources: &mut [&SourceRef],
+    mut root: usize,
+    end: usize,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    while root < end / 2 {
+        context.check().map_err(CatalogError::control)?;
+        let mut child = root * 2 + 1;
+        if child + 1 < end && sources[child] < sources[child + 1] {
+            child += 1;
+        }
+        if sources[root] >= sources[child] {
+            break;
+        }
+        sources.swap(root, child);
+        root = child;
+    }
+    Ok(())
 }
 
 fn add_rows(
@@ -534,7 +657,7 @@ fn insert_identities(
 
 fn insert_sources(
     transaction: &Transaction<'_>,
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction
@@ -545,8 +668,9 @@ fn insert_sources(
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
         .map_err(CatalogError::sqlite)?;
-    for (source, ordinal) in sources {
+    for (ordinal, source) in sources.iter().enumerate() {
         context.check().map_err(CatalogError::control)?;
+        let ordinal = usize_to_i64(ordinal)?;
         let span = source.span();
         let (line_start, line_end) = source
             .line_hint()
@@ -571,7 +695,7 @@ fn insert_sources(
 fn insert_provenance(
     transaction: &Transaction<'_>,
     document: &NormalizedIrDocument,
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut record_statement = transaction
@@ -652,7 +776,7 @@ fn insert_provenance(
 fn insert_files(
     transaction: &Transaction<'_>,
     document: &NormalizedIrDocument,
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction
@@ -707,7 +831,7 @@ fn insert_files(
 fn insert_entities(
     transaction: &Transaction<'_>,
     document: &NormalizedIrDocument,
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction
@@ -767,7 +891,7 @@ fn insert_entities(
 fn insert_occurrences(
     transaction: &Transaction<'_>,
     document: &NormalizedIrDocument,
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction
@@ -881,7 +1005,7 @@ fn encode_target(target: &OccurrenceTarget) -> Result<EncodedTarget, CatalogErro
 fn insert_relations(
     transaction: &Transaction<'_>,
     document: &NormalizedIrDocument,
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction
@@ -928,7 +1052,7 @@ fn insert_relations(
 fn insert_coverage(
     transaction: &Transaction<'_>,
     document: &NormalizedIrDocument,
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction
@@ -1107,18 +1231,15 @@ fn insert_evidence(
     Ok(())
 }
 
-fn source_ordinal(
-    sources: &BTreeMap<SourceRef, i64>,
-    source: &SourceRef,
-) -> Result<i64, CatalogError> {
+fn source_ordinal(sources: &[&SourceRef], source: &SourceRef) -> Result<i64, CatalogError> {
     sources
-        .get(source)
-        .copied()
-        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))
+        .binary_search_by(|candidate| (*candidate).cmp(source))
+        .map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))
+        .and_then(usize_to_i64)
 }
 
 fn optional_source_ordinal(
-    sources: &BTreeMap<SourceRef, i64>,
+    sources: &[&SourceRef],
     source: Option<&SourceRef>,
 ) -> Result<Option<i64>, CatalogError> {
     source
@@ -1328,6 +1449,48 @@ mod tests {
     use serde::ser::SerializeSeq;
 
     use super::*;
+
+    #[test]
+    fn borrowed_source_ordinals_match_the_canonical_owned_registry() {
+        let values = (0..257_u64)
+            .rev()
+            .map(|index| {
+                SourceRef::new(
+                    RepositoryId::from_bytes([1; 16]),
+                    rootlight_ids::GenerationId::from_bytes([2; 20]),
+                    rootlight_ir::SourceSpan::new(FileId::from_bytes([3; 20]), index, index + 1)
+                        .unwrap(),
+                    ContentHash::from_bytes([4; 32]),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = values.iter().collect::<BTreeSet<_>>();
+        let mut borrowed = values.iter().chain(values.iter()).collect::<Vec<_>>();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        sort_source_references(&mut borrowed, &context).unwrap();
+        borrowed.dedup();
+        assert_eq!(borrowed, expected.into_iter().collect::<Vec<_>>());
+        for (ordinal, source) in borrowed.iter().enumerate() {
+            assert_eq!(
+                source_ordinal(&borrowed, source).unwrap(),
+                i64::try_from(ordinal).unwrap()
+            );
+            assert!(
+                values
+                    .iter()
+                    .any(|original| std::ptr::eq(original, *source))
+            );
+        }
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert_eq!(
+            sort_source_references(&mut borrowed, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+    }
 
     struct StopDuringSerialization<'a> {
         cancellation: &'a Cancellation,

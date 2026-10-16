@@ -58,6 +58,7 @@ message RequestEnvelope {
     GraphProjectionReleaseRequest graph_projection_release = 50;
     RepositoryCatalogMutationRequest repository_catalog_mutation = 51;
     SourceTextPrefixMetadataQuoteRequest source_text_prefix_metadata_quote = 52;
+    SourceFindRequest source_find = 53;
   }
 }
 
@@ -74,6 +75,8 @@ message FirstSliceEffectiveBudget {
   uint64 duration_micros = 9;
   optional uint64 depth = 10;
   optional uint64 paths = 11;
+  // Absent preserves legacy explicit duration; false omits only an implicit source ceiling.
+  optional bool source_verification_duration_explicit = 12;
 }
 
 // Bounded response envelope paired with one request identifier.
@@ -109,6 +112,7 @@ message ResponseEnvelope {
     GraphProjectionReleaseResponse graph_projection_release = 50;
     RepositoryCatalogMutationResponse repository_catalog_mutation = 51;
     SourceTextPrefixMetadataQuoteResponse source_text_prefix_metadata_quote = 52;
+    SourceFindResponse source_find = 53;
     rootlight.common.v1.PublicError error = 20;
   }
 }
@@ -1119,6 +1123,65 @@ message SourceTextPrefixMetadataQuoteResponse {
   uint32 quote_policy_version = 3;
   repeated SourceTextPrefixMetadataQuoteEntry entries = 4;
   FirstSliceCompleteness completeness = 5;
+}
+
+// Forward scalar state is revalidated against the selected immutable source.
+// MCP additionally authenticates file, generation, query, and request controls.
+message SourceFindCursor {
+  uint64 next_byte = 1;
+  uint64 matched_prefix = 2;
+}
+
+// Requests exact, case-sensitive literal matches in one generation-owned file.
+// Scan work is independent of the source bytes returned by source.read.
+message SourceFindRequest {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  GenerationSelector generation = 3;
+  rootlight.common.v1.FileId file = 4;
+  string literal = 5;
+  optional SourceFindCursor cursor = 6;
+  uint64 maximum_scan_bytes = 7;
+  uint32 maximum_matches = 8;
+}
+
+// One verified file supplies shared metadata for all exact match references.
+message SourceFindFile {
+  rootlight.common.v1.FileId file = 1;
+  string path = 2;
+  string language = 3;
+  rootlight.common.v1.ContentHash content_hash = 4;
+  uint64 byte_length = 5;
+  SourcePhysicalEncoding encoding = 6;
+  bool generated = 7;
+  optional FirstSliceSourceRef extracted_from = 8;
+}
+
+// The stop reason is authoritative; totals are not inferred before EOF.
+enum SourceFindStop {
+  SOURCE_FIND_STOP_END_OF_SOURCE = 0;
+  SOURCE_FIND_STOP_SCAN_LIMIT = 1;
+  SOURCE_FIND_STOP_MATCH_LIMIT = 2;
+  SOURCE_FIND_STOP_MATCHER_MEMORY_LIMIT = 3;
+  SOURCE_FIND_STOP_RESPONSE_MEMORY_LIMIT = 4;
+  SOURCE_FIND_STOP_RESULT_LIMIT = 5;
+}
+
+// Contains exact physical-byte evidence and separate forward/restoration work.
+// UTF-16's leading encoding BOM is metadata; UTF-8 retains its BOM scalar.
+message SourceFindResponse {
+  rootlight.common.v1.ContractVersion schema_version = 1;
+  rootlight.common.v1.RepositoryId repository = 2;
+  rootlight.common.v1.GenerationId generation = 3;
+  SourceFindFile file = 4;
+  repeated FirstSliceSourceRef matches = 5;
+  uint64 scanned_start_byte = 6;
+  uint64 scanned_end_byte = 7;
+  uint64 restoration_bytes = 8;
+  SourceFindStop stop = 9;
+  optional SourceFindCursor continuation = 10;
+  uint64 total_metadata_bytes = 11;
+  uint64 total_response_memory_bytes = 12;
 }
 
 // Requests the bounded list of repositories known to this daemon process.

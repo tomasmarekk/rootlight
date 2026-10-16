@@ -28,8 +28,10 @@ use serde_json::{Value, json};
 
 use crate::token_accounting::{O200kTokenizer, OfflineTokenizer, TokenAccountingError};
 
+mod source_find;
+
 const EVIDENCE_SCHEMA_VERSION: &str = "1.0";
-const EXPECTED_TOOLS: [&str; 19] = [
+const EXPECTED_TOOLS: [&str; 20] = [
     "repo.index",
     "repo.status",
     "repo.list",
@@ -49,8 +51,9 @@ const EXPECTED_TOOLS: [&str; 19] = [
     "source.read",
     "query.advanced",
     "query.batch",
+    "source.find",
 ];
-const REPOSITORY_READ_TOOLS: [&str; 16] = [
+const REPOSITORY_READ_TOOLS: [&str; 17] = [
     "repo.status",
     "code.locate",
     "symbol.explain",
@@ -67,6 +70,7 @@ const REPOSITORY_READ_TOOLS: [&str; 16] = [
     "source.read",
     "query.advanced",
     "query.batch",
+    "source.find",
 ];
 const MATRIX_STATES: [&str; 10] = [
     "fresh_success",
@@ -502,6 +506,14 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         "measured_nonplaceholder",
         None,
     ));
+    let source_find = source_find::exercise(
+        &daemon_binary,
+        &mcp_binary,
+        temporary.path(),
+        &mut transcript,
+        &mut tool_matrix.cells,
+        &evidence.root.join("source-find-storage.jsonl"),
+    )?;
     finalize_tool_matrix(&mut tool_matrix)?;
     let restart_mcp_stderr = restarted_mcp.shutdown()?;
     assert_private_source_absent("restart MCP stderr", &restart_mcp_stderr)?;
@@ -695,6 +707,7 @@ fn run(options: &Options, evidence: &EvidencePaths) -> Result<Summary, VerticalE
         },
         catalog: catalog_evidence,
         tool_matrix,
+        source_find,
         architecture_communities,
         lineage: lineage.evidence,
         process_safety: ProcessSafetyEvidence {
@@ -3249,6 +3262,9 @@ fn validate_tool_matrix_cells(cells: &[ToolMatrixCell]) -> Result<(), VerticalEr
 }
 
 fn matrix_not_applicable_reason(tool: &str, state: &str) -> Option<&'static str> {
+    if tool == "source.find" && MATRIX_STATES.contains(&state) {
+        return None;
+    }
     let applicable = match state {
         "fresh_success" => true,
         "missing_repository" | "missing_generation" | "stale_retained_generation" => {
@@ -6245,6 +6261,7 @@ struct Summary {
     fixture: FixtureEvidence,
     catalog: CatalogEvidence,
     tool_matrix: ToolMatrixEvidence,
+    source_find: source_find::Evidence,
     architecture_communities: ArchitectureCommunityEvidence,
     lineage: LineageEvidence,
     process_safety: ProcessSafetyEvidence,
@@ -6314,7 +6331,7 @@ struct ProtocolEvidence {
     mcp_version: &'static str,
     schema_version: &'static str,
     framing: &'static str,
-    exact_tools: [&'static str; 19],
+    exact_tools: [&'static str; 20],
     tool_contract_version_selector: &'static str,
     versioned_tool_calls: bool,
     unsupported_major_tool_count: usize,
@@ -6501,6 +6518,9 @@ impl ToolMatrixCell {
 }
 
 fn matrix_requested_profile(tool: &str, state: &str) -> &'static str {
+    if tool == "source.find" && state != "cancelled" {
+        return "compact_via_response_profile";
+    }
     match state {
         "fresh_success"
         | "missing_repository"
@@ -7785,6 +7805,7 @@ mod tests {
                 "source.read",
                 "query.advanced",
                 "query.batch",
+                "source.find",
             ]
         );
     }
@@ -7820,9 +7841,19 @@ mod tests {
     }
 
     #[test]
+    fn literal_source_matrix_requires_every_current_state() {
+        for state in MATRIX_STATES {
+            assert_eq!(matrix_not_applicable_reason("source.find", state), None);
+        }
+    }
+
+    #[test]
     fn persisted_failure_states_are_owned_by_the_durable_storage_boundary() {
         for state in ["corrupt_persisted_state", "incompatible_persisted_schema"] {
-            for tool in EXPECTED_TOOLS {
+            for tool in EXPECTED_TOOLS
+                .into_iter()
+                .filter(|tool| *tool != "source.find")
+            {
                 assert_eq!(
                     matrix_not_applicable_reason(tool, state),
                     Some(

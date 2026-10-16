@@ -10,6 +10,7 @@ use rootlight_ir::{FileIdentityClaim, FileRecord};
 /// The presentation path is owned only by the file record. Identity claims are
 /// reconstructed on demand so large file-only catalogs do not retain a second
 /// copy of every repository-relative path.
+/// The `bytes` encoding identifies raw-only retrieval and makes no text claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFileCatalogEntry {
     file: FileRecord,
@@ -35,7 +36,10 @@ impl SourceFileCatalogEntry {
         }
         if file.path.is_empty()
             || file.language.is_empty()
-            || file.encoding != "utf-8"
+            || !matches!(
+                file.encoding.as_str(),
+                "utf-8" | "utf-16le" | "utf-16be" | "bytes"
+            )
             || file.path_locator.is_none()
             || claim.path_identity.is_empty()
         {
@@ -183,7 +187,7 @@ pub enum SourceFileCatalogError {
     /// A record disagreed with the inputs that derive its stable identity.
     #[error("source file catalog identity does not match its canonical claim")]
     IdentityMismatch,
-    /// A record lacked a lossless locator, language, path, or UTF-8 encoding.
+    /// A record lacked a lossless locator, language, path, or supported encoding.
     #[error("source file catalog retrieval metadata is incomplete")]
     IncompleteRetrievalMetadata,
     /// A record carried no direct immutable source reference.
@@ -329,5 +333,74 @@ mod tests {
             SourceFileCatalogEntry::new(file, claim),
             Err(SourceFileCatalogError::SourceEvidenceMismatch)
         );
+    }
+
+    #[test]
+    fn raw_only_entry_preserves_exact_identity_without_a_text_encoding() {
+        let raw = [0xff, 0x00, 0x80];
+        let (mut file, mut claim) = entry("source.dat", b"source.dat").into_parts();
+        file.encoding = "bytes".to_owned();
+        file.byte_length = u64::try_from(raw.len()).unwrap();
+        file.content_hash = content_hash(&raw);
+        claim.byte_length = file.byte_length;
+        claim.content_hash = file.content_hash;
+        file.evidence.source = Some(SourceRef::new(
+            file.repository,
+            file.generation,
+            SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+            file.content_hash,
+            None,
+        ));
+        let accepted = SourceFileCatalogEntry::new(file.clone(), claim.clone()).unwrap();
+        assert_eq!(accepted.file(), &file);
+        assert_eq!(accepted.identity_claim(), claim);
+        let mut invalid = file;
+        invalid.content_hash = content_hash(b"replacement");
+        assert_eq!(
+            SourceFileCatalogEntry::new(invalid, claim),
+            Err(SourceFileCatalogError::IdentityMismatch),
+        );
+    }
+
+    #[test]
+    fn entry_preserves_canonical_physical_encodings() {
+        let source = "// λ😀\r\n";
+        for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+            let bytes = match encoding {
+                "utf-16le" => std::iter::once(0xfeff)
+                    .chain(source.encode_utf16())
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+                "utf-16be" => std::iter::once(0xfeff)
+                    .chain(source.encode_utf16())
+                    .flat_map(u16::to_be_bytes)
+                    .collect(),
+                _ => source.as_bytes().to_vec(),
+            };
+            let (mut file, mut claim) = entry("source.txt", b"source.txt").into_parts();
+            file.encoding = encoding.to_owned();
+            file.byte_length = u64::try_from(bytes.len()).unwrap();
+            file.content_hash = content_hash(&bytes);
+            claim.byte_length = file.byte_length;
+            claim.content_hash = file.content_hash;
+            file.evidence.source = Some(SourceRef::new(
+                file.repository,
+                file.generation,
+                SourceSpan::new(file.id, 0, file.byte_length).unwrap(),
+                file.content_hash,
+                None,
+            ));
+            let accepted = SourceFileCatalogEntry::new(file.clone(), claim.clone()).unwrap();
+            assert_eq!(accepted.file(), &file);
+            assert_eq!(accepted.identity_claim(), claim);
+            for unsupported in ["", "utf8", "UTF-16LE", "utf-16", "utf-32le", "binary"] {
+                let mut rejected = file.clone();
+                rejected.encoding = unsupported.to_owned();
+                assert_eq!(
+                    SourceFileCatalogEntry::new(rejected, claim.clone()),
+                    Err(SourceFileCatalogError::IncompleteRetrievalMetadata)
+                );
+            }
+        }
     }
 }

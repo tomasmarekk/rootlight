@@ -129,6 +129,44 @@ impl<'a> SourceText<'a> {
         self.encoding
     }
 
+    /// Returns the original byte length, including an encoding BOM when present.
+    #[must_use]
+    pub const fn byte_len(self) -> usize {
+        match self.body {
+            TextBody::Utf8(text) => text.len(),
+            TextBody::Utf16(units) => units.len() * 2 + 2,
+        }
+    }
+
+    /// Iterates from an original byte offset without decoding the preceding text.
+    ///
+    /// Returns `None` for offsets beyond the source or inside a scalar. UTF-16
+    /// offset zero aliases the first scalar after the two-byte BOM; offset one,
+    /// odd offsets, and the low half of a surrogate pair are rejected. UTF-8
+    /// retains its BOM as a scalar, consistently with [`Self::chars`].
+    pub fn chars_from_byte(self, offset: usize) -> Option<impl Iterator<Item = char> + 'a> {
+        match self.body {
+            TextBody::Utf8(text) => Some(SourceChars::Utf8(text.get(offset..)?.chars())),
+            TextBody::Utf16(units) => {
+                let offset = if offset == 0 { 2 } else { offset };
+                if offset < 2 || !offset.is_multiple_of(2) {
+                    return None;
+                }
+                let suffix = units.get((offset - 2) / 2..)?;
+                if let Some(first) = suffix.first() {
+                    let unit = match self.encoding {
+                        TextEncoding::Utf16Be => u16::from_be_bytes(*first),
+                        TextEncoding::Utf8 | TextEncoding::Utf16Le => u16::from_le_bytes(*first),
+                    };
+                    if (0xdc00..=0xdfff).contains(&unit) {
+                        return None;
+                    }
+                }
+                Some(SourceChars::Utf16(decode_units(suffix, self.encoding)))
+            }
+        }
+    }
+
     /// Borrows the original text without copying when its encoding is UTF-8.
     #[must_use]
     pub const fn utf8(self) -> Option<&'a str> {
@@ -190,6 +228,60 @@ impl Iterator for SourceChars<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_suffixes_accept_only_original_scalar_boundaries() {
+        let text = SourceText::from_utf8("\u{feff}aλ😀z");
+        assert_eq!(text.byte_len(), 11);
+        for (offset, suffix) in [
+            (0, "\u{feff}aλ😀z"),
+            (3, "aλ😀z"),
+            (4, "λ😀z"),
+            (6, "😀z"),
+            (10, "z"),
+            (11, ""),
+        ] {
+            assert_eq!(
+                text.chars_from_byte(offset).unwrap().collect::<String>(),
+                suffix
+            );
+        }
+        for offset in [1, 2, 5, 7, 8, 9, 12, usize::MAX] {
+            assert!(text.chars_from_byte(offset).is_none());
+        }
+        for big_endian in [false, true] {
+            let bytes: Vec<_> = iter::once(0xfeff)
+                .chain("aλ😀z".encode_utf16())
+                .flat_map(|unit| {
+                    if big_endian {
+                        unit.to_be_bytes()
+                    } else {
+                        unit.to_le_bytes()
+                    }
+                })
+                .collect();
+            let text = SourceText::parse(&bytes, &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(text.byte_len(), 12);
+            for (offset, suffix) in [
+                (0, "aλ😀z"),
+                (2, "aλ😀z"),
+                (4, "λ😀z"),
+                (6, "😀z"),
+                (10, "z"),
+                (12, ""),
+            ] {
+                assert_eq!(
+                    text.chars_from_byte(offset).unwrap().collect::<String>(),
+                    suffix
+                );
+            }
+            for offset in [1, 3, 5, 7, 8, 9, 11, 13, usize::MAX] {
+                assert!(text.chars_from_byte(offset).is_none());
+            }
+        }
+    }
 
     #[test]
     fn unicode_views_preserve_original_byte_widths_without_debug_content() {

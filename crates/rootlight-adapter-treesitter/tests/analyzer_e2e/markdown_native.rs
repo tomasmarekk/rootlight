@@ -2236,6 +2236,54 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
         .chain([
             CSS_CASE,
             JSON_CASE,
+            jsonc_native::JSONC,
+            LanguageCase {
+                name: "coq",
+                path: "src/written.v",
+                frontend: "tree-sitter-rocq-0.2.0",
+                source: "Definition written := 0.\n",
+                generated: false,
+                body_before: "0",
+                body_after: "1",
+            },
+            LanguageCase {
+                name: "v",
+                path: "src/written.v",
+                frontend: "tree-sitter-v-0.0.6",
+                source: "module written\nstruct Box { value int }\nfn read(value int) int { return value + 1 }\n",
+                generated: false,
+                body_before: "value + 1",
+                body_after: "value + 2",
+            },
+            LanguageCase { name: "verilog", path: "src/written.v", frontend: "tree-sitter-verilog-0.4.1", source: "module Written; wire value; endmodule\n", generated: false, body_before: "wire value", body_after: "wire other" },
+            LanguageCase { name: "systemverilog", path: "src/written.sv", frontend: "tree-sitter-systemverilog-0.4.1", source: "module Written; wire value; endmodule\n", generated: false, body_before: "wire value", body_after: "wire other" },
+            LanguageCase {
+                name: "eiffel",
+                path: "src/written.e",
+                frontend: "tree-sitter-eiffel-1.0.0",
+                source: "class BOX\nfeature\n value: INTEGER\nend\n",
+                generated: false,
+                body_before: "INTEGER",
+                body_after: "STRING",
+            },
+            LanguageCase {
+                name: "julia",
+                path: "src/written.jl",
+                frontend: "tree-sitter-julia-0.25.0",
+                source: "module Written\nfunction measure(value::Int)\n value + 1\nend\nend\n",
+                generated: false,
+                body_before: "value + 1",
+                body_after: "value + 2",
+            },
+            LanguageCase {
+                name: "cmake",
+                path: "src/Written.cmake",
+                frontend: "tree-sitter-cmake-0.7.5",
+                source: "function(Written value)\nset(local ${value})\nendfunction()\n",
+                generated: false,
+                body_before: "${value}",
+                body_after: "changed",
+            },
             TOML_CASE,
             yaml_native::YAML,
             html_native::HTML,
@@ -2563,6 +2611,125 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             }
         } else {
             assert!(!expected.is_empty(), "{}", case.name);
+        }
+    }
+}
+
+#[test]
+fn markdown_coq_fences_keep_written_definitions_and_exact_scoped_gaps() {
+    for ending in ["\n", "\r\n"] {
+        let mut source = format!("# Coq examples λ😀{ending}{ending}");
+        source.push_str(&format!("Definition host_decoy := 0.{ending}{ending}"));
+        let mut bodies = Vec::new();
+        for value in ["0", "1"] {
+            source.push_str(&format!("~~~coq{ending}"));
+            let start = source.len();
+            source.push_str(&format!(
+                "(* Definition comment_decoy := 0. *){ending}Definition résumé := {value}.{ending}"
+            ));
+            bodies.push(start..source.len());
+            source.push_str(&format!("~~~{ending}{ending}"));
+        }
+        let result = output(&source);
+        let document = result.document();
+        let written: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "coq" && entity.canonical_name == "résumé")
+            .collect();
+        assert_eq!(written.len(), 2);
+        assert_ne!(written[0].id, written[1].id);
+        assert!(
+            written
+                .iter()
+                .all(|entity| entity.kind == EntityKind::Constant)
+        );
+        assert!(!document.entities.iter().any(|entity| matches!(
+            entity.canonical_name.as_str(),
+            "host_decoy" | "comment_decoy"
+        )));
+        for body in &bodies {
+            let exact = |span: SourceSpan| {
+                span.start_byte() == u64::try_from(body.start).unwrap()
+                    && span.end_byte() == u64::try_from(body.end).unwrap()
+            };
+            let owners: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.language == "coq"
+                        && entity.kind == EntityKind::Module
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| exact(source.span()))
+                })
+                .collect();
+            assert_eq!(owners.len(), 1);
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && written.iter().any(|entity| {
+                            site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                        })
+                        && site.source.span().start_byte() >= u64::try_from(body.start).unwrap()
+                        && site.source.span().end_byte() <= u64::try_from(body.end).unwrap()
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let definition = definitions[0];
+            let start = usize::try_from(definition.source.span().start_byte()).unwrap();
+            let end = usize::try_from(definition.source.span().end_byte()).unwrap();
+            assert_eq!(source.get(start..end), Some("résumé"));
+            assert_eq!(
+                definition.source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+            assert_eq!(
+                definition.syntactic_text_hash,
+                content_hash("résumé".as_bytes())
+            );
+            assert_eq!(definition.source.repository(), document.repository);
+            assert_eq!(definition.source.generation(), document.generation);
+            let OccurrenceTarget::Resolved { symbol } = definition.target else {
+                panic!("written Coq definition must resolve to its own source entity");
+            };
+            assert!(document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::Contains
+                    && edge.subject == RelationEndpoint::Entity(owners[0].id)
+                    && edge.object == RelationEndpoint::Entity(symbol)
+            }));
+            for (domain, detail) in [
+                (
+                    FactDomain::Entities,
+                    "coq-local-term-binder-projection-and-generated-declaration-coverage-incomplete",
+                ),
+                (
+                    FactDomain::Occurrences,
+                    "coq-term-pattern-tactic-and-notation-reference-surface-incomplete",
+                ),
+                (
+                    FactDomain::Relations,
+                    "coq-elaboration-typechecking-proofchecking-and-term-binding-unavailable",
+                ),
+            ] {
+                let gaps: Vec<_> = document
+                    .skipped_regions
+                    .iter()
+                    .filter(|gap| {
+                        gap.domain == domain && gap.detail == detail && exact(gap.source.span())
+                    })
+                    .collect();
+                assert_eq!(gaps.len(), 1, "{detail}");
+                assert_eq!(
+                    gaps[0].source.content_hash(),
+                    content_hash(source.as_bytes())
+                );
+                assert_eq!(gaps[0].reason, SkippedRegionReason::UnsupportedConstruct);
+            }
         }
     }
 }

@@ -1,0 +1,169 @@
+{
+  "$id": "https://rootlight.local/schema/mcp/source.find/input/1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceFindInput",
+  "description": "Strict source.find input; the literal is never interpreted as a regex or token.",
+  "type": "object",
+  "properties": {
+    "budget": {
+      "description": "Lower result, token, or timeout ceilings; other controls are unsupported.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceFindResponseBudget"
+        }
+      ]
+    },
+    "cursor": {
+      "description": "Authenticated continuation preserving an unfinished literal prefix.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ContinuationCursor"
+        }
+      ]
+    },
+    "file_id": {
+      "description": "Exact indexed file identity; caller paths are not accepted.",
+      "$ref": "#/$defs/FileId"
+    },
+    "generation": {
+      "description": "Active or omitted on the first page; exact generation on continuation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GenerationSelector"
+        }
+      ]
+    },
+    "literal": {
+      "description": "Nonempty exact scalar sequence, limited to 65536 UTF-8 bytes.",
+      "type": "string",
+      "maxLength": 65536,
+      "minLength": 1
+    },
+    "maximum_matches": {
+      "description": "Matches per page; omitted means 128. Overlapping matches are included.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 1024,
+      "minimum": 1
+    },
+    "maximum_scan_bytes": {
+      "description": "Forward physical bytes per page; omitted means 64 MiB.",
+      "type": "integer",
+      "format": "uint64",
+      "maximum": 67108864,
+      "minimum": 1
+    },
+    "repository": {
+      "description": "Owning repository selected by its stable identity.",
+      "$ref": "#/$defs/RepositorySelector"
+    },
+    "response_profile": {
+      "description": "Optional compact representation; source identity is always retained.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceFindResponseProfile"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "file_id",
+    "literal"
+  ],
+  "$defs": {
+    "ActiveGeneration": {
+      "description": "Active-generation keyword.",
+      "oneOf": [
+        {
+          "description": "Select the active generation.",
+          "type": "string",
+          "const": "active"
+        }
+      ]
+    },
+    "ContinuationCursor": {
+      "description": "A bounded opaque continuation cursor.",
+      "type": "string",
+      "maxLength": 4096,
+      "minLength": 1
+    },
+    "FileId": {
+      "type": "string",
+      "pattern": "^file1_[a-z2-7]{39}$"
+    },
+    "GenerationId": {
+      "type": "string",
+      "pattern": "^gen1_[a-z2-7]{39}$"
+    },
+    "GenerationSelector": {
+      "description": "Generation selector shared by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Resolve the currently active immutable generation.",
+          "$ref": "#/$defs/ActiveGeneration"
+        },
+        {
+          "description": "Pin an explicit immutable generation.",
+          "$ref": "#/$defs/GenerationId"
+        }
+      ]
+    },
+    "RepositoryId": {
+      "type": "string",
+      "pattern": "^repo1_[a-z2-7]{32}$"
+    },
+    "RepositoryIdSelector": {
+      "description": "Stable repository-ID selector.",
+      "type": "object",
+      "properties": {
+        "repository_id": {
+          "description": "Repository identity.",
+          "$ref": "#/$defs/RepositoryId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "RepositorySelector": {
+      "description": "Repository selector accepted by first-slice read tools.",
+      "anyOf": [
+        {
+          "description": "Select by stable repository identifier.",
+          "$ref": "#/$defs/RepositoryIdSelector"
+        }
+      ]
+    },
+    "SourceFindResponseBudget": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_tokens": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 16000,
+          "minimum": 100
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 30000,
+          "minimum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "SourceFindResponseProfile": {
+      "type": "string",
+      "const": "compact"
+    }
+  }
+}

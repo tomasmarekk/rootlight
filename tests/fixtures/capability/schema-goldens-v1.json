@@ -61,6 +61,10 @@
       "inputSha256": "7cf0e4eb21037ebf2e495ab1ff203990c729f5c96c0d4f8609f79120ae70c4aa",
       "outputSha256": "a807688c6bb1a934c3acaa899a4969af51e981a5e583aa47441488c36744a8b3"
     },
+    "source.find": {
+      "inputSha256": "380575631432d4d044f30cb6f764f822609585311b342121d3b412f02b7f5363",
+      "outputSha256": "f07e8ae0263bb81783a5eb372f42e345eacf6db3c264ba3a5d88b7c0ea77f47c"
+    },
     "source.read": {
       "inputSha256": "db407e30110b101e371df5791b2dad0a33a42c6f4dd2c87dc1f66f6dadb93c48",
       "outputSha256": "336d2477444ed2f7c3f319390ff7496a70a09374f27da9cc38e96cc643f6075a"

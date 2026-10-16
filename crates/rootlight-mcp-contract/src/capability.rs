@@ -354,6 +354,29 @@ impl ToolCapability {
         {
             return *rule;
         }
+        if let ResponseProfileSupport::Selectable {
+            wire_field,
+            supported,
+            ..
+        } = self.response_profiles
+            && path == wire_field.name()
+            && let Some((profile, name)) = match value {
+                Some("compact") => Some((ResponseProfile::Compact, "compact")),
+                Some("standard") => Some((ResponseProfile::Standard, "standard")),
+                Some("evidence") => Some((ResponseProfile::Evidence, "evidence")),
+                _ => None,
+            }
+            && !supported.contains(&profile)
+        {
+            // Schema-excluded profiles have no field/value rule to advertise.
+            return CapabilityRule {
+                path: wire_field.name(),
+                value: Some(name),
+                status: CapabilityStatus::UnsupportedStableError,
+                error_code: Some(ErrorCode::InvalidArgument),
+                summary: "the response profile is outside the current input contract",
+            };
+        }
         if let Some(rule) = self
             .rules
             .iter()
@@ -1439,6 +1462,21 @@ const SOURCE_READ_RULES: &[CapabilityRule] = &[
     unsupported("budget.evidence_level", "evidence projection is not served"),
 ];
 
+const SOURCE_FIND_RULES: &[CapabilityRule] = &[
+    accepted_fallback("repository"),
+    accepted_fallback("generation"),
+    accepted_fallback("file_id"),
+    accepted_fallback("literal"),
+    accepted_fallback("maximum_scan_bytes"),
+    accepted_fallback("maximum_matches"),
+    accepted_fallback("cursor"),
+    accepted_fallback("budget"),
+    fallback_limited(
+        "response_profile",
+        "only compact source references are served",
+    ),
+];
+
 const QUERY_ADVANCED_RULES: &[CapabilityRule] = &[
     accepted_fallback("repository"),
     accepted_fallback("generation"),
@@ -1516,7 +1554,7 @@ pub const fn is_batch_eligible(tool: McpTool) -> bool {
 }
 
 /// The canonical capability registry, one entry per tool in catalog order.
-pub const CAPABILITIES: [ToolCapability; 19] = build_capabilities();
+pub const CAPABILITIES: [ToolCapability; 20] = build_capabilities();
 
 /// Returns the canonical capability entry for one catalog tool.
 #[must_use]
@@ -1579,8 +1617,8 @@ fn lifecycle_metadata(tool: McpTool) -> Option<DiscoveryLifecycleMetadata> {
     })
 }
 
-const fn build_capabilities() -> [ToolCapability; 19] {
-    let mut entries = [tool_capability(McpTool::RepoIndex); 19];
+const fn build_capabilities() -> [ToolCapability; 20] {
+    let mut entries = [tool_capability(McpTool::RepoIndex); 20];
     let mut index = 0;
     while index < McpTool::ALL.len() {
         entries[index] = tool_capability(McpTool::ALL[index]);
@@ -1597,7 +1635,10 @@ const fn tool_capability(tool: McpTool) -> ToolCapability {
         profiles: tool_profiles(tool),
         response_profiles: response_profile_support(tool),
         batch_eligible: is_batch_eligible(tool),
-        explain_supported: !matches!(tool, McpTool::RepoIndex | McpTool::OperationStatus),
+        explain_supported: !matches!(
+            tool,
+            McpTool::RepoIndex | McpTool::OperationStatus | McpTool::SourceFind
+        ),
         handler_path: Some(handler_path(tool)),
         status: tool_status(tool),
         default_field_status: CapabilityStatus::Blocked,
@@ -1631,6 +1672,7 @@ const fn handler_path(tool: McpTool) -> &'static str {
         McpTool::SourceRead => "rootlight-mcp::executor::execute_source_read",
         McpTool::QueryAdvanced => "rootlight-mcp::executor::execute_query_advanced",
         McpTool::QueryBatch => "rootlight-mcp::executor::execute_query_batch",
+        McpTool::SourceFind => "rootlight-mcp::executor::execute_source_find",
     }
 }
 
@@ -1657,7 +1699,8 @@ const fn tool_profiles(tool: McpTool) -> &'static [ExposureProfile] {
         | McpTool::SymbolExplain
         | McpTool::ContextPack
         | McpTool::SourceRead
-        | McpTool::QueryBatch => SCOUT_PROFILES,
+        | McpTool::QueryBatch
+        | McpTool::SourceFind => SCOUT_PROFILES,
         McpTool::SymbolRelationships
         | McpTool::FlowTrace
         | McpTool::ChangeImpact
@@ -1676,11 +1719,13 @@ const fn response_profile_support(tool: McpTool) -> ResponseProfileSupport {
                 representation: ResponseProfile::Compact,
             }
         }
-        McpTool::RepoStatus | McpTool::RepoList => ResponseProfileSupport::Selectable {
-            wire_field: ResponseProfileField::ResponseProfile,
-            supported: COMPACT_RESPONSE_PROFILES,
-            default: ResponseProfile::Compact,
-        },
+        McpTool::RepoStatus | McpTool::RepoList | McpTool::SourceFind => {
+            ResponseProfileSupport::Selectable {
+                wire_field: ResponseProfileField::ResponseProfile,
+                supported: COMPACT_RESPONSE_PROFILES,
+                default: ResponseProfile::Compact,
+            }
+        }
         McpTool::SourceRead => ResponseProfileSupport::Selectable {
             wire_field: ResponseProfileField::ResponseProfile,
             supported: ANALYTICAL_RESPONSE_PROFILES,
@@ -1743,6 +1788,7 @@ const fn tool_rules(tool: McpTool) -> &'static [CapabilityRule] {
         McpTool::SourceRead => SOURCE_READ_RULES,
         McpTool::QueryAdvanced => QUERY_ADVANCED_RULES,
         McpTool::QueryBatch => QUERY_BATCH_RULES,
+        McpTool::SourceFind => SOURCE_FIND_RULES,
     }
 }
 
@@ -1753,7 +1799,8 @@ const fn pagination_semantics(tool: McpTool) -> PaginationSemantics {
         | McpTool::CodeLocate
         | McpTool::SymbolRelationships
         | McpTool::ContextPack
-        | McpTool::QueryAdvanced => PaginationSemantics::AuthenticatedCursor,
+        | McpTool::QueryAdvanced
+        | McpTool::SourceFind => PaginationSemantics::AuthenticatedCursor,
         McpTool::RepoStatus | McpTool::OperationStatus => PaginationSemantics::BoundedComplete,
         McpTool::SymbolExplain => PaginationSemantics::ExplicitTruncation,
         McpTool::QueryBatch => PaginationSemantics::ChildContinuations,
@@ -1794,7 +1841,8 @@ const fn budget_semantics(tool: McpTool) -> BudgetSemantics {
         | McpTool::HistoryCompare
         | McpTool::PlanChange
         | McpTool::SourceRead
-        | McpTool::QueryAdvanced => BudgetSemantics::PerRequest,
+        | McpTool::QueryAdvanced
+        | McpTool::SourceFind => BudgetSemantics::PerRequest,
         McpTool::ContextPack => BudgetSemantics::TokenBudget,
         McpTool::RepoStatus => BudgetSemantics::Unsupported,
         McpTool::QueryBatch => BudgetSemantics::PerRequest,
@@ -1837,6 +1885,7 @@ const fn input_shape_hash(tool: McpTool) -> &'static str {
             "195c080e355b7922adcb1741a36a934f4e31900d26020d56cfbd345990be63f0"
         }
         McpTool::QueryBatch => "18861b971b68ea45b8f742ef3e266d84d3af981db3f067854265053d87974b56",
+        McpTool::SourceFind => "d94bf0662cf851700d18b91e356ee5c9ff0dd38c7b55c7fdfb9290f9d78d596d",
     }
 }
 
@@ -1895,6 +1944,9 @@ const fn tool_fallback_summary(tool: McpTool) -> &'static str {
         McpTool::QueryBatch => {
             "bounded active-generation batch dispatch for up to sixteen eligible reads with shared child accounting"
         }
+        McpTool::SourceFind => {
+            "exact case-sensitive unicode literals in one known generation-pinned source file"
+        }
     }
 }
 
@@ -1911,6 +1963,43 @@ mod tests {
         ResponseProfileSupport, capability_for, discovery_metadata, is_batch_eligible,
     };
     use crate::{ErrorCode, vertical::ResponseProfile};
+
+    #[test]
+    fn source_find_advertises_only_known_file_literal_scan_capabilities() {
+        let entry = capability_for(McpTool::SourceFind);
+        assert_eq!(McpTool::SourceFind as usize, 19);
+        assert_eq!(McpTool::QueryBatch as usize, 18);
+        assert_eq!(entry.contract_version, "1.0");
+        assert_eq!(entry.status, CapabilityStatus::FallbackLimited);
+        assert_eq!(entry.pagination, PaginationSemantics::AuthenticatedCursor);
+        assert_eq!(entry.generation, GenerationSemantics::SelectsGeneration);
+        assert!(!entry.explain_supported);
+        assert!(!entry.batch_eligible);
+        for path in [
+            "repository.repository_id",
+            "generation",
+            "file_id",
+            "literal",
+            "maximum_scan_bytes",
+            "maximum_matches",
+            "cursor",
+            "budget.max_results",
+            "budget.max_tokens",
+            "budget.timeout_ms",
+            "response_profile",
+        ] {
+            assert_eq!(
+                entry.disposition(path, None).status,
+                CapabilityStatus::FallbackLimited
+            );
+        }
+        for path in ["path", "regex", "case_sensitive", "explain", "semantic"] {
+            assert_eq!(
+                entry.disposition(path, None).status,
+                CapabilityStatus::Blocked
+            );
+        }
+    }
 
     #[test]
     fn registry_covers_exactly_the_catalog_in_order() {
@@ -2108,6 +2197,14 @@ mod tests {
                     default: Compact,
                 },
             ),
+            (
+                McpTool::SourceFind,
+                Selectable {
+                    wire_field: CanonicalResponseProfileField,
+                    supported: COMPACT_RESPONSE_PROFILES,
+                    default: Compact,
+                },
+            ),
         ];
 
         assert_eq!(expected.len(), McpTool::ALL.len());
@@ -2164,7 +2261,11 @@ mod tests {
                             );
                             assert_eq!(
                                 disposition.error_code,
-                                Some(ErrorCode::UnsupportedCapability)
+                                Some(if tool == McpTool::SourceFind {
+                                    ErrorCode::InvalidArgument
+                                } else {
+                                    ErrorCode::UnsupportedCapability
+                                })
                             );
                         }
                     }
@@ -2249,7 +2350,10 @@ mod tests {
         for entry in &CAPABILITIES {
             assert_eq!(
                 entry.explain_supported,
-                !matches!(entry.tool, McpTool::RepoIndex | McpTool::OperationStatus)
+                !matches!(
+                    entry.tool,
+                    McpTool::RepoIndex | McpTool::OperationStatus | McpTool::SourceFind
+                )
             );
         }
         let status = CAPABILITIES[McpTool::RepoStatus as usize];
@@ -2558,6 +2662,10 @@ mod tests {
             ),
             (McpTool::PlanChange, PaginationSemantics::ExplicitTruncation),
             (McpTool::SourceRead, PaginationSemantics::ExplicitTruncation),
+            (
+                McpTool::SourceFind,
+                PaginationSemantics::AuthenticatedCursor,
+            ),
         ];
 
         assert_eq!(expected.len(), McpTool::ALL.len());

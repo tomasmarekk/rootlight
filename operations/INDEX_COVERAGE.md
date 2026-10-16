@@ -15,6 +15,27 @@ language assignments, use the format described in [SOURCE_LANGUAGES.md](SOURCE_L
 Run default detection and configured analysis separately with different new state
 directories. A configured result is not evidence of automatic language detection.
 
+Configuration 1.3 admits readable source files up to 64 MiB by default, matching
+the supported snapshot size. Explicit `analysis.max_source_file_bytes` values
+remain effective for both discovery and analysis; frozen configuration versions
+1.0 through 1.2 retain their original 8 MiB default. This admission ceiling does
+not establish structural or semantic completeness. Exact source responses remain
+bounded separately, so larger files must be read through explicit byte ranges.
+
+The service's structural profile admits completed syntax trees up to depth
+4,096, matching the adapter's existing hard bound. Explicit library caller
+limits remain effective. Trees beyond the admitted depth retain source access
+and an explicit `syntax-depth-limit` gap; they do not publish partial definition
+claims as complete analysis. Native parsing happens before completed-tree depth
+inspection, so this limit alone does not establish a native parser allocation
+or stack bound. The deeper profile also raises stalled-parser progress credit
+from 131,072 to 4,194,304 steps; separately requested cancellation still applies.
+
+Current configuration 1.3 does not impose default repository or catalog storage
+quotas. Durable admission checks the required allocation against available disk
+space and preserves the configured free-space reserve. Explicit storage quotas
+remain effective; configuration 1.2 retains its historical defaults and bounds.
+
 The state directory must be absolute and must not already exist. Its parent must exist, and the platform
 must support the service's private durable-state boundary. The example retains
 the state for inspection; it does not overwrite an existing audit.
@@ -52,6 +73,12 @@ without changing the independent 32 MiB default and 128 MiB hard transfer
 ceilings. The report explicitly records that no sharing round-trip occurred.
 This diagnostic includes normalized and file-only retained records, but does not
 qualify the sharing API; validate that boundary separately where required.
+File-only generations retain the original UTF-8 or BOM-marked UTF-16 byte
+encoding, including after incremental updates and durable reopen. Use raw-byte
+source reads for exact physical reconstruction, or the lossless text interface
+for decoded presentation. File availability under this fallback retains an
+explicit resource-bounded analysis result; it does not establish definitions
+or semantic relationships.
 `source_exact` is true only for a directly compared physical file. Extracted
 rows report `source_read_exact`, `container_live_exact`, and
 `extraction_independently_verified: false` separately; do not count the last

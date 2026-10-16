@@ -30,6 +30,18 @@ mod scheme;
 #[path = "structural_wgsl.rs"]
 mod wgsl;
 
+#[path = "structural_cmake.rs"]
+mod cmake;
+#[path = "structural_coq.rs"]
+mod coq;
+#[path = "structural_eiffel.rs"]
+mod eiffel;
+#[path = "structural_hdl.rs"]
+mod hdl;
+#[path = "structural_julia.rs"]
+mod julia;
+#[path = "structural_v.rs"]
+mod v;
 #[path = "structural_xml.rs"]
 mod xml;
 
@@ -42,12 +54,49 @@ pub use fsharp::StructuralClassificationGap;
 /// additionally requires the caller's language-specific scope evidence.
 /// Unsupported F# declaration shapes return `None`; callers must retain the
 /// corresponding [`structural_entity_classification_gap`] in entity coverage.
-/// Assembly, Common Lisp, GLSL, HLSL, OCaml, Scheme, WGSL, XML and DTD accept
+/// Assembly, Common Lisp, Eiffel, GLSL, HLSL, OCaml, Scheme, WGSL, XML and DTD accept
 /// only exact reviewed labels; unknown labels never use the substring classifier.
 /// HLSL buffer labels and contexts are not declarations, types or named scopes.
+/// Physical patch headers and hunks are document sections, never target-language declarations.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("patch.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Module, "patch.file.module") => Some(EntityKind::Module),
+            (
+                SyntaxFactKind::Declaration,
+                "patch.file_section.declaration" | "patch.hunk.declaration",
+            ) => Some(EntityKind::DocumentSection),
+            _ => None,
+        };
+    }
+    if label.starts_with("coq.") {
+        return coq::entity_kind(fact);
+    }
+    if fact.kind() == SyntaxFactKind::Declaration {
+        match label {
+            "rust.local_variable.declaration" => return Some(EntityKind::Variable),
+            "rust.parameter.declaration" => return Some(EntityKind::Parameter),
+            "rust.anonymous_function.declaration" => return Some(EntityKind::Function),
+            _ => {}
+        }
+    }
+    if label.starts_with("v.") {
+        return v::entity_kind(fact);
+    }
+    if label.starts_with("verilog.") || label.starts_with("systemverilog.") {
+        return hdl::entity_kind(fact);
+    }
+    if label.starts_with("eiffel.") {
+        return eiffel::entity_kind(fact);
+    }
+    if label.starts_with("julia.") {
+        return julia::entity_kind(fact);
+    }
+    if label.starts_with("cmake.") {
+        return cmake::entity_kind(fact);
+    }
     if label.starts_with("ocaml.") || label.starts_with("ocaml_interface.") {
         return ocaml::entity_kind(fact);
     }
@@ -350,6 +399,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             if matches!(
                 label,
                 "json.property.declaration"
+                    | "jsonc.property.declaration"
                     | "groovy.property.declaration"
                     | "matlab.property.declaration"
                     | "objective_c.property.declaration"
@@ -625,12 +675,24 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "assembly" {
+    if language == "coq" {
+        coq::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "v" {
+        v::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "assembly" {
         assembly::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if matches!(language, "ocaml" | "ocaml-interface") {
         ocaml::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "glsl" {
         glsl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "julia" {
+        julia::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "cmake" {
+        cmake::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if matches!(language, "verilog" | "systemverilog") {
+        hdl::captured_name(text, maximum_bytes).map(Cow::Borrowed)
+    } else if language == "eiffel" {
+        eiffel::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if matches!(language, "xml" | "dtd") {
         xml::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "hlsl" {
@@ -690,7 +752,7 @@ pub fn structural_captured_name_for_language<'a>(
             .then_some(Cow::Borrowed(candidate))
     } else if language == "sql" {
         crate::sql_names::canonical_sql_name(text, maximum_bytes)
-    } else if language == "json" {
+    } else if matches!(language, "json" | "jsonc") {
         crate::json_names::canonical_json_key(text, maximum_bytes)
     } else if language == "toml" {
         crate::toml_names::canonical_toml_key_path(text, maximum_bytes)
@@ -852,11 +914,64 @@ pub fn structural_captured_name_for_fact<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    let label = fact.syntax_kind().as_str();
+    if label.starts_with("patch.") {
+        return (language == "diff"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "patch.heading.definition"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && !text.contains(['\0', '\r', '\n']))
+        .then_some(Cow::Borrowed(text));
+    }
+    if language == "coq" || label.starts_with("coq.") {
+        return (language == "coq")
+            .then(|| coq::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "rust" && label.starts_with("rust.") && fact.kind() == SyntaxFactKind::Occurrence
+    {
+        return crate::canonical_rust_identifier(text, maximum_bytes);
+    }
+    if language == "v" || label.starts_with("v.") {
+        return (language == "v")
+            .then(|| v::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if matches!(language, "verilog" | "systemverilog")
+        || label.starts_with("verilog.")
+        || label.starts_with("systemverilog.")
+    {
+        return label
+            .strip_prefix(language)
+            .filter(|suffix| suffix.starts_with('.'))
+            .and_then(|_| hdl::captured_name_for_fact(fact, text, maximum_bytes))
+            .map(Cow::Borrowed);
+    }
+    if language == "eiffel" || fact.syntax_kind().as_str().starts_with("eiffel.") {
+        return (language == "eiffel")
+            .then(|| eiffel::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
     if matches!(language, "ocaml" | "ocaml-interface")
         || fact.syntax_kind().as_str().starts_with("ocaml.")
         || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
     {
         return ocaml::captured_name_for_fact(language, fact, text, maximum_bytes)
+            .map(Cow::Borrowed);
+    }
+    if language == "julia" || fact.syntax_kind().as_str().starts_with("julia.") {
+        return (language == "julia")
+            .then(|| julia::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten();
+    }
+    if language == "cmake" || fact.syntax_kind().as_str().starts_with("cmake.") {
+        return (language == "cmake")
+            .then(|| cmake::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
             .map(Cow::Borrowed);
     }
     if matches!(language, "xml" | "dtd")
@@ -1101,7 +1216,7 @@ pub fn structural_display_name_for_language<'a>(
         crate::powershell_names::display_key(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else if language == "nix" {
         crate::nix_names::display_path(canonical).unwrap_or(Cow::Borrowed(canonical))
-    } else if matches!(language, "json" | "toml")
+    } else if matches!(language, "json" | "jsonc" | "toml")
         || (language == "groovy" && canonical.starts_with('"'))
     {
         crate::json_names::display_json_key(canonical).unwrap_or(Cow::Borrowed(canonical))
@@ -1157,6 +1272,71 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_headings_are_document_sections_without_target_language_bindings() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 32).unwrap();
+        for label in ["patch.file_section.declaration", "patch.hunk.declaration"] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                span,
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_entity_kind(&fact),
+                Some(EntityKind::DocumentSection)
+            );
+        }
+        let heading = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Occurrence,
+            span,
+            0,
+            SyntaxKindLabel::new("patch.heading.definition").unwrap(),
+        );
+        for text in [
+            "diff --git a/source b/source",
+            "@@ -1 +1 @@",
+            "--- a/name with spaces",
+        ] {
+            assert_eq!(
+                structural_captured_name_for_fact("diff", &heading, text, text.len()).as_deref(),
+                Some(text)
+            );
+            assert!(
+                structural_captured_name_for_fact("diff", &heading, text, text.len() - 1).is_none()
+            );
+            assert!(
+                structural_captured_name_for_fact("cmake", &heading, text, text.len()).is_none()
+            );
+        }
+        for text in ["", "header\nbody", "header\rbody", "header\0body"] {
+            assert!(structural_captured_name_for_fact("diff", &heading, text, 64).is_none());
+        }
+        for label in [
+            "patch.function.declaration",
+            "patch.variable.declaration",
+            "patch.deleted_row.documentation",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                span,
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), None);
+        }
+    }
 
     #[test]
     fn vba_class_and_type_member_kinds_use_reviewed_fact_labels() {

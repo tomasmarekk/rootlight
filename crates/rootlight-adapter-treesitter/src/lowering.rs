@@ -4,12 +4,19 @@
 //! types, so extraction can evolve independently from stable IR construction.
 
 mod apex;
+mod cmake;
+mod coq;
+mod eiffel;
 mod embedded;
+mod embedded_rust;
+mod hdl;
+mod julia;
 mod matlab;
 mod nix_paths;
 mod perl;
 mod source_coordinates;
 mod toml;
+mod v;
 mod yaml;
 
 use std::{
@@ -23,8 +30,8 @@ use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, AnalysisLimits, AnalysisOutput, AnalysisReport,
     AnalysisRequest, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch, IrBatchSink,
     IrRecord, LanguageAnalyzer, MemoryAdmissionPolicy, MemoryEnforcement, ParseOutput,
-    ParseProvider, ProducerDescriptor, RequestError, ResourceKind, ResourceUsage, SinkError,
-    StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind,
+    ParseProvider, ProducerDescriptor, RequestError, ResourceKind, ResourceUsage,
+    RustBindingLookup, RustBindings, SinkError, StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind,
     derive_structural_occurrence_identity as source_occurrence_identity, execute_analysis,
     execute_parse, structural_entity_classification_gap, structural_entity_kind,
     structural_entity_kind_from_source, structural_syntax_fact_order, structural_type_member_kind,
@@ -739,11 +746,13 @@ fn required_syntax_fact_count_from_output(
             || (fact.kind() == SyntaxFactKind::Scope
                 && (contains_declaration
                     || fact.syntax_kind().as_str().starts_with("json.")
+                    || fact.syntax_kind().as_str().starts_with("jsonc.")
                     || fact.syntax_kind().as_str().starts_with("toml.")
                     || fact.syntax_kind().as_str().starts_with("yaml.")
                     || ((required_scope_profile == RequiredScopeProfile::FSharpImplementation
                         || within_fsharp_implementation)
                         && fact.syntax_kind().as_str().starts_with("fsharp."))))
+            || is_patch_documentary_fact(fact)
             || (fact.kind() == SyntaxFactKind::Occurrence
                 && (fact.syntax_kind().as_str().ends_with(".definition")
                     || fact.syntax_kind().as_str().ends_with(".definition_part")));
@@ -983,6 +992,44 @@ fn structural_parse_context_hash(
         &mut hasher,
         crate::runtime::FORTRAN_TEMPLATE_PROJECTION_POLICY.as_bytes(),
     )?;
+    if matches!(
+        request.language().as_str(),
+        "c" | "cpp" | "cmake" | "markdown"
+    ) || request
+        .included_ranges()
+        .iter()
+        .any(|range| matches!(range.language().as_str(), "c" | "cpp"))
+    {
+        hash_sized_bytes(
+            &mut hasher,
+            crate::runtime::C_PREPROCESSOR_PROJECTION_POLICY.as_bytes(),
+        )?;
+    }
+    if request.language().as_str() == "cmake" {
+        hash_sized_bytes(
+            &mut hasher,
+            crate::runtime::CMAKE_HEADER_PROJECTION_POLICY.as_bytes(),
+        )?;
+        hash_sized_bytes(
+            &mut hasher,
+            crate::runtime::CMAKE_PATCH_PROJECTION_POLICY.as_bytes(),
+        )?;
+        hash_sized_bytes(
+            &mut hasher,
+            crate::runtime::CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY.as_bytes(),
+        )?;
+    }
+    if matches!(request.language().as_str(), "jsonc" | "markdown")
+        || request
+            .included_ranges()
+            .iter()
+            .any(|range| range.language().as_str() == "jsonc")
+    {
+        hash_sized_bytes(
+            &mut hasher,
+            crate::runtime::JSONC_PARSE_INPUT_POLICY.as_bytes(),
+        )?;
+    }
     hash_sized_bytes(&mut hasher, request.source().path().identity_bytes())?;
     hash_sized_bytes(&mut hasher, request.language().as_str().as_bytes())?;
     hash_sized_bytes(&mut hasher, request.encoding().as_str().as_bytes())?;
@@ -1172,12 +1219,25 @@ fn preflight_lowering_limits(
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
                 &mut string_bytes,
-                STABLE_SCOPE_IDENTITY_UNAVAILABLE.len(),
+                if matches!(
+                    fact.syntax_kind().as_str(),
+                    "patch.file_section.declaration" | "patch.hunk.declaration"
+                ) {
+                    STABLE_SCOPE_IDENTITY_UNAVAILABLE
+                        .len()
+                        .max("patch-section-heading-resource-limit".len())
+                } else {
+                    STABLE_SCOPE_IDENTITY_UNAVAILABLE.len()
+                },
                 limits,
             )?;
             if supports_signature(
                 kind,
                 language_for_fact_with_profile_fences(request, fact, profile_fences),
+            ) || is_c_macro_signature_owner(
+                kind,
+                language_for_fact_with_profile_fences(request, fact, profile_fences),
+                fact,
             ) {
                 skipped_candidates = checked_add(skipped_candidates, 1)?;
                 account_string(
@@ -1300,6 +1360,10 @@ fn preflight_lowering_limits(
                 )?;
             }
         }
+        if let Some(detail) = rust_binding_metadata_gap(fact) {
+            skipped_candidates = checked_add(skipped_candidates, 1)?;
+            account_string(&mut string_bytes, detail.len(), limits)?;
+        }
         if is_definition_capture(fact) {
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
         }
@@ -1401,8 +1465,10 @@ fn preflight_lowering_limits(
         diagnostic_bytes = checked_add(diagnostic_bytes, code_length)?;
         diagnostic_bytes = checked_add(diagnostic_bytes, message_length)?;
         if diagnostic.source().is_some() {
-            skipped_candidates = checked_add(skipped_candidates, 1)?;
-            account_string(&mut string_bytes, code_length, limits)?;
+            for _ in diagnostic_gap_domains(diagnostic.code().as_str()) {
+                skipped_candidates = checked_add(skipped_candidates, 1)?;
+                account_string(&mut string_bytes, code_length, limits)?;
+            }
         } else {
             diagnostic_derivations = checked_add(diagnostic_derivations, 1)?;
         }
@@ -1615,6 +1681,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 draft,
                 self.full_source,
                 &self.coordinates,
+                draft
+                    .authored_display_span
+                    .map(|span| self.text_for_span(span))
+                    .transpose()?,
                 self.request.build_context(),
                 provenance_id,
                 self.analyzer.descriptor.tier(),
@@ -2256,6 +2326,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
         for (index, fact) in self.coordinates.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = self.source_for_span(fact.span())?;
+            if fact.kind() == SyntaxFactKind::Signature
+                && let Some(detail) = rust_binding_metadata_gap(fact)
+            {
+                let gap = self.skipped_region(
+                    fact.span(),
+                    FactDomain::Entities,
+                    SkippedRegionReason::UnsupportedConstruct,
+                    detail,
+                    provenance_id,
+                )?;
+                insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
+            }
             if entity_plan
                 .haskell_orphan_signatures
                 .contains(&fact.local_id())
@@ -2427,14 +2509,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     "html.embedded_limit.signature"
                     | "astro.embedded_limit.signature"
                     | "markdown.code_limit.signature"
-                    | "markdown.inline_limit.signature" => SkippedRegionReason::ResourceLimit,
+                    | "markdown.inline_limit.signature"
+                    | "patch.structure_limit.signature"
+                    | "cmake.header_limit.signature" => SkippedRegionReason::ResourceLimit,
                     "html.embedded_parse_error.signature"
                     | "astro.embedded_parse_error.signature"
                     | "markdown.code_error.signature"
                     | "markdown.classic_code_error.signature"
                     | "markdown.cobol_fixed_code_error.signature"
                     | "markdown.cobol_free_code_error.signature"
-                    | "markdown.inline_error.signature" => SkippedRegionReason::ParseError,
+                    | "markdown.inline_error.signature"
+                    | "patch.invalid_fragment.signature" => SkippedRegionReason::ParseError,
                     _ => SkippedRegionReason::UnsupportedConstruct,
                 };
                 let region =
@@ -2773,30 +2858,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .and_then(|local_id| facts_by_id.get(local_id))
                     .map(|terminal| self.text_for_span(terminal.span()))
                     .transpose()?;
-                let resolution_text =
-                    if fact.syntax_kind().as_str() == "fsharp.qualified_body_read.reference" {
-                        fsharp_bindings
-                            .as_ref()
-                            .map(|bindings| bindings.qualified_read_name(fact))
-                            .transpose()?
-                            .flatten()
-                            .map(std::borrow::Cow::Borrowed)
-                    } else if fact.syntax_kind().as_str() == "fsharp.application.call" {
-                        fsharp_bindings
-                            .as_ref()
-                            .map(|bindings| bindings.call_name(fact, cancellation))
-                            .transpose()?
-                            .flatten()
-                            .map(std::borrow::Cow::Borrowed)
-                    } else {
-                        structural_resolution_text(
-                            self.language_for_fact(fact),
-                            fact,
-                            text,
-                            terminal_call_name,
-                            self.request.limits().ir().max_string_bytes,
-                        )
-                    };
+                let resolution_text = if is_patch_documentary_fact(fact) {
+                    Some(std::borrow::Cow::Borrowed(text))
+                } else if fact.syntax_kind().as_str() == "fsharp.qualified_body_read.reference" {
+                    fsharp_bindings
+                        .as_ref()
+                        .map(|bindings| bindings.qualified_read_name(fact))
+                        .transpose()?
+                        .flatten()
+                        .map(std::borrow::Cow::Borrowed)
+                } else if fact.syntax_kind().as_str() == "fsharp.application.call" {
+                    fsharp_bindings
+                        .as_ref()
+                        .map(|bindings| bindings.call_name(fact, cancellation))
+                        .transpose()?
+                        .flatten()
+                        .map(std::borrow::Cow::Borrowed)
+                } else {
+                    structural_resolution_text(
+                        self.language_for_fact(fact),
+                        fact,
+                        text,
+                        terminal_call_name,
+                        self.request.limits().ir().max_string_bytes,
+                    )
+                };
                 let enclosing = entity_plan
                     .nearest_entity_ancestor
                     .get(&fact.local_id())
@@ -2811,8 +2897,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     provenance_id,
                     syntax_confidence,
                     source.clone(),
-                    resolution_text.as_deref().unwrap_or(text),
+                    if self.language_for_fact(fact) == "rust" {
+                        text
+                    } else {
+                        resolution_text.as_deref().unwrap_or(text)
+                    },
                 )?;
+                // Patch rows document their physical section. This target does not
+                // establish a binding in either target-language version.
+                if is_patch_documentary_fact(fact)
+                    && let Some(symbol) = enclosing
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                }
                 if resolution_text.is_none() {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
@@ -2991,6 +3090,54 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = entity_plan.rust_bindings.proven_for_fact(fact.local_id())
+                    && let RustBindingLookup::Definition(definition) =
+                        bindings.lookup(fact, text, cancellation)?
+                    && let Some(symbol) = bindings
+                        .definition_declaration(definition)
+                        .and_then(|declaration| materialized.get(&declaration))
+                        .map(|entity| entity.record.id)
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = entity_plan.rust_bindings.proven_for_fact(fact.local_id())
+                    && let Some(proof) = bindings.direct_call(fact, text, cancellation)?
+                    && let Some(entity) = materialized.get(&proof.declaration)
+                    && entity.record.kind == EntityKind::Function
+                    && let Some(definition) = facts_by_id.get(&proof.definition)
+                {
+                    let envelope = rootlight_ir::new_rust_direct_call_envelope(
+                        self.full_source.repository(),
+                        self.full_source.generation(),
+                        provenance_id,
+                        occurrence.source.clone(),
+                        rootlight_ir::RustDirectCall {
+                            target: entity.record.id,
+                            definition: self.source_for_span(definition.span())?.span(),
+                            canonical_name: proof.canonical_name,
+                        },
+                    )
+                    .map_err(|_| provider_failure("rust-direct-call-evidence"))?;
+                    if !insert_optional_extension(
+                        envelope,
+                        &mut extensions,
+                        &mut extension_bytes,
+                        self.request.limits().ir(),
+                    )? {
+                        let gap = self.skipped_region(
+                            fact.span(),
+                            FactDomain::Extensions,
+                            SkippedRegionReason::ResourceLimit,
+                            "rust-direct-call-evidence-resource-limit",
+                            provenance_id,
+                        )?;
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
+                    }
                 }
                 if let Some(bindings) = &groovy_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
@@ -3267,6 +3414,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let occurrence_id = occurrence.id;
                 occurrences.insert(occurrence_id, occurrence);
                 if fact.kind() == SyntaxFactKind::Comment
+                    && !is_patch_documentary_fact(fact)
                     && let Some(comment) = comment_text(text)
                 {
                     let kind = if fact.syntax_kind().as_str().contains("doc") {
@@ -3340,7 +3488,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                     continue;
                 }
-                let detail = if entity_plan
+                let patch_heading_limited = patch_section_heading_exceeds_limit(
+                    fact,
+                    self.text_for_span(fact.span())?,
+                    self.request.limits().ir().max_string_bytes,
+                    cancellation,
+                )?;
+                let detail = if patch_heading_limited {
+                    "patch-section-heading-resource-limit"
+                } else if entity_plan
                     .unsupported_scope_entities
                     .contains(&fact.local_id())
                 {
@@ -3351,7 +3507,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let region = self.skipped_region(
                     fact.span(),
                     FactDomain::Entities,
-                    SkippedRegionReason::UnsupportedConstruct,
+                    if patch_heading_limited {
+                        SkippedRegionReason::ResourceLimit
+                    } else {
+                        SkippedRegionReason::UnsupportedConstruct
+                    },
                     detail,
                     provenance_id,
                 )?;
@@ -3572,15 +3732,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let normalized = diagnostic_record(self.full_source, diagnostic, provenance_id)?;
             diagnostics.insert(normalized.id, normalized);
             if let Some(source) = diagnostic.source() {
-                let region = skipped_region(
-                    self.full_source,
-                    source.span(),
-                    FactDomain::Diagnostics,
-                    diagnostic_skip_reason(diagnostic.code().as_str()),
-                    diagnostic.code().as_str(),
-                    provenance_id,
-                )?;
-                insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+                for domain in diagnostic_gap_domains(diagnostic.code().as_str()) {
+                    let region = skipped_region(
+                        self.full_source,
+                        source.span(),
+                        *domain,
+                        diagnostic_skip_reason(diagnostic.code().as_str()),
+                        diagnostic.code().as_str(),
+                        provenance_id,
+                    )?;
+                    insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+                }
             }
         }
 
@@ -4028,6 +4190,45 @@ impl<'context, 'source> Lowering<'context, 'source> {
     ) -> Result<EntityPlan, AdapterError> {
         let mut ordered_facts: Vec<_> = self.coordinates.facts().iter().collect();
         ordered_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
+        let rust_bindings = if matches!(self.request.language().as_str(), "rust" | "markdown") {
+            let mut names = BTreeMap::new();
+            for fact in self.coordinates.facts() {
+                cancellation.check()?;
+                if matches!(
+                    fact.syntax_kind().as_str(),
+                    "rust.local_variable.declaration"
+                        | "rust.parameter.declaration"
+                        | "rust.local_variable.definition"
+                        | "rust.parameter.definition"
+                        | "rust.pattern_binding_unavailable.reference"
+                        | "rust.identifier.definition"
+                        | "rust.direct_call.call"
+                ) {
+                    names.insert(fact.local_id(), self.text_for_span(fact.span())?.to_owned());
+                }
+            }
+            if self.request.language().as_str() == "rust" {
+                embedded_rust::Plan::standalone(
+                    RustBindings::new(
+                        self.parse_output.facts(),
+                        &names,
+                        self.request.limits().ir().max_string_bytes,
+                        cancellation,
+                    )?,
+                    self.parse_output.report().coverage().status() == CoverageStatus::Complete,
+                )
+            } else {
+                embedded_rust::Plan::embedded(
+                    self.parse_output.facts(),
+                    self.parse_output.diagnostics(),
+                    &names,
+                    self.request.limits().ir().max_string_bytes,
+                    cancellation,
+                )?
+            }
+        } else {
+            embedded_rust::Plan::default()
+        };
         let fsharp_parameter_signatures =
             if matches!(self.request.language().as_str(), "fsharp" | "markdown") {
                 Some(crate::fsharp_bindings::FSharpParameterSignatures::new(
@@ -4222,6 +4423,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .then_some(parent)
                     .or_else(|| nearest_entity_ancestor.get(&parent).copied().flatten())
             });
+            if matches!(
+                fact.syntax_kind().as_str(),
+                "rust.local_variable.declaration"
+                    | "rust.parameter.declaration"
+                    | "rust.anonymous_function.declaration"
+            ) && let Some(bindings) = rust_bindings.for_fact(fact.local_id())
+            {
+                parent_entity = bindings.declaration_owner(fact.local_id());
+            }
             let mut parent_scope = fact
                 .parent()
                 .and_then(|parent| nearest_scope_ancestor.get(&parent).cloned().flatten());
@@ -4242,6 +4452,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 while let Some(parent) = parent_entity.and_then(|id| drafts.get(&id)) {
                     cancellation.check()?;
                     if matches!(parent.kind, EntityKind::Module | EntityKind::Class) {
+                        break;
+                    }
+                    parent_entity = parent.parent_entity;
+                }
+                parent_scope = None;
+            }
+            if fact.syntax_kind().as_str() == "julia.global_variable.declaration" {
+                // Explicit globals belong to the nearest written module even
+                // inside functions; include and evaluation targets remain unknown.
+                while let Some(parent) = parent_entity.and_then(|id| drafts.get(&id)) {
+                    cancellation.check()?;
+                    if parent.kind == EntityKind::Module {
                         break;
                     }
                     parent_entity = parent.parent_entity;
@@ -4275,7 +4497,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
             if fact.kind() == SyntaxFactKind::Scope {
                 let json_position = if matches!(
                     fact.syntax_kind().as_str(),
-                    "json.array_element.scope" | "json.document_value.scope"
+                    "json.array_element.scope"
+                        | "json.document_value.scope"
+                        | "jsonc.array_element.scope"
+                        | "jsonc.document_value.scope"
                 ) {
                     let next = json_positions.entry(fact.parent()).or_default();
                     let position = *next;
@@ -4515,7 +4740,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Lexical bindings in other languages need a span-local ambiguity
                 // guard without making position part of their durable SymbolId.
                 let collision_guard = if fact.syntax_kind().as_str().starts_with("css.")
-                    || self.language_for_fact(fact) == "json"
+                    || matches!(self.language_for_fact(fact), "json" | "jsonc")
                 {
                     None
                 } else {
@@ -4632,7 +4857,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
             if !matches!(
                 fact.syntax_kind().as_str(),
-                "groovy.anonymous_function.declaration" | "fsharp.function.declaration"
+                "groovy.anonymous_function.declaration"
+                    | "eiffel.routine.declaration"
+                    | "verilog.function.declaration"
+                    | "verilog.task.declaration"
+                    | "systemverilog.function.declaration"
+                    | "systemverilog.task.declaration"
+                    | "systemverilog.checker.declaration"
+                    | "systemverilog.property.declaration"
+                    | "systemverilog.sequence.declaration"
+                    | "systemverilog.let.declaration"
+                    | "fsharp.function.declaration"
+                    | "julia.function.declaration"
+                    | "julia.macro.declaration"
+                    | "julia.callable_object.declaration"
+                    | "julia.anonymous_function.declaration"
             ) && parent_entity
                 .and_then(|parent| drafts.get(&parent))
                 .is_some_and(|parent| {
@@ -4678,7 +4917,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         self.request.limits().ir().max_string_bytes,
                     )
                 };
+                let authored_display =
+                    self.language_for_fact(definition) == "julia" && text.starts_with("var\"");
+                let name = name.filter(|name| {
+                    !authored_display
+                        || (!name.is_empty() && !name.chars().any(char::is_control))
+                        || text.len() <= self.request.limits().ir().max_string_bytes
+                });
                 let Some(name) = name else {
+                    if authored_display {
+                        parent_scope
+                            .get_or_insert_with(ScopeContext::default)
+                            .unsupported_semantic_identity = true;
+                    }
                     if fact.syntax_kind().as_str() == "cobol.program.declaration"
                         || (matches!(self.language_for_fact(fact), "fsharp" | "fsharp-signature")
                             && fact.syntax_kind().as_str().starts_with("fsharp."))
@@ -4704,18 +4955,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     continue;
                 };
                 (name, Some(definition.local_id()))
-            } else if is_explicit_file_module(fact, self.request.language().as_str()) {
+            } else if is_explicit_file_module(fact, self.language_for_fact(fact)) {
                 let name = self.request.source().path().as_str();
                 (std::borrow::Cow::Borrowed(name), None)
             } else if matches!(
                 fact.syntax_kind().as_str(),
                 "r.anonymous_function.declaration"
+                    | "rust.anonymous_function.declaration"
+                    | "julia.unnamed_parameter.declaration"
+                    | "julia.callable_object.declaration"
+                    | "julia.anonymous_function.declaration"
                     | "powershell.anonymous_function.declaration"
                     | "nix.anonymous_function.declaration"
                     | "groovy.anonymous_function.declaration"
             ) {
                 // This label is synthetic, not a written binding. The native
-                // callable span and scope identity retain its source ownership.
+                // declaration span and scope identity retain its source ownership.
                 (std::borrow::Cow::Borrowed("<anonymous>"), None)
             } else if matches!(
                 fact.syntax_kind().as_str(),
@@ -4736,8 +4991,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // Empty written headings still own a section; this is not a fragment ID.
                 (std::borrow::Cow::Borrowed("<untitled>"), None)
             } else if fact.syntax_kind().as_str() == "markdown.code_block.module" {
-                // Separate examples own separate declarations, not one shared program.
-                (std::borrow::Cow::Borrowed("<code-block>"), None)
+                // The synthetic name groups an example; its written fence is the
+                // exact definition witness for that example's source boundary.
+                (
+                    std::borrow::Cow::Borrowed("<code-block>"),
+                    Some(fact.local_id()),
+                )
             } else {
                 if fact.syntax_kind().as_str() == "cobol.program.declaration"
                     || (matches!(self.language_for_fact(fact), "fsharp" | "fsharp-signature")
@@ -4754,9 +5013,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let signature_capture = select_unique_capture(&capture.signatures);
             // JSON permits duplicate keys. Distinguish their source-order
             // occurrences within this object, without hashing offsets or values.
-            let member_scope_identity = if fact.syntax_kind().as_str()
-                == "json.property.declaration"
+            let member_scope_identity = if let Some(bindings) =
+                rust_bindings.for_fact(fact.local_id())
             {
+                bindings.identity_scope(
+                    fact.local_id(),
+                    parent_scope
+                        .as_ref()
+                        .and_then(|scope| scope.stable_identity),
+                )
+            } else if matches!(
+                fact.syntax_kind().as_str(),
+                "json.property.declaration" | "jsonc.property.declaration"
+            ) {
                 let next = json_members
                     .entry((fact.parent(), name.to_string()))
                     .or_default();
@@ -4795,7 +5064,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 Some(*hash.finalize().as_bytes())
             } else if self.language_for_fact(fact) == "apex"
                 && kind == EntityKind::Variable
-                && fact.syntax_kind().as_str() == "apex.local_variable.declaration"
+                && matches!(
+                    fact.syntax_kind().as_str(),
+                    "apex.local_variable.declaration" | "apex.local_variable_fragment.declaration"
+                )
             {
                 // Disjoint blocks can reuse a written name. Only same-name
                 // source order distinguishes these declarations; initializers
@@ -4946,6 +5218,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_or(text, rootlight_ir::SourceTextProjection::text);
                     let canonical = if needs_projection && projection.is_none() {
                         None
+                    } else if matches!(
+                        self.language_for_fact(fact),
+                        "coq" | "cmake" | "diff" | "eiffel" | "verilog" | "systemverilog"
+                    ) {
+                        // These written identities do not use a signature discriminator.
+                        // Preserve source evidence so lexical output can explicitly truncate
+                        // long headers while retaining their complete hash and source span.
+                        (signature_text.len() <= maximum).then(String::new)
                     } else if kind == EntityKind::Constructor
                         && self.language_for_fact(fact) == "dart"
                         && let Some(definition) = definition
@@ -5029,7 +5309,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 qualified_length,
                 self.request.limits().ir().max_string_bytes,
             )?;
-            for length in [language.len(), name.len(), name.len(), qualified_length] {
+            let authored_display_span =
+                if language == "julia" && (name.is_empty() || name.chars().any(char::is_control)) {
+                    let definition =
+                        definition.ok_or_else(|| provider_failure("julia-display-definition"))?;
+                    if !span_contains(fact.span(), definition.span()) {
+                        return Err(provider_failure("julia-display-definition"));
+                    }
+                    Some(definition.span())
+                } else {
+                    None
+                };
+            let display_length = authored_display_span
+                .map(|span| self.text_for_span(span).map(str::len))
+                .transpose()?
+                .unwrap_or(name.len());
+            for length in [language.len(), name.len(), display_length, qualified_length] {
                 account_string(total_string_bytes, length, self.request.limits().ir())?;
             }
             if language == "nix" {
@@ -5057,13 +5352,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .as_ref()
                         .and_then(|scope| scope.collision_guard),
                     qualified_prefix: qualified_prefix.map(str::to_owned),
-                    synthetic: definition_local_id.is_none(),
+                    synthetic: definition_local_id.is_none()
+                        || fact.syntax_kind().as_str() == "markdown.code_block.module",
                     is_test: file_is_test || rust_test_declarations.contains(&fact.local_id()),
                     definition_local_id,
                     span: fact.span(),
                     depth: fact.depth(),
                     kind,
                     name: name.into_owned(),
+                    authored_display_span,
                     signature,
                     signature_evidence,
                     signature_span,
@@ -5213,6 +5510,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
         });
         Ok(EntityPlan {
+            rust_bindings,
             haskell_annotations,
             haskell_orphan_signatures,
             perl,
@@ -5707,6 +6005,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     depth: definition_fact.depth(),
                     kind: EntityKind::Method,
                     name: haskell_owned_text(name, cancellation)?,
+                    authored_display_span: None,
                     signature: String::new(),
                     signature_evidence: Some(SignatureEvidence::Contiguous(haskell_owned_text(
                         written,
@@ -5858,6 +6157,7 @@ struct AssociatedCaptures<'a> {
 }
 
 struct EntityPlan {
+    rust_bindings: embedded_rust::Plan,
     haskell_annotations: HashMap<u64, HaskellAnnotation>,
     haskell_orphan_signatures: BTreeSet<u64>,
     perl: perl::Plan,
@@ -5978,6 +6278,7 @@ struct EntityDraft {
     depth: usize,
     kind: EntityKind,
     name: String,
+    authored_display_span: Option<SourceSpan>,
     signature: String,
     signature_evidence: Option<SignatureEvidence>,
     signature_span: Option<SourceSpan>,
@@ -6095,6 +6396,7 @@ fn materialize_entity(
     draft: &EntityDraft,
     full_source: &SourceRef,
     coordinates: &SourceCoordinates<'_, '_>,
+    authored_display: Option<&str>,
     build_context: rootlight_ir::BuildContextIdentity,
     provenance: FactId,
     tier: AnalysisTier,
@@ -6201,7 +6503,18 @@ fn materialize_entity(
     // overload identities. Haskell equations likewise retain one lexical binding.
     let signature_discriminator = if matches!(
         draft.language.as_str(),
-        "assembly" | "common-lisp" | "scheme" | "glsl" | "hlsl" | "xml" | "wgsl"
+        "assembly"
+            | "common-lisp"
+            | "scheme"
+            | "glsl"
+            | "hlsl"
+            | "xml"
+            | "wgsl"
+            | "cmake"
+            | "coq"
+            | "eiffel"
+            | "verilog"
+            | "systemverilog"
     ) || (draft.language == "haskell"
         && matches!(
             draft.kind,
@@ -6247,7 +6560,14 @@ fn materialize_entity(
         language: draft.language.clone(),
         tier,
         canonical_name: draft.name.clone(),
-        display_name: if draft.kind == EntityKind::Property
+        display_name: if let Some(text) = authored_display {
+            let mut display = String::new();
+            display
+                .try_reserve_exact(text.len())
+                .map_err(|_| SinkError::AllocationFailed)?;
+            display.push_str(text);
+            display
+        } else if draft.kind == EntityKind::Property
             || matches!(draft.language.as_str(), "toml" | "nix")
         {
             rootlight_adapter_sdk::structural_display_name_for_language(
@@ -6503,6 +6823,10 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
     // its binding relation. Lexical header evidence proves neither domain.
     source_coverage_gap(fact)
         .into_iter()
+        .chain(coq::entity_surface_gap(fact).map(|reason| (FactDomain::Entities, reason)))
+        .chain(coq::term_surface_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(coq::structural_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(coq::structural_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(
             (fact.syntax_kind().as_str() == "fsharp.unsupported_attribute.expression").then_some((
                 FactDomain::Occurrences,
@@ -6521,11 +6845,50 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         )
         .chain(xml_owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(xml_owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(julia::owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(julia::owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(eiffel::owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(eiffel::owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(v::owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(v::owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(hdl::owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(hdl::owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(cmake::owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(cmake::owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(ocaml_owner_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(ocaml_owner_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(ocaml_type_member_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(fortran_source_identity_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(cmake_header_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(cmake_header_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(
+            (fact.syntax_kind().as_str() == "c.preprocessor_lexical_unavailable.signature")
+                .then_some((
+                    FactDomain::Occurrences,
+                    "c-preprocessor-replacement-lexical-unavailable",
+                )),
+        )
+        .chain(cpp_preprocessor_gap(fact).map(|reason| (FactDomain::Entities, reason)))
+        .chain(cpp_preprocessor_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(cpp_preprocessor_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(
+            (fact.kind() == SyntaxFactKind::Signature
+                && fact.syntax_kind().as_str() == "cpp.written_macro.signature")
+                .then_some((
+                    FactDomain::Relations,
+                    "cpp-macro-expansion-and-binding-unavailable",
+                )),
+        )
+        .chain(c_preprocessor_condition_gap(fact).map(|reason| (FactDomain::Entities, reason)))
+        .chain(c_preprocessor_condition_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(c_preprocessor_condition_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(c_preprocessor_projection_gap(fact).map(|reason| (FactDomain::Entities, reason)))
+        .chain(c_preprocessor_projection_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(c_preprocessor_projection_gap(fact).map(|reason| (FactDomain::Relations, reason)))
+        .chain(patch_gap(fact).map(|reason| (FactDomain::Entities, reason)))
+        .chain(patch_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
+        .chain(patch_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(sas_source_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
         .chain(sas_source_gap(fact).map(|reason| (FactDomain::Relations, reason)))
         .chain(sql_source_gap(fact).map(|reason| (FactDomain::Occurrences, reason)))
@@ -6564,6 +6927,98 @@ fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match fact.syntax_kind().as_str() {
         "fortran.template_source.expression" => Some("fortran-template-expansion-unavailable"),
         "fortran.unsupported_header.expression" => Some("fortran-source-identity-unavailable"),
+        _ => None,
+    }
+}
+
+fn patch_section_heading_exceeds_limit(
+    fact: &SyntaxFact,
+    source: &str,
+    maximum_bytes: usize,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if !matches!(
+        fact.syntax_kind().as_str(),
+        "patch.file_section.declaration" | "patch.hunk.declaration"
+    ) {
+        return Ok(false);
+    }
+    let end = source.len().min(maximum_bytes.saturating_add(1));
+    let prefix = source
+        .as_bytes()
+        .get(..end)
+        .ok_or_else(|| provider_failure("patch-section-heading-span"))?;
+    for chunk in prefix.chunks(64 * 1024) {
+        cancellation.check()?;
+        if chunk.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+            return Ok(false);
+        }
+    }
+    Ok(prefix.len() > maximum_bytes)
+}
+
+fn is_patch_documentary_fact(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Comment
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "patch.deleted_row.documentation"
+                | "patch.added_row.documentation"
+                | "patch.context_row.documentation"
+                | "patch.metadata_row.documentation"
+                | "patch.no_newline_row.documentation"
+        )
+}
+
+fn patch_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    match fact.syntax_kind().as_str() {
+        "patch.unapplied_fragment.signature" => {
+            Some("patch-target-fragment-analysis-and-applicability-unavailable")
+        }
+        "patch.invalid_fragment.signature" => Some("patch-shape-validation-unavailable"),
+        "patch.unsupported_fragment.signature" => Some("patch-format-analysis-unavailable"),
+        "patch.structure_limit.signature" => Some("patch-structure-resource-limit"),
+        _ => None,
+    }
+}
+
+fn c_preprocessor_condition_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    match fact.syntax_kind().as_str() {
+        "c.preprocessor_condition.signature" => {
+            Some("c-preprocessor-conditional-evaluation-unavailable")
+        }
+        "cpp.preprocessor_condition.signature" => {
+            Some("cpp-preprocessor-conditional-evaluation-unavailable")
+        }
+        _ => None,
+    }
+}
+
+fn cpp_preprocessor_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    match fact.syntax_kind().as_str() {
+        "cpp.preprocessor_lexical_unavailable.signature" => {
+            Some("cpp-preprocessor-replacement-lexical-unavailable")
+        }
+        "cpp.preprocessor_parameters.signature" => Some("cpp-macro-parameter-bindings-unavailable"),
+        _ => None,
+    }
+}
+
+fn cmake_header_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    match fact.syntax_kind().as_str() {
+        "cmake.header_template.signature" => Some("cmake-header-template-expansion-unavailable"),
+        "cmake.header_limit.signature" => Some("cmake-header-body-analysis-unavailable"),
+        "cmake.header_ambiguity.signature" => {
+            Some("cmake-header-top-level-invocation-analysis-unavailable")
+        }
         _ => None,
     }
 }
@@ -6775,6 +7230,24 @@ fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if let Some(gap) = coq::source_gap(fact) {
+        return Some(gap);
+    }
+    if let Some(gap) = julia::source_gap(fact) {
+        return Some(gap);
+    }
+    if let Some(gap) = v::source_gap(fact) {
+        return Some(gap);
+    }
+    if let Some(gap) = hdl::source_gap(fact) {
+        return Some(gap);
+    }
+    if let Some(gap) = eiffel::source_gap(fact) {
+        return Some(gap);
+    }
+    if let Some(gap) = cmake::source_gap(fact) {
+        return Some(gap);
+    }
     if let Some(gap) = ocaml_source_gap(fact) {
         return Some(gap);
     }
@@ -6844,6 +7317,10 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             FactDomain::Relations,
             "apex-shared-field-header-association-unavailable",
         )),
+        "apex.shared_local_header.expression" => Some((
+            FactDomain::Relations,
+            "apex-shared-local-header-association-unavailable",
+        )),
         "apex.application.expression" => {
             Some((FactDomain::Relations, "apex-call-target-unavailable"))
         }
@@ -6879,6 +7356,22 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         "fortran.template_source.expression" => Some((
             FactDomain::Entities,
             "fortran-template-expansion-unavailable",
+        )),
+        "c.header_semantics.expression" => Some((
+            FactDomain::Relations,
+            "c-preprocessor-and-binding-analysis-unavailable",
+        )),
+        "cmake.header_ambiguity.signature" => Some((
+            FactDomain::Entities,
+            "cmake-header-top-level-invocation-analysis-unavailable",
+        )),
+        "cmake.header_template.signature" => Some((
+            FactDomain::Entities,
+            "cmake-header-template-expansion-unavailable",
+        )),
+        "cmake.header_limit.signature" => Some((
+            FactDomain::Entities,
+            "cmake-header-body-analysis-unavailable",
         )),
         "fortran.unsupported_header.expression" => {
             Some((FactDomain::Entities, "fortran-source-identity-unavailable"))
@@ -7221,6 +7714,24 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "coq" {
+        return coq::written_identity(kind, label);
+    }
+    if language == "julia" {
+        return julia::written_identity(kind, label);
+    }
+    if language == "v" {
+        return v::written_identity(kind, label);
+    }
+    if matches!(language, "verilog" | "systemverilog") {
+        return hdl::written_identity(kind, label);
+    }
+    if language == "eiffel" {
+        return eiffel::written_identity(kind, label);
+    }
+    if language == "cmake" {
+        return cmake::written_identity(kind, label);
+    }
     if matches!(language, "ocaml" | "ocaml-interface")
         || label.starts_with("ocaml.")
         || label.starts_with("ocaml_interface.")
@@ -7410,8 +7921,22 @@ fn written_source_identity(
     kind: &str,
     position: u64,
 ) -> [u8; 32] {
-    let context = if language == "xml" {
+    let context = if language == "coq" {
+        "rootlight.coq-source-occurrence/1"
+    } else if language == "xml" {
         "rootlight.xml-source-occurrence/1"
+    } else if language == "julia" {
+        "rootlight.julia-source-occurrence/1"
+    } else if language == "verilog" {
+        "rootlight.verilog-source-occurrence/1"
+    } else if language == "v" {
+        "rootlight.v-source-occurrence/1"
+    } else if language == "systemverilog" {
+        "rootlight.systemverilog-source-occurrence/1"
+    } else if language == "eiffel" {
+        "rootlight.eiffel-source-occurrence/1"
+    } else if language == "cmake" {
+        "rootlight.cmake-source-occurrence/1"
     } else if language == "ocaml" {
         "rootlight.ocaml-source-occurrence/1"
     } else if language == "ocaml-interface" {
@@ -7538,7 +8063,9 @@ fn declaration_occurrence(
         generation: source.generation(),
         file: source.span().file(),
         source: source.clone(),
-        role: if matches!(
+        role: if let Some(role) = coq::declaration_role(fact) {
+            role
+        } else if matches!(
             fact.syntax_kind().as_str(),
             "objective_c.forward_class.definition" | "objective_c.forward_protocol.definition"
         ) {
@@ -7902,6 +8429,37 @@ fn diagnostic_skip_reason(code: &str) -> SkippedRegionReason {
         SkippedRegionReason::ResourceLimit
     } else {
         SkippedRegionReason::ParseError
+    }
+}
+
+fn diagnostic_gap_domains(code: &str) -> &'static [FactDomain] {
+    if matches!(
+        code,
+        "c-preprocessor-replacement-not-analyzed" | "cpp-preprocessor-replacement-not-analyzed"
+    ) {
+        &[
+            FactDomain::Diagnostics,
+            FactDomain::Entities,
+            FactDomain::Occurrences,
+            FactDomain::Relations,
+        ]
+    } else {
+        &[FactDomain::Diagnostics]
+    }
+}
+
+fn c_preprocessor_projection_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    match fact.syntax_kind().as_str() {
+        "c.preprocessor_projection_unavailable.signature" => {
+            Some("c-preprocessor-replacement-not-analyzed")
+        }
+        "cpp.preprocessor_projection_unavailable.signature" => {
+            Some("cpp-preprocessor-replacement-not-analyzed")
+        }
+        _ => None,
     }
 }
 
@@ -8312,6 +8870,12 @@ fn language_for_fact_with_ranges<'a>(
     fact: &'a SyntaxFact,
     ranges: &'a [rootlight_adapter_sdk::IncludedRange],
 ) -> &'a str {
+    if request.language().as_str() == "cmake" && fact.syntax_kind().as_str().starts_with("patch.") {
+        return "diff";
+    }
+    if request.language().as_str() == "cmake" && fact.syntax_kind().as_str().starts_with("c.") {
+        return "c";
+    }
     if request.language().as_str() == "markdown"
         && let Some(language) = markdown_language_for_syntax(fact.syntax_kind().as_str())
     {
@@ -8344,10 +8908,11 @@ fn markdown_language_for_syntax(syntax: &str) -> Option<&str> {
         "ocaml_interface" => Some("ocaml-interface"),
         "rust" | "javascript" | "typescript" | "python" | "c" | "cpp" | "csharp" | "go"
         | "java" | "groovy" | "haskell" | "kotlin" | "lua" | "php" | "ruby" | "swift" | "css"
-        | "bash" | "json" | "toml" | "yaml" | "html" | "sql" | "r" | "nix" | "matlab" | "perl"
-        | "solidity" | "scala" | "dart" | "powershell" | "astro" | "vba" | "fortran" | "plsql"
-        | "sas" | "apex" | "pascal" | "assembly" | "scheme" | "glsl" | "hlsl" | "wgsl" | "xml"
-        | "dtd" | "ocaml" => Some(language),
+        | "bash" | "json" | "jsonc" | "toml" | "yaml" | "html" | "sql" | "r" | "nix" | "matlab"
+        | "perl" | "solidity" | "scala" | "dart" | "powershell" | "astro" | "vba" | "fortran"
+        | "plsql" | "sas" | "apex" | "pascal" | "assembly" | "scheme" | "glsl" | "hlsl"
+        | "wgsl" | "xml" | "dtd" | "ocaml" | "cmake" | "coq" | "julia" | "eiffel" | "verilog"
+        | "systemverilog" | "v" => Some(language),
         _ => None,
     }
 }
@@ -8418,6 +8983,36 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if fact.syntax_kind().as_str() == "patch.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "diff";
+    }
+    if matches!(
+        fact.syntax_kind().as_str(),
+        "c.file.module" | "cpp.file.module"
+    ) {
+        return fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str().strip_prefix(language) == Some(".file.module")
+            && matches!(language, "c" | "cpp");
+    }
+    if fact.syntax_kind().as_str() == "coq.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "coq";
+    }
+    if fact.syntax_kind().as_str() == "julia.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "julia";
+    }
+    if matches!(language, "verilog" | "systemverilog") {
+        return fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str().strip_prefix(language) == Some(".file.module");
+    }
+    if fact.syntax_kind().as_str() == "v.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "v";
+    }
+    if fact.syntax_kind().as_str() == "eiffel.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "eiffel";
+    }
+    if fact.syntax_kind().as_str() == "cmake.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "cmake";
+    }
     if matches!(
         fact.syntax_kind().as_str(),
         "ocaml.file.module" | "ocaml_interface.file.module"
@@ -8468,6 +9063,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "css.file.module"
                 | "bash.file.module"
                 | "json.file.module"
+                | "jsonc.file.module"
                 | "toml.file.module"
                 | "yaml.file.module"
                 | "html.file.module"
@@ -8505,6 +9101,7 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
                 | "css"
                 | "bash"
                 | "json"
+                | "jsonc"
                 | "toml"
                 | "yaml"
                 | "html"
@@ -8581,6 +9178,61 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if c_preprocessor_condition_gap(fact).is_some()
+        || fact.syntax_kind().as_str() == "c.preprocessor_lexical_unavailable.signature"
+        || cpp_preprocessor_gap(fact).is_some()
+        || c_preprocessor_projection_gap(fact).is_some()
+    {
+        return false;
+    }
+    if fact.syntax_kind().as_str().starts_with("patch.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str() == "patch.heading.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("coq.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str() == "coq.written_header.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("rust.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "rust.parameters.signature" | "rust.function.signature"
+            );
+    }
+    if fact.syntax_kind().as_str().starts_with("v.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str() == "v.written_header.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("verilog.")
+        || fact.syntax_kind().as_str().starts_with("systemverilog.")
+    {
+        return fact.kind() == SyntaxFactKind::Signature
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "verilog.written_header.signature" | "systemverilog.written_header.signature"
+            );
+    }
+    if fact.syntax_kind().as_str().starts_with("eiffel.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "eiffel.written_header.signature" | "eiffel.written_parameter.signature"
+            );
+    }
+    if fact.syntax_kind().as_str().starts_with("julia.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str() == "julia.written_header.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("cmake.") {
+        // Control-flow and unsupported-construct markers describe gaps inside
+        // an owner; admitting them would make its written header ambiguous.
+        return fact.kind() == SyntaxFactKind::Signature
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "cmake.written_header.signature" | "cmake.written_parameter.signature"
+            );
+    }
     if fact.syntax_kind().as_str().starts_with("ocaml.")
         || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
     {
@@ -8669,6 +9321,32 @@ fn supports_declaration_signature(
     declaration: &SyntaxFact,
     definition: Option<&SyntaxFact>,
 ) -> bool {
+    if is_c_macro_signature_owner(kind, language, declaration) {
+        return true;
+    }
+    if language == "diff" {
+        return kind == EntityKind::DocumentSection
+            && declaration.kind() == SyntaxFactKind::Declaration
+            && matches!(
+                declaration.syntax_kind().as_str(),
+                "patch.file_section.declaration" | "patch.hunk.declaration"
+            )
+            && definition.is_some_and(|definition| {
+                definition.syntax_kind().as_str() == "patch.heading.definition"
+            });
+    }
+    if matches!(language, "verilog" | "systemverilog") {
+        return declaration.kind() == SyntaxFactKind::Declaration
+            && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
+    }
+    if language == "v" {
+        return declaration.kind() == SyntaxFactKind::Declaration
+            && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
+    }
+    if language == "julia" {
+        return declaration.kind() == SyntaxFactKind::Declaration
+            && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
+    }
     if matches!(language, "ocaml" | "ocaml-interface")
         || declaration.syntax_kind().as_str().starts_with("ocaml.")
         || declaration
@@ -8678,6 +9356,11 @@ fn supports_declaration_signature(
     {
         return declaration.kind() == SyntaxFactKind::Declaration
             && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
+    }
+    if language == "eiffel" {
+        return declaration.kind() == SyntaxFactKind::Declaration
+            && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str())
+            && definition.is_some_and(|definition| definition.span() != declaration.span());
     }
     if language == "xml" {
         return declaration.kind() == SyntaxFactKind::Declaration
@@ -8723,10 +9406,14 @@ fn supports_declaration_signature(
         // Separate written names do not each own their complete shared header.
         return false;
     }
-    if language == "apex" && declaration.syntax_kind().as_str() == "apex.field_fragment.declaration"
+    if language == "apex"
+        && matches!(
+            declaration.syntax_kind().as_str(),
+            "apex.field_fragment.declaration" | "apex.local_variable_fragment.declaration"
+        )
     {
         // Initializers widen a fragment without supplying its shared type.
-        // Such a fragment cannot acquire a unique complete field header.
+        // Such a fragment cannot acquire a unique complete declaration header.
         return false;
     }
     if language == "pascal"
@@ -8758,7 +9445,66 @@ fn supports_declaration_signature(
     supports_signature(kind, language)
 }
 
+fn is_c_macro_signature_owner(kind: EntityKind, language: &str, fact: &SyntaxFact) -> bool {
+    kind == EntityKind::Constant
+        && fact.kind() == SyntaxFactKind::Declaration
+        && matches!(
+            (language, fact.syntax_kind().as_str()),
+            (
+                "c",
+                "c.preprocessor_constant.declaration" | "c.header_constant.declaration"
+            ) | ("cpp", "cpp.preprocessor_constant.declaration")
+        )
+}
+
 fn supports_signature(kind: EntityKind, language: &str) -> bool {
+    if language == "diff" {
+        return kind == EntityKind::DocumentSection;
+    }
+    if language == "coq" {
+        return matches!(
+            kind,
+            EntityKind::Constant
+                | EntityKind::Enum
+                | EntityKind::Constructor
+                | EntityKind::Struct
+                | EntityKind::Class
+                | EntityKind::Field
+        );
+    }
+    if language == "eiffel" {
+        return matches!(
+            kind,
+            EntityKind::Class
+                | EntityKind::Function
+                | EntityKind::Field
+                | EntityKind::Constant
+                | EntityKind::Variable
+                | EntityKind::Parameter
+                | EntityKind::TypeParameter
+        );
+    }
+    if language == "julia" {
+        return matches!(
+            kind,
+            EntityKind::Module
+                | EntityKind::Function
+                | EntityKind::Struct
+                | EntityKind::Class
+                | EntityKind::Variable
+                | EntityKind::Parameter
+                | EntityKind::Field
+        );
+    }
+    if language == "cmake" {
+        return matches!(
+            kind,
+            EntityKind::Function
+                | EntityKind::Variable
+                | EntityKind::Parameter
+                | EntityKind::BuildTarget
+        );
+    }
     if matches!(language, "ocaml" | "ocaml-interface") {
         return matches!(
             kind,
@@ -8864,6 +9610,40 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if let Some(detail) = coq::reference_gap(fact) {
+        return Some(detail);
+    }
+    if fact.kind() == SyntaxFactKind::Occurrence && fact.syntax_kind().as_str().starts_with("rust.")
+    {
+        let label = fact.syntax_kind().as_str();
+        if label == "rust.pattern_binding_unavailable.reference" {
+            return Some("rust-pattern-binding-namespace-unavailable");
+        }
+        if label == "rust.generic_call.call" {
+            return Some("rust-generic-instantiation-and-typecheck-unverified");
+        }
+        if label.ends_with(".call") || label.ends_with(".scoped_call") {
+            return Some("rust-call-dispatch-target-unavailable");
+        }
+        if label.ends_with(".reference") {
+            return Some("rust-namespace-and-binding-target-unavailable");
+        }
+    }
+    if let Some(detail) = julia::reference_gap(fact) {
+        return Some(detail);
+    }
+    if let Some(detail) = v::reference_gap(fact) {
+        return Some(detail);
+    }
+    if let Some(detail) = hdl::reference_gap(fact) {
+        return Some(detail);
+    }
+    if let Some(detail) = eiffel::reference_gap(fact) {
+        return Some(detail);
+    }
+    if let Some(detail) = cmake::reference_gap(fact) {
+        return Some(detail);
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
@@ -9053,6 +9833,22 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     }
 }
 
+fn rust_binding_metadata_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    match fact.syntax_kind().as_str() {
+        "rust.macro_bindings_unavailable.signature"
+        | "rust.pattern_macro_bindings_unavailable.signature" => {
+            Some("rust-macro-expansion-bindings-unavailable")
+        }
+        "rust.pattern_bindings_unavailable.signature" => {
+            Some("rust-pattern-binding-namespace-unavailable")
+        }
+        "rust.unavailable_pattern_environment.signature" => {
+            Some("rust-pattern-binding-namespace-unavailable")
+        }
+        _ => None,
+    }
+}
+
 fn import_target_gap(fact: &SyntaxFact) -> &'static str {
     if fact.syntax_kind().as_str() == "cobol.copy.import" {
         "cobol-copy-target-unavailable"
@@ -9064,6 +9860,26 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if fact.syntax_kind().as_str().starts_with("coq.") {
+        return coq::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("julia.") {
+        return julia::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("verilog.")
+        || fact.syntax_kind().as_str().starts_with("systemverilog.")
+    {
+        return hdl::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("v.") {
+        return v::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("eiffel.") {
+        return eiffel::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("cmake.") {
+        return cmake::occurrence_role(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("ocaml.")
         || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
     {
@@ -9200,6 +10016,11 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
             Some(OccurrenceRole::ImportUse)
         }
         SyntaxFactKind::Occurrence if is_definition_capture(fact) => None,
+        SyntaxFactKind::Occurrence
+            if fact.syntax_kind().as_str() == "rust.type_identifier.reference" =>
+        {
+            Some(OccurrenceRole::TypeUse)
+        }
         SyntaxFactKind::Occurrence
             if fact.syntax_kind().as_str() == "objective_c.selector.definition_part" =>
         {
@@ -9506,7 +10327,7 @@ fn sort_owned_cancellable_by<T>(
         check_periodically(new_position, cancellation)?;
         destination[old_position] = new_position;
     }
-    // Invert new→old ordering before swapping: using it directly would apply
+    // Invert newÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¾ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¾ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢old ordering before swapping: using it directly would apply
     // the inverse sort for cycles longer than two elements.
     for position in 0..values.len() {
         check_periodically(position, cancellation)?;
@@ -10150,6 +10971,10 @@ mod tests {
             ("java.field.declaration", EntityKind::Field),
             ("java.local_variable.declaration", EntityKind::Variable),
             ("apex.local_variable.declaration", EntityKind::Variable),
+            (
+                "apex.local_variable_fragment.declaration",
+                EntityKind::Variable,
+            ),
             ("java.record.declaration", EntityKind::Struct),
             ("java.annotation.declaration", EntityKind::Interface),
             ("java.annotation_element.declaration", EntityKind::Method),
@@ -10374,6 +11199,42 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    // Conditional markers are required gap evidence rather than owner headers.
+    // This keeps an enclosing condition from competing with a written signature.
+    #[test]
+    fn c_preprocessor_conditions_are_semantic_gaps_not_callable_signatures() {
+        let file = FileId::from_bytes([3; 20]);
+        let marker = SyntaxFact::new(
+            2,
+            Some(1),
+            SyntaxFactKind::Signature,
+            SourceSpan::new(file, 2, 40).unwrap(),
+            1,
+            SyntaxKindLabel::new("c.preprocessor_condition.signature").unwrap(),
+        );
+        assert!(!is_signature_capture(&marker));
+        assert_eq!(
+            source_coverage_gaps(&marker).collect::<Vec<_>>(),
+            [
+                FactDomain::Entities,
+                FactDomain::Occurrences,
+                FactDomain::Relations
+            ]
+            .map(|domain| (domain, "c-preprocessor-conditional-evaluation-unavailable"))
+        );
+        let written = SyntaxFact::new(
+            3,
+            Some(1),
+            SyntaxFactKind::Signature,
+            SourceSpan::new(file, 12, 30).unwrap(),
+            2,
+            SyntaxKindLabel::new("c.written_macro.signature").unwrap(),
+        );
+        assert!(is_signature_capture(&written));
+        assert!(source_coverage_gaps(&written).next().is_none());
+        assert_eq!(select_unique_capture(&[&written]), Some(&written));
     }
 
     #[test]
@@ -12230,5 +13091,113 @@ mod tests {
 
             prop_assert_eq!(first.id, second.id);
         }
+    }
+
+    #[test]
+    fn cpp_preprocessor_markers_keep_exact_domains_and_written_macro_signatures() {
+        let file = FileId::from_bytes([3; 20]);
+        let fact = |kind, label: &str| {
+            SyntaxFact::new(
+                2,
+                Some(1),
+                kind,
+                SourceSpan::new(file, 2, 40).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (label, detail) in [
+            (
+                "cpp.preprocessor_condition.signature",
+                "cpp-preprocessor-conditional-evaluation-unavailable",
+            ),
+            (
+                "cpp.preprocessor_lexical_unavailable.signature",
+                "cpp-preprocessor-replacement-lexical-unavailable",
+            ),
+            (
+                "cpp.preprocessor_parameters.signature",
+                "cpp-macro-parameter-bindings-unavailable",
+            ),
+            (
+                "cpp.preprocessor_projection_unavailable.signature",
+                "cpp-preprocessor-replacement-not-analyzed",
+            ),
+        ] {
+            let marker = fact(SyntaxFactKind::Signature, label);
+            assert!(!is_signature_capture(&marker));
+            assert_eq!(
+                source_coverage_gaps(&marker).collect::<Vec<_>>(),
+                [
+                    FactDomain::Entities,
+                    FactDomain::Occurrences,
+                    FactDomain::Relations
+                ]
+                .map(|domain| (domain, detail))
+            );
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Occurrence, label))
+                    .next()
+                    .is_none()
+            );
+            assert!(
+                source_coverage_gaps(&fact(SyntaxFactKind::Signature, &format!("{label}.extra")))
+                    .next()
+                    .is_none()
+            );
+        }
+        let written = fact(SyntaxFactKind::Signature, "cpp.written_macro.signature");
+        assert!(is_signature_capture(&written));
+        assert_eq!(
+            source_coverage_gaps(&written).collect::<Vec<_>>(),
+            [(
+                FactDomain::Relations,
+                "cpp-macro-expansion-and-binding-unavailable"
+            )]
+        );
+        assert!(
+            source_coverage_gaps(&fact(
+                SyntaxFactKind::Occurrence,
+                "cpp.written_macro.signature"
+            ))
+            .next()
+            .is_none()
+        );
+        assert!(is_c_macro_signature_owner(
+            EntityKind::Constant,
+            "cpp",
+            &fact(
+                SyntaxFactKind::Declaration,
+                "cpp.preprocessor_constant.declaration"
+            )
+        ));
+        assert!(!is_c_macro_signature_owner(
+            EntityKind::Constant,
+            "c",
+            &fact(
+                SyntaxFactKind::Declaration,
+                "cpp.preprocessor_constant.declaration"
+            )
+        ));
+        assert!(!is_c_macro_signature_owner(
+            EntityKind::Constant,
+            "cpp",
+            &fact(
+                SyntaxFactKind::Declaration,
+                "c.preprocessor_constant.declaration"
+            )
+        ));
+        assert_eq!(
+            diagnostic_gap_domains("cpp-preprocessor-replacement-not-analyzed"),
+            &[
+                FactDomain::Diagnostics,
+                FactDomain::Entities,
+                FactDomain::Occurrences,
+                FactDomain::Relations
+            ]
+        );
+        let module = fact(SyntaxFactKind::Module, "cpp.file.module");
+        assert!(is_explicit_file_module(&module, "cpp"));
+        assert!(!is_explicit_file_module(&module, "c"));
     }
 }

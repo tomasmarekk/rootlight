@@ -212,9 +212,9 @@ mod tests {
         let analysis = measure_tool_list(ExposureProfile::Analysis);
         let developer = measure_tool_list(ExposureProfile::Developer);
 
-        assert_eq!(scout.tool_count, 6);
-        assert_eq!(analysis.tool_count, 13);
-        assert_eq!(developer.tool_count, 19);
+        assert_eq!(scout.tool_count, 7);
+        assert_eq!(analysis.tool_count, 14);
+        assert_eq!(developer.tool_count, 20);
 
         assert!(scout.definition_bytes < analysis.definition_bytes);
         assert!(analysis.definition_bytes < developer.definition_bytes);

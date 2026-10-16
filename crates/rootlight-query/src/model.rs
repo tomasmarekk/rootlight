@@ -31,6 +31,7 @@ pub struct QueryBudget {
     pub(crate) max_tokens: u64,
     pub(crate) max_memory_bytes: u64,
     pub(crate) max_duration: Duration,
+    pub(crate) explicit_duration: Option<Duration>,
 }
 
 impl QueryBudget {
@@ -46,6 +47,7 @@ impl QueryBudget {
             max_tokens: 1_000_000,
             max_memory_bytes: 16 * 1024 * 1024,
             max_duration: Duration::from_secs(2),
+            explicit_duration: None,
         }
     }
 
@@ -102,6 +104,21 @@ impl QueryBudget {
     #[must_use]
     pub const fn with_max_duration(mut self, maximum: Duration) -> Self {
         self.max_duration = maximum;
+        self.explicit_duration = Some(maximum);
+        self
+    }
+
+    /// Reduces legacy query duration while retaining an explicit caller ceiling.
+    ///
+    /// Verified streamed source work has no implicit default deadline. Its
+    /// explicit ceiling therefore remains distinct from the legacy default.
+    #[must_use]
+    pub fn reduce_max_duration(mut self, maximum: Duration) -> Self {
+        self.max_duration = self.max_duration.min(maximum);
+        self.explicit_duration = Some(
+            self.explicit_duration
+                .map_or(maximum, |old| old.min(maximum)),
+        );
         self
     }
 
@@ -151,6 +168,15 @@ impl QueryBudget {
     #[must_use]
     pub const fn max_duration(self) -> Duration {
         self.max_duration
+    }
+
+    /// Returns the caller's explicit duration, including the numeric default.
+    ///
+    /// `None` identifies an omitted duration, rather than an unbounded allowance
+    /// for ordinary queries; those retain [`Self::max_duration`].
+    #[must_use]
+    pub const fn explicit_max_duration(self) -> Option<Duration> {
+        self.explicit_duration
     }
 
     pub(crate) fn validate(self) -> Result<(), QueryError> {
@@ -3714,5 +3740,29 @@ mod tests {
             Err(QueryError::InvalidDurationBudget { maximum })
                 if maximum == HARD_MAX_QUERY_DURATION
         ));
+    }
+
+    #[test]
+    fn explicit_duration_preserves_omission_and_same_value_caller_intent() {
+        let default = QueryBudget::new();
+        assert_eq!(default.explicit_max_duration(), None);
+        assert_eq!(
+            default
+                .with_max_duration(default.max_duration())
+                .explicit_max_duration(),
+            Some(default.max_duration())
+        );
+        let reduced = default.reduce_max_duration(Duration::from_secs(5));
+        assert_eq!(reduced.max_duration(), default.max_duration());
+        assert_eq!(
+            reduced.explicit_max_duration(),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            reduced
+                .reduce_max_duration(Duration::from_millis(1))
+                .explicit_max_duration(),
+            Some(Duration::from_millis(1))
+        );
     }
 }

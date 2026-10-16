@@ -9,9 +9,13 @@
 #![forbid(unsafe_code)]
 
 pub mod compound;
+mod literal_find;
+mod literal_search;
 mod lossless_text;
 mod metadata;
 pub mod opc;
+mod streamed;
+mod streamed_find;
 pub mod vba_compression;
 pub mod vba_dir;
 pub mod vba_header;
@@ -22,10 +26,19 @@ pub mod vba_source;
 pub mod vba_text;
 pub mod zip;
 
+pub use literal_find::{
+    SourceFindBudget, SourceFindCursor, SourceFindError, SourceFindFile, SourceFindResult,
+    SourceFindStop,
+};
+pub use literal_search::{
+    LiteralPattern, LiteralSearchBudget, LiteralSearchCursor, LiteralSearchError,
+    LiteralSearchPage, LiteralSearchStop,
+};
 pub use lossless_text::{
     LosslessTextReadOptions, SourceTextChunk, SourceTextPrefixReadResult, SourceTextReadResult,
 };
 pub use metadata::{SourceMetadata, source_metadata_memory_upper, validate_source_metadata};
+pub use streamed::VerifiedSourceBacking;
 
 use std::{
     collections::VecDeque,
@@ -57,7 +70,7 @@ pub const HARD_MAX_SOURCE_RESPONSE_MEMORY_BYTES: usize =
     HARD_MAX_SOURCE_BYTES + HARD_MAX_SOURCE_METADATA_BYTES;
 /// Maximum source snapshot bytes retained while serving one request.
 pub const HARD_MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
-/// Maximum cooperative synchronous source-read duration.
+/// Maximum legacy live/snapshot source-read duration.
 pub const HARD_MAX_SOURCE_DURATION: Duration = Duration::from_secs(10);
 const UTF8_CHECK_CHUNK_BYTES: usize = 4 * 1024;
 
@@ -75,9 +88,17 @@ pub struct SourceBudget {
     pub max_metadata_bytes: usize,
     /// Maximum aggregate source, metadata, and owned text-presentation buffers.
     pub max_response_memory_bytes: usize,
-    /// Maximum aggregate file bytes snapshotted for verification.
+    /// Maximum request-owned snapshot or recent-line context working bytes.
+    /// Borrowed verified chunks do not charge their complete file length here.
     pub max_snapshot_bytes: u64,
-    /// Maximum cooperative monotonic wall time spent in the service.
+    /// Maximum aggregate complete-source bytes authenticated for unique files.
+    /// This work allowance does not allocate a snapshot or bound response bytes.
+    pub max_verified_bytes: u64,
+    /// Explicit duration for streamed verification and response staging.
+    /// `None` has no local deadline; cooperative cancellation remains mandatory.
+    pub max_verification_duration: Option<Duration>,
+    /// Maximum legacy live/snapshot cooperative duration.
+    /// Explicit [`Self::with_max_duration`] also limits streamed verification.
     pub max_duration: Duration,
 }
 
@@ -91,7 +112,11 @@ impl SourceBudget {
             max_source_bytes: 64 * 1024,
             max_metadata_bytes: 256 * 1024,
             max_response_memory_bytes: 320 * 1024,
-            max_snapshot_bytes: 16 * 1024 * 1024,
+            // A narrow range must remain readable in every supported file;
+            // response bytes and explicitly reduced snapshot limits are separate.
+            max_snapshot_bytes: HARD_MAX_SNAPSHOT_BYTES,
+            max_verified_bytes: u64::MAX,
+            max_verification_duration: None,
             max_duration: Duration::from_secs(2),
         }
     }
@@ -138,10 +163,25 @@ impl SourceBudget {
         self
     }
 
+    /// Replaces the aggregate complete-source verification work allowance.
+    #[must_use]
+    pub const fn with_max_verified_bytes(mut self, maximum: u64) -> Self {
+        self.max_verified_bytes = maximum;
+        self
+    }
+
+    /// Applies an explicit duration to streamed verification and staging.
+    #[must_use]
+    pub const fn with_max_verification_duration(mut self, maximum: Duration) -> Self {
+        self.max_verification_duration = Some(maximum);
+        self
+    }
+
     /// Returns a budget with the cooperative duration ceiling replaced.
     #[must_use]
     pub const fn with_max_duration(mut self, maximum: Duration) -> Self {
         self.max_duration = maximum;
+        self.max_verification_duration = Some(maximum);
         self
     }
 
@@ -317,8 +357,8 @@ impl std::fmt::Debug for SourceReadResult {
 
 /// Source reader bound to an immutable generation and verified source backing.
 ///
-/// The backing is either a live repository capability that revalidates current
-/// files or an ordered process-local snapshot set retained by its caller.
+/// The backing revalidates live files, borrows ordered retained snapshots, or
+/// authenticates bounded visits through a generation-owned source capability.
 pub struct SourceService<'a> {
     backing: SourceBacking<'a>,
     generation: &'a GenerationSnapshot,
@@ -368,6 +408,35 @@ impl<'a> SourceService<'a> {
             backing: SourceBacking::Retained(snapshots),
             generation,
         })
+    }
+
+    /// Binds an immutable source capability to its authenticated generation.
+    ///
+    /// The caller retains the provider and its generation-owned storage lease.
+    /// This constructor accepts no filesystem paths and creates no snapshots.
+    ///
+    /// # Errors
+    /// Returns repository or generation mismatch for a foreign provider owner.
+    pub fn from_verified_backing(
+        backing: &'a dyn VerifiedSourceBacking,
+        generation: &'a GenerationSnapshot,
+    ) -> Result<Self, SourceError> {
+        if backing.repository() != generation.metadata().repository() {
+            return Err(SourceError::RepositoryMismatch);
+        }
+        if backing.generation() != generation.metadata().generation() {
+            return Err(SourceError::GenerationMismatch);
+        }
+        Ok(Self {
+            backing: SourceBacking::Verified(backing),
+            generation,
+        })
+    }
+
+    /// Reports whether source operations use authenticated bounded visits.
+    #[must_use]
+    pub const fn uses_verified_backing(&self) -> bool {
+        matches!(self.backing, SourceBacking::Verified(_))
     }
 
     /// Reads verified UTF-8 text with line context or exact source bytes.
@@ -421,7 +490,7 @@ impl<'a> SourceService<'a> {
             return Err(SourceError::ContextLimit);
         }
 
-        let control = SourceControl::new(cancellation, budget.max_duration);
+        let control = SourceControl::for_service(self, cancellation, budget);
         control.check()?;
         let metadata = self.generation.metadata();
         let prepared = self.preflight(
@@ -432,6 +501,11 @@ impl<'a> SourceService<'a> {
             budget,
             &control,
         )?;
+        if let SourceBacking::Verified(backing) = self.backing {
+            return streamed::read(
+                self, backing, references, options, budget, mode, prepared, &control,
+            );
+        }
         let mut snapshots = Vec::<ResolvedSnapshot<'_>>::new();
         try_reserve_vec(&mut snapshots, prepared.files.len(), &control)?;
         let mut file_encodings = Vec::new();
@@ -663,6 +737,7 @@ impl<'a> SourceService<'a> {
         let mut metadata_bytes = 0usize;
         let mut minimum_source_bytes = 0usize;
         let mut snapshot_bytes = 0u64;
+        let mut verified_bytes = 0u64;
 
         for reference in references {
             control.check()?;
@@ -719,11 +794,19 @@ impl<'a> SourceService<'a> {
             {
                 file_slot
             } else {
-                snapshot_bytes = snapshot_bytes
+                verified_bytes = verified_bytes
                     .checked_add(file.byte_length)
-                    .ok_or(SourceError::SnapshotBudgetExceeded)?;
-                if snapshot_bytes > budget.max_snapshot_bytes {
-                    return Err(SourceError::SnapshotBudgetExceeded);
+                    .ok_or(SourceError::VerificationBudgetExceeded)?;
+                if verified_bytes > budget.max_verified_bytes {
+                    return Err(SourceError::VerificationBudgetExceeded);
+                }
+                if !self.uses_verified_backing() {
+                    snapshot_bytes = snapshot_bytes
+                        .checked_add(file.byte_length)
+                        .ok_or(SourceError::SnapshotBudgetExceeded)?;
+                    if snapshot_bytes > budget.max_snapshot_bytes {
+                        return Err(SourceError::SnapshotBudgetExceeded);
+                    }
                 }
                 let path = control.controlled(|| self.validated_path(file))?;
                 let file_slot = files.len();
@@ -773,6 +856,7 @@ impl<'a> SourceService<'a> {
                 }
             }
             SourceBacking::Live(_) => Err(SourceError::InvalidIndexedPath),
+            SourceBacking::Verified(_) => Ok(path),
         }
     }
 
@@ -790,7 +874,7 @@ impl<'a> SourceService<'a> {
                         &prepared.path,
                         file.byte_length.max(1),
                         cancellation,
-                        control.deadline,
+                        control.deadline.ok_or(SourceError::ReadFailed)?,
                     )
                     .map_err(map_snapshot_error)
                 })
@@ -801,6 +885,7 @@ impl<'a> SourceService<'a> {
                 control.check()?;
                 Ok(ResolvedSnapshot::Retained(snapshot))
             }
+            SourceBacking::Verified(_) => Err(SourceError::ReadFailed),
         }
     }
 }
@@ -841,7 +926,7 @@ impl SourceReadMode {
 struct RawSourceRead {
     result: SourceReadResult,
     text_encodings: Vec<rootlight_vfs::TextEncoding>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     truncated: bool,
 }
 
@@ -854,6 +939,7 @@ struct PreparedFile {
 enum SourceBacking<'a> {
     Live(&'a RepositoryRoot),
     Retained(&'a [Arc<SourceSnapshot>]),
+    Verified(&'a dyn VerifiedSourceBacking),
 }
 
 // Live snapshots stay inline because boxing would add one infallible
@@ -883,7 +969,7 @@ struct ExpandedRange {
 
 struct SourceControl<'a> {
     cancellation: &'a Cancellation,
-    deadline: Instant,
+    deadline: Option<Instant>,
     #[cfg(test)]
     after_operation: Option<&'a dyn Fn()>,
 }
@@ -893,7 +979,26 @@ impl<'a> SourceControl<'a> {
         let started = Instant::now();
         Self {
             cancellation,
-            deadline: started.checked_add(max_duration).unwrap_or(started),
+            deadline: Some(started.checked_add(max_duration).unwrap_or(started)),
+            #[cfg(test)]
+            after_operation: None,
+        }
+    }
+
+    fn for_service(
+        service: &SourceService<'_>,
+        cancellation: &'a Cancellation,
+        budget: SourceBudget,
+    ) -> Self {
+        if !service.uses_verified_backing() {
+            return Self::new(cancellation, budget.max_duration);
+        }
+        let started = Instant::now();
+        Self {
+            cancellation,
+            deadline: budget
+                .max_verification_duration
+                .map(|duration| started.checked_add(duration).unwrap_or(started)),
             #[cfg(test)]
             after_operation: None,
         }
@@ -903,7 +1008,10 @@ impl<'a> SourceControl<'a> {
         self.cancellation
             .check()
             .map_err(|cancelled| SourceError::Cancelled(cancelled.reason()))?;
-        if Instant::now() >= self.deadline {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             return Err(SourceError::Cancelled(CancellationReason::DeadlineExceeded));
         }
         Ok(())
@@ -954,6 +1062,9 @@ fn validate_budget(budget: SourceBudget) -> Result<(), SourceError> {
         || budget.max_snapshot_bytes > HARD_MAX_SNAPSHOT_BYTES
         || budget.max_duration.is_zero()
         || budget.max_duration > HARD_MAX_SOURCE_DURATION
+        || budget
+            .max_verification_duration
+            .is_some_and(|duration| duration.is_zero())
     {
         return Err(SourceError::InvalidBudget);
     }
@@ -1312,9 +1423,12 @@ pub enum SourceError {
     /// The first slice cannot truthfully return this file's encoding.
     #[error("source encoding is unsupported")]
     EncodingUnsupported,
-    /// Aggregate file verification exceeded its memory admission budget.
+    /// Request-owned snapshot or context-prefix memory exceeded its allowance.
     #[error("source snapshot budget exceeded")]
     SnapshotBudgetExceeded,
+    /// Complete source authentication exceeded its independent work allowance.
+    #[error("source verification budget exceeded")]
+    VerificationBudgetExceeded,
     /// One returned path or language identity exceeded its hard string ceiling.
     #[error("source metadata string limit exceeded")]
     MetadataStringLimitExceeded,
@@ -1340,6 +1454,9 @@ pub enum SourceError {
 
 #[cfg(test)]
 mod tests {
+    mod literal_find_tests;
+    mod streamed_tests;
+
     use super::*;
     use rootlight_ids::{
         GenerationIdentity, content_hash, derive_fact, derive_generation, derive_repository,
@@ -2445,7 +2562,7 @@ mod tests {
             let uncancelled = Cancellation::new();
             let expired = SourceControl {
                 cancellation: &uncancelled,
-                deadline: Instant::now(),
+                deadline: Some(Instant::now()),
                 after_operation: None,
             };
             assert_eq!(
@@ -3088,7 +3205,7 @@ mod tests {
         let uncancelled = Cancellation::new();
         let expired = SourceControl {
             cancellation: &uncancelled,
-            deadline: Instant::now(),
+            deadline: Some(Instant::now()),
             after_operation: None,
         };
         assert_eq!(
@@ -4584,7 +4701,7 @@ mod tests {
     fn deadline_after_an_operation_precedes_its_local_error() {
         let cancellation = Cancellation::new();
         let control = SourceControl::new(&cancellation, Duration::from_millis(10));
-        let deadline = control.deadline;
+        let deadline = control.deadline.unwrap();
         let result: Result<(), SourceError> = control.controlled(|| {
             while Instant::now() < deadline {
                 std::hint::spin_loop();

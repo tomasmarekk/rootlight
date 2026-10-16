@@ -10,7 +10,6 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use rootlight_adapter_sdk::{
@@ -36,7 +35,6 @@ mod profile;
 type DiagnosticResult<T> = Result<T, Box<dyn Error>>;
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
-const DIAGNOSTIC_DEADLINE_SECONDS: u64 = 3_600;
 
 struct Arguments {
     directory: PathBuf,
@@ -285,10 +283,7 @@ fn buffer_report(
 
 fn main() -> DiagnosticResult<()> {
     let args = Arguments::parse(std::env::args_os().skip(1))?;
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(DIAGNOSTIC_DEADLINE_SECONDS))
-        .ok_or("diagnostic deadline overflow")?;
-    let cancellation = Cancellation::with_deadline(deadline);
+    let cancellation = Cancellation::new();
     let config = ConfigSnapshot::resolve(&[])?;
     let source_capacity = config.analysis().max_source_file_bytes;
     let maximum_source_bytes = usize::try_from(source_capacity)?;
@@ -343,7 +338,7 @@ fn main() -> DiagnosticResult<()> {
             "max_cache_bytes": runtime.max_cache_bytes(),
             "input_chunk_bytes": runtime.default_settings().input_chunk_bytes(),
         },
-        "diagnostic_deadline_seconds": DIAGNOSTIC_DEADLINE_SECONDS,
+        "diagnostic_deadline_seconds": null,
         "diagnostic_max_output_bytes": MAX_OUTPUT_BYTES,
     });
     let provider = Arc::new(TreeSitterProvider::new(runtime)?);
@@ -540,7 +535,7 @@ mod tests {
 
     #[test]
     fn cancelled_output_is_not_returned_as_a_complete_report() {
-        let cancellation = Cancellation::with_deadline(Instant::now());
+        let cancellation = Cancellation::with_deadline(std::time::Instant::now());
         assert!(buffer_report(&json!({"count": 0}), 64, &cancellation).is_err());
     }
 }

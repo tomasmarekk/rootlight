@@ -30,7 +30,7 @@ use tempfile::{TempDir, tempdir_in};
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
 #[test]
-fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
+fn incremental_executor_accepts_optional_deadlines_and_explicit_memory_admission() {
     let fixture = Fixture::new("admission.rs", b"fn admitted() {}\n");
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
     let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
@@ -49,21 +49,8 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
             None,
             &[],
             settings,
-            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-            &Cancellation::new(),
-        ),
-        Err(AdapterError::RejectedRequest(
-            RequestError::DeadlineRequired
-        ))
-    ));
-    assert!(matches!(
-        provider.execute_with_previous(
-            &request,
-            None,
-            &[],
-            settings,
             MemoryAdmissionPolicy::RequireHardOrAccounted,
-            &deadline(Duration::from_secs(30)),
+            &Cancellation::new(),
         ),
         Err(AdapterError::RejectedRequest(
             RequestError::MemoryEnforcementUnavailable
@@ -78,7 +65,7 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
             &[],
             settings,
             MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-            &deadline(Duration::from_secs(30)),
+            &Cancellation::new(),
         )
         .expect("explicit unavailable-enforcement fallback admits incremental parsing");
     assert_eq!(
@@ -90,7 +77,14 @@ fn incremental_executor_enforces_deadline_and_explicit_memory_admission() {
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 55] = [
+    let cases: [(&str, &str, &[u8]); 63] = [
+    ("written.v", "coq", b"(* marker *)\r\nDefinition written_value : nat := 1.\r\nLemma statement : True. Proof. exact I. Qed.\r\n"),
+    ("source.v", "v", b"module written\nstruct Box { value int }\nfn measure(value int) int { return value }\n"),
+    ("written.v", "verilog", b"module Written(input wire clk); wire value; endmodule\n"),
+    ("written.sv", "systemverilog", b"interface Written(input logic clk); logic value; endinterface\n"),
+        ("written.e", "eiffel", b"class BOX\nfeature\n value: INTEGER\nend\n"),
+        ("written.jl", "julia", b"module Written\nmeasure(value) = value\nend\n"),
+        ("written.cmake", "cmake", b"function(Written value)\nset(local ${value})\nendfunction()\n"),
         ("written.ml", "ocaml", b"let increment x = x + 1\n"),
         ("written.mli", "ocaml-interface", b"val increment : int -> int\n"),
         ("written.scm", "scheme", b"(define (measure value) (+ value 1))\n"),
@@ -206,6 +200,7 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
         ("sample.yaml", "yaml", b"name: sample\n"),
         ("sample.toml", "toml", b"name = 'sample'\n"),
         ("sample.json", "json", br#"{"name":"sample"}"#),
+        ("sample.jsonc", "jsonc", br#"{/*comment*/"name":"sample",}"#),
         ("sample.sh", "bash", b"sample() { :; }\n"),
         (
             "sample.lua",
@@ -769,6 +764,172 @@ fn typescript_dialect_changes_invalidate_native_tree_reuse() {
 }
 
 #[test]
+fn jsonc_projection_edits_rebuild_and_match_fresh_source_facts() {
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    let settings = ParserSettings::new(64).unwrap();
+    let memory = MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
+    for (old, edited, start, end, replacement, projected) in [
+        ("[1,]", "[1]", 2, 3, "", true),
+        ("[1]", "[1,]", 2, 2, ",", true),
+        ("[1, /*x*/]", "[1, /**/2/*x*/]", 6, 7, "*/2/*x", true),
+        ("[1]", "[2]", 1, 2, "2", false),
+    ] {
+        let fixture = Fixture::new("settings.jsonc", old.as_bytes());
+        let first = provider
+            .execute_with_previous(
+                &request(
+                    &fixture.snapshot,
+                    &fixture.source,
+                    &limits,
+                    "jsonc",
+                    Vec::new(),
+                ),
+                None,
+                &[],
+                settings,
+                memory,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        let same = provider
+            .execute_with_previous(
+                &request(
+                    &fixture.snapshot,
+                    &fixture.source,
+                    &limits,
+                    "jsonc",
+                    Vec::new(),
+                ),
+                first.previous(),
+                &[],
+                settings,
+                memory,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert!(matches!(same.reuse_status(), ReuseStatus::Reused { .. }));
+        let changed = fixture.rewrite(edited.as_bytes());
+        let input = request(
+            &changed.snapshot,
+            &changed.source,
+            &limits,
+            "jsonc",
+            Vec::new(),
+        );
+        let incremental = provider
+            .execute_with_previous(
+                &input,
+                first.previous(),
+                &[SourceEdit::new(start, end, replacement).unwrap()],
+                settings,
+                memory,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        if projected {
+            assert_eq!(
+                incremental.reuse_status(),
+                ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute)
+            );
+        } else {
+            assert!(matches!(
+                incremental.reuse_status(),
+                ReuseStatus::Reused { .. }
+            ));
+        }
+        let fresh = provider
+            .execute_with_previous(&input, None, &[], settings, memory, &Cancellation::new())
+            .unwrap();
+        assert_eq!(
+            incremental.output().facts(),
+            fresh.output().facts(),
+            "{old} -> {edited}"
+        );
+        assert_eq!(
+            incremental.output().diagnostics(),
+            fresh.output().diagnostics()
+        );
+        assert_eq!(incremental.output().report(), fresh.output().report());
+    }
+}
+
+#[test]
+fn jsonc_fragmented_input_rebuilds_edits_and_matches_fresh_facts() {
+    let original = "opaque \"\n[1,\nHOST\n]\n";
+    let changed = original.replacen("[1,", "[2,", 1);
+    let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
+    let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
+    let settings = ParserSettings::new(64).unwrap();
+    let memory = MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
+    let fixture = Fixture::new("settings.jsonc", original.as_bytes());
+    let selected = |fixture: &Fixture| {
+        ["[1,\n", "]\n"]
+            .into_iter()
+            .map(|fragment| {
+                let start = original.find(fragment).unwrap();
+                let span = SourceSpan::new(
+                    fixture.source.span().file(),
+                    u64::try_from(start).unwrap(),
+                    u64::try_from(start + fragment.len()).unwrap(),
+                )
+                .unwrap();
+                IncludedRange::new(span, LanguageId::new("jsonc").unwrap())
+            })
+            .collect()
+    };
+    let first = provider
+        .execute_with_previous(
+            &request(
+                &fixture.snapshot,
+                &fixture.source,
+                &limits,
+                "jsonc",
+                selected(&fixture),
+            ),
+            None,
+            &[],
+            settings,
+            memory,
+            &Cancellation::new(),
+        )
+        .unwrap();
+    assert!(first.output().diagnostics().is_empty());
+    let current = fixture.rewrite(changed.as_bytes());
+    let input = request(
+        &current.snapshot,
+        &current.source,
+        &limits,
+        "jsonc",
+        selected(&current),
+    );
+    let start = original.find("[1,").unwrap() + 1;
+    let incremental = provider
+        .execute_with_previous(
+            &input,
+            first.previous(),
+            &[SourceEdit::new(start, start + 1, "2").unwrap()],
+            settings,
+            memory,
+            &Cancellation::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        incremental.reuse_status(),
+        ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute)
+    );
+    let fresh = provider
+        .execute_with_previous(&input, None, &[], settings, memory, &Cancellation::new())
+        .unwrap();
+    assert_eq!(incremental.output().facts(), fresh.output().facts());
+    assert_eq!(
+        incremental.output().diagnostics(),
+        fresh.output().diagnostics()
+    );
+    assert_eq!(incremental.output().report(), fresh.output().report());
+}
+
+#[test]
 fn matlab_virtual_final_line_ending_preserves_reuse_and_exact_spans() {
     let initial = b"function result = twice(value)\nresult = value * 2";
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
@@ -1023,6 +1184,80 @@ fn incremental_edit_work_is_bounded_before_cloning_or_intermediate_growth() {
             if code.as_str() == "incremental-source-limit"
     ));
     assert_eq!(provider.stats().checked_out_parsers, 0);
+}
+
+#[test]
+fn unrestricted_node_credit_preserves_explicit_request_and_provider_limits() {
+    let fixture = Fixture::new("nodes.rs", b"fn retained() { let value = 1; }\n");
+    for (requested, configured) in [(2, usize::MAX), (usize::MAX, 2)] {
+        let limits = limits(MAX_SOURCE_BYTES, requested, 64);
+        let provider = provider(MAX_SOURCE_BYTES, configured, 64, 2 * 1024 * 1024);
+        let request = request(
+            &fixture.snapshot,
+            &fixture.source,
+            &limits,
+            "rust",
+            Vec::new(),
+        );
+        let output = execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &Cancellation::new(),
+        );
+        if requested > configured {
+            assert!(matches!(
+                output,
+                Err(AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                    resource: ResourceKind::SyntaxNodes,
+                    observed: usize::MAX,
+                    limit: 2,
+                }))
+            ));
+            assert_eq!(provider.stats().cache.entries, 0);
+            continue;
+        }
+        let output = output.unwrap();
+        assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
+        assert_eq!(output.report().resources().syntax_nodes(), 2);
+        assert_eq!(output.diagnostics()[0].code().as_str(), "syntax-node-limit");
+        assert!(output.facts().is_empty());
+        assert_eq!(provider.stats().cache.entries, 0);
+    }
+    let limits = limits(MAX_SOURCE_BYTES, usize::MAX, 64);
+    let provider = provider(MAX_SOURCE_BYTES, usize::MAX, 64, 2 * 1024 * 1024);
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "rust",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &Cancellation::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        output.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    assert!(output.diagnostics().is_empty());
+    assert!(output.report().resources().syntax_nodes() > 2);
+    assert!(!output.facts().is_empty());
+    let cancellation = Cancellation::new();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    assert!(
+        execute_parse(
+            &provider,
+            &request,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancellation,
+        )
+        .is_err()
+    );
 }
 
 #[test]

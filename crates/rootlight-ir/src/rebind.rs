@@ -53,6 +53,9 @@ use crate::{
 };
 use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
 use crate::{
+    RUST_DIRECT_CALL_NAMESPACE, decode_rust_direct_call_envelope, new_rust_direct_call_envelope,
+};
+use crate::{
     VBA_COMPILATION_NAMESPACE, decode_vba_compilation_envelope, new_vba_compilation_envelope,
 };
 #[cfg(test)]
@@ -737,16 +740,28 @@ impl ProjectionHasher {
     }
 
     fn record(&mut self, record: &impl Serialize) -> Result<(), NormalizedRebindError> {
-        let mut record_hasher = RecordHasher {
-            hasher: blake3::Hasher::new_derive_key("rootlight.ir.logical.record/1"),
-            bytes: 0,
-            pending: [0; RECORD_HASH_BUFFER_BYTES],
-            pending_len: 0,
-        };
-        serde_json::to_writer(&mut record_hasher, record)
-            .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
-        self.hasher.update(&record_hasher.bytes.to_be_bytes());
-        self.hasher.update(record_hasher.finish().as_bytes());
+        let (bytes, digest) = serialized_record_digest(record)?;
+        self.record_digest(bytes, &digest);
+        Ok(())
+    }
+
+    fn record_digest(&mut self, bytes: u64, digest: &blake3::Hash) {
+        self.hasher.update(&bytes.to_be_bytes());
+        self.hasher.update(digest.as_bytes());
+    }
+
+    fn record_with_secondary(
+        &mut self,
+        secondary: &mut Self,
+        record: &impl Serialize,
+        checkpoint: &mut impl FnMut() -> bool,
+    ) -> Result<(), NormalizedRebindError> {
+        // Both projections commit the same record-domain bytes. Reusing this
+        // digest avoids serializing large coverage/provenance records twice.
+        let (bytes, digest) = serialized_record_digest(record)?;
+        self.record_digest(bytes, &digest);
+        ensure_projection_continues(checkpoint)?;
+        secondary.record_digest(bytes, &digest);
         Ok(())
     }
 
@@ -756,6 +771,20 @@ impl ProjectionHasher {
 }
 
 const RECORD_HASH_BUFFER_BYTES: usize = 4 * 1024;
+
+fn serialized_record_digest(
+    record: &impl Serialize,
+) -> Result<(u64, blake3::Hash), NormalizedRebindError> {
+    let mut record_hasher = RecordHasher {
+        hasher: blake3::Hasher::new_derive_key("rootlight.ir.logical.record/1"),
+        bytes: 0,
+        pending: [0; RECORD_HASH_BUFFER_BYTES],
+        pending_len: 0,
+    };
+    serde_json::to_writer(&mut record_hasher, record)
+        .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+    Ok((record_hasher.bytes, record_hasher.finish()))
+}
 
 struct RecordHasher {
     hasher: blake3::Hasher,
@@ -963,6 +992,7 @@ fn require_supported_extensions_with_checkpoint(
                 | PERL_BINDING_NAMESPACE
                 | FSHARP_BINDING_NAMESPACE
                 | GROOVY_BINDING_NAMESPACE
+                | RUST_DIRECT_CALL_NAMESPACE
                 | GROOVY_TYPE_LOOKUP_NAMESPACE
                 | GROOVY_CALLABLE_NAMESPACE
                 | GROOVY_MEMBER_NAMESPACE
@@ -1443,25 +1473,33 @@ fn hash_rebound_fact(
         FactLocation::Occurrence(_) => hashers.complete.record(&scratch.occurrences[0])?,
         FactLocation::Relation(_) => hashers.complete.record(&scratch.relations[0])?,
         FactLocation::Provenance(_) => {
-            hashers.complete.record(&scratch.provenance[0])?;
-            ensure_projection_continues(checkpoint)?;
-            hashers.provenance.record(&scratch.provenance[0])?;
+            hashers.complete.record_with_secondary(
+                &mut hashers.provenance,
+                &scratch.provenance[0],
+                checkpoint,
+            )?;
         }
         FactLocation::SourceMapping(_) => hashers.complete.record(&scratch.source_mappings[0])?,
         FactLocation::Coverage(_) => {
-            hashers.complete.record(&scratch.coverage_records[0])?;
-            ensure_projection_continues(checkpoint)?;
-            hashers.coverage.record(&scratch.coverage_records[0])?;
+            hashers.complete.record_with_secondary(
+                &mut hashers.coverage,
+                &scratch.coverage_records[0],
+                checkpoint,
+            )?;
         }
         FactLocation::Skipped(_) => {
-            hashers.complete.record(&scratch.skipped_regions[0])?;
-            ensure_projection_continues(checkpoint)?;
-            hashers.coverage.record(&scratch.skipped_regions[0])?;
+            hashers.complete.record_with_secondary(
+                &mut hashers.coverage,
+                &scratch.skipped_regions[0],
+                checkpoint,
+            )?;
         }
         FactLocation::Diagnostic(_) => {
-            hashers.complete.record(&scratch.diagnostics[0])?;
-            ensure_projection_continues(checkpoint)?;
-            hashers.coverage.record(&scratch.diagnostics[0])?;
+            hashers.complete.record_with_secondary(
+                &mut hashers.coverage,
+                &scratch.diagnostics[0],
+                checkpoint,
+            )?;
         }
         FactLocation::Extension(_) => hashers.complete.record(&scratch.extensions[0])?,
     }
@@ -1630,6 +1668,12 @@ fn rebind_extension(
             let evidence = decode_groovy_binding_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             new_groovy_binding_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        RUST_DIRECT_CALL_NAMESPACE => {
+            let evidence = decode_rust_direct_call_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_rust_direct_call_envelope(repository, generation, provenance, source, evidence)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         FSHARP_BINDING_NAMESPACE => {
@@ -1868,6 +1912,121 @@ mod tests {
             }
             assert_eq!(record.bytes, u64::try_from(payload.len()).unwrap());
             assert_eq!(record.finish(), expected.finalize());
+        }
+    }
+
+    #[test]
+    fn paired_projection_records_match_independent_json_digest() {
+        let contexts = [
+            "rootlight.ir.logical.complete/1",
+            "rootlight.ir.logical.coverage/1",
+        ];
+        for length in [0, 17, 4_095, 4_096, 12_305] {
+            let value = ("\u{03bb}\u{1f600}\n\"\\", "x".repeat(length));
+            let encoded = serde_json::to_vec(&value).unwrap();
+            let mut record = blake3::Hasher::new_derive_key("rootlight.ir.logical.record/1");
+            record.update(&encoded);
+            let expected = contexts.map(|context| {
+                let mut hasher = blake3::Hasher::new_derive_key(context);
+                hasher.update(&[8]);
+                hasher.update(&1_u64.to_be_bytes());
+                hasher.update(&u64::try_from(encoded.len()).unwrap().to_be_bytes());
+                hasher.update(record.finalize().as_bytes());
+                ContentHash::from_bytes(*hasher.finalize().as_bytes())
+            });
+            let [mut complete, mut coverage] = contexts.map(ProjectionHasher::new);
+            complete.category(8, 1).unwrap();
+            coverage.category(8, 1).unwrap();
+            complete
+                .record_with_secondary(&mut coverage, &value, &mut || true)
+                .unwrap();
+            assert_eq!([complete.finish(), coverage.finish()], expected);
+        }
+    }
+
+    #[test]
+    fn paired_projection_records_serialize_once_and_preserve_interruption() {
+        struct Counted<'a>(&'a std::cell::Cell<usize>);
+
+        impl Serialize for Counted<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                serializer.serialize_str("same authored record")
+            }
+        }
+
+        let calls = std::cell::Cell::new(0);
+        let mut complete = ProjectionHasher::new("rootlight.ir.logical.complete/1");
+        let mut coverage = ProjectionHasher::new("rootlight.ir.logical.coverage/1");
+        complete
+            .record_with_secondary(&mut coverage, &Counted(&calls), &mut || true)
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+
+        let mut untouched = ProjectionHasher::new("rootlight.ir.logical.coverage/1");
+        let before = untouched.hasher.finalize();
+        let mut primary_expected = ProjectionHasher {
+            hasher: complete.hasher.clone(),
+        };
+        primary_expected.record(&"interrupted").unwrap();
+        assert_eq!(
+            complete.record_with_secondary(&mut untouched, &"interrupted", &mut || false),
+            Err(NormalizedRebindError::Interrupted)
+        );
+        assert_eq!(untouched.hasher.finalize(), before);
+        assert_eq!(complete.finish(), primary_expected.finish());
+    }
+
+    #[test]
+    fn paired_projection_serialization_error_publishes_no_digest() {
+        struct Incomplete;
+
+        impl Serialize for Incomplete {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let _ = serializer.serialize_str("a prefix was already written")?;
+                Err(serde::ser::Error::custom("record serialization failed"))
+            }
+        }
+
+        let mut complete = ProjectionHasher::new("rootlight.ir.logical.complete/1");
+        let mut coverage = ProjectionHasher::new("rootlight.ir.logical.coverage/1");
+        let expected = [complete.hasher.finalize(), coverage.hasher.finalize()];
+        let mut checkpoint_called = false;
+        assert_eq!(
+            complete.record_with_secondary(&mut coverage, &Incomplete, &mut || {
+                checkpoint_called = true;
+                true
+            }),
+            Err(NormalizedRebindError::IdentityRecipe)
+        );
+        assert_eq!(
+            [complete.hasher.finalize(), coverage.hasher.finalize()],
+            expected
+        );
+        assert!(!checkpoint_called);
+    }
+
+    #[test]
+    #[ignore = "manual release cost observation without a timing threshold"]
+    fn profile_paired_projection_records() {
+        let value = ("\u{03bb}\u{1f600}\n\"\\".repeat(128), "x".repeat(3_072));
+        for sample in 0..3 {
+            let mut complete = ProjectionHasher::new("rootlight.ir.logical.complete/1");
+            let mut coverage = ProjectionHasher::new("rootlight.ir.logical.coverage/1");
+            let started = std::time::Instant::now();
+            for _ in 0..10_000 {
+                complete
+                    .record_with_secondary(&mut coverage, std::hint::black_box(&value), &mut || {
+                        true
+                    })
+                    .unwrap();
+            }
+            let elapsed = started.elapsed().as_micros();
+            println!(
+                "pair_profile sample={sample} records=10000 micros={elapsed} complete={} coverage={}",
+                complete.finish(),
+                coverage.finish()
+            );
         }
     }
 
@@ -2689,6 +2848,60 @@ mod tests {
         );
         assert_eq!(writer.encoded.len(), RECORD_HASH_BUFFER_BYTES);
         assert_eq!(writer.failure, Some(NormalizedRebindError::Interrupted));
+    }
+
+    #[test]
+    fn rust_direct_call_rebinds_without_occurrence_identity_payloads() {
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let source = SourceRef::new(
+            document.repository,
+            document.generation,
+            crate::SourceSpan::new(file.id, 2, 3).unwrap(),
+            file.content_hash,
+            None,
+        );
+        let proof = crate::RustDirectCall {
+            target: document.entities[0].id,
+            definition: crate::SourceSpan::new(file.id, 0, 1).unwrap(),
+            canonical_name: rootlight_ids::content_hash(b"target"),
+        };
+        document.extensions.push(
+            new_rust_direct_call_envelope(
+                document.repository,
+                document.generation,
+                file.provenance,
+                source,
+                proof,
+            )
+            .unwrap(),
+        );
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let generation = GenerationId::from_bytes([87; 20]);
+        let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+        assert_eq!(
+            decode_rust_direct_call_envelope(&rebound.extensions[0]).unwrap(),
+            proof
+        );
+        assert_eq!(
+            rebound.extensions[0]
+                .evidence
+                .source
+                .as_ref()
+                .unwrap()
+                .generation(),
+            generation
+        );
+        assert_ne!(rebound.extensions[0].id, document.extensions[0].id);
+        assert_eq!(
+            chunk.digest(),
+            CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                .unwrap()
+                .digest()
+        );
     }
 
     #[test]

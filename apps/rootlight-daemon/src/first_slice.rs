@@ -10,6 +10,7 @@
 #![allow(clippy::result_large_err)]
 
 mod dart_dependencies;
+mod source_find;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -160,10 +161,6 @@ const MAX_RECOVERY_LOAD_WORKERS: usize = 4;
 const OPERATION_STATUS_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 const LIFECYCLE_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 const REFINEMENT_ADMISSION_WAIT: Duration = Duration::from_secs(2);
-const DETACHED_INDEX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-// Semantic refinement starts after structural publication and must cover the
-// reviewed two-hour large-repository profile while remaining time-bounded.
-const DETACHED_SEMANTIC_REFINEMENT_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WATCHER_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(250);
 const WATCHER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -4999,10 +4996,7 @@ impl FirstSliceDaemon {
             };
         let (recovery_cancellation, recovery_thread) = match (deferred_restore, recovery_runtime) {
             (Some(deferred_restore), Some(recovery_runtime)) => {
-                let deadline = Instant::now()
-                    .checked_add(DETACHED_INDEX_TIMEOUT)
-                    .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
-                let cancellation = Cancellation::with_deadline(deadline);
+                let cancellation = Cancellation::new();
                 let worker_cancellation = cancellation.clone();
                 let recovery_lanes = lanes.clone();
                 let recovery_state = recovery_lanes.support_state.clone();
@@ -5143,10 +5137,10 @@ impl FirstSliceDaemon {
         // control worker needed by cancellation and health traffic.
         request.wait_ms = None;
         request.after_revision = None;
-        let response_deadline = context
-            .deadline
+        let client_deadline = context.required_deadline()?;
+        let response_deadline = client_deadline
             .checked_sub(OPERATION_STATUS_RESPONSE_GRACE)
-            .unwrap_or(context.deadline);
+            .unwrap_or(client_deadline);
         let wait_deadline = Instant::now()
             .checked_add(Duration::from_millis(u64::from(wait_ms)))
             .ok_or_else(internal_error)?
@@ -5925,7 +5919,6 @@ fn classify_resource_pressure(
 struct RecoveryOperation {
     operation: OperationId,
     cancellation: Cancellation,
-    deadline: Instant,
     peak_rss_bytes: Arc<AtomicU64>,
     files_examined: u64,
     bytes_examined: u64,
@@ -5988,14 +5981,12 @@ impl<'a> RecoveryOperationGuard<'a> {
         runtime: &tokio::runtime::Runtime,
     ) -> Result<(), FirstSliceHostError> {
         sample_current_process_rss(&self.recovery.peak_rss_bytes, None);
-        let deadline = fresh_lifecycle_deadline(self.recovery.deadline)
-            .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))?;
         runtime
             .block_on(self.journal.update_resources_until(
                 self.recovery.operation,
                 self.recovery.peak_rss_bytes.load(Ordering::Relaxed),
                 0,
-                deadline,
+                recovery_lifecycle_deadline()?,
             ))
             .map_err(FirstSliceHostError::Journal)?;
         runtime
@@ -6003,7 +5994,7 @@ impl<'a> RecoveryOperationGuard<'a> {
                 self.recovery.operation,
                 self.recovery.files_examined,
                 self.recovery.bytes_examined,
-                deadline,
+                recovery_lifecycle_deadline()?,
             ))
             .map_err(FirstSliceHostError::Journal)?;
         Ok(())
@@ -6045,7 +6036,7 @@ impl<'a> RecoveryOperationGuard<'a> {
             .block_on(self.journal.update_progress_until(
                 self.recovery.operation,
                 progress,
-                self.recovery.deadline,
+                recovery_lifecycle_deadline()?,
             ))
             .map_err(FirstSliceHostError::Journal)?;
         Ok(())
@@ -6138,15 +6129,7 @@ fn start_recovery_operations(
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
         .filter(|started| *started != 0)
         .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
-    let deadline = Instant::now()
-        .checked_add(DETACHED_INDEX_TIMEOUT)
-        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
-    let deadline_unix_ms = started_unix_ms
-        .checked_add(
-            u64::try_from(DETACHED_INDEX_TIMEOUT.as_millis())
-                .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))?,
-        )
-        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
+    let deadline = recovery_lifecycle_deadline()?;
     let prepared = targets
         .iter()
         .copied()
@@ -6166,7 +6149,7 @@ fn start_recovery_operations(
                 recovery_plan_hash(target),
                 ClientInstanceId::SYSTEM,
                 true,
-                Some(deadline_unix_ms),
+                None,
                 None,
             )
             .and_then(|submission| submission.with_repository_context(repository_context))
@@ -6221,13 +6204,10 @@ fn start_recovery_operations(
             FirstSliceError::CatalogCorrupt,
         ));
     }
-    if let Some(reason) = activated.iter().find_map(|(_, cancellation)| {
-        cancellation.extend_deadline(deadline).err().map(|_| {
-            cancellation
-                .reason()
-                .unwrap_or(CancellationReason::DeadlineExceeded)
-        })
-    }) {
+    if let Some(reason) = activated
+        .iter()
+        .find_map(|(_, cancellation)| cancellation.reason())
+    {
         finalize_pre_guard_recovery_batch(
             journal,
             prepared
@@ -6247,7 +6227,6 @@ fn start_recovery_operations(
         recoveries.push(RecoveryOperation {
             operation,
             cancellation,
-            deadline,
             peak_rss_bytes: Arc::new(AtomicU64::new(0)),
             files_examined: 0,
             bytes_examined: 0,
@@ -6327,7 +6306,11 @@ fn complete_recovery_operation(
     recovery: &RecoveryOperation,
 ) -> Result<(), FirstSliceHostError> {
     let record = runtime
-        .block_on(journal.finish_operation_until(recovery.operation, None, recovery.deadline))
+        .block_on(journal.finish_operation_until(
+            recovery.operation,
+            None,
+            recovery_lifecycle_deadline()?,
+        ))
         .map_err(FirstSliceHostError::Journal)?;
     if record.state != OperationState::Succeeded {
         return Err(FirstSliceHostError::Service(
@@ -6347,7 +6330,7 @@ fn finish_cancelled_recovery_operation(
         .block_on(journal.finish_operation_until(
             recovery.operation,
             Some(reason),
-            recovery.deadline,
+            recovery_lifecycle_deadline()?,
         ))
         .or_else(|_| {
             journal
@@ -6386,7 +6369,7 @@ fn fail_recovery_operation(
         .block_on(journal.fail_operation_until(
             recovery.operation,
             public.clone(),
-            recovery.deadline,
+            recovery_lifecycle_deadline()?,
         ))
         .or_else(|_| {
             journal
@@ -7526,10 +7509,8 @@ fn watcher_reconcile_target(
     {
         return Ok(WatcherReconcileOutcome::Busy);
     }
-    let deadline = Instant::now()
-        .checked_add(DETACHED_INDEX_TIMEOUT)
-        .ok_or(FirstSliceHostError::Service(FirstSliceError::Limits))?;
-    if cancellation.extend_deadline(deadline).is_err() {
+    let deadline = recovery_lifecycle_deadline()?;
+    if cancellation.check().is_err() {
         return Ok(WatcherReconcileOutcome::Retry);
     }
     let registered = lanes
@@ -7553,7 +7534,7 @@ fn watcher_reconcile_target(
         client_instance_id: ClientInstanceId::SYSTEM,
         selected_protocol_minor: PROTOCOL_MINOR,
         cancellation: cancellation.clone(),
-        deadline,
+        deadline: Some(deadline),
         effective_budget: None,
         index_admission: None,
     };
@@ -7781,6 +7762,9 @@ fn semantic_refinement_worker(
             if stopping.load(Ordering::Acquire) {
                 return;
             }
+            let Ok(command_deadline) = command.context.required_deadline() else {
+                return;
+            };
             let cancelled = command.context.cancellation.check().is_err();
             // A cancelled command can settle from journal state alone; waiting
             // for a service writer would delay shutdown without validating work.
@@ -7800,7 +7784,7 @@ fn semantic_refinement_worker(
                     error.clone(),
                     &journal,
                     &runtime,
-                    command.context.deadline,
+                    command_deadline,
                 )
                 .is_err()
                 {
@@ -7838,9 +7822,13 @@ fn semantic_refinement_worker(
                 .err()
                 .filter(|error| error.code() == ErrorCode::Busy && error.retryable());
             if let Some(error) = retryable_busy {
+                let journal_deadline = match index_lifecycle_deadline(None) {
+                    Ok(deadline) => deadline,
+                    Err(_) => return,
+                };
                 match journal_call(
                     &runtime,
-                    command.context.deadline,
+                    journal_deadline,
                     journal.control(ControlRequest::OperationStatus(command.operation)),
                 ) {
                     Ok(ControlResponse::OperationStatus(record))
@@ -7849,14 +7837,7 @@ fn semantic_refinement_worker(
                         // A watcher can enter the index lane just before this
                         // child is registered. Its no-op must not strand Auto
                         // at the structural generation.
-                        thread::park_timeout(
-                            OPERATION_STATUS_POLL_INTERVAL.min(
-                                command
-                                    .context
-                                    .deadline
-                                    .saturating_duration_since(Instant::now()),
-                            ),
-                        );
+                        thread::park_timeout(OPERATION_STATUS_POLL_INTERVAL);
                         continue;
                     }
                     Err(_)
@@ -7865,7 +7846,7 @@ fn semantic_refinement_worker(
                             error.clone(),
                             &journal,
                             &runtime,
-                            command.context.deadline,
+                            command_deadline,
                         )
                         .is_err() =>
                     {
@@ -7945,6 +7926,9 @@ fn execute_service_request(
         FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(_)
     ) {
         require_source_metadata_quote_protocol(context.selected_protocol_minor)?;
+    }
+    if matches!(&request, FirstSliceIpcRequest::SourceFind(_)) {
+        source_find::require_protocol(context.selected_protocol_minor)?;
     }
     let requested_repository = request_repository(&request)?;
     let requested_recovery = if let Some(repository) = requested_repository {
@@ -8031,6 +8015,9 @@ fn execute_service_request(
         }
         FirstSliceIpcRequest::SourceRead(request) => {
             source_read(&service, request, &context).map(FirstSliceIpcResponse::SourceRead)
+        }
+        FirstSliceIpcRequest::SourceFind(request) => {
+            source_find::execute(&service, request, &context).map(FirstSliceIpcResponse::SourceFind)
         }
         FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(request) => {
             source_text_prefix_metadata_quote(&service, request, &context)
@@ -8176,7 +8163,7 @@ fn lock_publication_until<'a>(
     serialization: &'a Mutex<()>,
     service: &'a RwLock<FirstSliceService>,
     cancellation: &Cancellation,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<(MutexGuard<'a, ()>, RwLockWriteGuard<'a, FirstSliceService>), PublicError> {
     let serialization = loop {
         cancellation
@@ -8184,7 +8171,9 @@ fn lock_publication_until<'a>(
             .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
         match serialization.try_lock() {
             Ok(guard) => break guard,
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+            Err(TryLockError::WouldBlock)
+                if deadline.is_none_or(|deadline| Instant::now() < deadline) =>
+            {
                 thread::park_timeout(PUBLICATION_LOCK_POLL_INTERVAL);
             }
             Err(TryLockError::WouldBlock) => return Err(operation_in_progress()),
@@ -8197,7 +8186,9 @@ fn lock_publication_until<'a>(
             .map_err(|cancelled| cancellation_error(cancelled.reason()))?;
         match service.try_write() {
             Ok(guard) => break guard,
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+            Err(TryLockError::WouldBlock)
+                if deadline.is_none_or(|deadline| Instant::now() < deadline) =>
+            {
                 // Preparation readers never acquire the publication mutex until
                 // after releasing their read guard, so bounded polling here
                 // preserves the prepared candidate without creating a lock cycle.
@@ -8219,6 +8210,7 @@ fn request_repository(request: &FirstSliceIpcRequest) -> Result<Option<Repositor
         FirstSliceIpcRequest::CodeLocate(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::SymbolExplain(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::SourceRead(request) => request.repository.as_ref(),
+        FirstSliceIpcRequest::SourceFind(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::SourceTextPrefixMetadataQuote(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::RepositoryStatus(request) => request.repository.as_ref(),
         FirstSliceIpcRequest::SymbolRelationships(request) => request.repository.as_ref(),
@@ -8374,6 +8366,17 @@ struct ServiceBudgetReduction {
     estimated_tokens: u64,
     memory_bytes: u64,
     duration: Duration,
+    source_duration_explicit: bool,
+}
+
+trait RequiredContextDeadline {
+    fn required_deadline(&self) -> Result<Instant, PublicError>;
+}
+
+impl RequiredContextDeadline for FirstSliceIpcContext {
+    fn required_deadline(&self) -> Result<Instant, PublicError> {
+        self.deadline.ok_or_else(invalid_argument)
+    }
 }
 
 impl From<FirstSliceEffectiveBudget> for ServiceBudgetReduction {
@@ -8387,6 +8390,7 @@ impl From<FirstSliceEffectiveBudget> for ServiceBudgetReduction {
             estimated_tokens: budget.estimated_tokens(),
             memory_bytes: budget.memory_bytes(),
             duration: budget.duration(),
+            source_duration_explicit: budget.source_verification_duration_explicit(),
         }
     }
 }
@@ -8396,16 +8400,34 @@ fn service_budget(context: &FirstSliceIpcContext) -> FirstSliceBudget {
 }
 
 fn reduced_service_budget(reduction: Option<ServiceBudgetReduction>) -> FirstSliceBudget {
+    reduced_service_budget_for_source(reduction, false)
+}
+
+fn source_service_budget(context: &FirstSliceIpcContext) -> FirstSliceBudget {
+    reduced_service_budget_for_source(
+        context.effective_budget.map(ServiceBudgetReduction::from),
+        true,
+    )
+}
+
+fn reduced_service_budget_for_source(
+    reduction: Option<ServiceBudgetReduction>,
+    source_only: bool,
+) -> FirstSliceBudget {
     reduction.map_or_else(FirstSliceBudget::new, |reduction| {
-        FirstSliceBudget::new()
+        let budget = FirstSliceBudget::new()
             .reduce_max_rows(reduction.rows)
             .reduce_max_edges(reduction.edges)
             .reduce_max_results(reduction.results)
             .reduce_max_source_bytes(reduction.source_bytes)
             .reduce_max_json_bytes(reduction.json_bytes)
             .reduce_max_tokens(reduction.estimated_tokens)
-            .reduce_max_memory_bytes(reduction.memory_bytes)
-            .reduce_max_duration(reduction.duration)
+            .reduce_max_memory_bytes(reduction.memory_bytes);
+        if !source_only || reduction.source_duration_explicit {
+            budget.reduce_max_duration(reduction.duration)
+        } else {
+            budget
+        }
     })
 }
 
@@ -8487,6 +8509,7 @@ fn remaining_service_budget(
         estimated_tokens,
         memory_bytes,
         duration,
+        source_duration_explicit: true,
     })))
 }
 
@@ -8570,24 +8593,26 @@ enum RepositoryPreparationFailure {
     Journal(PublicError),
 }
 
-fn repository_index_work_deadline(
-    intent: RepositoryIndexIntent,
-    detached: bool,
-    admitted_deadline: Instant,
+fn repository_index_work_deadline(detached: bool, admitted_deadline: Instant) -> Option<Instant> {
+    (!detached).then_some(admitted_deadline)
+}
+
+// Detached work has no elapsed ceiling. Each journal mutation still gets a
+// finite claim window so an unavailable actor cannot strand publication.
+fn index_lifecycle_deadline(work_deadline: Option<Instant>) -> Result<Instant, PublicError> {
+    index_lifecycle_deadline_at(work_deadline, Instant::now())
+}
+
+fn index_lifecycle_deadline_at(
+    work_deadline: Option<Instant>,
     now: Instant,
 ) -> Result<Instant, PublicError> {
-    if matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. }) {
-        // The semantic queue has already persisted its reviewed deadline.
-        // Shortening it here would make durable admission disagree with the
-        // cancellation token that owns the actual refinement work.
-        return Ok(admitted_deadline);
-    }
-    if detached {
-        return now
-            .checked_add(DETACHED_INDEX_TIMEOUT)
-            .ok_or_else(internal_error);
-    }
-    Ok(admitted_deadline)
+    lifecycle_deadline(work_deadline.unwrap_or(now))
+}
+
+fn recovery_lifecycle_deadline() -> Result<Instant, FirstSliceHostError> {
+    index_lifecycle_deadline(None)
+        .map_err(|_| FirstSliceHostError::Service(FirstSliceError::Limits))
 }
 
 fn repository_index_with_intent(
@@ -8659,10 +8684,15 @@ fn repository_index_with_intent(
         return Err(invalid_argument());
     }
     let detached = request.detached;
-    let work_deadline =
-        repository_index_work_deadline(intent, detached, context.deadline, Instant::now())?;
-    let lifecycle_deadline = lifecycle_deadline(work_deadline)?;
-    let deadline_unix_ms = deadline_unix_ms(work_deadline)?;
+    let work_deadline = repository_index_work_deadline(detached, context.required_deadline()?);
+    let lifecycle_deadline = || index_lifecycle_deadline(work_deadline);
+    let admission_deadline = || match intent {
+        RepositoryIndexIntent::Requested => Ok(context.required_deadline()?),
+        RepositoryIndexIntent::Watcher | RepositoryIndexIntent::SemanticRefinement { .. } => {
+            index_lifecycle_deadline(None)
+        }
+    };
+    let deadline_unix_ms = work_deadline.map(deadline_unix_ms).transpose()?;
     let plan_hash = match intent {
         RepositoryIndexIntent::Requested | RepositoryIndexIntent::Watcher => {
             let mut plan_hasher = blake3::Hasher::new();
@@ -8690,14 +8720,14 @@ fn repository_index_with_intent(
         plan_hash,
         context.client_instance_id,
         detached,
-        Some(deadline_unix_ms),
-        (!detached).then_some(deadline_unix_ms),
+        deadline_unix_ms,
+        if detached { None } else { deadline_unix_ms },
     )
     .map_err(|error| operation_error(&error, Some(operation)))?;
     let mut resume_pre_submitted_semantic = false;
     match journal_call(
         runtime,
-        context.deadline,
+        admission_deadline()?,
         journal.control(ControlRequest::OperationStatus(operation)),
     ) {
         Ok(ControlResponse::OperationStatus(existing)) => {
@@ -8706,7 +8736,7 @@ fn repository_index_with_intent(
             // checking every caller-controlled immutable field.
             let (repository_context, retry_analysis_mode) = match journal_call(
                 runtime,
-                context.deadline,
+                admission_deadline()?,
                 journal.repository_operation_context(operation),
             ) {
                 Ok(context) => {
@@ -8736,7 +8766,8 @@ fn repository_index_with_intent(
                 repository_context,
                 ..submission
             };
-            let existing = journal_call(runtime, context.deadline, journal.retry_status(retry))?;
+            let existing =
+                journal_call(runtime, admission_deadline()?, journal.retry_status(retry))?;
             if matches!(intent, RepositoryIndexIntent::SemanticRefinement { .. })
                 && existing.state == OperationState::Queued
             {
@@ -8837,7 +8868,7 @@ fn repository_index_with_intent(
         journal,
         metadata,
         admission.repository,
-        context.deadline,
+        admission_deadline()?,
     )
     .and_then(|()| {
         lock_metadata(metadata).and_then(|mut operation_metadata| {
@@ -8927,21 +8958,23 @@ fn repository_index_with_intent(
             )
             .unwrap_or_else(|_| unreachable!("repository context matches the operation kind"));
     }
-    let submitted =
-        match journal_lifecycle_call(runtime, journal.submit_until(submission, context.deadline)) {
-            Ok(submitted) => submitted,
-            Err(error) => {
-                lock_metadata(metadata)?.remove_unpublished(operation);
-                read_service(service)?.release_index_admission(admission);
-                terminalize_pre_submitted_semantic(
-                    resume_pre_submitted_semantic,
-                    operation,
-                    &error,
-                    journal,
-                )?;
-                return Err(error);
-            }
-        };
+    let submitted = match journal_lifecycle_call(
+        runtime,
+        journal.submit_until(submission, admission_deadline()?),
+    ) {
+        Ok(submitted) => submitted,
+        Err(error) => {
+            lock_metadata(metadata)?.remove_unpublished(operation);
+            read_service(service)?.release_index_admission(admission);
+            terminalize_pre_submitted_semantic(
+                resume_pre_submitted_semantic,
+                operation,
+                &error,
+                journal,
+            )?;
+            return Err(error);
+        }
+    };
     if !submitted.inserted && !resume_pre_submitted_semantic {
         if let Some(admitted) = admission_ack {
             let _ = admitted.try_send(Ok(()));
@@ -8985,7 +9018,7 @@ fn repository_index_with_intent(
         {
             finish_failed_index(
                 runtime,
-                lifecycle_deadline,
+                lifecycle_deadline()?,
                 journal,
                 metadata,
                 operation,
@@ -8994,21 +9027,21 @@ fn repository_index_with_intent(
             )?;
             return Err(error);
         }
-        if propagate_peer_cancellation(runtime, journal, operation, context, lifecycle_deadline)? {
+        if propagate_peer_cancellation(runtime, journal, operation, context, lifecycle_deadline()?)?
+        {
             lock_metadata(metadata)?.mark_terminal(operation);
             return Err(cancelled_error());
         }
         let (_, cancellation) = journal_lifecycle_call(
             runtime,
-            journal.activate_operation_until(operation, lifecycle_deadline),
+            journal.activate_operation_until(operation, lifecycle_deadline()?),
         )?;
-        // The journal owns cancellation fan-out while the IPC boundary owns the
-        // process-local work deadline. Installing it on this exact token keeps
-        // later journal cancellation linked to every synchronous service stage.
-        if let Err(error) = bind_journal_cancellation_deadline(&cancellation, work_deadline) {
+        // The journal token links explicit cancellation to every service stage.
+        // Only synchronous work inherits the caller's elapsed deadline.
+        if let Err(error) = bind_journal_work_deadline(&cancellation, work_deadline) {
             finish_failed_index(
                 runtime,
-                lifecycle_deadline,
+                lifecycle_deadline()?,
                 journal,
                 metadata,
                 operation,
@@ -9025,7 +9058,7 @@ fn repository_index_with_intent(
         {
             finish_failed_index(
                 runtime,
-                lifecycle_deadline,
+                lifecycle_deadline()?,
                 journal,
                 metadata,
                 operation,
@@ -9040,53 +9073,39 @@ fn repository_index_with_intent(
                 if progress_failure.is_some() {
                     return;
                 }
-                let progress = match operation_progress(observed) {
-                    Ok(progress) => progress,
-                    Err(error) => {
-                        progress_failure = Some(error);
-                        return;
-                    }
-                };
-                if let Err(error) = journal_lifecycle_call(
-                    runtime,
-                    journal.update_progress_until(operation, progress, lifecycle_deadline),
-                ) {
-                    progress_failure = Some(error);
-                    return;
-                }
-                match lock_metadata(metadata) {
-                    Ok(mut metadata) => metadata.observe_inputs(
-                        operation,
-                        observed.files_examined,
-                        observed.bytes_examined,
-                    ),
-                    Err(error) => {
-                        progress_failure = Some(error);
-                        return;
-                    }
-                }
-                if let Err(error) = journal_lifecycle_call(
-                    runtime,
-                    journal.update_repository_observation_until(
-                        operation,
-                        observed.files_examined,
-                        observed.bytes_examined,
-                        lifecycle_deadline,
-                    ),
-                ) {
-                    progress_failure = Some(error);
-                    return;
-                }
-                if observed.written_bytes > 0
-                    && let Err(error) = persist_operation_resources(
+                let update = (|| {
+                    let progress = operation_progress(observed)?;
+                    journal_lifecycle_call(
                         runtime,
-                        lifecycle_deadline,
-                        journal,
-                        metadata,
+                        journal.update_progress_until(operation, progress, lifecycle_deadline()?),
+                    )?;
+                    lock_metadata(metadata)?.observe_inputs(
                         operation,
-                        observed.written_bytes,
-                    )
-                {
+                        observed.files_examined,
+                        observed.bytes_examined,
+                    );
+                    journal_lifecycle_call(
+                        runtime,
+                        journal.update_repository_observation_until(
+                            operation,
+                            observed.files_examined,
+                            observed.bytes_examined,
+                            lifecycle_deadline()?,
+                        ),
+                    )?;
+                    if observed.written_bytes > 0 {
+                        persist_operation_resources(
+                            runtime,
+                            lifecycle_deadline()?,
+                            journal,
+                            metadata,
+                            operation,
+                            observed.written_bytes,
+                        )?;
+                    }
+                    Ok::<(), PublicError>(())
+                })();
+                if let Err(error) = update {
                     progress_failure = Some(error);
                 }
             };
@@ -9100,7 +9119,7 @@ fn repository_index_with_intent(
                             journal.record_repository_planning_until(
                                 operation,
                                 planning,
-                                lifecycle_deadline,
+                                lifecycle_deadline()?,
                             ),
                         )
                         .map(|_| ())
@@ -9144,7 +9163,7 @@ fn repository_index_with_intent(
         if let Some(error) = progress_failure {
             finish_failed_index(
                 runtime,
-                lifecycle_deadline,
+                lifecycle_deadline()?,
                 journal,
                 metadata,
                 operation,
@@ -9160,11 +9179,11 @@ fn repository_index_with_intent(
                     journal,
                     operation,
                     context,
-                    lifecycle_deadline,
+                    lifecycle_deadline()?,
                 )? {
                     finish_failed_index(
                         runtime,
-                        lifecycle_deadline,
+                        lifecycle_deadline()?,
                         journal,
                         metadata,
                         operation,
@@ -9187,7 +9206,7 @@ fn repository_index_with_intent(
                         let public = publication_error(operation, error);
                         finish_failed_index(
                             runtime,
-                            lifecycle_deadline,
+                            lifecycle_deadline()?,
                             journal,
                             metadata,
                             operation,
@@ -9206,7 +9225,7 @@ fn repository_index_with_intent(
                     let error = stale_generation();
                     finish_failed_index(
                         runtime,
-                        lifecycle_deadline,
+                        lifecycle_deadline()?,
                         journal,
                         metadata,
                         operation,
@@ -9221,7 +9240,7 @@ fn repository_index_with_intent(
                     let error = operation_in_progress();
                     finish_failed_index(
                         runtime,
-                        lifecycle_deadline,
+                        lifecycle_deadline()?,
                         journal,
                         metadata,
                         operation,
@@ -9239,7 +9258,7 @@ fn repository_index_with_intent(
                         let public = publication_error(operation, error);
                         finish_failed_index(
                             runtime,
-                            lifecycle_deadline,
+                            lifecycle_deadline()?,
                             journal,
                             metadata,
                             operation,
@@ -9259,7 +9278,7 @@ fn repository_index_with_intent(
                 }
                 if let Err(error) = persist_operation_resources(
                     runtime,
-                    lifecycle_deadline,
+                    lifecycle_deadline()?,
                     journal,
                     metadata,
                     operation,
@@ -9270,7 +9289,7 @@ fn repository_index_with_intent(
                         .map_err(service_error)?;
                     finish_failed_index(
                         runtime,
-                        lifecycle_deadline,
+                        lifecycle_deadline()?,
                         journal,
                         metadata,
                         operation,
@@ -9287,7 +9306,7 @@ fn repository_index_with_intent(
                         .map_err(service_error);
                     let terminal = finish_failed_index(
                         runtime,
-                        lifecycle_deadline,
+                        lifecycle_deadline()?,
                         journal,
                         metadata,
                         operation,
@@ -9303,7 +9322,7 @@ fn repository_index_with_intent(
                     journal,
                     operation,
                     context,
-                    lifecycle_deadline,
+                    lifecycle_deadline()?,
                 )?;
                 let durable_publication = read_service(service)?.uses_durable_publication();
                 let completion = if durable_publication {
@@ -9312,7 +9331,7 @@ fn repository_index_with_intent(
                         journal.authorize_publication_until(
                             operation,
                             context.index_admission.clone(),
-                            lifecycle_deadline,
+                            lifecycle_deadline()?,
                         ),
                     )
                 } else {
@@ -9322,12 +9341,12 @@ fn repository_index_with_intent(
                             journal.complete_publication_with_admission_until(
                                 operation,
                                 admission,
-                                lifecycle_deadline,
+                                lifecycle_deadline()?,
                             ),
                         ),
                         None => journal_lifecycle_call(
                             runtime,
-                            journal.complete_publication_until(operation, lifecycle_deadline),
+                            journal.complete_publication_until(operation, lifecycle_deadline()?),
                         ),
                     }
                 };
@@ -9339,7 +9358,7 @@ fn repository_index_with_intent(
                             .map_err(service_error)?;
                         finish_failed_index(
                             runtime,
-                            lifecycle_deadline,
+                            lifecycle_deadline()?,
                             journal,
                             metadata,
                             operation,
@@ -9372,7 +9391,7 @@ fn repository_index_with_intent(
                         .map_err(service_error)?;
                     finish_failed_index(
                         runtime,
-                        lifecycle_deadline,
+                        lifecycle_deadline()?,
                         journal,
                         metadata,
                         operation,
@@ -9409,7 +9428,7 @@ fn repository_index_with_intent(
                         let public = failed_closed_publication(operation);
                         finish_failed_index(
                             runtime,
-                            lifecycle_deadline,
+                            lifecycle_deadline()?,
                             journal,
                             metadata,
                             operation,
@@ -9425,7 +9444,7 @@ fn repository_index_with_intent(
                 }
                 let resource_update = persist_operation_resources(
                     runtime,
-                    lifecycle_deadline,
+                    lifecycle_deadline()?,
                     journal,
                     metadata,
                     operation,
@@ -9463,7 +9482,7 @@ fn repository_index_with_intent(
                     Ok(_) => operation_record,
                     Err(_) => persist_operation_resources(
                         runtime,
-                        lifecycle_deadline,
+                        lifecycle_deadline()?,
                         journal,
                         metadata,
                         operation,
@@ -9471,7 +9490,7 @@ fn repository_index_with_intent(
                     )
                     .unwrap_or(operation_record),
                 };
-                let publication_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                let publication_deadline = fresh_lifecycle_deadline(lifecycle_deadline()?)?;
                 let publication_projection = journal_lifecycle_call(
                     runtime,
                     journal.record_repository_publication_until(
@@ -9481,7 +9500,7 @@ fn repository_index_with_intent(
                     ),
                 );
                 if publication_projection.is_err() {
-                    let retry_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                    let retry_deadline = fresh_lifecycle_deadline(lifecycle_deadline()?)?;
                     let _ = journal_lifecycle_call(
                         runtime,
                         journal.record_repository_publication_until(
@@ -9492,7 +9511,7 @@ fn repository_index_with_intent(
                     );
                 }
                 let operation_evidence = repository_operation_evidence(operation_evidence);
-                let evidence_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                let evidence_deadline = fresh_lifecycle_deadline(lifecycle_deadline()?)?;
                 let evidence_projection = journal_lifecycle_call(
                     runtime,
                     journal.record_repository_evidence_until(
@@ -9502,7 +9521,7 @@ fn repository_index_with_intent(
                     ),
                 );
                 if evidence_projection.is_err() {
-                    let retry_deadline = fresh_lifecycle_deadline(lifecycle_deadline)?;
+                    let retry_deadline = fresh_lifecycle_deadline(lifecycle_deadline()?)?;
                     journal_lifecycle_call(
                         runtime,
                         journal.record_repository_evidence_until(
@@ -9553,7 +9572,7 @@ fn repository_index_with_intent(
                 );
                 finish_failed_index(
                     runtime,
-                    lifecycle_deadline,
+                    lifecycle_deadline()?,
                     journal,
                     metadata,
                     operation,
@@ -9565,7 +9584,7 @@ fn repository_index_with_intent(
             Err(RepositoryPreparationFailure::Journal(error)) => {
                 finish_failed_index(
                     runtime,
-                    lifecycle_deadline,
+                    lifecycle_deadline()?,
                     journal,
                     metadata,
                     operation,
@@ -9646,7 +9665,7 @@ fn complete_auto_structural_index(
     if matches!(resources.intent, RepositoryIndexIntent::Watcher) {
         let operation_context = journal_call(
             resources.runtime,
-            fresh_lifecycle_deadline(context.deadline)?,
+            fresh_lifecycle_deadline(context.required_deadline()?)?,
             resources.journal.repository_operation_context(operation),
         )?;
         // A watcher checks source freshness; a verified no-op must not upgrade
@@ -9659,9 +9678,7 @@ fn complete_auto_structural_index(
     }
     let semantic_operation = semantic_refinement_operation(operation);
 
-    let refinement_deadline = Instant::now()
-        .checked_add(DETACHED_SEMANTIC_REFINEMENT_TIMEOUT)
-        .ok_or_else(internal_error)?;
+    let refinement_deadline = index_lifecycle_deadline(None)?;
     let semantic_record = ensure_semantic_refinement_operation(
         SemanticRefinementAdmission {
             root,
@@ -9679,12 +9696,12 @@ fn complete_auto_structural_index(
     if semantic_record.state != OperationState::Queued {
         return deliver_structural_response(reply, response);
     }
-    let cancellation = Cancellation::with_deadline(refinement_deadline);
+    let cancellation = Cancellation::new();
     let refinement_context = FirstSliceIpcContext {
         client_instance_id: context.client_instance_id,
         selected_protocol_minor: context.selected_protocol_minor,
         cancellation: cancellation.clone(),
-        deadline: refinement_deadline,
+        deadline: Some(refinement_deadline),
         effective_budget: context.effective_budget,
         index_admission: None,
     };
@@ -9784,7 +9801,7 @@ fn ensure_semantic_refinement_operation(
     } = admission;
     let parent_context = journal_call(
         runtime,
-        deadline,
+        fresh_lifecycle_deadline(deadline)?,
         journal.repository_operation_context(parent_operation),
     )?;
     if parent_context.repository != repository
@@ -9796,13 +9813,13 @@ fn ensure_semantic_refinement_operation(
     let plan_hash = semantic_refinement_plan_hash(root, structural_generation);
     match journal_call(
         runtime,
-        deadline,
+        fresh_lifecycle_deadline(deadline)?,
         journal.control(ControlRequest::OperationStatus(semantic_operation)),
     ) {
         Ok(ControlResponse::OperationStatus(record)) => {
             let repository_context = journal_call(
                 runtime,
-                deadline,
+                fresh_lifecycle_deadline(deadline)?,
                 journal.repository_operation_context(semantic_operation),
             )?;
             if record.kind != OperationKind::RepositoryIndex
@@ -9823,7 +9840,6 @@ fn ensure_semantic_refinement_operation(
         Err(error) => return Err(error),
     }
     let started_unix_ms = unix_time_ms()?;
-    let deadline_unix_ms = deadline_unix_ms(deadline)?;
     let repository_submission = RepositoryOperationSubmission::new(
         repository,
         Some(structural_generation),
@@ -9839,14 +9855,17 @@ fn ensure_semantic_refinement_operation(
         plan_hash,
         context.client_instance_id,
         true,
-        Some(deadline_unix_ms),
+        None,
         None,
     )
     .map_err(|error| operation_error(&error, Some(semantic_operation)))?
     .with_repository_context(repository_submission)
     .map_err(|error| operation_error(&error, Some(semantic_operation)))?;
-    journal_lifecycle_call(runtime, journal.submit_until(submission, deadline))
-        .map(|submitted| submitted.operation)
+    journal_lifecycle_call(
+        runtime,
+        journal.submit_until(submission, fresh_lifecycle_deadline(deadline)?),
+    )
+    .map(|submitted| submitted.operation)
 }
 
 fn fail_queued_semantic_refinement(
@@ -9859,7 +9878,7 @@ fn fail_queued_semantic_refinement(
     let error_for_compensation = error.clone();
     let record = journal_lifecycle_call(
         runtime,
-        journal.fail_operation_until(operation, error, deadline),
+        journal.fail_operation_until(operation, error, fresh_lifecycle_deadline(deadline)?),
     )
     .or_else(|_| {
         journal
@@ -10213,6 +10232,18 @@ fn persist_operation_resources(
         runtime,
         journal.update_resources_until(operation, peak_rss_bytes, written_bytes, deadline),
     )
+}
+
+fn bind_journal_work_deadline(
+    cancellation: &Cancellation,
+    deadline: Option<Instant>,
+) -> Result<(), PublicError> {
+    match deadline {
+        Some(deadline) => bind_journal_cancellation_deadline(cancellation, deadline),
+        None => cancellation
+            .check()
+            .map_err(|cancelled| cancellation_error(cancelled.reason())),
+    }
 }
 
 fn bind_journal_cancellation_deadline(
@@ -10694,9 +10725,16 @@ fn repository_operation_status(
         ControlRequest::OperationStatus(operation)
     };
     let response = if action == daemon::RepositoryOperationAction::RepositoryOperationCancel {
-        journal_lifecycle_call(runtime, journal.control_until(control, context.deadline))?
+        journal_lifecycle_call(
+            runtime,
+            journal.control_until(control, context.required_deadline()?),
+        )?
     } else {
-        journal_call(runtime, context.deadline, journal.control(control))?
+        journal_call(
+            runtime,
+            context.required_deadline()?,
+            journal.control(control),
+        )?
     };
     let record = match response {
         ControlResponse::OperationStatus(record)
@@ -10714,7 +10752,7 @@ fn repository_operation_status(
     }
     let repository_context = match journal_call(
         runtime,
-        context.deadline,
+        context.required_deadline()?,
         journal.repository_operation_context(operation),
     ) {
         Ok(context) => Some(context),
@@ -10728,8 +10766,13 @@ fn repository_operation_status(
             &record,
         ),
     };
-    let record =
-        persist_visible_operation_resources(journal, runtime, context.deadline, record, &metadata)?;
+    let record = persist_visible_operation_resources(
+        journal,
+        runtime,
+        context.required_deadline()?,
+        record,
+        &metadata,
+    )?;
     let operation_planning = repository_context
         .as_ref()
         .and_then(|context| context.planning.clone());
@@ -10884,11 +10927,11 @@ fn completed_auto_semantic_operation(
     let grace_deadline = Instant::now()
         .checked_add(OPERATION_STATUS_RESPONSE_GRACE)
         .ok_or_else(internal_error)?;
-    let wait_deadline = grace_deadline.min(context.deadline);
+    let wait_deadline = grace_deadline.min(context.required_deadline()?);
     loop {
         match journal_call(
             runtime,
-            context.deadline,
+            context.required_deadline()?,
             journal.control(ControlRequest::OperationStatus(candidate)),
         ) {
             Ok(ControlResponse::OperationStatus(child))
@@ -11634,7 +11677,7 @@ fn git_evidence_limits(context: &FirstSliceIpcContext) -> Result<(usize, Duratio
         }
     });
     let duration = context
-        .deadline
+        .required_deadline()?
         .saturating_duration_since(Instant::now())
         .min(Duration::from_secs(30));
     if duration.is_zero() {
@@ -13991,7 +14034,7 @@ fn source_read(
         u16::try_from(request.context_lines_before).map_err(|_| invalid_argument())?;
     let context_lines_after =
         u16::try_from(request.context_lines_after).map_err(|_| invalid_argument())?;
-    let source_budget = service_budget(context)
+    let source_budget = source_service_budget(context)
         .with_source_max_context_lines(context_lines_before.max(context_lines_after))
         .map_err(service_error)?;
     let include_line_numbers = request.include_line_numbers.unwrap_or(true);
@@ -14507,7 +14550,7 @@ fn repository_catalog_mutation(
         &lanes.index_serialization,
         &lanes.service,
         &context.cancellation,
-        context.deadline,
+        Some(context.required_deadline()?),
     )?;
 
     match mutation {
@@ -14537,7 +14580,7 @@ fn repository_catalog_mutation(
                 resources.runtime,
                 resources
                     .journal
-                    .delete_repository_history_until(repository, context.deadline),
+                    .delete_repository_history_until(repository, context.required_deadline()?),
             )?;
             service
                 .delete_repository(repository)
@@ -14595,7 +14638,7 @@ fn project_current_recovery(
     // recent-operation cache. Its identity must remain visible until terminal.
     let record = match journal_call(
         resources.runtime,
-        context.deadline,
+        context.required_deadline()?,
         resources
             .journal
             .control(ControlRequest::OperationStatus(operation)),
@@ -14612,7 +14655,7 @@ fn project_current_recovery(
     if include_operations {
         let durable = journal_call(
             resources.runtime,
-            context.deadline,
+            context.required_deadline()?,
             resources.journal.repository_operation_context(operation),
         )?;
         if durable.repository != parse_repository(status.repository.as_ref())? {
@@ -14713,7 +14756,7 @@ fn repository_status(
             None => {
                 let response = journal_call(
                     runtime,
-                    context.deadline,
+                    context.required_deadline()?,
                     journal.control(ControlRequest::OperationStatus(operation)),
                 );
                 let record = match response {
@@ -15978,6 +16021,13 @@ fn build_service_error(
             "execution_budget",
             "query",
         ),
+        FirstSliceError::QueryTermBudget { .. } => (
+            ErrorCode::BudgetExceeded,
+            "query term budget rejected the request",
+            false,
+            "query_terms",
+            "admission",
+        ),
         FirstSliceError::Query => (
             ErrorCode::NotFound,
             "query target was not found",
@@ -16076,6 +16126,13 @@ fn build_service_error(
             "source",
             "publication",
         ),
+        FirstSliceError::SourceEncodingUnsupported => (
+            ErrorCode::UnsupportedCapability,
+            "source encoding does not support text queries",
+            false,
+            "unsupported_encoding",
+            "admission",
+        ),
         FirstSliceError::Sharing => (
             ErrorCode::Internal,
             "generation transfer failed",
@@ -16130,6 +16187,14 @@ fn build_service_error(
                 PublicValue::Label(static_safe_label(context.provider)),
             )
             .next_action(NextAction::InspectOperation);
+    }
+    if let FirstSliceError::QueryTermBudget { limit } = error {
+        builder = builder
+            .detail(
+                static_detail_key("resource"),
+                PublicValue::Label(static_safe_label("query_terms")),
+            )
+            .detail(static_detail_key("limit"), PublicValue::Unsigned(limit));
     }
     if let FirstSliceError::ResourceLimit {
         resource,
@@ -17114,7 +17179,7 @@ mod tests {
             client_instance_id: ClientInstanceId::SYSTEM,
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation,
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -17198,7 +17263,7 @@ mod tests {
             client_instance_id: ClientInstanceId::SYSTEM,
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation,
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -17315,7 +17380,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                 cancellation,
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             };
@@ -17976,7 +18041,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([121; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -18387,7 +18452,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([58; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -18529,12 +18594,14 @@ mod tests {
             catalog_epoch: Instant::now(),
             publication_hook: None,
         };
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_secs(3 * 60 * 60))
+            .unwrap();
         let context = FirstSliceIpcContext {
             client_instance_id: ClientInstanceId::SYSTEM,
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
-            cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            cancellation: Cancellation::new(),
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -18571,6 +18638,8 @@ mod tests {
             .status(watcher_operation)
             .expect("watcher operation remains queryable");
         assert_eq!(watcher_record.state, OperationState::Failed);
+        assert_eq!(watcher_record.deadline_unix_ms, None);
+        assert!(!context.cancellation.has_deadline());
         assert_eq!(
             watcher_record
                 .error
@@ -18857,6 +18926,45 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::BudgetExceeded);
         assert!(!error.retryable());
+    }
+
+    #[test]
+    fn raw_source_text_admission_is_not_a_resource_failure() {
+        let error = service_error(FirstSliceError::SourceEncodingUnsupported);
+        assert_eq!(error.code(), ErrorCode::UnsupportedCapability);
+        assert!(!error.retryable());
+        assert_eq!(
+            error.details().get(&static_detail_key("failure_family")),
+            Some(&PublicValue::Label(static_safe_label(
+                "unsupported_encoding"
+            ))),
+        );
+        assert_eq!(
+            error.details().get(&static_detail_key("failure_stage")),
+            Some(&PublicValue::Label(static_safe_label("admission"))),
+        );
+        assert!(!error.details().contains_key(&static_detail_key("limit")));
+    }
+
+    #[test]
+    fn text_query_term_admission_reports_the_effective_limit() {
+        for limit in [0, 1, 16] {
+            let error = service_error(FirstSliceError::QueryTermBudget { limit });
+            assert_eq!(error.code(), ErrorCode::BudgetExceeded);
+            assert!(!error.retryable());
+            assert_eq!(
+                error.details().get(&static_detail_key("resource")),
+                Some(&PublicValue::Label(static_safe_label("query_terms"))),
+            );
+            assert_eq!(
+                error.details().get(&static_detail_key("limit")),
+                Some(&PublicValue::Unsigned(limit)),
+            );
+            assert_eq!(
+                error.details().get(&static_detail_key("failure_stage")),
+                Some(&PublicValue::Label(static_safe_label("admission"))),
+            );
+        }
     }
 
     #[test]
@@ -22058,7 +22166,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([client; 16]),
                 selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             }
@@ -22334,7 +22442,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation,
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -22479,9 +22587,15 @@ mod tests {
                 .coverage_status,
             daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete as i32
         );
-        let refinement = refinement_receiver
+        let mut refinement = refinement_receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("semantic refinement is scheduled");
+        assert!(!refinement.context.cancellation.has_deadline());
+        refinement.context.deadline = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(3 * 60 * 60))
+                .expect("elapsed admission window derives"),
+        );
         let mut refinement_reply = None;
         let competing_watcher = OperationId::from_bytes([92; 16]);
         metadata
@@ -22538,6 +22652,7 @@ mod tests {
             .status(semantic_operation)
             .expect("semantic operation remains queryable");
         assert_eq!(semantic_record.state, OperationState::Failed);
+        assert_eq!(semantic_record.deadline_unix_ms, None);
         let semantic_error = semantic_record.error.as_ref().expect("failure is recorded");
         assert_eq!(semantic_error.code(), ErrorCode::ResourceExhausted);
         assert_eq!(
@@ -22712,7 +22827,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([34; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -22810,19 +22925,9 @@ mod tests {
         let semantic_context = journal
             .repository_operation_context(semantic_operation)
             .expect("semantic repository context is durable");
-        let deadline_unix_ms = semantic_record
-            .deadline_unix_ms
-            .expect("detached semantic refinement has a deadline");
-        let admitted_timeout_ms = deadline_unix_ms
-            .checked_sub(semantic_context.started_unix_ms)
-            .expect("semantic deadline follows admission");
-        let configured_timeout_ms = u64::try_from(DETACHED_SEMANTIC_REFINEMENT_TIMEOUT.as_millis())
-            .expect("semantic timeout fits");
-        assert!(
-            (configured_timeout_ms.saturating_sub(5_000)..=configured_timeout_ms)
-                .contains(&admitted_timeout_ms),
-            "semantic refinement retains the reviewed two-hour deadline"
-        );
+        assert_eq!(semantic_record.deadline_unix_ms, None);
+        assert_eq!(semantic_record.lease_expires_unix_ms, None);
+        assert_eq!(semantic_context.mode, RepositoryOperationMode::Deep);
         assert!(
             semantic_refinements
                 .lock()
@@ -22835,33 +22940,58 @@ mod tests {
     }
 
     #[test]
-    fn semantic_refinement_preserves_its_admitted_work_deadline() {
+    fn detached_indexing_does_not_inherit_elapsed_work_deadlines() {
         let now = Instant::now();
-        let admitted_deadline = now + DETACHED_SEMANTIC_REFINEMENT_TIMEOUT;
-        let structural_generation = GenerationId::from_bytes([37; 20]);
+        let expired = now.checked_sub(Duration::from_secs(3 * 60 * 60)).unwrap();
+        assert_eq!(repository_index_work_deadline(true, expired), None);
+        assert_eq!(
+            repository_index_work_deadline(false, expired),
+            Some(expired)
+        );
 
+        let later = now + Duration::from_secs(3 * 60 * 60);
         assert_eq!(
-            repository_index_work_deadline(
-                RepositoryIndexIntent::SemanticRefinement {
-                    structural_generation,
-                },
-                true,
-                admitted_deadline,
-                now,
-            )
-            .expect("semantic deadline is valid"),
-            admitted_deadline
+            index_lifecycle_deadline_at(None, later).unwrap(),
+            later + LIFECYCLE_FINALIZATION_GRACE
         );
         assert_eq!(
-            repository_index_work_deadline(
-                RepositoryIndexIntent::Requested,
-                true,
-                admitted_deadline,
-                now,
-            )
-            .expect("detached index deadline is valid"),
-            now + DETACHED_INDEX_TIMEOUT
+            index_lifecycle_deadline_at(Some(expired), later).unwrap(),
+            expired + LIFECYCLE_FINALIZATION_GRACE
         );
+        let cancellation = Cancellation::new();
+        bind_journal_work_deadline(&cancellation, None).unwrap();
+        assert!(!cancellation.has_deadline());
+        assert!(cancellation.cancel(CancellationReason::Shutdown));
+        assert_eq!(
+            bind_journal_work_deadline(&cancellation, None)
+                .unwrap_err()
+                .code(),
+            ErrorCode::Busy
+        );
+    }
+
+    #[test]
+    fn detached_publication_waits_remain_cancellable_without_a_deadline() {
+        let service = RwLock::new(FirstSliceService::new(2).unwrap());
+        let serialization = Mutex::new(());
+        for block_service in [false, true] {
+            let cancellation = Cancellation::new();
+            let (ready, started) = mpsc::sync_channel(1);
+            let _serialization = (!block_service).then(|| serialization.lock().unwrap());
+            let _reader = block_service.then(|| service.read().unwrap());
+            thread::scope(|scope| {
+                let worker = scope.spawn(|| {
+                    ready.send(()).unwrap();
+                    match lock_publication_until(&serialization, &service, &cancellation, None) {
+                        Ok(_) => panic!("a held publication boundary must not be acquired"),
+                        Err(error) => error,
+                    }
+                });
+                started.recv().unwrap();
+                assert!(cancellation.cancel(CancellationReason::ClientRequest));
+                assert_eq!(worker.join().unwrap().code(), ErrorCode::Cancelled);
+            });
+        }
     }
 
     #[test]
@@ -22976,7 +23106,7 @@ mod tests {
                     client_instance_id: ClientInstanceId::SYSTEM,
                     selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                     cancellation,
-                    deadline,
+                    deadline: Some(deadline),
                     effective_budget: None,
                     index_admission: None,
                 },
@@ -23113,7 +23243,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation,
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -23807,7 +23937,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::SYSTEM,
                 selected_protocol_minor,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             };
@@ -23833,7 +23963,7 @@ mod tests {
             client_instance_id: ClientInstanceId::SYSTEM,
             selected_protocol_minor: 25,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -23934,7 +24064,7 @@ mod tests {
         assert_eq!(wire.usage.unwrap().source_bytes, 0);
     }
 
-    fn indexed_lossless_source(
+    pub(super) fn indexed_lossless_source(
         raw: &[u8],
     ) -> (FirstSliceService, TempDir, SourceRef, FirstSliceIpcContext) {
         let fixture = TempDir::new().unwrap();
@@ -23974,7 +24104,7 @@ mod tests {
             client_instance_id: ClientInstanceId::SYSTEM,
             selected_protocol_minor: rootlight_protocol::LOSSLESS_SOURCE_TEXT_PROTOCOL_MINOR,
             cancellation,
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -24160,7 +24290,7 @@ mod tests {
             client_instance_id: ClientInstanceId::SYSTEM,
             selected_protocol_minor: 24,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -24349,6 +24479,7 @@ mod tests {
                     estimated_tokens: u64::MAX,
                     memory_bytes: u64::MAX,
                     duration: Duration::MAX,
+                    source_duration_explicit: true,
                 })),
                 &cancellation,
             )
@@ -24588,7 +24719,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation,
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -24888,6 +25019,7 @@ mod tests {
             estimated_tokens: u64::MAX,
             memory_bytes: u64::MAX,
             duration: Duration::MAX,
+            source_duration_explicit: true,
         }));
         assert_eq!(
             advanced_edge_work_limit(reduced).expect("edge budget converts"),
@@ -24983,7 +25115,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -25166,7 +25298,7 @@ mod tests {
             client_instance_id: owner,
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -25343,7 +25475,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -25409,7 +25541,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([76; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -25475,7 +25607,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -25543,7 +25675,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -25636,7 +25768,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([120; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -25757,7 +25889,7 @@ mod tests {
             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -26388,7 +26520,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([93; 16]),
                 selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             }
@@ -26897,16 +27029,9 @@ mod tests {
             .expect("recovery repository context persists");
         assert_eq!(context.repository, target.repository());
         assert_eq!(context.parent_generation, Some(target.generation()));
-        assert_eq!(
-            record
-                .deadline_unix_ms
-                .expect("recovery deadline is durable")
-                .checked_sub(context.started_unix_ms),
-            Some(
-                u64::try_from(DETACHED_INDEX_TIMEOUT.as_millis())
-                    .expect("recovery timeout fits public milliseconds")
-            )
-        );
+        assert_eq!(record.deadline_unix_ms, None);
+        assert_eq!(record.lease_expires_unix_ms, None);
+        assert!(!recovery.cancellation().has_deadline());
         drop(recovery);
         let terminal = journal
             .status(operation)
@@ -27740,7 +27865,7 @@ mod tests {
                             client_instance_id: ClientInstanceId::from_bytes([7; 16]),
                             selected_protocol_minor: PROTOCOL_MINOR,
                             cancellation: Cancellation::with_deadline(deadline),
-                            deadline,
+                            deadline: Some(deadline),
                             effective_budget: None,
                             index_admission: None,
                         };
@@ -27854,7 +27979,7 @@ mod tests {
         result.expect("recovery completes");
         assert_eq!(record.kind, OperationKind::Recovery);
         assert_eq!(record.state, OperationState::Succeeded);
-        assert!(record.deadline_unix_ms.is_some());
+        assert_eq!(record.deadline_unix_ms, None);
         assert!(record.peak_rss_bytes > 0);
         assert_eq!(record.written_bytes, 0);
         assert_eq!(context.files_examined, 1);
@@ -28160,7 +28285,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([94; 16]),
                 selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             }
@@ -28284,7 +28409,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([94; 16]),
                 selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: Some(admission),
             }
@@ -29116,7 +29241,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([7; 16]),
                 selected_protocol_minor: 5,
                 cancellation,
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: Some(admission),
             };
@@ -29990,7 +30115,7 @@ mod tests {
                 client_instance_id: rootlight_operations::ClientInstanceId::from_bytes([7; 16]),
                 selected_protocol_minor: 5,
                 cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             };
@@ -30250,7 +30375,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([54; 16]),
                 selected_protocol_minor: 5,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -30317,7 +30442,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([56; 16]),
                 selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -30398,7 +30523,7 @@ mod tests {
                 client_instance_id: ClientInstanceId::from_bytes([60; 16]),
                 selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
                 cancellation: Cancellation::with_deadline(deadline),
-                deadline,
+                deadline: Some(deadline),
                 effective_budget: None,
                 index_admission: None,
             },
@@ -30470,7 +30595,7 @@ mod tests {
             client_instance_id: rootlight_operations::ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: rootlight_daemon_core::PROTOCOL_MINOR,
             cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };
@@ -30514,7 +30639,7 @@ mod tests {
             client_instance_id: rootlight_operations::ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: 5,
             cancellation: rootlight_operations::Cancellation::with_deadline(deadline),
-            deadline,
+            deadline: Some(deadline),
             effective_budget: None,
             index_admission: None,
         };

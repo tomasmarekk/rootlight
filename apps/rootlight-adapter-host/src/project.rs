@@ -30,8 +30,8 @@ use rootlight_ids::{
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, ExtensionSupport, FILE_IDENTITY_CLAIM_NAMESPACE,
     IDENTITY_CLAIM_VERSION, IrLimits, LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION,
-    ProducerIdentity, SYMBOL_IDENTITY_CLAIM_NAMESPACE, SYMBOL_IDENTITY_CLAIM_VERSION, SourceRef,
-    SourceSpan,
+    ProducerIdentity, RUST_DIRECT_CALL_NAMESPACE, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+    SYMBOL_IDENTITY_CLAIM_VERSION, SourceRef, SourceSpan,
 };
 use rootlight_protocol::{
     adapter_contract::{
@@ -51,7 +51,7 @@ use rootlight_protocol::{
     },
 };
 use rootlight_sandbox::{AuthenticatedAdapterExecutable, MAX_ADAPTER_EXECUTABLE_BYTES};
-use rootlight_vfs::{RelativePath, SourceSnapshot};
+use rootlight_vfs::{RelativePath, SourceSnapshot, SourceText};
 
 use crate::{AdapterHostError, serve_project_session};
 
@@ -131,8 +131,8 @@ fn project_adapter_identity_from_digest(digest: ContentHash) -> AdapterIdentity 
 /// Builds and validates the production advertisement for one exact executable.
 ///
 /// The advertisement fixes protocol 1.3, project normalized IR, first-party
-/// lexical evidence, producer-neutral identity claims, first-party trust,
-/// cancellation, and the built-in hard resource ceiling.
+/// lexical evidence, producer-neutral identity claims, written Rust call proofs,
+/// first-party trust, cancellation, and the built-in hard resource ceiling.
 ///
 /// # Errors
 ///
@@ -375,6 +375,7 @@ fn project_extensions() -> Vec<ExtensionDescriptor> {
             SYMBOL_IDENTITY_CLAIM_VERSION,
         ),
         project_extension(LEXICAL_EXTENSION_NAMESPACE, LEXICAL_EXTENSION_VERSION),
+        project_extension(RUST_DIRECT_CALL_NAMESPACE, "1"),
     ]
 }
 
@@ -517,10 +518,17 @@ fn analyze_project_request(
                 .collect::<Result<Vec<_>, _>>()?;
             let snapshot = GenerationBoundSnapshot::new(&input.snapshot, source)
                 .map_err(|_| AdapterHostError::ProjectRequest)?;
+            // The wire carries original bytes without an encoding label. Undecodable
+            // sources retain the analyzer's existing failure or bounded-coverage policy.
+            let encoding = SourceText::parse(input.snapshot.content(), cancellation)?
+                .map(|text| EncodingId::new(text.encoding().as_str()))
+                .transpose()
+                .map_err(|_| AdapterHostError::ProjectRequest)?
+                .unwrap_or_else(EncodingId::utf8);
             Ok(ProjectSourceInput::new(
                 snapshot,
                 LanguageId::new(language.as_str()).map_err(|_| AdapterHostError::ProjectRequest)?,
-                EncodingId::utf8(),
+                encoding,
                 input.generated,
                 origins,
             ))
@@ -1184,6 +1192,10 @@ mod tests {
                 ),
                 (
                     LEXICAL_EXTENSION_NAMESPACE,
+                    Some(ContractVersion { major: 1, minor: 0 })
+                ),
+                (
+                    RUST_DIRECT_CALL_NAMESPACE,
                     Some(ContractVersion { major: 1, minor: 0 })
                 ),
             ]

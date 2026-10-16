@@ -49,10 +49,10 @@ use crate::{
     OperationStatusPortRequest, PlanChangePortRequest, PlanChangePortResponse,
     QueryAdvancedPortRequest, QueryAdvancedPortResponse, ReadResponseMetadata,
     RepositoryCatalogPagePortRequest, RepositoryIndexPortRequest, RepositoryIndexPortResponse,
-    RepositoryStatusPortRequest, RequestCancellation, SourceReadLosslessPortResponse,
-    SourceReadPortRequest, SourceReadPortResponse, SymbolExplainPortRequest,
-    SymbolExplainPortResponse, SymbolRelationshipsPortRequest, SymbolRelationshipsPortResponse,
-    TestsSelectPortRequest, TestsSelectPortResponse,
+    RepositoryStatusPortRequest, RequestCancellation, SourceFindPortRequest,
+    SourceReadLosslessPortResponse, SourceReadPortRequest, SourceReadPortResponse,
+    SymbolExplainPortRequest, SymbolExplainPortResponse, SymbolRelationshipsPortRequest,
+    SymbolRelationshipsPortResponse, TestsSelectPortRequest, TestsSelectPortResponse,
 };
 
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -183,6 +183,14 @@ trait AsyncFirstSliceClient: Send + Sync + 'static {
         projection: ClientSourceReadOptions,
         options: RequestOptions,
     ) -> AsyncClientFuture<SourceRead>;
+
+    fn source_find(
+        &self,
+        _request: SourceFindPortRequest,
+        _options: RequestOptions,
+    ) -> AsyncClientFuture<rootlight_client::SourceFindResult> {
+        Box::pin(async { Err(ClientError::ProtocolFeatureUnavailable) })
+    }
 
     fn source_read_lossless_text(
         &self,
@@ -462,6 +470,26 @@ struct LiveAsyncFirstSliceClient {
 }
 
 impl AsyncFirstSliceClient for LiveAsyncFirstSliceClient {
+    fn source_find(
+        &self,
+        request: SourceFindPortRequest,
+        options: RequestOptions,
+    ) -> AsyncClientFuture<rootlight_client::SourceFindResult> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let client = client.resolve().await?;
+            client
+                .source_find_async_with_options(
+                    request.repository(),
+                    request.generation(),
+                    request.file(),
+                    request.literal(),
+                    request.search(),
+                    options,
+                )
+                .await
+        })
+    }
     fn prepare(&self) -> AsyncClientFuture<()> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
@@ -1067,6 +1095,20 @@ impl fmt::Debug for NativeFirstSliceClientPort {
 }
 
 impl FirstSliceClientPort for NativeFirstSliceClientPort {
+    fn source_find(
+        &self,
+        request: SourceFindPortRequest,
+        options: RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<rootlight_client::SourceFindResult> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .source_find(request, options)
+                .await
+                .map_err(map_client_error)
+        })
+    }
     fn prepare(&self, _cancellation: RequestCancellation) -> ClientPortFuture<()> {
         let client = Arc::clone(&self.client);
         Box::pin(async move { client.prepare().await.map_err(map_client_error) })

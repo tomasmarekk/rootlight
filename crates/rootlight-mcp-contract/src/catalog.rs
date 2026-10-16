@@ -1,6 +1,6 @@
 //! Complete MCP tool catalog, exposure profiles, and discovery metadata.
 //!
-//! The catalog defines all nineteen agent-facing tools, their stable names,
+//! The catalog defines all twenty agent-facing tools, their stable names,
 //! annotations, and the three exposure profiles that filter `tools/list`
 //! without changing tool semantics, limits, or authorization.
 
@@ -45,11 +45,13 @@ pub enum McpTool {
     QueryAdvanced,
     /// Executes up to sixteen read operations under one generation.
     QueryBatch,
+    /// Finds exact Unicode literals within one immutable known source file.
+    SourceFind,
 }
 
 impl McpTool {
     /// Complete deterministic tool catalog in stable discovery order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::RepoIndex,
         Self::RepoStatus,
         Self::RepoList,
@@ -69,6 +71,7 @@ impl McpTool {
         Self::SourceRead,
         Self::QueryAdvanced,
         Self::QueryBatch,
+        Self::SourceFind,
     ];
 
     /// Stable tool name advertised through MCP.
@@ -92,6 +95,7 @@ impl McpTool {
             Self::PlanChange => "plan.change",
             Self::ContextPack => "context.pack",
             Self::SourceRead => "source.read",
+            Self::SourceFind => "source.find",
             Self::QueryAdvanced => "query.advanced",
             Self::QueryBatch => "query.batch",
         }
@@ -104,6 +108,7 @@ impl McpTool {
             Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
             Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
             Self::SourceRead => crate::source_text::SOURCE_READ_TEXT_VERSION,
+            Self::SourceFind => crate::source_find::SOURCE_FIND_VERSION,
             Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
             Self::RepoList => crate::REPO_LIST_SCHEMA_VERSION,
@@ -142,6 +147,7 @@ impl McpTool {
             Self::PlanChange => "Plan change",
             Self::ContextPack => "Context pack",
             Self::SourceRead => "Read source",
+            Self::SourceFind => "Find exact source literal",
             Self::QueryAdvanced => "Advanced query",
             Self::QueryBatch => "Batch query",
         }
@@ -200,7 +206,10 @@ impl McpTool {
                 "Assemble deterministic generation-pinned definitions, implementations, callers, tests, risks, architecture, change, and source evidence from symbol, path, route, test, change, located-result, or plan seeds under an authenticated token-bounded continuation."
             }
             Self::SourceRead => {
-                "Read bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding, or explicitly request historical UTF-8/base64 modes; optional context, overlap merging, line projection and caller-reduced ceilings apply. Conditional activity is source-bound for classic Visual Basic/VBA; direct file selectors are unsupported."
+                "Read bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding, or explicitly request historical UTF-8/base64 modes; optional context, overlap merging, line projection and caller-reduced ceilings apply. Omitted budget.timeout_ms imposes no implicit full-source verification deadline; supplied timeouts remain bounded by server ceilings. Conditional activity is source-bound for classic Visual Basic/VBA; direct file selectors are unsupported."
+            }
+            Self::SourceFind => {
+                "Find exact case-sensitive Unicode literals in one known generation-pinned source file; returns overlapping original-byte source references with explicit scan limits, source provenance, and authenticated continuation, without tokenization or structural and semantic support claims. Omitted budget.timeout_ms imposes no implicit full-source verification deadline; supplied timeouts remain bounded by server ceilings."
             }
             Self::QueryAdvanced => {
                 "Use a bounded safe-AST query with typed value parameters, authenticated continuation, and enforced cost, row, and depth limits."
@@ -254,6 +263,7 @@ impl McpTool {
             Self::PlanChange => 3200,
             Self::ContextPack => 4500,
             Self::SourceRead => 3200,
+            Self::SourceFind => 3200,
             Self::QueryAdvanced => 2600,
             Self::QueryBatch => 3000,
         }
@@ -271,7 +281,7 @@ pub enum ExposureProfile {
     Scout,
     /// Adds relationship, flow, impact, test, architecture, and reachability tools.
     Analysis,
-    /// Exposes all nineteen tools including administration and advanced query.
+    /// Exposes all twenty tools including administration and advanced query.
     Developer,
 }
 
@@ -338,6 +348,7 @@ impl ExposureProfile {
                 McpTool::ContextPack,
                 McpTool::SourceRead,
                 McpTool::QueryBatch,
+                McpTool::SourceFind,
             ],
             Self::Analysis => &[
                 McpTool::RepoStatus,
@@ -353,6 +364,7 @@ impl ExposureProfile {
                 McpTool::ContextPack,
                 McpTool::SourceRead,
                 McpTool::QueryBatch,
+                McpTool::SourceFind,
             ],
             Self::Developer => &McpTool::ALL,
         }
@@ -383,7 +395,7 @@ mod tests {
     use super::{ExposureProfile, McpTool};
 
     #[test]
-    fn catalog_contains_exactly_nineteen_unique_tools() {
+    fn catalog_contains_exactly_twenty_unique_tools() {
         let mut names = std::collections::BTreeSet::new();
         for tool in McpTool::ALL {
             assert!(
@@ -392,7 +404,7 @@ mod tests {
                 tool.name()
             );
         }
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 20);
     }
 
     #[test]
@@ -496,6 +508,7 @@ mod tests {
             "context.pack",
             "source.read",
             "query.batch",
+            "source.find",
         ];
         let tools = ExposureProfile::Scout.tools();
         assert_eq!(tools.len(), expected.len());
@@ -515,12 +528,12 @@ mod tests {
                 tool.name()
             );
         }
-        assert_eq!(analysis.len(), 13);
+        assert_eq!(analysis.len(), 14);
     }
 
     #[test]
-    fn developer_profile_exposes_all_nineteen_tools() {
-        assert_eq!(ExposureProfile::Developer.tools().len(), 19);
+    fn developer_profile_exposes_all_twenty_tools() {
+        assert_eq!(ExposureProfile::Developer.tools().len(), 20);
         assert_eq!(ExposureProfile::Developer.tools(), &McpTool::ALL);
     }
 

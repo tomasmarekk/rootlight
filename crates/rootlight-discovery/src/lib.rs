@@ -27,9 +27,15 @@ use serde::{Deserialize, Serialize};
 
 mod apex;
 mod common_lisp;
+mod coq;
+#[cfg(test)]
+mod coq_contract;
+#[cfg(test)]
+mod coq_corpus_observation;
 mod encoding;
 mod fsharp;
 mod fsproj;
+mod hdl;
 mod incremental;
 mod matlab;
 mod objective_c;
@@ -37,9 +43,15 @@ mod office;
 mod prolog;
 mod scheme;
 mod shebang;
+mod streamed;
+mod v_language;
 mod vba;
 
 pub use fsproj::{OrderedFSharpCompileMembers, ordered_fsharp_compile_members};
+pub use streamed::{
+    MAX_STREAMED_CLASSIFICATION_BYTES, StreamedDiscoveryOptions, StreamedDiscoverySource,
+    StreamedSourceReceiver, discover_streamed_and_reconcile, discover_with_streamed_sources,
+};
 
 pub use incremental::{
     IncrementalDiscovery, IncrementalDiscoveryBaseline, IncrementalDiscoveryContext,
@@ -48,7 +60,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.43";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.50";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1066,6 +1078,8 @@ struct DiscoveryState<'a> {
     project_witnesses: Vec<PendingProjectWitness>,
     project_member_count: usize,
     project_member_bytes: usize,
+    streamed_receiver: Option<&'a mut dyn StreamedSourceReceiver>,
+    snapshot_file_bytes: u64,
 }
 
 struct PendingProjectWitness {
@@ -1149,6 +1163,8 @@ impl<'a> DiscoveryState<'a> {
             project_witnesses: Vec::new(),
             project_member_count: 0,
             project_member_bytes: 0,
+            streamed_receiver: None,
+            snapshot_file_bytes: limits.max_file_bytes,
         })
     }
 
@@ -1325,6 +1341,7 @@ impl<'a> DiscoveryState<'a> {
         if self.retain_snapshots
             || cached_snapshot.is_some()
             || observed_metadata.length > self.limits.max_file_bytes
+            || observed_metadata.length > self.snapshot_file_bytes
         {
             return self.visit_file(path, observed_metadata, decisive_rule, cached_snapshot);
         }
@@ -1400,6 +1417,9 @@ impl<'a> DiscoveryState<'a> {
             self.exclude(&path, ExclusionReason::Oversized, decisive_rule);
             return Ok(());
         }
+        if observed_metadata.length > self.snapshot_file_bytes {
+            return self.record_streamed_source(path, observed_metadata, decisive_rule);
+        }
         let snapshot_result = match cached_snapshot {
             Some(snapshot) => revalidate_cached_snapshot(
                 self.root,
@@ -1411,6 +1431,94 @@ impl<'a> DiscoveryState<'a> {
             None => self.snapshot_for_path(&path, observed_metadata),
         };
         self.record_file_snapshot(path, decisive_rule, snapshot_result)
+    }
+
+    fn record_streamed_source(
+        &mut self,
+        path: RelativePath,
+        observed: rootlight_vfs::SnapshotMetadata,
+        decisive_rule: Option<DecisiveRule>,
+    ) -> Result<(), DiscoveryError> {
+        let receiver = self
+            .streamed_receiver
+            .as_mut()
+            .ok_or(DiscoveryError::StreamedCaptureUnavailable)?;
+        let source = receiver.capture(self.root, &path, observed, self.cancellation)?;
+        if source.capture.file() != self.root.file_id(&path)
+            || source.capture.path() != &path
+            || source.capture.metadata() != observed
+            || source.prefix.len() > MAX_STREAMED_CLASSIFICATION_BYTES
+            || u64::try_from(source.prefix.len()).unwrap_or(u64::MAX) > observed.length
+        {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+        self.files_examined = self
+            .files_examined
+            .checked_add(1)
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        self.bytes_examined = self
+            .bytes_examined
+            .checked_add(observed.length)
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        if let Some(progress) = self.observe_progress.as_mut() {
+            progress(IncrementalDiscoveryProgress {
+                files_examined: self.files_examined,
+                bytes_examined: self.bytes_examined,
+            });
+        }
+        let Some(classification) = encoding::classify_streamed(
+            &source.prefix,
+            observed.length,
+            source.encoding,
+            source.contains_nul,
+            self.cancellation,
+        )?
+        else {
+            self.exclude(&path, ExclusionReason::Binary, decisive_rule);
+            return Ok(());
+        };
+        let content = classification.decoded_prefix.as_ref().map_or(
+            if source.encoding.is_some() {
+                source.prefix.as_slice()
+            } else {
+                b""
+            },
+            |prefix| prefix.as_bytes(),
+        );
+        let (class, mut language_signals) = classify_prefix(
+            &path,
+            content,
+            classification.prefix_truncated,
+            classification.decoded_prefix.is_some(),
+        );
+        if let Some(language) = self.config.source_language_for_path(path.as_str()) {
+            language_signals.push(LanguageSignal {
+                language: language.to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+            language_signals.sort();
+        }
+        self.scanned
+            .try_reserve(1)
+            .map_err(|_| DiscoveryError::Vfs(VfsError::MemoryUnavailable))?;
+        self.scanned.push(ScannedFile::new(FileDescriptor::new(
+            source.capture.file(),
+            content_hash(path.identity_bytes()),
+            incremental::incremental_metadata(observed),
+        )));
+        self.inputs.push(ManifestInput {
+            file: source.capture.file(),
+            path: path.as_str().to_owned(),
+            content_hash: source.capture.content_hash(),
+            bytes: observed.length,
+            encoding: classification.encoding.to_owned(),
+            class,
+            language_signals,
+            project_language_witnesses: Vec::new(),
+            decisive_rule,
+        });
+        self.coverage.included = self.coverage.included.saturating_add(1);
+        Ok(())
     }
 
     fn record_file_snapshot(
@@ -1882,10 +1990,41 @@ fn classify_prefix(
             prefix_truncated && (decoded_prefix || content.len() >= MAX_CLASSIFICATION_BYTES),
         )
         .then_some("fsharp")
+    } else if normalized.ends_with(".v") {
+        // Preserve independent conflicting signals; native availability cannot
+        // establish which language owns a shared suffix.
+        let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
+        for (language, written) in [
+            ("verilog", hdl::has_content_hint(sample)),
+            (
+                "v",
+                shebang_language(sample) == Some("v")
+                    || v_language::has_content_hint(sample, prefix_truncated),
+            ),
+            ("coq", coq::has_content_hint(sample, prefix_truncated)),
+        ] {
+            if written {
+                signals.insert(LanguageSignal {
+                    language: language.to_owned(),
+                    evidence: LanguageEvidence::Content,
+                });
+            }
+        }
+        None
     } else if is_ambiguous_perl_prolog_source(&normalized)
         && prolog::has_content_hint(&content[..content.len().min(MAX_CLASSIFICATION_BYTES)])
     {
         Some("prolog")
+    } else if normalized
+        .rsplit_once('.')
+        .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("vsh"))
+        && (shebang_language(content) == Some("v")
+            || v_language::has_script_hint(
+                &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
+                prefix_truncated,
+            ))
+    {
+        Some("v")
     } else if is_ambiguous_basic_source(&normalized) {
         let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
         // A class export shares its suffix with Apex. Retain both independent
@@ -2035,6 +2174,22 @@ pub const fn language_capabilities() -> &'static [LanguageCapability] {
 
 const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
+        language: "julia",
+        suffixes: &[".jl"],
+        aliases: &[],
+        detectors: &["extension", "shebang", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "cmake",
+        suffixes: &[".cmake", ".cmake.in"],
+        aliases: &[],
+        detectors: &["extension", "filename", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "agda",
         suffixes: &[".agda", ".lagda", ".lagda.md", ".lagda.rst", ".lagda.tex"],
         aliases: &[],
@@ -2131,6 +2286,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "coq",
+        suffixes: &[],
+        aliases: &["rocq"],
+        detectors: &["content", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "cpp",
         suffixes: &[".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"],
         aliases: &["cplusplus"],
@@ -2161,6 +2324,38 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "v",
+        suffixes: &[".vv"],
+        aliases: &[],
+        detectors: &["extension", "content", "shebang", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "verilog",
+        suffixes: &[".vh"],
+        aliases: &[],
+        detectors: &["extension", "content", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "systemverilog",
+        suffixes: &[".sv", ".svh"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "eiffel",
+        suffixes: &[".e"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "elm",
@@ -2302,6 +2497,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "json",
         suffixes: &[".json"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "jsonc",
+        suffixes: &[".jsonc"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -2639,6 +2842,10 @@ pub fn filename_language(path: &str) -> Option<&'static str> {
     let name = path.rsplit(['/', '\\']).next()?;
     if name.eq_ignore_ascii_case("Jenkinsfile") {
         Some("groovy")
+    } else if name.eq_ignore_ascii_case("CMakeLists.txt")
+        || name.eq_ignore_ascii_case("CMakeLists.txt.in")
+    {
+        Some("cmake")
     } else if ["Makefile", "GNUmakefile", "BSDmakefile"]
         .iter()
         .any(|basename| name.eq_ignore_ascii_case(basename))
@@ -2882,6 +3089,9 @@ pub enum DiscoveryError {
     /// One or more configured limits were outside supported ceilings.
     #[error("invalid discovery limits")]
     InvalidLimits,
+    /// A streamed source had no usable private capture owner or storage admission.
+    #[error("streamed source capture unavailable")]
+    StreamedCaptureUnavailable,
     /// A configured or repository-scoped layered policy was malformed.
     #[error("invalid discovery policy")]
     InvalidPolicy,
@@ -6055,6 +6265,7 @@ max_source_file_bytes = 2097152
             ("pyproject.toml", "toml", Some("python")),
             ("package.json", "json", Some("typescript")),
             ("settings.JSON", "json", None),
+            ("settings.JSONC", "jsonc", None),
             ("pipeline.yaml", "yaml", None),
             ("pipeline.yml", "yaml", None),
         ] {
@@ -6081,7 +6292,7 @@ max_source_file_bytes = 2097152
                 .expect("source capability is declared");
             assert_eq!(
                 capability.analyzers,
-                if matches!(syntax, "json" | "toml" | "yaml") {
+                if matches!(syntax, "json" | "jsonc" | "toml" | "yaml") {
                     &["treesitter"][..]
                 } else {
                     &["source-fallback"][..]
@@ -6089,17 +6300,71 @@ max_source_file_bytes = 2097152
             );
         }
         assert_eq!(canonical_language("yml"), Some("yaml"));
-        for path in [
-            "sample.json5",
-            "sample.jsonc",
-            "sample.yaml.bak",
-            "sample.toml.rs",
-        ] {
+        for path in ["sample.json5", "sample.yaml.bak", "sample.toml.rs"] {
             assert!(!matches!(
                 extension_language(path),
                 Some("json" | "yaml" | "toml")
             ));
         }
+    }
+
+    #[test]
+    fn jsonc_discovery_preserves_physical_sources_and_configuration_precedence() {
+        let temporary = local_tempdir();
+        let contents = b"// authored comment\r\n{\"key\":[1,],}\r\n";
+        write_fixture(&temporary, "settings.JSONC", contents);
+        write_fixture(&temporary, "assigned.conf", contents);
+        write_fixture(&temporary, "overridden.jsonc", b"fn typed() {}\n");
+        write_fixture(&temporary, "binary.jsonc", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='jsonc'\n[extensions.source-languages.data.paths]\n'overridden.jsonc'='rust'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"jsonc-discovery");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 3);
+        assert_eq!(manifest.exclusions.len(), 1);
+        assert_eq!(manifest.exclusions[0].path, "binary.jsonc");
+        assert_eq!(manifest.exclusions[0].reason, ExclusionReason::Binary);
+        for (path, language, evidence) in [
+            ("settings.JSONC", "jsonc", LanguageEvidence::Extension),
+            ("assigned.conf", "jsonc", LanguageEvidence::Configuration),
+            ("overridden.jsonc", "rust", LanguageEvidence::Configuration),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language && signal.evidence == evidence),
+                "{input:?}"
+            );
+            if language == "jsonc" {
+                assert_eq!(input.content_hash, rootlight_ids::content_hash(contents));
+                assert_eq!(input.bytes, u64::try_from(contents.len()).unwrap());
+            }
+        }
+        assert_eq!(canonical_language("jsonc"), Some("jsonc"));
+        assert_eq!(extension_language("settings.jsonc.bak"), None);
+        assert_eq!(extension_language("settings.json5"), None);
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "jsonc")
+            .unwrap();
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, &["treesitter"]);
     }
 
     #[test]
@@ -6664,6 +6929,561 @@ max_source_file_bytes = 2097152
             assert_ne!(extension_language(path), Some("make"), "{path}");
         }
         assert_eq!(canonical_language("make"), Some("make"));
+    }
+
+    #[test]
+    fn hdl_extension_and_ambiguous_content_routes_preserve_written_evidence() {
+        for (path, language, evidence) in [
+            ("written.v", "verilog", LanguageEvidence::Content),
+            ("written.V", "verilog", LanguageEvidence::Content),
+            ("written.vh", "verilog", LanguageEvidence::Extension),
+            ("written.sv", "systemverilog", LanguageEvidence::Extension),
+            ("written.SVH", "systemverilog", LanguageEvidence::Extension),
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"module Written; parameter WIDTH=8; wire value; endmodule",
+            );
+            assert!(
+                signals
+                    .iter()
+                    .any(|signal| signal.language == language && signal.evidence == evidence)
+            );
+        }
+        assert_eq!(extension_language("written.v"), None);
+        for source in [
+            b"module main\nfn main() {}".as_slice(),
+            b"(* module hidden(); endmodule *) Definition value := 1.",
+        ] {
+            let (_, signals) =
+                classify(&RelativePath::parse(Path::new("other.v")).unwrap(), source);
+            assert!(
+                !signals
+                    .iter()
+                    .any(|signal| matches!(signal.language.as_str(), "verilog" | "systemverilog"))
+            );
+        }
+        for language in ["verilog", "systemverilog"] {
+            assert_eq!(canonical_language(language), Some(language));
+        }
+    }
+
+    #[test]
+    fn v_routes_distinguish_shared_suffixes_and_literal_interpreters() {
+        for (path, source, evidence) in [
+            ("written.v", "fn written() {}", LanguageEvidence::Content),
+            ("written.V", "module main\n", LanguageEvidence::Content),
+            (
+                "written.vv",
+                "malformed compiler fixture",
+                LanguageEvidence::Extension,
+            ),
+            ("written.VV", "fn written() {}", LanguageEvidence::Extension),
+            (
+                "script.vsh",
+                "println('written')\n",
+                LanguageEvidence::Content,
+            ),
+            (
+                "script.VSH",
+                "#!/usr/bin/env -S v run\n",
+                LanguageEvidence::Shebang,
+            ),
+            ("script", "#!/usr/local/bin/v\n", LanguageEvidence::Shebang),
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                source.as_bytes(),
+            );
+            assert!(
+                signals
+                    .iter()
+                    .any(|signal| signal.language == "v" && signal.evidence == evidence),
+                "{path}: {signals:?}"
+            );
+        }
+        for (path, source) in [
+            (
+                "proof.v",
+                "Require Import Init.\nRecord Box := {\nvalue := 1\n}.",
+            ),
+            ("wire.v", "module Written(input wire clk); endmodule"),
+            (
+                "shader.vsh",
+                "// fn fake() {}\nvoid main() { gl_Position = vec4(0.0); }",
+            ),
+            ("quoted.v", "'fn fake() {}'"),
+            ("comment.v", "/* fn fake() {} */"),
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                source.as_bytes(),
+            );
+            assert!(
+                !signals.iter().any(|signal| signal.language == "v"),
+                "{path}: {signals:?}"
+            );
+        }
+        for header in [
+            "#!/usr/bin/env V\n",
+            "#!/usr/bin/env -S tool v\n",
+            "#!/usr/bin/v-other\n",
+            "#!/usr/bin/env -S python v\n",
+        ] {
+            assert_ne!(shebang_language(header.as_bytes()), Some("v"));
+        }
+        assert_eq!(extension_language("shader.vsh"), Some("glsl"));
+        assert_eq!(extension_language("written.v"), None);
+        assert_eq!(canonical_language("v"), Some("v"));
+    }
+
+    #[test]
+    fn configured_hdl_routes_preserve_override_and_binary_boundaries() {
+        let temporary = local_tempdir();
+        for path in [
+            "override.v",
+            "fragment.input",
+            "extension.other",
+            "denied.sv",
+        ] {
+            write_fixture(&temporary, path, b"module Written; wire value; endmodule");
+        }
+        write_fixture(&temporary, "binary.sv", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nother='verilog'\n[extensions.source-languages.data.paths]\n'override.v'='python'\n'fragment.input'='systemverilog'\n",
+        }]).unwrap();
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "denied.sv".to_owned(),
+                source: "fixture".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let manifest = discover(
+            &fixture_root(&temporary, b"configured-hdl"),
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        for (path, language) in [
+            ("override.v", "python"),
+            ("fragment.input", "systemverilog"),
+            ("extension.other", "verilog"),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language
+                        && signal.evidence == LanguageEvidence::Configuration)
+            );
+        }
+        assert!(
+            !manifest
+                .inputs
+                .iter()
+                .any(|input| matches!(input.path.as_str(), "denied.sv" | "binary.sv"))
+        );
+    }
+
+    #[test]
+    fn configured_v_routes_preserve_override_and_binary_boundaries() {
+        let temporary = local_tempdir();
+        for path in [
+            "override.v",
+            "fragment.input",
+            "extension.other",
+            "denied.vv",
+        ] {
+            write_fixture(&temporary, path, b"fn written() {}");
+        }
+        write_fixture(&temporary, "binary.vv", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nother='v'\n[extensions.source-languages.data.paths]\n'override.v'='python'\n'fragment.input'='v'\n",
+        }]).unwrap();
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "denied.vv".to_owned(),
+                source: "fixture".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let manifest = discover(
+            &fixture_root(&temporary, b"configured-v"),
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        for (path, language) in [
+            ("override.v", "python"),
+            ("fragment.input", "v"),
+            ("extension.other", "v"),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language
+                        && signal.evidence == LanguageEvidence::Configuration)
+            );
+        }
+        assert!(
+            !manifest
+                .inputs
+                .iter()
+                .any(|input| matches!(input.path.as_str(), "denied.vv" | "binary.vv"))
+        );
+    }
+
+    #[test]
+    fn eiffel_extension_routes_keep_written_source_evidence() {
+        let source = b"class BOX\nfeature\n count: INTEGER\nend\n";
+        for path in ["box.e", "nested/BOX.E", "other\\box.e"] {
+            assert_eq!(extension_language(path), Some("eiffel"));
+        }
+        let (_, signals) = classify(&RelativePath::parse(Path::new("box.e")).unwrap(), source);
+        assert!(
+            signals.iter().any(|signal| signal.language == "eiffel"
+                && signal.evidence == LanguageEvidence::Extension)
+        );
+        for path in ["box.e.bak", "box.eiffel", "box.ecf", "plain.erl", "e"] {
+            assert_ne!(extension_language(path), Some("eiffel"));
+        }
+        let (_, signals) = classify(
+            &RelativePath::parse(Path::new("box.unknown")).unwrap(),
+            source,
+        );
+        assert!(!signals.iter().any(|signal| signal.language == "eiffel"));
+        assert_eq!(canonical_language("eiffel"), Some("eiffel"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "eiffel")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".e"]);
+        assert_eq!(capability.detectors, ["extension", "configuration"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+    }
+
+    #[test]
+    fn configured_eiffel_routes_preserve_overrides_and_exclusions() {
+        let temporary = local_tempdir();
+        for path in [
+            "box.e",
+            "override.e",
+            "custom.input",
+            "extension.other",
+            "denied.e",
+        ] {
+            write_fixture(
+                &temporary,
+                path,
+                b"class BOX\nfeature\n count: INTEGER\nend\n",
+            );
+        }
+        write_fixture(&temporary, "binary.e", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nother='eiffel'\n[extensions.source-languages.data.paths]\n'override.e'='python'\n'custom.input'='eiffel'\n",
+        }]).unwrap();
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "denied.e".to_owned(),
+                source: "fixture".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let manifest = discover(
+            &fixture_root(&temporary, b"configured-eiffel"),
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 4);
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|entry| entry.path == "binary.e" && entry.reason == ExclusionReason::Binary)
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|entry| entry.path == "denied.e")
+        );
+        for (path, language) in [
+            ("override.e", "python"),
+            ("custom.input", "eiffel"),
+            ("extension.other", "eiffel"),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language
+                        && signal.evidence == LanguageEvidence::Configuration)
+            );
+        }
+        let native = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "box.e")
+            .unwrap();
+        assert!(
+            native
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "eiffel"
+                    && signal.evidence == LanguageEvidence::Extension)
+        );
+    }
+
+    #[test]
+    fn julia_extension_and_literal_shebang_routes_keep_independent_evidence() {
+        for path in ["module.jl", "nested/Module.JL"] {
+            assert_eq!(extension_language(path), Some("julia"));
+        }
+        for path in ["module.jl.bak", "module.julia", "jl", "plain.m"] {
+            assert_ne!(extension_language(path), Some("julia"));
+        }
+        for source in [
+            "#!/usr/bin/julia\n",
+            "#!/usr/bin/env julia\n",
+            "#!/usr/bin/env -S julia --startup-file=no\n",
+        ] {
+            assert_eq!(shebang::language(source.as_bytes()), Some("julia"));
+        }
+        for source in [
+            "#!/usr/bin/julia-wrapper\n",
+            "#!/usr/bin/env -S wrapper julia\n",
+            "#!/usr/bin/env -S ${INTERPRETER} julia\n",
+            "#!/usr/bin/env -u julia python\n",
+        ] {
+            assert_ne!(shebang::language(source.as_bytes()), Some("julia"));
+        }
+        let (_, signals) = classify(
+            &RelativePath::parse(Path::new("wrapper.jl")).unwrap(),
+            b"#!/bin/bash\n#=\nexec julia\n=#\n",
+        );
+        assert!(
+            signals.iter().any(|signal| signal.language == "julia"
+                && signal.evidence == LanguageEvidence::Extension)
+        );
+        assert!(signals.iter().any(
+            |signal| signal.language == "bash" && signal.evidence == LanguageEvidence::Shebang
+        ));
+        assert_eq!(canonical_language("julia"), Some("julia"));
+    }
+
+    #[test]
+    fn configured_julia_routes_preserve_overrides_and_exclusions() {
+        let temporary = local_tempdir();
+        for path in ["module.jl", "override.jl", "custom.input", "denied.jl"] {
+            write_fixture(&temporary, path, b"written(x) = x\n");
+        }
+        write_fixture(&temporary, "binary.jl", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'override.jl'='python'\n'custom.input'='julia'\n",
+        }]).unwrap();
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "denied.jl".to_owned(),
+                source: "fixture".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let manifest = discover(
+            &fixture_root(&temporary, b"configured-julia"),
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 3);
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|entry| entry.path == "binary.jl" && entry.reason == ExclusionReason::Binary)
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|entry| entry.path == "denied.jl")
+        );
+        for (path, language) in [("override.jl", "python"), ("custom.input", "julia")] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language
+                        && signal.evidence == LanguageEvidence::Configuration)
+            );
+        }
+    }
+
+    #[test]
+    fn cmake_source_and_template_routes_preserve_specific_filename_evidence() {
+        for path in [
+            "CMakeLists.txt",
+            "build/CMAKELists.TXT",
+            "build\\CMakeLists.txt",
+            "cmake/CMakeLists.txt.in",
+        ] {
+            assert_eq!(filename_language(path), Some("cmake"), "{path}");
+        }
+        for path in [
+            "module.cmake",
+            "cmake/Module.CMAKE",
+            "config/module.cmake.in",
+        ] {
+            assert_eq!(extension_language(path), Some("cmake"), "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"set(Written value)\n",
+            );
+            assert!(signals.iter().any(|signal| signal.language == "cmake"
+                && signal.evidence == LanguageEvidence::Extension));
+        }
+        for path in [
+            "plain.txt",
+            "plain.in",
+            "CMakeLists.txt.bak",
+            "module.cmake.bak",
+            "module.cmake.in.bak",
+            "CMakeLists.txt/notes",
+        ] {
+            assert_ne!(filename_language(path), Some("cmake"), "{path}");
+            assert_ne!(extension_language(path), Some("cmake"), "{path}");
+        }
+        let (_, signals) = classify(
+            &RelativePath::parse(Path::new("nested/CMakeLists.txt")).unwrap(),
+            b"function(Written)\nendfunction()\n",
+        );
+        assert_eq!(
+            signals,
+            vec![LanguageSignal {
+                language: "cmake".to_owned(),
+                evidence: LanguageEvidence::Filename
+            }]
+        );
+        assert_eq!(canonical_language("cmake"), Some("cmake"));
+    }
+
+    #[test]
+    fn configured_cmake_routes_keep_binary_and_policy_exclusions() {
+        let temporary = local_tempdir();
+        for path in [
+            "CMakeLists.txt",
+            "module.cmake",
+            "template.cmake.in",
+            "custom.input",
+            "denied.cmake",
+        ] {
+            write_fixture(&temporary, path, b"set(Written value)\n");
+        }
+        write_fixture(&temporary, "binary.cmake", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'CMakeLists.txt'='python'\n'custom.input'='cmake'\n",
+        }]).unwrap();
+        let policy = DiscoveryPolicy::build(
+            vec![PolicyRule {
+                layer: PolicyLayer::Operation,
+                pattern: "denied.cmake".to_owned(),
+                source: "fixture".to_owned(),
+            }],
+            true,
+        )
+        .unwrap();
+        let manifest = discover(
+            &fixture_root(&temporary, b"configured-cmake"),
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 4);
+        assert!(
+            manifest.exclusions.iter().any(
+                |entry| entry.path == "binary.cmake" && entry.reason == ExclusionReason::Binary
+            )
+        );
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|entry| entry.path == "denied.cmake")
+        );
+        for (path, language) in [("CMakeLists.txt", "python"), ("custom.input", "cmake")] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language
+                        && signal.evidence == LanguageEvidence::Configuration)
+            );
+        }
+        for path in ["module.cmake", "template.cmake.in"] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == "cmake"
+                        && signal.evidence == LanguageEvidence::Extension)
+            );
+        }
     }
 
     #[test]

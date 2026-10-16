@@ -154,6 +154,18 @@ pub(crate) fn verify_parent(parent: &Dir) -> Result<(), PlatformError> {
     }
 }
 
+pub(crate) fn sync_verified_parent(parent: &Dir) -> Result<(), PlatformError> {
+    verify_parent(parent)?;
+    #[cfg(any(unix, windows))]
+    {
+        sync_dir_handle(parent)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(PlatformError::UnsupportedPlatform)
+    }
+}
+
 pub(crate) fn create_directory(
     parent: &Dir,
     name: &PrivateName,
@@ -258,6 +270,100 @@ pub(crate) fn sync_parent(parent: &Dir) -> Result<(), PlatformError> {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = parent;
+        Err(PlatformError::UnsupportedPlatform)
+    }
+}
+
+pub(super) fn read_file_streamed_with_check(
+    parent: &Directory,
+    name: &PrivateName,
+    maximum_bytes: u64,
+    mut check: impl FnMut() -> Result<(), PlatformError>,
+    mut visitor: impl FnMut(u64, &[u8]) -> Result<(), PlatformError>,
+) -> Result<u64, PlatformError> {
+    check()?;
+    require_support()?;
+    #[cfg(any(unix, windows))]
+    {
+        let parent = directory_handle(parent)?;
+        validate_private_directory(parent)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            };
+
+            options
+                .access_mode(FILE_GENERIC_READ.0)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0);
+        }
+        let mut file = parent
+            .open_with(Path::new(&name.0), &options)
+            .map_err(|source| platform_io("open_file", source))?;
+        #[cfg(windows)]
+        verify_private_windows_dacl(&file)?;
+        #[cfg(target_os = "macos")]
+        verify_no_macos_extended_acl(&file)?;
+        let before = file
+            .metadata()
+            .map_err(|source| platform_io("inspect_file", source))?;
+        let identity = validate_private_file_metadata(&before)?;
+        if before.len() > maximum_bytes {
+            return Err(PlatformError::ResourceLimit);
+        }
+        let mut offset = 0_u64;
+        let mut buffer = [0_u8; PRIVATE_FILE_READ_CHUNK_BYTES];
+        let buffer_bytes = u64::try_from(buffer.len()).map_err(|_| PlatformError::ResourceLimit)?;
+        loop {
+            check()?;
+            // One extra byte detects growth beyond the cap without delivering
+            // an out-of-bound chunk, including when the cap is u64::MAX.
+            let remaining = maximum_bytes
+                .checked_sub(offset)
+                .ok_or(PlatformError::ResourceLimit)?;
+            let request = usize::try_from(remaining.saturating_add(1).min(buffer_bytes))
+                .map_err(|_| PlatformError::ResourceLimit)?;
+            let read = file
+                .read(&mut buffer[..request])
+                .map_err(|source| platform_io("read_file", source))?;
+            if read == 0 {
+                break;
+            }
+            let next = offset
+                .checked_add(u64::try_from(read).map_err(|_| PlatformError::ResourceLimit)?)
+                .ok_or(PlatformError::ResourceLimit)?;
+            if next > maximum_bytes {
+                return Err(PlatformError::ResourceLimit);
+            }
+            if next > before.len() {
+                return Err(PlatformError::SecurityPolicy);
+            }
+            visitor(offset, &buffer[..read])?;
+            offset = next;
+        }
+        check()?;
+        #[cfg(windows)]
+        verify_private_windows_dacl(&file)?;
+        #[cfg(target_os = "macos")]
+        verify_no_macos_extended_acl(&file)?;
+        let after = file
+            .metadata()
+            .map_err(|source| platform_io("inspect_file", source))?;
+        if validate_private_file_metadata(&after)? != identity
+            || before.len() != after.len()
+            || after.len() != offset
+        {
+            return Err(PlatformError::SecurityPolicy);
+        }
+        check()?;
+        Ok(offset)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (parent, name, maximum_bytes, check, visitor);
         Err(PlatformError::UnsupportedPlatform)
     }
 }

@@ -57,7 +57,8 @@ pub struct SymbolNameLexicalOmissions {
 /// Source-free accounting from one complete lexical projection scan.
 ///
 /// Counts describe original word occurrences, not distinct postings. Delimiters
-/// are not words; deduplication is not an omission. This is not semantic coverage.
+/// are not words; literal punctuation postings are admitted separately.
+/// Deduplication is not an omission. This is not semantic coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceLexicalCoverage {
     /// Exact input byte length, including delimiters.
@@ -81,7 +82,7 @@ impl SourceLexicalCoverage {
 /// Bounded source vocabulary and accounting produced in the same scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTermProjection {
-    /// Whole-word batches sharing one file identity.
+    /// Whole-word and literal punctuation batches sharing one file identity.
     pub chunks: Vec<Vec<String>>,
     /// Exact source-free omission accounting.
     pub coverage: SourceLexicalCoverage,
@@ -125,7 +126,7 @@ pub struct LexicalDocument {
     pub source_identifiers: Vec<String>,
     /// Optional bounded retained source text.
     pub source_text: Option<String>,
-    /// Bounded source-word batches indexed under the same file identity.
+    /// Bounded source-word and punctuation batches under the same file identity.
     ///
     /// These extend the legacy prefix fields without creating extra search
     /// hits. Each batch retains whole words so token boundaries are not cut.
@@ -140,7 +141,10 @@ pub struct LexicalDocument {
     pub declaration_only: bool,
 }
 
-/// Resource limits for deterministic index construction.
+/// Caller-selected resource limits for deterministic index construction.
+///
+/// Defaults admit all representable document and text counts. Allocation,
+/// cancellation, and individual field validation still apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildBudget {
     /// Maximum documents in one generation.
@@ -154,8 +158,8 @@ pub struct BuildBudget {
 impl Default for BuildBudget {
     fn default() -> Self {
         Self {
-            max_documents: 250_000,
-            max_text_bytes: 512 * 1024 * 1024,
+            max_documents: usize::MAX,
+            max_text_bytes: usize::MAX,
             indexer_memory_bytes: 32 * 1024 * 1024,
         }
     }
@@ -181,6 +185,9 @@ pub enum SearchMode {
     /// Case-insensitive identifier prefix match.
     Prefix,
     /// Language-aware identifier, path, signature, and documentation search.
+    /// Queries without code words require every distinct literal punctuation
+    /// scalar in the source vocabulary, in any order. They have no regex,
+    /// adjacency, repetition-count, or whitespace-matching semantics.
     Text,
     /// Restricted regular-expression syntax compiled to a finite automaton.
     SafeRegex,
@@ -210,7 +217,7 @@ pub struct SearchBudget {
     pub max_candidates: usize,
     /// Maximum result count a request may ask for.
     pub max_results: usize,
-    /// Maximum code-aware terms one text query may contain.
+    /// Maximum code-aware terms or distinct punctuation scalars in a text query.
     pub max_terms: usize,
     /// Maximum distinct index terms admitted to one executable query.
     pub max_expanded_terms: usize,

@@ -374,6 +374,10 @@
     {
       "tool": "query.batch",
       "version": "1.0"
+    },
+    {
+      "tool": "source.find",
+      "version": "1.1"
     }
   ],
   "tool_version_negotiation": {

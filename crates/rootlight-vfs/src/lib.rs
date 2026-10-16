@@ -36,11 +36,21 @@ use rootlight_ir::{
 
 pub mod platform;
 mod space;
+mod stream;
+mod stream_read;
+mod stream_text;
 mod text;
 #[cfg(windows)]
 mod windows_handle;
 
 pub use space::available_space;
+pub use stream::{StreamedSourceCapture, StreamedSourceCaptureError};
+pub use stream_read::{
+    SourceRangeReadBudget, SourceRangeReadError, StreamedSourceBytesIdentity,
+    StreamedSourceIdentity, VerifiedSourceRange, read_verified_source_range_cancellable,
+    visit_verified_source_bytes_cancellable, visit_verified_source_cancellable,
+};
+pub use stream_text::StreamingSourceTextValidator;
 pub use text::{SourceText, TextEncoding};
 
 /// Hard ceiling for one VFS source capture, independent of caller configuration.

@@ -471,9 +471,9 @@
       "tool": "source.read",
       "profile": "compact",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 1414,
-      "o200k_tokens": 468,
-      "sha256": "c9f3958e4c0bad7d91e6d26f613f88448a85bb212f51b4b015af91ad1a2f2827",
+      "serialized_bytes": 1436,
+      "o200k_tokens": 474,
+      "sha256": "7c18091a4ec0813a05a4ca4b178c8c2c9a336631a97f5f4b3aac359c5ff2bc7f",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -482,9 +482,9 @@
       "tool": "source.read",
       "profile": "standard",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 1442,
-      "o200k_tokens": 478,
-      "sha256": "c736e60bd2bf4cdd36d8e3ba570e2c39ed88c321a986fc794d417670555917af",
+      "serialized_bytes": 1464,
+      "o200k_tokens": 484,
+      "sha256": "6cf23809b4d8172d73e8083e6d91d593375739640faea1eb8c7072ca396d342a",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -493,9 +493,9 @@
       "tool": "source.read",
       "profile": "evidence",
       "framing": "compact_json_output_object",
-      "serialized_bytes": 1484,
-      "o200k_tokens": 491,
-      "sha256": "84bb41867f9a24ec585b685bfa54e4175c754e23c7f50564e9d45b90881ab12d",
+      "serialized_bytes": 1506,
+      "o200k_tokens": 497,
+      "sha256": "3bbca3e4cbe0265297a9081b412ea01ced107893c8176f8e041dc7a7a2df4680",
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
@@ -543,8 +543,19 @@
       "semantic_identity_equal": true,
       "envelope_invariants_preserved": true,
       "hard_budget_ceiling_unchanged": true
+    },
+    {
+      "tool": "source.find",
+      "profile": "compact",
+      "framing": "compact_json_output_object",
+      "serialized_bytes": 1719,
+      "o200k_tokens": 677,
+      "sha256": "ba7c6f65f12a25ed8052c288f7ab47755bed867f27fb7f18063ee1acaf1d0a4a",
+      "semantic_identity_equal": true,
+      "envelope_invariants_preserved": true,
+      "hard_budget_ceiling_unchanged": true
     }
   ],
-  "total_serialized_bytes": 101585,
-  "total_o200k_tokens": 32670
+  "total_serialized_bytes": 103370,
+  "total_o200k_tokens": 33365
 }

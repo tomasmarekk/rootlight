@@ -1290,6 +1290,88 @@
         "warnings": []
       },
       "tool": "query.batch"
+    },
+    {
+      "input": {
+        "file_id": "file1_ambqgaydambqgaydambqgaydambqgaydzphcr4i",
+        "generation": "gen1_aibaeaqcaibaeaqcaibaeaqcaibaeaqcz5zngva",
+        "literal": "aaa",
+        "repository": {
+          "repository_id": "repo1_aeaqcaibaeaqcaibaeaqcaibagmnypnn"
+        }
+      },
+      "output": {
+        "data": {
+          "file": {
+            "byte_length": 5,
+            "content_hash": "b3_e2h4y6fvonk7fymi5ujkwxgpcgmmywz6r4dtwsq2tzehvbdq3pcz7wo6mq",
+            "encoding": "utf-8",
+            "generated": false,
+            "id": "file1_ambqgaydambqgaydambqgaydambqgaydzphcr4i",
+            "language": "rust",
+            "path": "file.rs",
+            "trust": "untrusted_repository_data"
+          },
+          "matches": [
+            {
+              "content_hash": "b3_e2h4y6fvonk7fymi5ujkwxgpcgmmywz6r4dtwsq2tzehvbdq3pcz7wo6mq",
+              "generation": "gen1_aibaeaqcaibaeaqcaibaeaqcaibaeaqcz5zngva",
+              "repository": "repo1_aeaqcaibaeaqcaibaeaqcaibagmnypnn",
+              "span": {
+                "end_byte": 3,
+                "file": "file1_ambqgaydambqgaydambqgaydambqgaydzphcr4i",
+                "start_byte": 0
+              }
+            },
+            {
+              "content_hash": "b3_e2h4y6fvonk7fymi5ujkwxgpcgmmywz6r4dtwsq2tzehvbdq3pcz7wo6mq",
+              "generation": "gen1_aibaeaqcaibaeaqcaibaeaqcaibaeaqcz5zngva",
+              "repository": "repo1_aeaqcaibaeaqcaibaeaqcaibagmnypnn",
+              "span": {
+                "end_byte": 4,
+                "file": "file1_ambqgaydambqgaydambqgaydambqgaydzphcr4i",
+                "start_byte": 1
+              }
+            },
+            {
+              "content_hash": "b3_e2h4y6fvonk7fymi5ujkwxgpcgmmywz6r4dtwsq2tzehvbdq3pcz7wo6mq",
+              "generation": "gen1_aibaeaqcaibaeaqcaibaeaqcaibaeaqcz5zngva",
+              "repository": "repo1_aeaqcaibaeaqcaibaeaqcaibagmnypnn",
+              "span": {
+                "end_byte": 5,
+                "file": "file1_ambqgaydambqgaydambqgaydambqgaydzphcr4i",
+                "start_byte": 2
+              }
+            }
+          ],
+          "restoration_bytes": 0,
+          "scanned_end_byte": 5,
+          "scanned_start_byte": 0,
+          "stop": "end_of_source",
+          "total_metadata_bytes": 11,
+          "total_response_memory_bytes": 400
+        },
+        "generation": "gen1_aibaeaqcaibaeaqcaibaeaqcaibaeaqcz5zngva",
+        "next_cursor": null,
+        "repository": {
+          "display_name": "fixture",
+          "repository_id": "repo1_aeaqcaibaeaqcaibaeaqcaibagmnypnn"
+        },
+        "schema_version": "1.1",
+        "truncated": false,
+        "trust": "untrusted_repository_data",
+        "usage": {
+          "cache_status": "not_applicable",
+          "edges": 0,
+          "estimated_tokens": 0,
+          "json_bytes": 0,
+          "rows": 4,
+          "source_bytes": 0,
+          "trace_id": "source-find-example",
+          "wall_time_ms": 0
+        }
+      },
+      "tool": "source.find"
     }
   ]
 }

@@ -959,7 +959,7 @@ mod tests {
     fn census_cancellation_requires_a_representable_deadline() {
         let cancellation = census_cancellation(3600).unwrap();
         assert!(cancellation.has_deadline());
-        super::super::require_deadline(&cancellation).unwrap();
+        super::super::check_cancellation(&cancellation).unwrap();
         cancellation.check().unwrap();
         assert!(matches!(
             census_cancellation(0),

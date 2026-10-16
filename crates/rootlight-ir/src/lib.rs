@@ -25,6 +25,7 @@ mod lexical;
 mod normalized;
 mod perl_binding;
 mod rebind;
+mod rust_direct_call;
 mod source_projection;
 mod validation;
 mod vba_compilation;
@@ -125,6 +126,10 @@ pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,
     GenerationNeutralFactIdIndex, NormalizedRebindError, canonical_generation_neutral_digests,
     generation_neutral_workspace_bytes,
+};
+pub use rust_direct_call::{
+    RUST_DIRECT_CALL_NAMESPACE, RustDirectCall, RustDirectCallError,
+    decode_rust_direct_call_envelope, new_rust_direct_call_envelope,
 };
 pub use source_projection::{
     EncodedSourceTextProjection, MAX_SIGNATURE_SOURCE_PARTS, SignatureSourcePart,

@@ -3,14 +3,21 @@
 //! Temporary repositories use English-only fixtures and assert source-free,
 //! bounded evidence without depending on the Rootlight checkout itself.
 
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_git::{
-    FileChangeKind, GitCollectErrorCode, GitCollectLimits, GitLimits, HeadState, HistoryState,
-    HistoryTruncation, ObjectFormat, RenameEvidenceKind, RepositoryState, SubmoduleCheckoutState,
-    WorktreeChangeSelection, collect_repository, collect_revision_range, collect_tracked_paths,
-    collect_worktree_change_paths, collect_worktree_status, revision_resolves_to_head,
+    FileChangeKind, GitCollectErrorCode, GitCollectLimits, GitLimits, GitTrackedPathLimits,
+    HeadState, HistoryState, HistoryTruncation, ObjectFormat, RenameEvidenceKind, RepositoryState,
+    SubmoduleCheckoutState, WorktreeChangeSelection, collect_repository, collect_revision_range,
+    collect_tracked_paths, collect_tracked_paths_streaming, collect_worktree_change_paths,
+    collect_worktree_status, revision_resolves_to_head,
 };
 use rootlight_ids::{RepositoryId, derive_repository};
 use tempfile::TempDir;
@@ -74,6 +81,54 @@ fn collection_limits(history_commits: usize) -> GitCollectLimits {
 }
 
 #[test]
+fn tracked_inventory_streams_complete_output_beyond_the_buffered_command_limit() {
+    let directory = initialized_repository();
+    let root = directory.path();
+    fs::write(root.join("seed.rs"), "fn seed() {}\n").expect("seed source writes");
+    run_git(root, &["add", "seed.rs"]);
+    let object = git_stdout(root, &["rev-parse", ":seed.rs"]);
+    run_git(root, &["rm", "--cached", "seed.rs"]);
+    let prefix = "a".repeat(210);
+    let count = 65_536;
+    let mut child = Command::new("git")
+        .args(["update-index", "--index-info"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("fixture index writer starts");
+    {
+        let mut input = std::io::BufWriter::new(child.stdin.take().unwrap());
+        for index in 0..count {
+            writeln!(input, "100644 {object}\t{prefix}{index:06}.rs")
+                .expect("fixture index entry writes");
+        }
+        input.flush().expect("fixture index flushes");
+    }
+    let output = child
+        .wait_with_output()
+        .expect("fixture index writer exits");
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        collect_tracked_paths(root, GitCollectLimits::default(), &Cancellation::new())
+            .expect_err("the buffered API still enforces its command byte budget")
+            .code(),
+        GitCollectErrorCode::CommandOutputLimit,
+    );
+    let paths = collect_tracked_paths_streaming(
+        root,
+        GitTrackedPathLimits::new(32 * 1024).unwrap(),
+        &Cancellation::new(),
+    )
+    .expect("all index paths collect without a whole-command buffer");
+    assert_eq!(paths.len(), count);
+    for (index, path) in paths.iter().enumerate() {
+        assert_eq!(path, &format!("{prefix}{index:06}.rs"));
+    }
+}
+
+#[test]
 fn focused_worktree_paths_match_staged_unstaged_and_untracked_states() {
     let directory = initialized_repository();
     let root = directory.path();
@@ -119,6 +174,12 @@ fn tracked_inventory_is_root_local_bounded_and_tracks_index_changes() {
     fs::write(root.join("child/untracked.rs"), "fn untracked() {}\n").expect("control writes");
     let inventory = collect_tracked_paths(root, collection_limits(1), &Cancellation::new())
         .expect("tracked inventory collects");
+    let streaming_limits = GitTrackedPathLimits::new(32 * 1024).unwrap();
+    assert_eq!(
+        collect_tracked_paths_streaming(root, streaming_limits, &Cancellation::new())
+            .expect("streaming inventory collects"),
+        inventory,
+    );
     assert_eq!(inventory.into_iter().collect::<Vec<_>>(), ["child/kept.rs"]);
     assert!(
         collect_tracked_paths(
@@ -127,6 +188,15 @@ fn tracked_inventory_is_root_local_bounded_and_tracks_index_changes() {
             &Cancellation::new()
         )
         .expect("nested non-repository has no root-local inventory")
+        .is_empty()
+    );
+    assert!(
+        collect_tracked_paths_streaming(
+            &root.join("child"),
+            streaming_limits,
+            &Cancellation::new(),
+        )
+        .expect("streaming inventory does not discover a parent repository")
         .is_empty()
     );
     let tiny = GitCollectLimits::new(1, 8, Duration::from_secs(10)).expect("small bound is valid");
@@ -144,10 +214,21 @@ fn tracked_inventory_is_root_local_bounded_and_tracks_index_changes() {
             .code(),
         GitCollectErrorCode::Cancelled
     );
+    assert!(matches!(
+        collect_tracked_paths_streaming(root, streaming_limits, &cancelled),
+        Err(rootlight_git::GitTrackedPathError::Collection(
+            rootlight_git::GitCollectError::Cancelled(_)
+        ))
+    ));
     run_git(root, &["rm", "--cached", "--", "child/kept.rs"]);
     assert!(
         collect_tracked_paths(root, collection_limits(1), &Cancellation::new())
             .expect("updated index collects")
+            .is_empty()
+    );
+    assert!(
+        collect_tracked_paths_streaming(root, streaming_limits, &Cancellation::new())
+            .expect("streaming inventory observes index removal")
             .is_empty()
     );
     fs::write(root.join("child/.git"), "malformed metadata").expect("invalid metadata writes");
@@ -156,6 +237,14 @@ fn tracked_inventory_is_root_local_bounded_and_tracks_index_changes() {
             &root.join("child"),
             collection_limits(1),
             &Cancellation::new()
+        )
+        .is_err()
+    );
+    assert!(
+        collect_tracked_paths_streaming(
+            &root.join("child"),
+            streaming_limits,
+            &Cancellation::new(),
         )
         .is_err()
     );

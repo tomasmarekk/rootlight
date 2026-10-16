@@ -462,7 +462,7 @@ fn repository_lineage_survives_interleaved_indexing() {
 fn cancellation_stays_typed_across_index_and_query_boundaries() {
     let fixture = fixture(BEFORE);
     let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
-    let cancelled_index = deadline();
+    let cancelled_index = Cancellation::new();
     assert!(cancelled_index.cancel(CancellationReason::ClientRequest));
     assert_eq!(
         service.index_rust_fixture(fixture.path(), &cancelled_index),
@@ -473,7 +473,7 @@ fn cancellation_stays_typed_across_index_and_query_boundaries() {
     assert_eq!(service.active_generation(), None);
 
     let indexed = service
-        .index_rust_fixture(fixture.path(), &deadline())
+        .index_rust_fixture(fixture.path(), &Cancellation::new())
         .expect("fixture indexes before query cancellation");
     let cancelled_query = deadline();
     assert!(cancelled_query.cancel(CancellationReason::ParentCancelled));

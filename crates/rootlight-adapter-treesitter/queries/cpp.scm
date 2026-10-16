@@ -5,6 +5,8 @@
 (namespace_definition) @module
 
 [
+  (preproc_def)
+  (preproc_function_def)
   (function_definition)
   (declaration)
   (field_declaration
@@ -27,6 +29,8 @@
 ] @declaration
 
 [
+  (preproc_def name: (identifier) @definition)
+  (preproc_function_def name: (identifier) @definition)
   (function_declarator declarator: [(identifier) (field_identifier)] @definition)
   (class_specifier name: (type_identifier) @definition)
   (struct_specifier name: (type_identifier) @definition)
@@ -38,6 +42,11 @@
 
 (preproc_include) @import
 [(parameter_list) (template_parameter_list)] @signature
+[(preproc_def) (preproc_function_def)] @signature
+(preproc_params) @signature
+; Branch selection and macro expansion remain source-bound semantic gaps.
+[(preproc_if) (preproc_ifdef)] @signature
+[(preproc_def) (preproc_function_def)] @string
 [(compound_statement) (declaration_list)] @scope
 (call_expression) @call
 [

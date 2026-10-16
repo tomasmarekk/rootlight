@@ -19,12 +19,11 @@ use crate::model::{BuildStats, SearchError};
 const ARTIFACT_MANIFEST_VERSION: u32 = 1;
 const MAX_PORTABLE_NAME_BYTES: usize = 128;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
-const HARD_MAX_ARTIFACT_FILES: usize = 4_096;
-const HARD_MAX_ARTIFACT_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const HARD_MAX_ARTIFACT_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-const HARD_MAX_ARTIFACT_DURATION: Duration = Duration::from_secs(300);
 
-/// Resource limits for artifact creation and verification.
+/// Caller-selected resource limits for artifact creation and verification.
+///
+/// Defaults impose no size or time admission ceiling beyond representable
+/// counts. Integrity checks and cooperative cancellation always apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactBudget {
     /// Maximum regular files in the flat artifact directory.
@@ -40,10 +39,10 @@ pub struct ArtifactBudget {
 impl Default for ArtifactBudget {
     fn default() -> Self {
         Self {
-            max_files: 512,
-            max_file_bytes: 1024 * 1024 * 1024,
-            max_total_bytes: 4 * 1024 * 1024 * 1024,
-            max_duration: Duration::from_secs(30),
+            max_files: usize::MAX,
+            max_file_bytes: u64::MAX,
+            max_total_bytes: u64::MAX,
+            max_duration: Duration::MAX,
         }
     }
 }
@@ -138,12 +137,9 @@ impl VerifiedLexicalArtifact {
     ) -> Result<Self, SearchError> {
         crate::require_private_file_boundary(cfg!(test))?;
         validate_artifact_budget(budget)?;
-        validate_manifest(&manifest, budget)?;
-        let observed = inspect_directory(
-            directory,
-            budget,
-            &ArtifactControl::new(cancellation, budget.max_duration),
-        )?;
+        let control = ArtifactControl::new(cancellation, budget.max_duration);
+        validate_manifest(&manifest, budget, &control)?;
+        let observed = inspect_directory(directory, budget, &control)?;
         if observed.files != manifest.files || observed.total_bytes != manifest.total_bytes {
             return Err(SearchError::ArtifactIntegrityMismatch);
         }
@@ -206,26 +202,16 @@ pub(crate) fn create_manifest(
 }
 
 fn validate_artifact_budget(budget: ArtifactBudget) -> Result<(), SearchError> {
-    for (resource, value, maximum) in [
+    for (resource, value) in [
         (
             "files",
             u64::try_from(budget.max_files)
                 .map_err(|_| SearchError::InvalidArtifactBudget { resource: "files" })?,
-            u64::try_from(HARD_MAX_ARTIFACT_FILES)
-                .map_err(|_| SearchError::InvalidArtifactBudget { resource: "files" })?,
         ),
-        (
-            "file_bytes",
-            budget.max_file_bytes,
-            HARD_MAX_ARTIFACT_FILE_BYTES,
-        ),
-        (
-            "total_bytes",
-            budget.max_total_bytes,
-            HARD_MAX_ARTIFACT_TOTAL_BYTES,
-        ),
+        ("file_bytes", budget.max_file_bytes),
+        ("total_bytes", budget.max_total_bytes),
     ] {
-        if value == 0 || value > maximum {
+        if value == 0 {
             return Err(SearchError::InvalidArtifactBudget { resource });
         }
     }
@@ -234,7 +220,7 @@ fn validate_artifact_budget(budget: ArtifactBudget) -> Result<(), SearchError> {
             resource: "file_bytes",
         });
     }
-    if budget.max_duration.is_zero() || budget.max_duration > HARD_MAX_ARTIFACT_DURATION {
+    if budget.max_duration.is_zero() {
         return Err(SearchError::InvalidArtifactBudget {
             resource: "duration",
         });
@@ -245,7 +231,9 @@ fn validate_artifact_budget(budget: ArtifactBudget) -> Result<(), SearchError> {
 fn validate_manifest(
     manifest: &LexicalArtifactManifest,
     budget: ArtifactBudget,
+    control: &ArtifactControl<'_>,
 ) -> Result<(), SearchError> {
+    control.check()?;
     if manifest.version != ARTIFACT_MANIFEST_VERSION
         || manifest.files.is_empty()
         || manifest.files.len() > budget.max_files
@@ -256,6 +244,7 @@ fn validate_manifest(
     let mut portable_names = BTreeSet::new();
     let mut total_bytes = 0u64;
     for file in &manifest.files {
+        control.check()?;
         validate_portable_name(&file.name)?;
         if !names.insert(file.name.as_str())
             || !portable_names.insert(file.name.to_ascii_lowercase())
@@ -329,6 +318,9 @@ fn inspect_directory(
                 resource: "total_bytes",
             });
         }
+        files
+            .try_reserve(1)
+            .map_err(|_| SearchError::ArtifactBudgetExceeded { resource: "files" })?;
         files.push(file);
     }
 
@@ -576,6 +568,62 @@ mod tests {
             documents: 1,
             text_bytes: 4,
         }
+    }
+
+    #[test]
+    fn default_artifact_limits_allow_large_manifests_without_skipping_integrity() {
+        let budget = ArtifactBudget::default();
+        assert_eq!(budget.max_files, usize::MAX);
+        assert_eq!(budget.max_file_bytes, u64::MAX);
+        assert_eq!(budget.max_total_bytes, u64::MAX);
+        assert_eq!(budget.max_duration, Duration::MAX);
+        validate_artifact_budget(budget).expect("elastic default is valid");
+
+        let cancellation = Cancellation::new();
+        let control = ArtifactControl::new(&cancellation, budget.max_duration);
+        let file_bytes = 8 * 1024 * 1024 * 1024 + 1;
+        let mut manifest = LexicalArtifactManifest {
+            version: ARTIFACT_MANIFEST_VERSION,
+            stats: stats(),
+            files: (0..4_097)
+                .map(|index| ArtifactFile {
+                    name: format!("segment-{index}"),
+                    length: file_bytes,
+                    blake3: [0; 32],
+                })
+                .collect(),
+            total_bytes: 4_097 * file_bytes,
+        };
+        validate_manifest(&manifest, budget, &control)
+            .expect("representable metadata above former ceilings is admitted");
+        manifest.total_bytes -= 1;
+        assert_eq!(
+            validate_manifest(&manifest, budget, &control),
+            Err(SearchError::IncompatibleIndex)
+        );
+        manifest.files[0].length = u64::MAX;
+        assert_eq!(
+            validate_manifest(&manifest, budget, &control),
+            Err(SearchError::IncompatibleIndex)
+        );
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            validate_manifest(&manifest, budget, &control),
+            Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+        );
+    }
+
+    #[test]
+    fn explicit_artifact_time_limit_expires_without_deadline_arithmetic() {
+        let cancellation = Cancellation::new();
+        let mut control = ArtifactControl::new(&cancellation, Duration::MAX);
+        control.started = control.started.checked_sub(Duration::from_secs(1)).unwrap();
+        assert_eq!(control.check(), Ok(()));
+        control.max_duration = Duration::from_millis(1);
+        assert_eq!(
+            control.check(),
+            Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded))
+        );
     }
 
     #[test]

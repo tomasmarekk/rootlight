@@ -11,8 +11,10 @@ mod normalize;
 
 pub use collect::{
     GitCollectError, GitCollectErrorCode, GitCollectLimits, GitCollectOperation,
-    WorktreeChangeSelection, collect_repository, collect_revision_range, collect_tracked_paths,
-    collect_worktree_change_paths, collect_worktree_status, revision_resolves_to_head,
+    GitTrackedPathError, GitTrackedPathLimit, GitTrackedPathLimits, WorktreeChangeSelection,
+    collect_repository, collect_revision_range, collect_tracked_paths,
+    collect_tracked_paths_streaming, collect_worktree_change_paths, collect_worktree_status,
+    revision_resolves_to_head,
 };
 pub use model::{
     ByteSpan, CandidateGroupId, CanonicalGitSnapshot, ChangeSet, ChangedSpan, CommitRecord,

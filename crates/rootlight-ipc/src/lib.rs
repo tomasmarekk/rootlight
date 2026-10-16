@@ -190,6 +190,28 @@ impl FrameCodec {
         decode_payload(&payload)
     }
 
+    fn read_stream_message_waiting<M: Message + Default>(
+        &self,
+        stream: &mut Stream,
+    ) -> Result<M, IpcError> {
+        let mut header = [0_u8; FRAME_HEADER_BYTES];
+        #[cfg(windows)]
+        stream.set_nonblocking(false).map_err(IpcError::Transport)?;
+        let first = read_first_byte_waiting(stream, &mut header[0]);
+        #[cfg(windows)]
+        // PIPE_NOWAIT and a disconnected Windows pipe can both yield zero.
+        // Blocking only this deliberately unlimited wait restores EOF meaning.
+        let restored = stream.set_nonblocking(true).map_err(IpcError::Transport);
+        first?;
+        #[cfg(windows)]
+        restored?;
+        read_exact_bounded_with_policy(stream, &mut header[1..], self.timeout, cfg!(windows))?;
+        let declared = self.validate_declared_length(header)?;
+        let mut payload = self.allocate_payload(declared)?;
+        read_exact_bounded_with_policy(stream, &mut payload, self.timeout, cfg!(windows))?;
+        decode_payload(&payload)
+    }
+
     fn decode_message<M: Message + Default, R: io::Read>(
         &self,
         stream: &mut R,
@@ -244,6 +266,25 @@ impl FrameCodec {
     ) -> Result<M, IpcError> {
         let mut header = [0_u8; FRAME_HEADER_BYTES];
         read_exact_async(stream, &mut header, self.timeout).await?;
+        let declared = self.validate_declared_length(header)?;
+        let mut payload = self.allocate_payload(declared)?;
+        read_exact_async(stream, &mut payload, self.timeout).await?;
+        decode_payload(&payload)
+    }
+
+    async fn read_message_waiting_async<M: Message + Default, R: AsyncRead + Unpin>(
+        &self,
+        stream: &mut R,
+    ) -> Result<M, IpcError> {
+        let mut header = [0_u8; FRAME_HEADER_BYTES];
+        stream.read_exact(&mut header[..1]).await.map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                IpcError::UnexpectedEof
+            } else {
+                IpcError::Transport(error)
+            }
+        })?;
+        read_exact_async(stream, &mut header[1..], self.timeout).await?;
         let declared = self.validate_declared_length(header)?;
         let mut payload = self.allocate_payload(declared)?;
         read_exact_async(stream, &mut payload, self.timeout).await?;
@@ -728,6 +769,24 @@ pub fn read_response(codec: FrameCodec, stream: &mut Stream) -> Result<ResponseE
     codec.read_stream_message(stream)
 }
 
+/// Waits for a response without imposing a deadline on the server's work.
+///
+/// Only the wait for the first response byte has no time ceiling. Once a frame
+/// starts, its remaining header and payload retain the codec's I/O and size
+/// limits. Use this only when the request deliberately omitted its deadline.
+/// This synchronous API has no cancellation token; peer closure still ends the
+/// wait. Requests with an explicit timeout must use [`read_response`].
+///
+/// # Errors
+/// Returns [`IpcError`] for closure, transport errors, malformed or oversized
+/// frames, or a frame that stalls after its first byte.
+pub fn read_response_waiting(
+    codec: FrameCodec,
+    stream: &mut Stream,
+) -> Result<ResponseEnvelope, IpcError> {
+    codec.read_stream_message_waiting(stream)
+}
+
 /// Writes the client negotiation frame asynchronously.
 ///
 /// # Errors
@@ -830,6 +889,22 @@ pub async fn read_response_async(
     codec.read_message_async(stream).await
 }
 
+/// Waits asynchronously for a deliberately deadline-free source response.
+///
+/// The wait before the first byte has no implicit ceiling; subsequent header
+/// and payload reads retain the codec's limits. Dropping the caller's future
+/// still drops its owned stream and cancels the peer operation.
+///
+/// # Errors
+/// Returns [`IpcError`] for closure, transport errors, malformed or oversized
+/// frames, or a frame that stalls after its first byte.
+pub async fn read_response_waiting_async(
+    codec: FrameCodec,
+    stream: &mut AsyncLocalStream,
+) -> Result<ResponseEnvelope, IpcError> {
+    codec.read_message_waiting_async(stream).await
+}
+
 /// Waits for an accepted asynchronous peer to close its receive direction.
 ///
 /// The single-request protocol permits no further client bytes while daemon
@@ -903,6 +978,20 @@ fn read_exact_bounded(
     timeout: Duration,
 ) -> Result<(), IpcError> {
     read_exact_bounded_with_policy(stream, buffer, timeout, false)
+}
+
+fn read_first_byte_waiting(stream: &mut impl io::Read, byte: &mut u8) -> Result<(), IpcError> {
+    loop {
+        match stream.read(std::slice::from_mut(byte)) {
+            Ok(0) => return Err(IpcError::UnexpectedEof),
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(RETRY_PAUSE);
+            }
+            Err(error) => return Err(IpcError::Transport(error)),
+        }
+    }
 }
 
 fn read_exact_bounded_with_policy(
@@ -1692,5 +1781,119 @@ mod tests {
                 maximum: 16
             })
         ));
+    }
+    #[tokio::test]
+    async fn response_waiting_omits_only_idle_wait_and_preserves_frame_limits() {
+        let codec = FrameCodec::new(1024, Duration::from_millis(20)).unwrap();
+        let expected = ResponseEnvelope {
+            request_id: 91,
+            response: None,
+        };
+        let frame = encoded_frame(&expected);
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let waiting = codec.read_message_waiting_async::<ResponseEnvelope, _>(&mut reader);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(60), &mut waiting)
+                .await
+                .is_err(),
+            "no response byte was sent, so an implicit codec deadline must not finish the wait"
+        );
+        writer.write_all(&frame).await.unwrap();
+        let observed = waiting.await;
+        assert_eq!(observed.unwrap(), expected);
+
+        let (_writer, mut reader) = tokio::io::duplex(1024);
+        assert!(matches!(
+            codec
+                .read_message_async::<ResponseEnvelope, _>(&mut reader)
+                .await,
+            Err(IpcError::TimedOut)
+        ));
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        writer.write_all(&[0]).await.unwrap();
+        assert!(matches!(
+            codec
+                .read_message_waiting_async::<ResponseEnvelope, _>(&mut reader)
+                .await,
+            Err(IpcError::TimedOut)
+        ));
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        writer.write_all(&1025_u32.to_be_bytes()).await.unwrap();
+        assert!(matches!(
+            codec
+                .read_message_waiting_async::<ResponseEnvelope, _>(&mut reader)
+                .await,
+            Err(IpcError::FrameTooLarge {
+                observed: 1025,
+                maximum: 1024
+            })
+        ));
+        drop(writer);
+        let (writer, mut reader) = tokio::io::duplex(1);
+        drop(writer);
+        assert!(matches!(
+            codec
+                .read_message_waiting_async::<ResponseEnvelope, _>(&mut reader)
+                .await,
+            Err(IpcError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn response_waiting_sync_receives_header_after_ordinary_idle_limit() {
+        let temporary = private_tempdir();
+        let endpoint = async_test_endpoint(&temporary, "waiting-sync");
+        let listener = LocalListener::bind(endpoint.clone()).unwrap();
+        let expected = ResponseEnvelope {
+            request_id: 92,
+            response: None,
+        };
+        let sent = expected.clone();
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept_timeout(Duration::from_secs(1)).unwrap();
+            thread::sleep(Duration::from_millis(80));
+            write_response(FrameCodec::default(), &mut stream, &sent).unwrap();
+        });
+        let mut stream = connect(&endpoint).unwrap();
+        let codec = FrameCodec::new(1024, Duration::from_millis(10)).unwrap();
+        assert_eq!(read_response_waiting(codec, &mut stream).unwrap(), expected);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn response_waiting_sync_returns_eof_when_peer_closes_before_header() {
+        let temporary = private_tempdir();
+        let endpoint = async_test_endpoint(&temporary, "waiting-sync-close");
+        let listener = LocalListener::bind(endpoint.clone()).unwrap();
+        let server = thread::spawn(move || {
+            let stream = listener.accept_timeout(Duration::from_secs(1)).unwrap();
+            drop(stream);
+        });
+        let mut stream = connect(&endpoint).unwrap();
+        let result = read_response_waiting(FrameCodec::default(), &mut stream);
+        assert!(matches!(result, Err(IpcError::UnexpectedEof)), "{result:?}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn response_waiting_sync_still_limits_partial_header_and_payload() {
+        for prefix in [vec![0], 2_u32.to_be_bytes().to_vec()] {
+            let temporary = private_tempdir();
+            let endpoint = async_test_endpoint(&temporary, "waiting-sync-stall");
+            let listener = LocalListener::bind(endpoint.clone()).unwrap();
+            let (release, held) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let mut stream = listener.accept_timeout(Duration::from_secs(1)).unwrap();
+                write_all_bounded(&mut stream, &prefix, Duration::from_secs(1)).unwrap();
+                held.recv().unwrap();
+            });
+            let mut stream = connect(&endpoint).unwrap();
+            let codec = FrameCodec::new(1024, Duration::from_millis(10)).unwrap();
+            let result = read_response_waiting(codec, &mut stream);
+            release.send(()).unwrap();
+            server.join().unwrap();
+            assert!(matches!(result, Err(IpcError::TimedOut)), "{result:?}");
+        }
     }
 }

@@ -8,7 +8,6 @@ use std::{
     ffi::OsString,
     io::{self, Write},
     path::PathBuf,
-    time::{Duration, Instant},
 };
 
 use rootlight_cancel::Cancellation;
@@ -35,7 +34,6 @@ const MAX_OCCURRENCES: usize = 16_384;
 const MAX_RELATIONS: usize = 32_768;
 const MAX_PROVENANCE: usize = 32_768;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const DIAGNOSTIC_DEADLINE_SECONDS: u64 = 3_600;
 
 struct Arguments {
     directory: PathBuf,
@@ -513,7 +511,7 @@ fn inspect(
             "selected_files":MAX_SELECTED_FILES,"selected_entities":MAX_SELECTED_ENTITIES,
             "witness_files":MAX_WITNESS_FILES,"occurrences":MAX_OCCURRENCES,
             "unique_relations":MAX_RELATIONS,"provenance":MAX_PROVENANCE,
-            "output_bytes":MAX_OUTPUT_BYTES,"deadline_seconds":DIAGNOSTIC_DEADLINE_SECONDS,
+            "output_bytes":MAX_OUTPUT_BYTES,"deadline_seconds":null,
             "production_limits_changed":false
         }),
         qualification: json!({
@@ -607,11 +605,7 @@ impl Write for OutputWriter {
 fn main() -> DiagnosticResult<()> {
     let mut arguments = Arguments::parse(std::env::args_os().skip(1))?;
     arguments.directory = std::fs::canonicalize(&arguments.directory)?;
-    let cancellation = Cancellation::with_deadline(
-        Instant::now()
-            .checked_add(Duration::from_secs(DIAGNOSTIC_DEADLINE_SECONDS))
-            .ok_or("diagnostic deadline overflow")?,
-    );
+    let cancellation = Cancellation::new();
     let open_context = GenerationContext::new(&cancellation, GenerationBudget::default());
     let reader = OracleReader::open_in(&arguments.directory, &open_context)?;
     let read_budget = GenerationBudget::new(262_144, 65_536, u64::try_from(MAX_OUTPUT_BYTES)?)?;

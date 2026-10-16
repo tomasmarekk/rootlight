@@ -36,11 +36,10 @@ pub const WEB_DISCOVERY_SCHEMA_VERSION: u16 = 1;
 pub const PROTOCOL_MAJOR: u32 = 1;
 /// Current private daemon protocol minor version.
 pub const PROTOCOL_MINOR: u32 = CURRENT_PROTOCOL_MINOR;
-/// Maximum time the daemon may spend restoring required active generations.
+/// Startup allowance for analyzer discovery and authenticated recovery contention.
 ///
-/// Coordinated clients use the same bound after the exact child signals that
-/// pre-readiness recovery began, so they never reap a healthy restore before
-/// the daemon's own recovery contract expires.
+/// This legacy allowance does not bound background generation restoration or
+/// readiness after the exact owned child announces active-generation recovery.
 pub const STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// Child-only environment opt-in for the coordinated startup signal pipe.
 pub const COORDINATED_START_SIGNAL_ENV: &str = "ROOTLIGHT_COORDINATED_START_SIGNAL";

@@ -5,15 +5,16 @@
 
 use std::collections::BTreeMap;
 
-use rootlight_ids::{FactId, GenerationId, RepositoryId, SymbolId};
+use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, EntityFlag, EntityKind,
-    EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope, ExtensionEnvelopeDecodeError,
-    ExtensionSupport, FactDomain, FactEvidence, FactRef, FilePathLocator, FilePathLocatorEncoding,
-    FileRecord, IrLimits, NormalizedIrDocument, NormalizedIrVersion, NormalizedRecordDecodeError,
-    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
-    ProvenanceRecord, RelationPredicate, RelationRecord, SkippedRegion, SourceMappingRecord,
-    SourceRef, decode_diagnostic_record_with_checkpoint, decode_extension_envelope_with_checkpoint,
+    AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, DiagnosticRecord,
+    EntityFlag, EntityKind, EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope,
+    ExtensionEnvelopeDecodeError, ExtensionSupport, FactDomain, FactEvidence, FactRef,
+    FilePathLocator, FilePathLocatorEncoding, FileRecord, IrLimits, NormalizedIrDocument,
+    NormalizedIrVersion, NormalizedRecordDecodeError, OccurrenceRecord, OccurrenceRole,
+    OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord, RelationPredicate,
+    RelationRecord, SkippedRegion, SourceMappingRecord, SourceRef,
+    decode_diagnostic_record_with_checkpoint, decode_extension_envelope_with_checkpoint,
     decode_skipped_region_with_checkpoint, decode_source_mapping_record_with_checkpoint,
 };
 use rootlight_storage::{
@@ -335,6 +336,7 @@ pub(crate) fn read_generation_with_admission<E>(
     let memory_plan =
         oracle_read_memory_plan(metadata.contract_version(), stats, maximum_payload_bytes)?;
     validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
+    validate_source_reference_layout(&transaction, stats.source_refs(), context)?;
     admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
     context.check().map_err(CatalogError::control)?;
     let sources = read_sources(&transaction, stats.source_refs(), context)?;
@@ -346,25 +348,53 @@ pub(crate) fn read_generation_with_admission<E>(
 
     let provenance = read_provenance(
         &transaction,
+        stats.provenance(),
         &mut provenance_sources,
         &mut provenance_derivations,
         context,
     )?;
-    let files = read_files(&transaction, &sources, &mut evidence, context)?;
-    let entities = read_entities(&transaction, &sources, &mut evidence, &mut flags, context)?;
+    let files = read_files(
+        &transaction,
+        stats.files(),
+        &sources,
+        &mut evidence,
+        context,
+    )?;
+    let entities = read_entities(
+        &transaction,
+        stats.entities(),
+        &sources,
+        &mut evidence,
+        &mut flags,
+        context,
+    )?;
     let occurrences = read_occurrences(
         &transaction,
+        stats.occurrences(),
         &sources,
         &mut evidence,
         &mut candidates,
         context,
     )?;
-    let relations = read_relations(&transaction, &sources, &mut evidence, context)?;
-    let coverage_records = read_coverage(&transaction, &sources, &mut evidence, context)?;
+    let relations = read_relations(
+        &transaction,
+        stats.relations(),
+        &sources,
+        &mut evidence,
+        context,
+    )?;
+    let coverage_records = read_coverage(
+        &transaction,
+        stats.coverage(),
+        &sources,
+        &mut evidence,
+        context,
+    )?;
     let document = read_complete_document(
         &transaction,
         metadata,
         ir_version,
+        stats,
         files,
         entities,
         occurrences,
@@ -491,23 +521,117 @@ fn oracle_read_memory_plan(
         .checked_sub(identity_registry_rows)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
 
-    // RegistryIdentity owns only a closed tag and fixed ID. Reserve one complete
-    // 11-slot internal-node envelope per entry plus a root, without assuming
-    // occupancy. All other physical rows retain their full record envelope.
-    const _: () =
-        assert!(std::mem::align_of::<write::RegistryIdentity>() <= std::mem::align_of::<usize>());
-    let identity_node_bytes = std::mem::size_of::<write::RegistryIdentity>()
-        .checked_mul(11)
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<usize>().checked_mul(16)?))
-        .and_then(|bytes| u64::try_from(bytes).ok())
+    let closed_rows = stats
+        .files()
+        .checked_add(stats.entities())
+        .and_then(|rows| rows.checked_add(stats.occurrences()))
+        .and_then(|rows| rows.checked_add(stats.relations()))
+        .and_then(|rows| rows.checked_add(stats.provenance()))
+        .and_then(|rows| rows.checked_add(stats.coverage()))
+        .and_then(|rows| rows.checked_add(stats.skipped_regions()))
+        .and_then(|rows| rows.checked_add(stats.diagnostics()))
+        .and_then(|rows| rows.checked_add(stats.source_refs()))
         .ok_or_else(memory_plan_overflow)?;
-    let identity_bytes = identity_registry_rows
+    let opaque_and_auxiliary_rows = other_rows
+        .checked_sub(closed_rows)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+
+    // Exact buffers are allocated only after the same-transaction census and
+    // admission. Canonicalization sorts one collection at a time; its validation
+    // trees are dropped before snapshot indexes and writer registry measurement
+    // begin. These temporary stages therefore share their largest workspace.
+    // Gap and diagnostic JSON decodes to closed record shapes too. Their text
+    // and evidence vectors remain charged through encoded text, while the
+    // largest single-payload decoder has its own transient allowance. Other
+    // opaque payloads and child-row maps retain the four-KiB envelope.
+    let id_set = tree_node_bytes::<FactId, ()>()?;
+    let file_validation = tree_node_bytes::<FileId, &FileRecord>()?
+        .checked_add(tree_node_bytes::<FileId, FileId>()?)
+        .and_then(|bytes| bytes.checked_add(tree_node_bytes::<FileId, u8>().ok()?))
+        .ok_or_else(memory_plan_overflow)?;
+    let entity_validation = tree_node_bytes::<SymbolId, &EntityRecord>()?
+        .checked_add(tree_node_bytes::<SymbolId, Option<SymbolId>>()?)
+        .and_then(|bytes| bytes.checked_add(tree_node_bytes::<SymbolId, u8>().ok()?))
+        .and_then(|bytes| {
+            bytes.checked_add(u64::try_from(2 * std::mem::size_of::<SymbolId>()).ok()?)
+        })
+        .ok_or_else(memory_plan_overflow)?;
+    let provenance_validation = id_set
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(tree_node_bytes::<FactId, &ProvenanceRecord>().ok()?))
+        .ok_or_else(memory_plan_overflow)?;
+    let record_buffers = [
+        typed_record_buffer_bytes::<FileRecord>(stats.files())?,
+        typed_record_buffer_bytes::<EntityRecord>(stats.entities())?,
+        typed_record_buffer_bytes::<OccurrenceRecord>(stats.occurrences())?,
+        typed_record_buffer_bytes::<RelationRecord>(stats.relations())?,
+        typed_record_buffer_bytes::<ProvenanceRecord>(stats.provenance())?,
+        typed_record_buffer_bytes::<CoverageRecord>(stats.coverage())?,
+        typed_record_buffer_bytes::<SkippedRegion>(stats.skipped_regions())?,
+        typed_record_buffer_bytes::<DiagnosticRecord>(stats.diagnostics())?,
+    ];
+    let retained_record_bytes = record_buffers
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(memory_plan_overflow)?;
+    let sorting_workspace = record_buffers.into_iter().max().unwrap_or(0);
+    let validation_workspace = [
+        (stats.files(), file_validation),
+        (stats.entities(), entity_validation),
+        (
+            stats.occurrences(),
+            id_set.checked_mul(2).ok_or_else(memory_plan_overflow)?,
+        ),
+        (stats.relations(), id_set),
+        (stats.provenance(), provenance_validation),
+        (stats.coverage(), id_set),
+        (stats.skipped_regions(), id_set),
+        (stats.diagnostics(), id_set),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, (rows, bytes)| {
+        rows.checked_add(1)
+            .and_then(|rows| rows.checked_mul(bytes))
+            .and_then(|bytes| total.checked_add(bytes))
+    })
+    .ok_or_else(memory_plan_overflow)?;
+    let registry_workspace = identity_registry_rows
         .checked_add(1)
-        .and_then(|rows| rows.checked_mul(identity_node_bytes))
+        .and_then(|rows| rows.checked_mul(tree_node_bytes::<write::RegistryIdentity, ()>().ok()?))
         .ok_or_else(memory_plan_overflow)?;
-    let record_workspace_bytes = other_rows
+    let temporary_workspace = sorting_workspace
+        .max(validation_workspace)
+        .max(registry_workspace);
+
+    // The dense read lookup owns SourceRef values. Writer measurement borrows
+    // every input reference, including duplicates, and sorts/deduplicates those
+    // pointer slots; it never builds a second owned source map. Physical child
+    // rows bound provenance lists, while direct typed source fields add at most
+    // the listed extra references beyond one evidence source per logical row.
+    let source_input_slots = logical_rows
+        .checked_add(stats.occurrences())
+        .and_then(|rows| rows.checked_add(stats.source_mappings().checked_mul(2)?))
+        .and_then(|rows| rows.checked_add(stats.skipped_regions()))
+        .and_then(|rows| rows.checked_add(stats.diagnostics()))
+        .and_then(|rows| rows.checked_add(opaque_and_auxiliary_rows))
+        .ok_or_else(memory_plan_overflow)?;
+    let source_buffers = stats
+        .source_refs()
+        .checked_mul(
+            u64::try_from(std::mem::size_of::<SourceRef>()).map_err(|_| memory_plan_overflow())?,
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(
+                source_input_slots
+                    .checked_mul(u64::try_from(std::mem::size_of::<&SourceRef>()).ok()?)?,
+            )
+        })
+        .ok_or_else(memory_plan_overflow)?;
+    let record_workspace_bytes = opaque_and_auxiliary_rows
         .checked_mul(4 * 1024)
-        .and_then(|bytes| bytes.checked_add(identity_bytes))
+        .and_then(|bytes| bytes.checked_add(retained_record_bytes))
+        .and_then(|bytes| bytes.checked_add(temporary_workspace))
+        .and_then(|bytes| bytes.checked_add(source_buffers))
         .ok_or_else(memory_plan_overflow)?;
 
     // Malformed adjacent-tag JSON can buffer owned content before typed decode
@@ -534,6 +658,74 @@ fn oracle_read_memory_plan(
         transient_decode_bytes,
         materialization_bytes,
     })
+}
+
+fn tree_node_bytes<K, V>() -> Result<u64, CatalogError> {
+    const SLOTS: usize = 11;
+    std::mem::size_of::<K>()
+        .checked_add(std::mem::size_of::<V>())
+        .and_then(|bytes| bytes.checked_mul(SLOTS))
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<usize>().checked_mul(16)?))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(memory_plan_overflow)
+}
+
+fn typed_record_buffer_bytes<R>(rows: u64) -> Result<u64, CatalogError> {
+    let record_bytes =
+        u64::try_from(std::mem::size_of::<R>()).map_err(|_| memory_plan_overflow())?;
+    rows.checked_add(1)
+        .and_then(|rows| rows.checked_mul(record_bytes))
+        .ok_or_else(memory_plan_overflow)
+}
+
+fn exact_record_buffer<R>(rows: u64) -> Result<Vec<R>, CatalogError> {
+    let mut records = Vec::new();
+    records
+        .try_reserve_exact(usize::try_from(rows).map_err(|_| memory_plan_overflow())?)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+    Ok(records)
+}
+
+fn check_record_push(records: usize, expected_rows: u64) -> Result<(), CatalogError> {
+    if usize_to_u64(records)? >= expected_rows {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
+fn validate_source_reference_layout(
+    connection: &Connection,
+    expected_rows: u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let (rows, invalid): (i64, i64) = connection
+        .query_row(
+            "SELECT count(*), coalesce(sum(CASE WHEN
+             typeof(ordinal) != 'integer' OR ordinal < 0
+             OR typeof(repository_id) != 'blob' OR length(repository_id) != 16
+             OR typeof(generation_id) != 'blob' OR length(generation_id) != 20
+             OR typeof(file_id) != 'blob' OR length(file_id) != 20
+             OR typeof(content_hash) != 'blob' OR length(content_hash) != 32
+             OR typeof(start_byte) != 'integer' OR start_byte < 0
+             OR typeof(end_byte) != 'integer' OR end_byte < start_byte
+             OR typeof(line_start) != 'integer' OR line_start < 0
+             OR typeof(line_end) != 'integer' OR line_end < line_start
+             THEN 1 ELSE 0 END), 0)
+         FROM (SELECT * FROM source_refs LIMIT ?1)",
+            [codec::sqlite_i64(
+                expected_rows
+                    .checked_add(1)
+                    .ok_or_else(memory_plan_overflow)?,
+            )?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(CatalogError::sqlite)?;
+    context.check().map_err(CatalogError::control)?;
+    if codec::nonnegative_u64(rows)? != expected_rows || invalid != 0 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
 }
 
 fn memory_plan_overflow() -> CatalogError {
@@ -896,16 +1088,16 @@ fn validate_identity_registry(
 }
 
 fn validate_source_registry(
-    observed: &BTreeMap<i64, SourceRef>,
-    expected: &BTreeMap<SourceRef, i64>,
+    observed: &[SourceRef],
+    expected: &[&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     if observed.len() != expected.len() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
-    for (source, ordinal) in expected {
+    for (observed, expected) in observed.iter().zip(expected) {
         context.check().map_err(CatalogError::control)?;
-        if observed.get(ordinal) != Some(source) {
+        if observed != *expected {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
     }
@@ -916,7 +1108,7 @@ fn read_sources(
     connection: &Connection,
     expected_count: u64,
     context: &GenerationContext<'_>,
-) -> Result<BTreeMap<i64, SourceRef>, CatalogError> {
+) -> Result<Vec<SourceRef>, CatalogError> {
     let mut statement = connection
         .prepare(
             "SELECT
@@ -927,7 +1119,11 @@ fn read_sources(
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut sources = BTreeMap::new();
+    // Ordinals are authenticated as dense before indexing this exact buffer.
+    let mut sources = Vec::new();
+    sources
+        .try_reserve_exact(usize::try_from(expected_count).map_err(|_| memory_plan_overflow())?)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
         let ordinal: i64 = get(row, 0)?;
@@ -944,9 +1140,10 @@ fn read_sources(
             get(row, 7)?,
             get(row, 8)?,
         )?;
-        if sources.insert(ordinal, source).is_some() {
+        if usize_to_u64(sources.len())? >= expected_count {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
+        sources.push(source);
     }
     if usize_to_u64(sources.len())? != expected_count {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
@@ -1033,7 +1230,7 @@ fn read_candidates(
 
 fn read_provenance_sources(
     connection: &Connection,
-    sources: &BTreeMap<i64, SourceRef>,
+    sources: &[SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<BTreeMap<(FactId, String), Vec<SourceRef>>, CatalogError> {
     let mut statement = connection
@@ -1085,6 +1282,7 @@ fn read_provenance_derivations(
 
 fn read_provenance(
     connection: &Connection,
+    expected_count: u64,
     sources: &mut BTreeMap<(FactId, String), Vec<SourceRef>>,
     derivations: &mut BTreeMap<FactId, Vec<FactRef>>,
     context: &GenerationContext<'_>,
@@ -1101,9 +1299,10 @@ fn read_provenance(
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut records = Vec::new();
+    let mut records = exact_record_buffer(expected_count)?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
+        check_record_push(records.len(), expected_count)?;
         let id = codec::fact_id(get(row, 0)?)?;
         let producer = ProducerIdentity::new(
             &get::<String>(row, 4)?,
@@ -1137,7 +1336,8 @@ fn read_provenance(
 
 fn read_files(
     connection: &Connection,
-    sources: &BTreeMap<i64, SourceRef>,
+    expected_count: u64,
+    sources: &[SourceRef],
     evidence: &mut EvidenceMap,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<FileRecord>, CatalogError> {
@@ -1152,9 +1352,10 @@ fn read_files(
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut records = Vec::new();
+    let mut records = exact_record_buffer(expected_count)?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
+        check_record_push(records.len(), expected_count)?;
         let raw_id: Vec<u8> = get(row, 0)?;
         records.push(FileRecord {
             id: codec::file_id(raw_id.clone())?,
@@ -1194,7 +1395,8 @@ fn decode_path_locator(
 
 fn read_entities(
     connection: &Connection,
-    sources: &BTreeMap<i64, SourceRef>,
+    expected_count: u64,
+    sources: &[SourceRef],
     evidence: &mut EvidenceMap,
     flags: &mut BTreeMap<SymbolId, Vec<EntityFlag>>,
     context: &GenerationContext<'_>,
@@ -1210,9 +1412,10 @@ fn read_entities(
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut records = Vec::new();
+    let mut records = exact_record_buffer(expected_count)?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
+        check_record_push(records.len(), expected_count)?;
         let raw_id: Vec<u8> = get(row, 0)?;
         let id = codec::symbol_id(raw_id.clone())?;
         records.push(EntityRecord {
@@ -1237,7 +1440,8 @@ fn read_entities(
 
 fn read_occurrences(
     connection: &Connection,
-    sources: &BTreeMap<i64, SourceRef>,
+    expected_count: u64,
+    sources: &[SourceRef],
     evidence: &mut EvidenceMap,
     candidates: &mut BTreeMap<FactId, Vec<SymbolId>>,
     context: &GenerationContext<'_>,
@@ -1255,9 +1459,10 @@ fn read_occurrences(
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut records = Vec::new();
+    let mut records = exact_record_buffer(expected_count)?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
+        check_record_push(records.len(), expected_count)?;
         let raw_id: Vec<u8> = get(row, 0)?;
         let id = codec::fact_id(raw_id.clone())?;
         let target_kind: String = get(row, 7)?;
@@ -1320,7 +1525,8 @@ fn decode_target(
 
 fn read_relations(
     connection: &Connection,
-    sources: &BTreeMap<i64, SourceRef>,
+    expected_count: u64,
+    sources: &[SourceRef],
     evidence: &mut EvidenceMap,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<RelationRecord>, CatalogError> {
@@ -1335,9 +1541,10 @@ fn read_relations(
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut records = Vec::new();
+    let mut records = exact_record_buffer(expected_count)?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
+        check_record_push(records.len(), expected_count)?;
         let raw_id: Vec<u8> = get(row, 0)?;
         records.push(RelationRecord {
             id: codec::fact_id(raw_id.clone())?,
@@ -1357,7 +1564,8 @@ fn read_relations(
 
 fn read_coverage(
     connection: &Connection,
-    sources: &BTreeMap<i64, SourceRef>,
+    expected_count: u64,
+    sources: &[SourceRef],
     evidence: &mut EvidenceMap,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<CoverageRecord>, CatalogError> {
@@ -1372,9 +1580,10 @@ fn read_coverage(
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut records = Vec::new();
+    let mut records = exact_record_buffer(expected_count)?;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
+        check_record_push(records.len(), expected_count)?;
         let raw_id: Vec<u8> = get(row, 0)?;
         records.push(CoverageRecord {
             id: codec::fact_id(raw_id.clone())?,
@@ -1402,6 +1611,7 @@ fn read_complete_document(
     connection: &Connection,
     metadata: GenerationMetadata,
     ir_version: NormalizedIrVersion,
+    stats: GenerationStats,
     files: Vec<FileRecord>,
     entities: Vec<EntityRecord>,
     occurrences: Vec<OccurrenceRecord>,
@@ -1416,6 +1626,7 @@ fn read_complete_document(
             source_mapping_id, repository_id, generation_id, provenance_id, payload
          FROM source_mappings
          ORDER BY source_mapping_id",
+        stats.source_mappings(),
         context,
         |encoded, context| {
             decode_source_mapping_record_with_checkpoint(encoded, &IrLimits::default(), || {
@@ -1430,6 +1641,7 @@ fn read_complete_document(
             skipped_region_id, repository_id, generation_id, provenance_id, payload
          FROM skipped_regions
          ORDER BY skipped_region_id",
+        stats.skipped_regions(),
         context,
         |encoded, context| {
             decode_skipped_region_with_checkpoint(encoded, &IrLimits::default(), || {
@@ -1444,6 +1656,7 @@ fn read_complete_document(
             diagnostic_id, repository_id, generation_id, provenance_id, payload
          FROM diagnostics
          ORDER BY diagnostic_id",
+        stats.diagnostics(),
         context,
         |encoded, context| {
             decode_diagnostic_record_with_checkpoint(encoded, &IrLimits::default(), || {
@@ -1458,6 +1671,7 @@ fn read_complete_document(
             extension_id, repository_id, generation_id, provenance_id, payload
          FROM extensions
          ORDER BY extension_id",
+        stats.extensions(),
         context,
         |encoded, context| {
             decode_extension_envelope_with_checkpoint(encoded, &IrLimits::default(), || {
@@ -1519,15 +1733,19 @@ opaque_record!(ExtensionEnvelope);
 fn read_opaque_records<T: OpaqueRecord>(
     connection: &Connection,
     sql: &'static str,
+    expected_count: u64,
     context: &GenerationContext<'_>,
     decode: impl Fn(&[u8], &GenerationContext<'_>) -> Result<T, CatalogError>,
 ) -> Result<Vec<T>, CatalogError> {
     let mut statement = connection.prepare(sql).map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut records = Vec::new();
+    let mut records = exact_record_buffer(expected_count)?;
     let mut payload_bytes = 0_u64;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
+        if usize_to_u64(records.len())? >= expected_count {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
         let id = codec::fact_id(get(row, 0)?)?;
         let repository = codec::repository_id(get(row, 1)?)?;
         let generation = codec::generation_id(get(row, 2)?)?;
@@ -1548,6 +1766,9 @@ fn read_opaque_records<T: OpaqueRecord>(
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
         records.push(record);
+    }
+    if usize_to_u64(records.len())? != expected_count {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     Ok(records)
 }
@@ -1580,7 +1801,7 @@ fn take_evidence(
     owner_kind: &str,
     owner_id: Vec<u8>,
     source_ordinal: Option<i64>,
-    sources: &BTreeMap<i64, SourceRef>,
+    sources: &[SourceRef],
     evidence: &mut EvidenceMap,
 ) -> Result<FactEvidence, CatalogError> {
     Ok(FactEvidence {
@@ -1836,17 +2057,15 @@ mod tests {
     }
 
     #[test]
-    fn memory_plan_only_reduces_closed_identity_rows_and_checks_overflow() {
+    fn memory_plan_separates_closed_records_and_retains_opaque_envelopes() {
         let stats = stats(17, 1024);
         let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97).unwrap();
-        let node_bytes = u64::try_from(
-            11 * std::mem::size_of::<write::RegistryIdentity>() + 16 * std::mem::size_of::<usize>(),
-        )
-        .unwrap();
         assert_eq!(plan.physical_rows(), 17);
         assert_eq!(plan.identity_registry_rows(), 8);
-        assert_eq!(plan.record_workspace_bytes(), 9 * 4096 + 9 * node_bytes);
-        assert!(plan.record_workspace_bytes() < 17 * 4096);
+        assert!(plan.record_workspace_bytes() >= 5 * 4096);
+        assert!(
+            plan.record_workspace_bytes() >= typed_record_buffer_bytes::<FileRecord>(2).unwrap()
+        );
         let factor =
             u64::try_from(4 * (std::mem::size_of::<String>() + std::mem::size_of::<usize>()))
                 .unwrap();
@@ -1879,6 +2098,138 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), CatalogErrorKind::Corrupt);
+    }
+
+    #[test]
+    fn large_closed_record_plan_fits_without_reducing_text_or_payload_allowances() {
+        let stats = GenerationStats::new(
+            1_698,
+            562_293,
+            1_757_807,
+            562_311,
+            1_716,
+            0,
+            13_584,
+            100_000,
+            36,
+            564_256,
+            2_320_166,
+            9_452_809,
+            769_035_567,
+        )
+        .unwrap();
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636).unwrap();
+        let index_per_row = u64::try_from(
+            4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
+        )
+        .unwrap();
+        let admitted = plan
+            .materialization_bytes()
+            .checked_add(plan.physical_rows().checked_mul(index_per_row).unwrap())
+            .unwrap()
+            .checked_add(stats.text_bytes().checked_mul(6).unwrap())
+            .unwrap()
+            .checked_add(128 * 1024 * 1024)
+            .unwrap();
+        assert!(
+            admitted.checked_add(3_867_000_000).unwrap() < 16 * 1024 * 1024 * 1024,
+            "closed record and borrowed source workspaces coexist with the resident generation under the unchanged ceiling: {admitted}"
+        );
+        let oversized =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024).unwrap();
+        assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
+        assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
+    }
+
+    #[test]
+    fn gap_dense_read_plan_fits_with_unchanged_text_and_decode_allowances() {
+        let stats = GenerationStats::new(
+            6_385,
+            160_874,
+            1_523_231,
+            160_874,
+            6_385,
+            0,
+            51_080,
+            1_207_400,
+            357,
+            172_054,
+            1_623_951,
+            8_234_921,
+            1_442_569_165,
+        )
+        .unwrap();
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636).unwrap();
+        let index_per_row = u64::try_from(
+            4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
+        )
+        .unwrap();
+        let admitted = plan.materialization_bytes()
+            + plan.physical_rows() * index_per_row
+            + stats.text_bytes() * 6
+            + 192 * 1024 * 1024;
+        assert!(
+            admitted < 16 * 1024 * 1024 * 1024,
+            "complete gap details must fit alongside unchanged text, postings and sidecar charges: {admitted}"
+        );
+        assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
+        assert_eq!(plan.stats(), stats);
+        let oversized =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024).unwrap();
+        assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn source_reference_layout_rejects_unbounded_scalars_before_owned_decode() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE source_refs(ordinal,repository_id,generation_id,file_id,start_byte,end_byte,content_hash,line_start,line_end);
+             INSERT INTO source_refs VALUES (0,zeroblob(16),zeroblob(20),zeroblob(20),0,1,zeroblob(32),0,0);",
+        ).unwrap();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        validate_source_reference_layout(&connection, 1, &context).unwrap();
+        for (column, expression) in [
+            ("repository_id", "zeroblob(1048576)"),
+            ("generation_id", "'wrong scalar type'"),
+            ("file_id", "zeroblob(19)"),
+            ("content_hash", "zeroblob(33)"),
+            ("ordinal", "-1"),
+            ("start_byte", "-1"),
+            ("end_byte", "-1"),
+            ("line_end", "-1"),
+        ] {
+            connection
+                .execute_batch("SAVEPOINT corrupt_source")
+                .unwrap();
+            connection
+                .execute_batch(&format!("UPDATE source_refs SET {column}={expression}"))
+                .unwrap();
+            assert_eq!(
+                validate_source_reference_layout(&connection, 1, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+            connection
+                .execute_batch("ROLLBACK TO corrupt_source; RELEASE corrupt_source")
+                .unwrap();
+        }
+        assert_eq!(
+            codec::source_by_ordinal(&[], -1).unwrap_err().kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert_eq!(
+            codec::source_by_ordinal(&[], 0).unwrap_err().kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert_eq!(
+            validate_source_reference_layout(&connection, 1, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
     }
 
     #[test]

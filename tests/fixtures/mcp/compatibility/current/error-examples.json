@@ -247,6 +247,19 @@
         "schema_version": "1.0"
       },
       "tool": "query.batch"
+    },
+    {
+      "output": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "details": {},
+          "message": "request is invalid",
+          "next_actions": [],
+          "retryable": false
+        },
+        "schema_version": "1.1"
+      },
+      "tool": "source.find"
     }
   ]
 }

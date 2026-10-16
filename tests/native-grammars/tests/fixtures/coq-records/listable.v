@@ -1,0 +1,1 @@
+Class Listable T := { list_all : list T ; find_index : T -> nat ; cardinality := length list_all }.

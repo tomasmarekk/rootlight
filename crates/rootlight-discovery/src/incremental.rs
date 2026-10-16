@@ -343,6 +343,54 @@ pub fn discover_incremental_with_progress(
     let mut offset = 0;
     while offset < hashed_files.len() {
         cancellation.check()?;
+        let current_file = hashed_files[offset];
+        let current = candidate_scan
+            .descriptors
+            .get(&current_file)
+            .copied()
+            .ok_or(DiscoveryError::IncrementalDrift)?;
+        if current.metadata().length() > rootlight_vfs::MAX_SNAPSHOT_BYTES {
+            if retain_hashed_snapshots {
+                return Err(DiscoveryError::Vfs(VfsError::FileTooLarge {
+                    maximum: rootlight_vfs::MAX_SNAPSHOT_BYTES,
+                }));
+            }
+            let path = candidate_scan
+                .paths
+                .get(&current_file)
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            let capture = root
+                .capture_streamed_cancellable(
+                    path,
+                    current.metadata().length(),
+                    cancellation,
+                    &mut std::io::sink(),
+                )
+                .map_err(|error| match error {
+                    rootlight_vfs::StreamedSourceCaptureError::Source(error) => {
+                        DiscoveryError::Vfs(error)
+                    }
+                    _ => DiscoveryError::IncrementalDrift,
+                })?;
+            if capture.file() != current_file
+                || incremental_metadata(capture.metadata()) != current.metadata()
+            {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+            files_examined = files_examined
+                .checked_add(1)
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            bytes_examined = bytes_examined
+                .checked_add(capture.metadata().length)
+                .ok_or(DiscoveryError::IncrementalDrift)?;
+            hashes.insert(current_file, capture.content_hash());
+            observe_progress(IncrementalDiscoveryProgress {
+                files_examined,
+                bytes_examined,
+            });
+            offset += 1;
+            continue;
+        }
         let mut requests = Vec::new();
         requests
             .try_reserve_exact(MAX_SNAPSHOT_BATCH_FILES.min(hashed_files.len() - offset))
@@ -363,6 +411,9 @@ pub fn discover_incremental_with_progress(
             // The complete scan supplied the aggregate reservation. A smaller
             // capture ceiling keeps a racing file growth outside that reservation.
             let capture_limit = expected.metadata().length().max(1);
+            if capture_limit > rootlight_vfs::MAX_SNAPSHOT_BYTES {
+                break;
+            }
             let next_bytes = batch_bytes.checked_add(capture_limit);
             if !requests.is_empty()
                 && next_bytes.is_none_or(|bytes| bytes > MAX_SNAPSHOT_BATCH_BYTES)

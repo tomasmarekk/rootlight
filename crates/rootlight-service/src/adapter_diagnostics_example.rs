@@ -8,7 +8,6 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use rootlight_adapter_sdk::{
     AdapterError, AnalysisLimits, AnalysisRequest, EncodingId, GenerationBoundSnapshot, LanguageId,
@@ -118,13 +117,6 @@ fn emit(output: &mut impl Write, value: Value) -> Result<(), Box<dyn Error>> {
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
-}
-
-fn deadline() -> Result<Cancellation, Box<dyn Error>> {
-    let end = Instant::now()
-        .checked_add(Duration::from_secs(3600))
-        .ok_or("diagnostic deadline is not representable")?;
-    Ok(Cancellation::with_deadline(end))
 }
 
 fn grammar_digest(descriptor: &GrammarDescriptor) -> Result<ContentHash, Box<dyn Error>> {
@@ -419,7 +411,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if !seen.insert(input.path.as_str()) {
             return Err("saved inventory repeats a physical path".into());
         }
-        let cancellation = deadline()?;
+        let cancellation = Cancellation::new();
         let generated = matches!(input.class, InputClass::Generated);
         let mut row = json!({"schema":SCHEMA, "kind":"input", "ordinal":ordinal, "path":input.path,
             "file":input.file, "bytes":input.bytes, "content_hash":input.content_hash,

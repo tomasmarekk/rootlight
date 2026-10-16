@@ -315,7 +315,7 @@ fn cancellation_wins_before_and_between_batches() {
         Vec::new(),
         coverage.clone(),
     );
-    let before = deadline();
+    let before = Cancellation::new();
     before.cancel(CancellationReason::ClientRequest);
 
     assert_eq!(
@@ -342,7 +342,7 @@ fn cancellation_wins_before_and_between_batches() {
             &between,
             &request,
             MemoryAdmissionPolicy::default(),
-            &deadline(),
+            &Cancellation::new(),
         ),
         Err(AdapterError::Cancelled {
             reason: CancellationReason::ResourceLimit,
@@ -364,7 +364,7 @@ fn cancellation_wins_before_and_between_batches() {
 }
 
 #[test]
-fn invocation_admission_requires_deadline_and_parser_checkpoints() {
+fn invocation_admission_accepts_optional_deadlines_and_requires_parser_checkpoints() {
     let (_temporary, snapshot, source) = source_fixture();
     let limits = limits(1, IrLimits::default());
     let parse_request = parse_request(&snapshot, &source, &limits);
@@ -375,17 +375,14 @@ fn invocation_admission_requires_deadline_and_parser_checkpoints() {
         complete_coverage(source_len(&source)),
     );
 
-    assert_eq!(
-        execute_parse(
-            &provider,
-            &parse_request,
-            MemoryAdmissionPolicy::default(),
-            &Cancellation::new(),
-        ),
-        Err(AdapterError::RejectedRequest(
-            RequestError::DeadlineRequired
-        ))
-    );
+    let parsed = execute_parse(
+        &provider,
+        &parse_request,
+        MemoryAdmissionPolicy::default(),
+        &Cancellation::new(),
+    )
+    .expect("explicit cancellation admits parsing without a deadline");
+    assert_eq!(parsed.facts().len(), 1);
 
     let missing_checkpoints = MockParseProvider::new(
         parse_capabilities_with(MemoryEnforcement::AccountedInProcess, false),
@@ -413,18 +410,15 @@ fn invocation_admission_requires_deadline_and_parser_checkpoints() {
         analysis_coverage(AnalysisTier::TierC, source_len(&source)),
         0,
     );
-    assert_eq!(
-        execute_analysis(
-            &analyzer,
-            &analysis_request,
-            ExtensionSupport::default(),
-            MemoryAdmissionPolicy::default(),
-            &Cancellation::new(),
-        ),
-        Err(AdapterError::RejectedRequest(
-            RequestError::DeadlineRequired
-        ))
-    );
+    let analyzed = execute_analysis(
+        &analyzer,
+        &analysis_request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::default(),
+        &Cancellation::new(),
+    )
+    .expect("explicit cancellation admits analysis without a deadline");
+    assert_eq!(analyzed.document().files.len(), 1);
 }
 
 #[test]

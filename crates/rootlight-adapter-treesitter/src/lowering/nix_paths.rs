@@ -155,6 +155,7 @@ pub(super) fn resolve(
                     depth: 0,
                     kind: EntityKind::Variable,
                     name: path.clone(),
+                    authored_display_span: None,
                     signature: String::new(),
                     signature_evidence: None,
                     signature_span: None,

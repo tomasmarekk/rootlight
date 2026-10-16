@@ -5,15 +5,56 @@
 //! `changed_ranges` performs eager native work before Rust iterator checkpoints;
 //! hard preemption and native-allocation isolation remain responsibilities of the isolated adapter supervisor.
 
+mod c_preprocessor;
+mod cmake_command_template;
+mod cmake_header;
+mod cmake_patch;
 mod embedded;
 mod expression;
 mod fortran;
 mod fsharp_admission;
+mod jsonc;
 mod markdown;
 mod perl;
 
+pub(crate) use c_preprocessor::C_PREPROCESSOR_PROJECTION_POLICY;
+pub(crate) use cmake_command_template::CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY;
+pub(crate) use cmake_header::CMAKE_HEADER_PROJECTION_POLICY;
+pub(crate) use cmake_patch::CMAKE_PATCH_PROJECTION_POLICY;
 pub(crate) use fortran::FORTRAN_TEMPLATE_PROJECTION_POLICY;
+
+fn cmake_patch_input(
+    request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
+    max_units: usize,
+    cancellation: &Cancellation,
+) -> Result<Option<cmake_patch::CmakePatchInput>, AdapterError> {
+    if request.language().as_str() != "cmake" || !request.included_ranges().is_empty() {
+        return Ok(None);
+    }
+    let memory = request
+        .limits()
+        .max_reported_memory_bytes()
+        .checked_sub(source.owned_bytes())
+        .ok_or_else(|| provider_failure("cmake-patch-memory-limit"))?;
+    let plan =
+        cmake_patch::CmakePatchInput::new(source.as_bytes(), max_units, memory, cancellation)?;
+    if let Some(plan) = &plan {
+        require_provider_limit(
+            ResourceKind::ReportedMemoryBytes,
+            plan.owned_bytes(),
+            memory,
+        )?;
+        require_provider_limit(
+            ResourceKind::SyntaxNodes,
+            plan.required_candidate_count(),
+            max_units,
+        )?;
+    }
+    Ok(plan)
+}
 pub use fsharp_admission::{FSharpAdmissionKind, FSharpAdmissionWitness};
+pub(crate) use jsonc::JSONC_PARSE_INPUT_POLICY;
 
 #[cfg(test)]
 mod native_context_tests;
@@ -348,6 +389,8 @@ impl TreeSitterProvider {
             mut traversal,
             reuse_status,
             reuse_key,
+            c_macro_projected,
+            cache_nodes,
         } = self.prepare_tree(request, previous, edits, settings, &source, cancellation)?;
         let source_bytes = request.source().bytes();
         let extraction = if traversal.fully_traversed {
@@ -397,11 +440,11 @@ impl TreeSitterProvider {
             StreamEnd::new(sink.next_sequence(), usage),
         )
         .map_err(AdapterError::InvalidReport)?;
-        let pending = if traversal.fully_traversed {
+        let pending = if traversal.fully_traversed && !c_macro_projected {
             Some(PendingParse {
                 identity,
                 tree,
-                nodes: traversal.processed_nodes,
+                nodes: cache_nodes,
             })
         } else {
             None
@@ -442,6 +485,8 @@ impl TreeSitterProvider {
             included_ranges: Arc::clone(&included_ranges),
             settings,
             virtual_line_ending: needs_virtual_matlab_line_ending(request, source.as_bytes()),
+            cmake_header_path: request.language().as_str() == "cmake"
+                && cmake_header::is_header_path(request.source().path().as_str()),
         };
         let cached = self.resolve_previous(previous, cancellation)?;
         let previous_hash = cached
@@ -453,6 +498,7 @@ impl TreeSitterProvider {
             current_content_hash: identity.content_hash,
             family,
             native_family,
+            cmake_header_path: identity.cmake_header_path,
             grammar_version: identity.grammar_version,
             encoding: identity.encoding.clone(),
             included_ranges,
@@ -468,38 +514,58 @@ impl TreeSitterProvider {
             cancellation,
         )?;
 
-        let tree = self.parse_native_tree(
+        let parsed = self.parse_native_tree_with_input(
             request,
             &language_for(native_family),
             old_tree.as_ref(),
             settings,
             source,
             None,
+            None,
+            0,
             cancellation,
         )?;
-
+        let c_macro_projected = parsed.projection_changed || parsed.projection_unavailable;
+        if c_macro_projected && matches!(reuse_status, ReuseStatus::Reused { .. }) {
+            // Raw reuse cannot qualify a changed private input or withheld tree.
+            reuse_status = ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute);
+        }
         if matches!(reuse_status, ReuseStatus::Reused { .. }) {
             let changed_ranges = old_tree.as_ref().map_or(Ok(0), |old| {
-                count_changed_ranges(old, &tree, self.config.max_syntax_nodes(), cancellation)
+                count_changed_ranges(
+                    old,
+                    &parsed.tree,
+                    self.config.max_syntax_nodes(),
+                    cancellation,
+                )
             })?;
             reuse_status = ReuseStatus::Reused { changed_ranges };
         }
-        let traversal = inspect_tree(
-            &tree,
+        let traversal = inspect_parsed_tree(
+            &parsed,
             request,
             source,
             request.limits().max_syntax_nodes(),
             request.limits().max_syntax_depth(),
             cancellation,
         )?;
+        // A complete unchanged proof counts the one retained tree. Walk-work
+        // credit must not double its physical cache-retention estimate.
+        let cache_nodes = if parsed.projection_nodes != 0 && !c_macro_projected {
+            parsed.projection_nodes
+        } else {
+            traversal.processed_nodes
+        };
         cancellation.check()?;
         Ok(PreparedParse {
             family,
             identity,
-            tree,
+            tree: parsed.tree,
             traversal,
             reuse_status,
             reuse_key,
+            c_macro_projected,
+            cache_nodes,
         })
     }
 
@@ -600,7 +666,166 @@ impl TreeSitterProvider {
         old_tree: Option<&Tree>,
         settings: ParserSettings,
         source: &NativeSourceView<'_>,
+        context: Option<&mut NativeParseContext>,
+        cancellation: &Cancellation,
+    ) -> Result<Tree, AdapterError> {
+        self.parse_native_tree_with_input(
+            request,
+            language,
+            old_tree,
+            settings,
+            source,
+            context,
+            None,
+            0,
+            cancellation,
+        )
+        .map(|parsed| parsed.tree)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_native_tree_with_input(
+        &self,
+        request: &ParseRequest<'_>,
+        language: &tree_sitter::Language,
+        old_tree: Option<&Tree>,
+        settings: ParserSettings,
+        source: &NativeSourceView<'_>,
+        context: Option<&mut NativeParseContext>,
+        parse_input: Option<&[u8]>,
+        upstream_owned_bytes: usize,
+        cancellation: &Cancellation,
+    ) -> Result<NativeParsedTree, AdapterError> {
+        if !matches!(request.language().as_str(), "c" | "cpp") {
+            return self
+                .parse_native_tree_once(
+                    request,
+                    language,
+                    old_tree,
+                    settings,
+                    source,
+                    context,
+                    parse_input,
+                    cancellation,
+                )
+                .map(NativeParsedTree::ordinary);
+        }
+        let limit = ParseWorkLimit::from_syntax_limits(
+            request.limits().max_syntax_nodes(),
+            request.limits().max_syntax_depth(),
+        );
+        let mut local = NativeParseContext {
+            expression_envelope: None,
+            range_origin: (0, Point::new(0, 0)),
+            remaining_progress_checks: limit.max_total_progress_checks,
+        };
+        let shared = match context {
+            Some(context) => context,
+            None => &mut local,
+        };
+        let tree = self.parse_native_tree_once(
+            request,
+            language,
+            old_tree,
+            settings,
+            source,
+            Some(&mut *shared),
+            parse_input,
+            cancellation,
+        )?;
+        let recognize = if request.language().as_str() == "cpp" {
+            c_preprocessor::MacroProjection::recognize_cpp
+        } else {
+            c_preprocessor::MacroProjection::recognize
+        };
+        let outcome = recognize(
+            &tree,
+            source,
+            parse_input.unwrap_or_else(|| source.as_bytes()),
+            upstream_owned_bytes,
+            request.included_ranges().len().max(1),
+            c_preprocessor::ProjectionLimits {
+                nodes: request
+                    .limits()
+                    .max_syntax_nodes()
+                    .min(self.config.max_syntax_nodes()),
+                depth: request
+                    .limits()
+                    .max_syntax_depth()
+                    .min(self.config.max_syntax_depth()),
+                owned_bytes: request.limits().max_reported_memory_bytes(),
+            },
+            cancellation,
+        )?;
+        let plan = match outcome {
+            c_preprocessor::ProjectionOutcome::Projected(plan) => plan,
+            c_preprocessor::ProjectionOutcome::Unchanged {
+                work_nodes,
+                work_depth,
+            } => {
+                return Ok(NativeParsedTree {
+                    projection_nodes: work_nodes,
+                    projection_depth: work_depth,
+                    ..NativeParsedTree::ordinary(tree)
+                });
+            }
+            c_preprocessor::ProjectionOutcome::Unavailable {
+                work_nodes,
+                work_depth,
+            } => {
+                return Ok(NativeParsedTree {
+                    projection_nodes: work_nodes,
+                    projection_depth: work_depth,
+                    projection_unavailable: true,
+                    ..NativeParsedTree::ordinary(tree)
+                });
+            }
+            c_preprocessor::ProjectionOutcome::Limited {
+                work_nodes,
+                work_depth,
+                limit,
+            } => {
+                return Ok(NativeParsedTree {
+                    projection_nodes: work_nodes,
+                    projection_depth: work_depth,
+                    proof_limit: Some(limit),
+                    ..NativeParsedTree::ordinary(tree)
+                });
+            }
+        };
+        // Retain only the source-proved descriptor result before allocating the
+        // final native tree; raw and projected trees cannot share edit identity.
+        drop(tree);
+        let tree = self.parse_native_tree_once(
+            request,
+            language,
+            None,
+            settings,
+            source,
+            Some(shared),
+            Some(plan.as_bytes()),
+            cancellation,
+        )?;
+        Ok(NativeParsedTree {
+            tree,
+            projection_nodes: plan.work_nodes,
+            projection_depth: plan.work_depth,
+            projection_unavailable: false,
+            projection_changed: true,
+            proof_limit: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_native_tree_once(
+        &self,
+        request: &ParseRequest<'_>,
+        language: &tree_sitter::Language,
+        old_tree: Option<&Tree>,
+        settings: ParserSettings,
+        source: &NativeSourceView<'_>,
         mut context: Option<&mut NativeParseContext>,
+        parse_input: Option<&[u8]>,
         cancellation: &Cancellation,
     ) -> Result<Tree, AdapterError> {
         cancellation.check()?;
@@ -615,6 +840,59 @@ impl TreeSitterProvider {
         {
             return Err(provider_failure(parse_work_limit.failure_code));
         }
+        let patch_input = if parse_input.is_none() {
+            cmake_patch_input(
+                request,
+                source,
+                request.limits().max_syntax_nodes(),
+                cancellation,
+            )?
+        } else {
+            None
+        };
+        let header_plan = if patch_input.is_none()
+            && parse_input.is_none()
+            && request.language().as_str() == "cmake"
+            && request.included_ranges().is_empty()
+        {
+            cmake_header::HeaderPlan::recognize(
+                request.source().path().as_str(),
+                source,
+                request.limits(),
+                cancellation,
+            )?
+        } else {
+            None
+        };
+        let header_input = header_plan
+            .as_ref()
+            .map(|plan| {
+                plan.parse_bytes(
+                    source,
+                    true,
+                    request.limits().max_reported_memory_bytes(),
+                    cancellation,
+                )
+            })
+            .transpose()?;
+        let command_template = if patch_input.is_none()
+            && header_plan.is_none()
+            && parse_input.is_none()
+            && request.language().as_str() == "cmake"
+            && request.included_ranges().is_empty()
+        {
+            cmake_command_template::CommandTemplatePlan::recognize(
+                source,
+                request.limits(),
+                cancellation,
+            )?
+        } else {
+            None
+        };
+        let command_template_input = command_template
+            .as_ref()
+            .map(|plan| plan.parse_bytes(source, request.limits(), cancellation))
+            .transpose()?;
         let fortran_input = if request.language().as_str() == "fortran" && context.is_none() {
             Some(fortran::FortranParseInput::new(
                 source,
@@ -624,9 +902,19 @@ impl TreeSitterProvider {
         } else {
             None
         };
-        let source_bytes = fortran_input
-            .as_ref()
-            .map_or_else(|| source.as_bytes(), fortran::FortranParseInput::as_bytes);
+        let source_bytes = parse_input
+            .or_else(|| {
+                patch_input
+                    .as_ref()
+                    .map(cmake_patch::CmakePatchInput::parse_bytes)
+            })
+            .or(header_input.as_deref())
+            .or(command_template_input.as_deref())
+            .unwrap_or_else(|| {
+                fortran_input
+                    .as_ref()
+                    .map_or_else(|| source.as_bytes(), fortran::FortranParseInput::as_bytes)
+            });
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
         let parser = lease.parser_mut().map_err(map_pool_error)?;
         parser
@@ -639,6 +927,19 @@ impl TreeSitterProvider {
             context.as_ref().map(|context| context.range_origin),
             cancellation,
         )?;
+        let jsonc_input = if request.language().as_str() == "jsonc" {
+            Some(jsonc::JsoncParseInput::new(
+                source,
+                &included_ranges,
+                request.limits().max_reported_memory_bytes(),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let source_bytes = jsonc_input
+            .as_ref()
+            .map_or(source_bytes, jsonc::JsoncParseInput::as_bytes);
         parser
             .set_included_ranges(&included_ranges)
             .map_err(|_| provider_failure("included-ranges"))?;
@@ -718,7 +1019,7 @@ impl TreeSitterProvider {
     ) -> Result<ExtractionReport, AdapterError> {
         cancellation.check()?;
         let budget = sink.remaining_budget();
-        let max_facts = pre_extraction_fact_limit(budget)?;
+        let max_facts = pre_extraction_fact_limit(budget);
         let pack = self.query_packs.get_for_source(
             family,
             request.source().path().as_str(),
@@ -751,7 +1052,7 @@ impl TreeSitterProvider {
         }
         let normalization_fact_limit = extraction
             .fact_limit
-            .min(pre_extraction_fact_limit(sink.remaining_budget())?);
+            .min(pre_extraction_fact_limit(sink.remaining_budget()));
         let mut normalized = prepare_query_candidates(
             extraction.candidates,
             request,
@@ -883,11 +1184,35 @@ struct RawContinuation {
     reuse_key: ParseReuseKey,
 }
 
+struct NativeParsedTree {
+    tree: Tree,
+    projection_nodes: usize,
+    projection_depth: usize,
+    projection_unavailable: bool,
+    projection_changed: bool,
+    proof_limit: Option<c_preprocessor::ProofLimit>,
+}
+
+impl NativeParsedTree {
+    fn ordinary(tree: Tree) -> Self {
+        Self {
+            tree,
+            projection_nodes: 0,
+            projection_depth: 0,
+            projection_unavailable: false,
+            projection_changed: false,
+            proof_limit: None,
+        }
+    }
+}
+
 struct PreparedParse {
     family: GrammarFamily,
     identity: ParseIdentity,
     tree: Tree,
     traversal: TraversalReport,
+    c_macro_projected: bool,
+    cache_nodes: usize,
     reuse_status: ReuseStatus,
     reuse_key: ParseReuseKey,
 }
@@ -1024,7 +1349,11 @@ impl ParseCache {
         self.entries.push_back(CachedParse {
             entry_id,
             projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
+            c_preprocessor_projection_policy: C_PREPROCESSOR_PROJECTION_POLICY,
             fortran_projection_policy: FORTRAN_TEMPLATE_PROJECTION_POLICY,
+            cmake_header_projection_policy: CMAKE_HEADER_PROJECTION_POLICY,
+            cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
+            cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             identity,
             source,
             tree: Some(tree.clone()),
@@ -1054,7 +1383,11 @@ impl ParseCache {
 struct CachedParse {
     entry_id: u64,
     projection_policy: &'static str,
+    c_preprocessor_projection_policy: &'static str,
     fortran_projection_policy: &'static str,
+    cmake_header_projection_policy: &'static str,
+    cmake_patch_projection_policy: &'static str,
+    cmake_command_template_projection_policy: &'static str,
     identity: ParseIdentity,
     source: Arc<Vec<u8>>,
     tree: Option<Tree>,
@@ -1067,7 +1400,11 @@ impl CachedParse {
         Self {
             entry_id: 0,
             projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
+            c_preprocessor_projection_policy: C_PREPROCESSOR_PROJECTION_POLICY,
             fortran_projection_policy: FORTRAN_TEMPLATE_PROJECTION_POLICY,
+            cmake_header_projection_policy: CMAKE_HEADER_PROJECTION_POLICY,
+            cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
+            cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             identity: invalid_identity(),
             source: Arc::new(Vec::new()),
             tree: None,
@@ -1080,7 +1417,11 @@ impl CachedParse {
         Self {
             entry_id: self.entry_id,
             projection_policy: self.projection_policy,
+            c_preprocessor_projection_policy: self.c_preprocessor_projection_policy,
             fortran_projection_policy: self.fortran_projection_policy,
+            cmake_header_projection_policy: self.cmake_header_projection_policy,
+            cmake_patch_projection_policy: self.cmake_patch_projection_policy,
+            cmake_command_template_projection_policy: self.cmake_command_template_projection_policy,
             identity: self.identity.clone(),
             source: self.source.clone(),
             tree: self.tree.clone(),
@@ -1099,6 +1440,7 @@ fn invalid_identity() -> ParseIdentity {
         included_ranges: Arc::new(Vec::new()),
         settings: ParserSettings::new(1).expect("hard-coded parser setting is nonzero"),
         virtual_line_ending: false,
+        cmake_header_path: false,
     }
 }
 
@@ -1180,8 +1522,13 @@ fn prepare_reuse(
     if let Some(reason) = cached.invalidation {
         return Ok((None, ReuseStatus::Invalidated(reason)));
     }
-    if cached.projection_policy != NATIVE_SOURCE_PROJECTION_POLICY
+    if cached.c_preprocessor_projection_policy != C_PREPROCESSOR_PROJECTION_POLICY
+        || cached.projection_policy != NATIVE_SOURCE_PROJECTION_POLICY
         || cached.fortran_projection_policy != FORTRAN_TEMPLATE_PROJECTION_POLICY
+        || cached.cmake_header_projection_policy != CMAKE_HEADER_PROJECTION_POLICY
+        || cached.cmake_patch_projection_policy != CMAKE_PATCH_PROJECTION_POLICY
+        || cached.cmake_command_template_projection_policy
+            != CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY
     {
         return Ok((
             None,
@@ -1190,6 +1537,14 @@ fn prepare_reuse(
     }
     if cached.identity.family != current.family {
         return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Language)));
+    }
+    if cached.identity.cmake_header_path != current.cmake_header_path {
+        // Identical bytes may select different private inputs on .h.cmake paths.
+        // A previous tree is reusable only within the same projection route.
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
     }
     if cached.identity.grammar_version != current.grammar_version {
         return Ok((
@@ -1230,6 +1585,28 @@ fn prepare_reuse(
     {
         // Physical edits do not describe changes to a template parse view:
         // one marker may change the interpretation of later physical bytes.
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::CMake && !edits.is_empty() {
+        // Changing one template or header marker may alter the parse view of
+        // later bytes. Physical edits cannot prove equivalent projected edits.
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Jsonc
+        && !edits.is_empty()
+        && (!current.included_ranges.is_empty()
+            || jsonc::needs_projection(current_source, cancellation)?
+            || jsonc::needs_projection(&cached.source, cancellation)?)
+    {
+        // A comma or comment edit can change the parser-only mask beyond the
+        // physical edit range. Fragmented input also omits host lexical state.
+        // Rebuild rather than apply incomplete tree edits.
         return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
@@ -2969,20 +3346,19 @@ fn emit_fact_plan(
     Ok(())
 }
 
-fn pre_extraction_fact_limit(budget: RemainingBudget) -> Result<usize, AdapterError> {
+fn pre_extraction_fact_limit(budget: RemainingBudget) -> usize {
     let remaining = budget.remaining();
     let batch = budget.batch();
     let facts_per_batch = batch
         .max_records()
         .min(batch.max_output_bytes() / MIN_SYNTAX_FACT_OUTPUT_BYTES);
-    let batched_facts = remaining
-        .batches()
-        .checked_mul(facts_per_batch)
-        .ok_or_else(|| provider_failure("query-fact-accounting"))?;
-    Ok(batched_facts
+    // This is theoretical capacity; finite remaining credit bounds the result
+    // even when the configured batch allowance has no practical ceiling.
+    let batched_facts = remaining.batches().saturating_mul(facts_per_batch);
+    batched_facts
         .min(remaining.records())
         .min(remaining.output_bytes() / MIN_SYNTAX_FACT_OUTPUT_BYTES)
-        .min(remaining.string_bytes() / MIN_SYNTAX_KIND_BYTES))
+        .min(remaining.string_bytes() / MIN_SYNTAX_KIND_BYTES)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3086,6 +3462,30 @@ enum PrimaryDiagnostic {
     NodeLimit,
     DepthLimit,
     ErrorRecovery { start: usize, end: usize },
+    CProjectionUnavailable { start: usize, end: usize },
+}
+
+fn mark_c_projection_unavailable(
+    traversal: &mut TraversalReport,
+    request: &ParseRequest<'_>,
+) -> Result<(), AdapterError> {
+    let full = request.source().source_ref().span();
+    let start = request
+        .included_ranges()
+        .first()
+        .map_or(full.start_byte(), |range| range.span().start_byte());
+    let end = request
+        .included_ranges()
+        .last()
+        .map_or(full.end_byte(), |range| range.span().end_byte());
+    let start = usize::try_from(start).map_err(|_| provider_failure("c-projection-source-span"))?;
+    let end = usize::try_from(end).map_err(|_| provider_failure("c-projection-source-span"))?;
+    traversal.primary_diagnostic = Some(PrimaryDiagnostic::CProjectionUnavailable { start, end });
+    traversal.coverage = CoverageStatus::Unknown;
+    traversal.covered_source_bytes = 0;
+    traversal.skipped_regions = 1;
+    traversal.fully_traversed = false;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -3095,6 +3495,52 @@ struct SyntaxTraversal {
     error_span: Option<(usize, usize)>,
     limited_nodes: bool,
     limited_depth: bool,
+}
+
+fn inspect_parsed_tree(
+    parsed: &NativeParsedTree,
+    request: &ParseRequest<'_>,
+    source: &NativeSourceView<'_>,
+    max_nodes: usize,
+    max_depth: usize,
+    cancellation: &Cancellation,
+) -> Result<TraversalReport, AdapterError> {
+    cancellation.check()?;
+    if parsed.projection_unavailable || parsed.proof_limit.is_some() {
+        // A stopped proof already visited the admitted raw tree partition.
+        // Re-inspecting it would spend the same credit twice without producing
+        // any safe facts for this unavailable or limited result.
+        let mut report = TraversalReport {
+            processed_nodes: parsed.projection_nodes,
+            max_depth: parsed.projection_depth.min(max_depth),
+            covered_source_bytes: 0,
+            skipped_regions: 1,
+            coverage: CoverageStatus::Bounded,
+            primary_diagnostic: parsed.proof_limit.map(|limit| match limit {
+                c_preprocessor::ProofLimit::Nodes => PrimaryDiagnostic::NodeLimit,
+                c_preprocessor::ProofLimit::Depth => PrimaryDiagnostic::DepthLimit,
+            }),
+            fully_traversed: false,
+        };
+        if parsed.projection_unavailable {
+            mark_c_projection_unavailable(&mut report, request)?;
+        }
+        return Ok(report);
+    }
+    let mut report = inspect_tree(
+        &parsed.tree,
+        request,
+        source,
+        max_nodes.saturating_sub(parsed.projection_nodes),
+        max_depth,
+        cancellation,
+    )?;
+    report.processed_nodes = report
+        .processed_nodes
+        .checked_add(parsed.projection_nodes)
+        .ok_or(SinkError::AccountingOverflow)?;
+    report.max_depth = report.max_depth.max(parsed.projection_depth);
+    Ok(report)
 }
 
 fn inspect_tree(
@@ -3116,6 +3562,15 @@ fn inspect_tree(
         limited_nodes,
         limited_depth,
     } = traversal;
+    let error_span = if request.language().as_str() == "jsonc"
+        && error_span.is_none()
+        && !limited_nodes
+        && !limited_depth
+    {
+        jsonc::invalid_document_span(tree, cancellation)?
+    } else {
+        error_span
+    };
     let source_len = request.source().bytes().len();
     let requested_covered_bytes = if request.included_ranges().is_empty() {
         source_len
@@ -3327,6 +3782,15 @@ fn emit_primary_diagnostic(
         ),
         PrimaryDiagnostic::ErrorRecovery { start, end } => (
             "syntax-error-recovery",
+            source_ref_for_span(request.source().source_ref(), start, end),
+            CoverageStatus::Unknown,
+        ),
+        PrimaryDiagnostic::CProjectionUnavailable { start, end } => (
+            if request.language().as_str() == "cpp" {
+                "cpp-preprocessor-replacement-not-analyzed"
+            } else {
+                "c-preprocessor-replacement-not-analyzed"
+            },
             source_ref_for_span(request.source().source_ref(), start, end),
             CoverageStatus::Unknown,
         ),
@@ -3556,8 +4020,8 @@ mod tests {
         .unwrap();
         let provider = TreeSitterProvider::with_query_packs(config, registry).unwrap();
         assert_eq!(registry.initialized_count(), 0);
-        assert_eq!(provider.registry.descriptors().len(), 55);
-        assert_eq!(provider.capabilities.languages().len(), 55);
+        assert_eq!(provider.registry.descriptors().len(), 63);
+        assert_eq!(provider.capabilities.languages().len(), 63);
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
         let debug = format!("{provider:?}");
@@ -3733,7 +4197,11 @@ mod tests {
         let cached = CachedParse {
             entry_id: 1,
             projection_policy: NATIVE_SOURCE_PROJECTION_POLICY,
+            c_preprocessor_projection_policy: C_PREPROCESSOR_PROJECTION_POLICY,
             fortran_projection_policy: FORTRAN_TEMPLATE_PROJECTION_POLICY,
+            cmake_header_projection_policy: CMAKE_HEADER_PROJECTION_POLICY,
+            cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
+            cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             identity: base.clone(),
             source: Arc::new(b"fn one() {}".to_vec()),
             tree: Some(tree),
@@ -3747,9 +4215,23 @@ mod tests {
             base.clone(),
             ReuseInvalidation::FrontendRoute,
         );
+        let mut old_c = cached.clone_for_reuse();
+        old_c.c_preprocessor_projection_policy =
+            "rootlight.treesitter.c-preprocessor-replacement-input/0";
+        assert_invalidated(&old_c, base.clone(), ReuseInvalidation::FrontendRoute);
+        let mut old_header = cached.clone_for_reuse();
+        old_header.cmake_header_projection_policy = "rootlight.treesitter.cmake-header-template/0";
+        assert_invalidated(&old_header, base.clone(), ReuseInvalidation::FrontendRoute);
+        let mut old_patch = cached.clone_for_reuse();
+        old_patch.cmake_patch_projection_policy =
+            "rootlight.treesitter.cmake-physical-unified-patch/0";
+        assert_invalidated(&old_patch, base.clone(), ReuseInvalidation::FrontendRoute);
         let mut changed = base.clone();
         changed.family = GrammarFamily::Python;
         assert_invalidated(&cached, changed, ReuseInvalidation::Language);
+        let mut changed = base.clone();
+        changed.cmake_header_path = true;
+        assert_invalidated(&cached, changed, ReuseInvalidation::FrontendRoute);
         let mut changed = base.clone();
         changed.grammar_version = "other";
         assert_invalidated(&cached, changed, ReuseInvalidation::GrammarVersion);
@@ -3993,11 +4475,24 @@ mod tests {
         );
         let sink = rootlight_adapter_sdk::BoundedSyntaxSink::new(source, stream, 64);
 
-        assert_eq!(
-            pre_extraction_fact_limit(sink.remaining_budget())
-                .expect("fact capacity is representable"),
-            1
-        );
+        assert_eq!(pre_extraction_fact_limit(sink.remaining_budget()), 1);
+    }
+
+    #[test]
+    fn pre_extraction_limit_with_unbounded_batches_preserves_finite_credit() {
+        for (records, output_bytes, string_bytes, expected) in
+            [(3, 512, 512, 3), (8, 130, 512, 2), (8, 512, 1, 1)]
+        {
+            let sink = exact_admission_sink_with_records(
+                records,
+                usize::MAX,
+                output_bytes,
+                string_bytes,
+                512.min(output_bytes),
+            );
+            assert_eq!(pre_extraction_fact_limit(sink.remaining_budget()), expected);
+        }
+        assert_exact_admission_preserves_late_definition(usize::MAX, 150, 512, 150);
     }
 
     fn exact_admission_facts() -> [SyntaxFact; 2] {
@@ -4137,7 +4632,7 @@ mod tests {
         );
         let cancellation = Cancellation::new();
         assert_eq!(
-            pre_extraction_fact_limit(sink.remaining_budget()).unwrap(),
+            pre_extraction_fact_limit(sink.remaining_budget()),
             2,
             "both candidates reach exact planning before any coarse pruning"
         );

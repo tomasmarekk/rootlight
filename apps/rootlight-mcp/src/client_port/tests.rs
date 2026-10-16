@@ -1298,9 +1298,49 @@ async fn native_port_maps_all_five_calls_without_blocking_adapters() {
             ..
         } if *observed == generation()
             && references.len() == 1
-            && options.timeout().is_some()
-            && options.effective_budget().is_some()
+            && options.timeout().is_none()
+            && options.effective_budget().is_some_and(|budget|
+                budget.source_verification_duration_explicit() == Some(false))
     ));
+}
+
+#[tokio::test]
+async fn native_port_source_read_preserves_explicit_default_duration() {
+    let fake = FakeAsyncClient::default();
+    let calls = Arc::clone(&fake.calls);
+    let executor =
+        FirstSliceToolExecutor::new(native_port_with_client(fake)).expect("executor initializes");
+    let source_ref = rootlight_ir::SourceRef::new(
+        repository(),
+        generation(),
+        rootlight_ir::SourceSpan::new(file(), 0, 0).unwrap(),
+        content_hash(),
+        Some(rootlight_ir::LineRange::new(1, 1).unwrap()),
+    );
+    let output: ToolResponse<ReadEnvelope<SourceReadDataV1_2>> = execute(
+        &executor,
+        VerticalTool::SourceRead,
+        json!({
+            "repository": {"repository_id": repository()},
+            "generation": generation(),
+            "references": [{"source_ref": source_ref}],
+            "budget": {"timeout_ms": 2000}
+        }),
+    )
+    .await;
+    assert!(matches!(output, ToolResponse::Success(_)));
+
+    let calls = calls.lock().expect("fake call recorder is not poisoned");
+    let [Call::SourceRead { options, .. }] = calls.as_slice() else {
+        panic!("one source request reaches the native client");
+    };
+    let budget = options.effective_budget().unwrap();
+    assert_eq!(budget.source_verification_duration_explicit(), Some(true));
+    assert_eq!(budget.limits().duration, std::time::Duration::from_secs(2));
+    assert_eq!(
+        options.timeout().unwrap().duration(),
+        std::time::Duration::from_secs(3)
+    );
 }
 
 #[tokio::test]

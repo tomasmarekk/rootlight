@@ -14,6 +14,7 @@ mod groovy;
 mod model;
 mod perl;
 mod quality;
+mod rust;
 
 pub use classic::{
     ClassicProjectSource, NativeClassicMember, NativeClassicMemberKind, NativeClassicProject,

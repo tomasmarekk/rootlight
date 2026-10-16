@@ -492,7 +492,7 @@ where
             }
         }
         let signatures_incomplete = hydrate_locate_signatures(
-            self.generation.document(),
+            self.generation,
             &mut located,
             &mut tracker,
             &control,
@@ -590,9 +590,9 @@ where
             operators: vec![
                 QueryOperator::GenerationPin,
                 QueryOperator::EntityLookup,
-                QueryOperator::RelationScan,
                 QueryOperator::OccurrenceScan,
                 QueryOperator::LexicalEvidenceScan,
+                QueryOperator::RelationScan,
                 QueryOperator::ProvenanceLookup,
                 QueryOperator::CoverageProjection,
                 QueryOperator::OutputBudget,
@@ -647,37 +647,9 @@ where
         )?)?;
 
         let mut limiting_resources = Vec::new();
-        let mut relations = Vec::new();
-        for &ordinal in self.generation.relation_ordinals_for_symbol(plan.symbol) {
-            control.check()?;
-            let relation = document
-                .relations
-                .get(ordinal)
-                .ok_or(QueryError::IndexDrift)?;
-            if !tracker.can_add(QueryResource::Rows, 1) {
-                record_limit(&mut limiting_resources, QueryResource::Rows)?;
-                break;
-            }
-            tracker.add_rows(1)?;
-            if !tracker.can_add(QueryResource::Edges, 1) {
-                record_limit(&mut limiting_resources, QueryResource::Edges)?;
-                break;
-            }
-            tracker.add_edges(1)?;
-            if !tracker.can_add(QueryResource::Results, 1) {
-                record_limit(&mut limiting_resources, QueryResource::Results)?;
-                break;
-            }
-            let bytes = serialized_size(relation, u64::MAX, &control)?;
-            if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
-                record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
-                break;
-            }
-            tracker.add_results(1)?;
-            tracker.add_memory(bytes)?;
-            try_push(&mut relations, relation.clone())?;
-        }
-
+        // Direct source evidence must not disappear behind a large adjacency
+        // list. Relations have their own paged API; this summary stays partial
+        // when the caller's budget cannot fit every relevant record.
         let mut occurrences = Vec::new();
         if !limits_optional_results(&limiting_resources) {
             for &ordinal in self.generation.occurrence_ordinals_for_symbol(plan.symbol) {
@@ -718,6 +690,38 @@ where
                 &mut limiting_resources,
             )?
         };
+        let mut relations = Vec::new();
+        if !limits_optional_results(&limiting_resources) {
+            for &ordinal in self.generation.relation_ordinals_for_symbol(plan.symbol) {
+                control.check()?;
+                let relation = document
+                    .relations
+                    .get(ordinal)
+                    .ok_or(QueryError::IndexDrift)?;
+                if !tracker.can_add(QueryResource::Rows, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Rows)?;
+                    break;
+                }
+                tracker.add_rows(1)?;
+                if !tracker.can_add(QueryResource::Edges, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Edges)?;
+                    break;
+                }
+                tracker.add_edges(1)?;
+                if !tracker.can_add(QueryResource::Results, 1) {
+                    record_limit(&mut limiting_resources, QueryResource::Results)?;
+                    break;
+                }
+                let bytes = serialized_size(relation, u64::MAX, &control)?;
+                if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
+                    record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
+                    break;
+                }
+                tracker.add_results(1)?;
+                tracker.add_memory(bytes)?;
+                try_push(&mut relations, relation.clone())?;
+            }
+        }
         let symbols = BTreeSet::from([plan.symbol]);
         let files = entity
             .evidence
@@ -2632,7 +2636,7 @@ where
         budget: QueryBudget,
     ) -> Result<SourceTextPrefixReadPlan, QueryError> {
         budget.validate()?;
-        source_budget.max_duration = source_budget.max_duration.min(budget.max_duration);
+        intersect_source_duration(&mut source_budget, budget);
         source_budget.validate()?;
         if maximum_text_bytes_per_chunk == 0
             || maximum_text_bytes_per_chunk > rootlight_source::HARD_MAX_SOURCE_BYTES
@@ -2672,7 +2676,7 @@ where
         chunk_memory_bytes: usize,
     ) -> Result<SourceReadPlan, QueryError> {
         budget.validate()?;
-        source_budget.max_duration = source_budget.max_duration.min(budget.max_duration);
+        intersect_source_duration(&mut source_budget, budget);
         source_budget.validate()?;
         if references.is_empty() || references.len() > source_budget.max_selectors {
             return Err(QueryError::Source(SourceError::SelectorLimit));
@@ -2784,7 +2788,8 @@ where
     ) -> Result<QueryResponse<SourceReadQueryResult>, QueryError> {
         self.require_generation(plan.explanation.generation)?;
         let started = Instant::now();
-        let control = QueryControl::new(cancellation, plan.budget.max_duration);
+        let control =
+            QueryControl::for_source(cancellation, source, plan.budget, plan.source_budget);
         control.check()?;
         let result = source.read(
             &plan.references,
@@ -2864,7 +2869,8 @@ where
         let base = &plan.base;
         self.require_generation(base.explanation.generation)?;
         let started = Instant::now();
-        let control = QueryControl::new(cancellation, base.budget.max_duration);
+        let control =
+            QueryControl::for_source(cancellation, source, base.budget, base.source_budget);
         control.check()?;
         let result = source.read_lossless_text(
             &base.references,
@@ -2890,7 +2896,8 @@ where
         let base = &plan.base.base;
         self.require_generation(base.explanation.generation)?;
         let started = Instant::now();
-        let control = QueryControl::new(cancellation, base.budget.max_duration);
+        let control =
+            QueryControl::for_source(cancellation, source, base.budget, base.source_budget);
         control.check()?;
         let (result, prefix_truncated) = source
             .read_lossless_text_prefix_with_options(
@@ -2992,7 +2999,7 @@ where
 }
 
 fn hydrate_locate_signatures(
-    document: &NormalizedIrDocument,
+    generation: &GenerationSnapshot,
     hits: &mut [LocateHit],
     tracker: &mut UsageTracker,
     control: &QueryControl<'_>,
@@ -3005,7 +3012,8 @@ fn hydrate_locate_signatures(
     let lookup_bytes = symbol_count
         .checked_mul(
             crate::projection::RetainedSignatureIndex::entry_bytes()
-                + std::mem::size_of::<(usize, rootlight_ir::LexicalEvidenceV1)>(),
+                + std::mem::size_of::<(usize, rootlight_ir::LexicalEvidenceV1)>()
+                + std::mem::size_of::<Reverse<(usize, usize, usize)>>(),
         )
         .ok_or(QueryError::MemoryUnavailable)?;
     let lookup_bytes = checked_usize_to_u64(lookup_bytes)?;
@@ -3018,8 +3026,42 @@ fn hydrate_locate_signatures(
         hits.iter().filter_map(|hit| hit.symbol),
         symbol_count,
     )?;
-    for envelope in &document.extensions {
+    let mut pending = BinaryHeap::new();
+    pending
+        .try_reserve_exact(symbol_count)
+        .map_err(|_| QueryError::MemoryUnavailable)?;
+    for (index, hit) in hits.iter().enumerate() {
         control.check()?;
+        if let Some(symbol) = hit.symbol
+            && let Some(&ordinal) = generation.lexical_ordinals_for_symbol(symbol).first()
+        {
+            pending.push(Reverse((ordinal, index, 0_usize)));
+        }
+    }
+    let document = generation.document();
+    let mut previous = None;
+    let mut scratch_high_water = 0;
+    // Symbol postings retain every relevant envelope, including conflicts.
+    // Merge shared batches once without buffering unrelated generation evidence.
+    while let Some(Reverse((ordinal, index, position))) = pending.pop() {
+        control.check()?;
+        let symbol = hits
+            .get(index)
+            .and_then(|hit| hit.symbol)
+            .ok_or(QueryError::IndexDrift)?;
+        let ordinals = generation.lexical_ordinals_for_symbol(symbol);
+        let next_position = position.checked_add(1).ok_or(QueryError::IndexDrift)?;
+        if let Some(&next_ordinal) = ordinals.get(next_position) {
+            pending.push(Reverse((next_ordinal, index, next_position)));
+        }
+        if previous == Some(ordinal) {
+            continue;
+        }
+        previous = Some(ordinal);
+        let envelope = document
+            .extensions
+            .get(ordinal)
+            .ok_or(QueryError::IndexDrift)?;
         if !tracker.can_add(QueryResource::Rows, 1) {
             record_limit(limiting_resources, QueryResource::Rows)?;
             return Ok(true);
@@ -3029,11 +3071,14 @@ fn hydrate_locate_signatures(
             continue;
         }
         let scratch = signature_decode_bytes(envelope)?;
-        if !tracker.can_add(QueryResource::MemoryBytes, scratch) {
-            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        if !reserve_signature_scratch(
+            tracker,
+            scratch,
+            &mut scratch_high_water,
+            limiting_resources,
+        )? {
             return Ok(true);
         }
-        tracker.add_memory(scratch)?;
         let rows = signature_decode_rows(envelope);
         if !tracker.can_add(QueryResource::Rows, rows) {
             record_limit(limiting_resources, QueryResource::Rows)?;
@@ -3054,8 +3099,12 @@ fn hydrate_locate_signatures(
             match event {
                 crate::projection::SignatureVisit::Workspace(envelope) => {
                     let scratch = signature_decode_bytes(envelope)?;
-                    if !tracker.can_add(QueryResource::MemoryBytes, scratch) {
-                        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+                    if !reserve_signature_scratch(
+                        tracker,
+                        scratch,
+                        &mut scratch_high_water,
+                        limiting_resources,
+                    )? {
                         return Ok(false);
                     }
                     let rows = signature_decode_rows(envelope);
@@ -3063,7 +3112,6 @@ fn hydrate_locate_signatures(
                         record_limit(limiting_resources, QueryResource::Rows)?;
                         return Ok(false);
                     }
-                    tracker.add_memory(scratch)?;
                     tracker.add_rows(rows)?;
                 }
                 crate::projection::SignatureVisit::Evidence(symbol, Some(evidence)) => {
@@ -3111,6 +3159,24 @@ fn hydrate_locate_signatures(
         hits.get_mut(index).ok_or(QueryError::IndexDrift)?.signature = Some(evidence);
     }
     Ok(false)
+}
+
+fn reserve_signature_scratch(
+    tracker: &mut UsageTracker,
+    required: u64,
+    high_water: &mut u64,
+    limiting_resources: &mut Vec<QueryResource>,
+) -> Result<bool, QueryError> {
+    // Observe and visit release each decoded workspace before the next one.
+    // Keep its largest reservation alongside all separately retained evidence.
+    let additional = required.saturating_sub(*high_water);
+    if !tracker.can_add(QueryResource::MemoryBytes, additional) {
+        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        return Ok(false);
+    }
+    tracker.add_memory(additional)?;
+    *high_water = (*high_water).max(required);
+    Ok(true)
 }
 
 fn signature_decode_bytes(envelope: &rootlight_ir::ExtensionEnvelope) -> Result<u64, QueryError> {
@@ -3172,6 +3238,7 @@ fn collect_symbol_signature(
     tracker.add_memory(lookup_bytes)?;
     let mut signatures =
         crate::projection::RetainedSignatureIndex::new(std::iter::once(symbol), 1)?;
+    let mut scratch_high_water = 0;
     for &ordinal in ordinals {
         control.check()?;
         let envelope = document
@@ -3189,11 +3256,10 @@ fn collect_symbol_signature(
         // Reserve decode and canonical-validation scratch before allocating.
         // The generation has already admitted each bounded envelope payload.
         let bytes = signature_decode_bytes(envelope)?;
-        if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
-            record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+        if !reserve_signature_scratch(tracker, bytes, &mut scratch_high_water, limiting_resources)?
+        {
             return Ok(None);
         }
-        tracker.add_memory(bytes)?;
         let rows = signature_decode_rows(envelope);
         if !tracker.can_add(QueryResource::Rows, rows) {
             record_limit(limiting_resources, QueryResource::Rows)?;
@@ -3209,8 +3275,12 @@ fn collect_symbol_signature(
             match event {
                 crate::projection::SignatureVisit::Workspace(envelope) => {
                     let bytes = signature_decode_bytes(envelope)?;
-                    if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
-                        record_limit(limiting_resources, QueryResource::MemoryBytes)?;
+                    if !reserve_signature_scratch(
+                        tracker,
+                        bytes,
+                        &mut scratch_high_water,
+                        limiting_resources,
+                    )? {
                         return Ok(false);
                     }
                     let rows = signature_decode_rows(envelope);
@@ -3218,7 +3288,6 @@ fn collect_symbol_signature(
                         record_limit(limiting_resources, QueryResource::Rows)?;
                         return Ok(false);
                     }
-                    tracker.add_memory(bytes)?;
                     tracker.add_rows(rows)?;
                 }
                 crate::projection::SignatureVisit::Evidence(subject, evidence) => {
@@ -11504,9 +11573,20 @@ impl UsageTracker {
     }
 }
 
+fn intersect_source_duration(source: &mut SourceBudget, query: QueryBudget) {
+    source.max_duration = source.max_duration.min(query.max_duration);
+    if let Some(explicit) = query.explicit_max_duration() {
+        source.max_verification_duration = Some(
+            source
+                .max_verification_duration
+                .map_or(explicit, |old| old.min(explicit)),
+        );
+    }
+}
+
 pub(super) struct QueryControl<'a> {
     cancellation: &'a Cancellation,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 impl<'a> QueryControl<'a> {
@@ -11514,7 +11594,30 @@ impl<'a> QueryControl<'a> {
         let started = Instant::now();
         Self {
             cancellation,
-            deadline: started.checked_add(duration).unwrap_or(started),
+            deadline: Some(started.checked_add(duration).unwrap_or(started)),
+        }
+    }
+
+    fn for_source(
+        cancellation: &'a Cancellation,
+        source: &SourceService<'_>,
+        query: QueryBudget,
+        source_budget: SourceBudget,
+    ) -> Self {
+        if !source.uses_verified_backing() {
+            return Self::new(cancellation, query.max_duration);
+        }
+        let duration = match (
+            query.explicit_max_duration(),
+            source_budget.max_verification_duration,
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let started = Instant::now();
+        Self {
+            cancellation,
+            deadline: duration.map(|duration| started.checked_add(duration).unwrap_or(started)),
         }
     }
 
@@ -11522,7 +11625,10 @@ impl<'a> QueryControl<'a> {
         self.cancellation
             .check()
             .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-        if Instant::now() >= self.deadline {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             return Err(QueryError::Cancelled(CancellationReason::DeadlineExceeded));
         }
         Ok(())

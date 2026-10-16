@@ -34,7 +34,42 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 55] = [
+const CASES: [LanguageCase; 63] = [
+    LanguageCase {
+        name: "written.v",
+        language: "coq",
+        source: "(* marker λ😀 *)\r\nDefinition written_value : nat := 1.\r\nLemma statement : True. Proof. exact I. Qed.\r\n",
+    },
+    LanguageCase {
+        name: "source.v",
+        language: "v",
+        source: "// marker λ😀\r\nmodule written\r\nfn measure(value int) int { return value }\r\n",
+    },
+    LanguageCase {
+        name: "written.v",
+        language: "verilog",
+        source: "// marker λ😀\r\nmodule Written(input wire clk); wire value; endmodule\r\n",
+    },
+    LanguageCase {
+        name: "written.sv",
+        language: "systemverilog",
+        source: "// marker λ😀\r\ninterface Written(input logic clk); logic value; endinterface\r\n",
+    },
+    LanguageCase {
+        name: "written.e",
+        language: "eiffel",
+        source: "-- marker λ😀\r\nclass BOX\r\nfeature\r\n value: INTEGER\r\nend\r\n",
+    },
+    LanguageCase {
+        name: "written.jl",
+        language: "julia",
+        source: "# marker λ😀\r\nmodule Written\r\nfunction ι(value::Int)\r\n value + 1\r\nend\r\nend\r\n",
+    },
+    LanguageCase {
+        name: "written.cmake",
+        language: "cmake",
+        source: "function(Written value)\r\nset(local \"${value}\")\r\nmessage([=[  λ😀 literal  ]=])\r\nendfunction()\r\n",
+    },
     LanguageCase {
         name: "written.ml",
         language: "ocaml",
@@ -309,6 +344,11 @@ const CASES: [LanguageCase; 55] = [
         name: "sample.json",
         language: "json",
         source: r#"{"name":"sample"}"#,
+    },
+    LanguageCase {
+        name: "sample.jsonc",
+        language: "jsonc",
+        source: r#"{/* comment */"name":"sample","values":[1,],}"#,
     },
 ];
 

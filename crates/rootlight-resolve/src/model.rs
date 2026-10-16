@@ -330,6 +330,8 @@ pub enum ResolutionRule {
     GroovyTypeImport,
     /// Native Perl package CODE storage in the indexed dependency snapshot.
     PerlPackageStorage,
+    /// A producer proves an identifier call to one written same-module Rust function.
+    RustDirectFunctionCall,
     /// Native public F# module export in one source-declared project order.
     FSharpQualifiedModule,
     /// Lexical scope and file containment resolution.
@@ -356,6 +358,8 @@ pub enum ResolutionSignal {
     NativeTypeImport,
     /// Source-bound native package/storage identities match without name scoring.
     NativePackageStorage,
+    /// Exact native lexical context selects a named Rust function definition.
+    NativeDirectFunction,
     /// The entity canonical-name hash matches the occurrence text hash.
     CanonicalNameHash,
     /// The entity presentation name matches an explicit alias spelling.
@@ -430,6 +434,8 @@ pub enum CompletenessAssumption {
     IndexedPackageSnapshot,
     /// Literal ordered project members constrain links, without evaluated build closure.
     SourceDeclaredProjectOrder,
+    /// The producer establishes a complete written Rust module context for this call.
+    SourceDeclaredRustModule,
     /// The normalized document passed common ownership, reference, and quota validation.
     ValidatedNormalizedDocument,
     /// All considered facts belong to one repository generation.

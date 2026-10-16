@@ -11,6 +11,8 @@ use std::{
 mod dart;
 mod ecmascript;
 mod module_resolution;
+mod rust_modules;
+mod rust_source;
 
 pub use module_resolution::ModuleResolution as ProjectModuleResolution;
 use module_resolution::ModuleResolution;
@@ -19,8 +21,8 @@ use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DiagnosticCode, DomainCoverage, IrBatch,
     IrBatchSink, IrRecord, LanguageId, MemoryAdmissionPolicy, MemoryEnforcement, ParseProvider,
     ParseRequest, ProducerDescriptor, ProjectAnalysisReport, ProjectAnalysisRequest,
-    ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, SinkError,
-    StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport,
+    ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, RustBindingLookup,
+    RustBindings, SinkError, StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport,
     canonical_ecmascript_identifier, derive_structural_occurrence_identity, execute_parse,
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
     structural_type_member_kind,
@@ -33,13 +35,14 @@ use rootlight_ir::{
     EntityVisibility, EvidenceKind, FactDomain, FactEvidence, FactRef, FileIdentityClaim,
     FileRecord, LexicalEvidenceFormat, LexicalEvidenceKind, LexicalEvidenceV1, OccurrenceRecord,
     OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord,
-    RelationEndpoint, RelationPredicate, RelationRecord, SkippedRegion, SkippedRegionReason,
-    SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan, SymbolIdentityClaim,
-    canonical_rust_impl_scope, canonical_symbol_signature, derive_coverage_record_id,
-    derive_diagnostic_record_id, derive_occurrence_record_id, derive_provenance_record_id,
-    derive_relation_record_id, derive_rust_impl_scope_identity, derive_skipped_region_id,
-    derive_source_mapping_record_id, new_file_identity_claim_envelope,
-    new_lexical_evidence_envelope, new_symbol_identity_claim_envelope,
+    RelationEndpoint, RelationPredicate, RelationRecord, RustDirectCall, SkippedRegion,
+    SkippedRegionReason, SourceMappingKind, SourceMappingRecord, SourceRef, SourceSpan,
+    SymbolIdentityClaim, canonical_rust_impl_scope, canonical_symbol_signature,
+    derive_coverage_record_id, derive_diagnostic_record_id, derive_occurrence_record_id,
+    derive_provenance_record_id, derive_relation_record_id, derive_rust_impl_scope_identity,
+    derive_skipped_region_id, derive_source_mapping_record_id, new_file_identity_claim_envelope,
+    new_lexical_evidence_envelope, new_rust_direct_call_envelope,
+    new_symbol_identity_claim_envelope,
 };
 
 const STRUCTURAL_TIER: AnalysisTier = AnalysisTier::TierB;
@@ -248,11 +251,15 @@ impl SemanticProjectAnalyzer {
         for (index, input) in request.inputs().iter().enumerate() {
             check_periodically(index, cancellation)?;
             if input.language().as_str() != self.language.as_str()
-                || input.encoding().as_str() != "utf-8"
+                || !(input.encoding().as_str() == "utf-8"
+                    || self.language == SemanticProjectLanguage::Rust
+                        && matches!(input.encoding().as_str(), "utf-16le" | "utf-16be"))
             {
                 return Err(provider_failure("project-language-input"));
             }
-            if std::str::from_utf8(input.source().bytes()).is_err() {
+            if input.encoding().as_str() == "utf-8"
+                && std::str::from_utf8(input.source().bytes()).is_err()
+            {
                 // Encoding fixtures are legitimate repository inputs. Retain
                 // their identity at Tier B while declaring their facts bounded.
                 parsed.push(ParsedInput {
@@ -1458,6 +1465,8 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
             || is_symbol_signature_fact(fact)
             || ecmascript::is_export_metadata(fact)
             || ecmascript::lexical::is_binding_metadata(fact)
+            || rust_binding_metadata_fact(fact)
+            || fact.syntax_kind().as_str() == "rust.pattern_binding_unavailable.reference"
             || is_identity_capture_fact(fact)
     }) {
         select_mandatory_syntax_fact_group([fact], &facts_by_id, &mut selected);
@@ -1474,6 +1483,60 @@ fn is_identity_capture_fact(fact: &SyntaxFact) -> bool {
             | "java.test_attribute.test_attribute"
             | "cpp.test_attribute.test_attribute"
     )
+}
+
+fn rust_binding_name_fact(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "rust.local_variable.declaration"
+            | "rust.local_variable.definition"
+            | "rust.parameter.declaration"
+            | "rust.parameter.definition"
+            | "rust.pattern_binding_unavailable.reference"
+            | "rust.identifier.definition"
+            | "rust.direct_call.call"
+    )
+}
+
+fn rust_binding_metadata_fact(fact: &SyntaxFact) -> bool {
+    matches!(
+        fact.syntax_kind().as_str(),
+        "rust.let.signature"
+            | "rust.body.signature"
+            | "rust.unavailable_pattern_environment.signature"
+            | "rust.macro_bindings_unavailable.signature"
+            | "rust.pattern_macro_bindings_unavailable.signature"
+            | "rust.pattern_bindings_unavailable.signature"
+            | "rust.proof_context.signature"
+            | "rust.attribute.signature"
+            | "rust.namespace_barrier.signature"
+    )
+}
+
+fn rust_binding_gaps(fact: &SyntaxFact) -> &'static [(FactDomain, &'static str)] {
+    match fact.syntax_kind().as_str() {
+        "rust.macro_bindings_unavailable.signature"
+        | "rust.pattern_macro_bindings_unavailable.signature" => &[(
+            FactDomain::Entities,
+            "rust-macro-expansion-bindings-unavailable",
+        )],
+        "rust.pattern_bindings_unavailable.signature"
+        | "rust.unavailable_pattern_environment.signature" => &[
+            (
+                FactDomain::Entities,
+                "rust-pattern-binding-namespace-unavailable",
+            ),
+            (
+                FactDomain::Relations,
+                "rust-pattern-binding-namespace-unavailable",
+            ),
+        ],
+        "rust.pattern_binding_unavailable.reference" => &[(
+            FactDomain::Relations,
+            "rust-pattern-binding-namespace-unavailable",
+        )],
+        _ => &[],
+    }
 }
 
 fn select_mandatory_syntax_fact_group<'fact>(
@@ -1652,6 +1715,8 @@ struct DeclarationDraft {
     declaring_type: Option<String>,
     arity: Option<usize>,
     is_test: bool,
+    synthetic: bool,
+    rust_local: bool,
     source: SourceRef,
 }
 
@@ -1717,6 +1782,7 @@ enum ImportBinding {
 struct OccurrenceDraft {
     file: FileId,
     name: String,
+    spelling_hash: ContentHash,
     qualifier: Option<String>,
     call_text: Option<String>,
     arity: Option<usize>,
@@ -1725,6 +1791,13 @@ struct OccurrenceDraft {
     enclosing_declaration: Option<u64>,
     enclosing: Option<SymbolId>,
     source: SourceRef,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RustDirectCallDraft {
+    declaration: u64,
+    definition: SourceSpan,
+    canonical_name: ContentHash,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1810,6 +1883,10 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     namespace_occurrence_targets: BTreeMap<SourceSpan, Vec<ecmascript::exports::ExportTarget>>,
     ecmascript_receiver_calls: BTreeSet<SourceSpan>,
     ecmascript_bindings: ecmascript::lexical::LocalBindings,
+    rust_bindings: BTreeMap<(SourceSpan, OccurrenceRole), Option<u64>>,
+    rust_direct_calls: BTreeMap<SourceSpan, RustDirectCallDraft>,
+    rust_module_calls: BTreeMap<SourceSpan, rust_modules::CallProof>,
+    rust_local_symbols: BTreeSet<SymbolId>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1840,6 +1917,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             namespace_occurrence_targets: BTreeMap::new(),
             ecmascript_receiver_calls: BTreeSet::new(),
             ecmascript_bindings: ecmascript::lexical::LocalBindings::default(),
+            rust_bindings: BTreeMap::new(),
+            rust_direct_calls: BTreeMap::new(),
+            rust_module_calls: BTreeMap::new(),
+            rust_local_symbols: BTreeSet::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -1856,6 +1937,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         self.materialize_files_and_provenance()?;
         self.collect_syntax()?;
         self.materialize_entities()?;
+        if self.analyzer.language == SemanticProjectLanguage::Rust {
+            let module_calls = rust_modules::resolve(&self)?;
+            self.rust_module_calls = module_calls.proofs;
+            for span in module_calls.generic_gaps {
+                let input = self.input_for_file(span.file())?.clone();
+                self.push_rust_binding_gap(
+                    &input,
+                    span,
+                    FactDomain::Relations,
+                    "rust-generic-call-target-unavailable",
+                )?;
+            }
+        }
         self.materialize_default_exports()?;
         self.materialize_named_exports()?;
         self.materialize_reexports()?;
@@ -2067,6 +2161,46 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let input = self.parsed[file_index].input;
             let facts = self.parsed[file_index].facts.clone();
             let bytes = input.source().bytes();
+            let rust_source = (self.analyzer.language == SemanticProjectLanguage::Rust)
+                .then(|| {
+                    rust_source::RustSourceText::new(
+                        bytes,
+                        input.encoding().as_str(),
+                        &facts,
+                        self.request.limits(),
+                        self.cancellation,
+                    )
+                })
+                .transpose()?;
+            let text_for = |span| {
+                rust_source
+                    .as_ref()
+                    .map_or_else(|| source_text(bytes, span), |source| source.text(span))
+            };
+            let rust_bindings = if self.analyzer.language == SemanticProjectLanguage::Rust {
+                let names = facts
+                    .iter()
+                    .filter(|fact| rust_binding_name_fact(fact))
+                    .filter_map(|fact| {
+                        text_for(fact.span())
+                            .and_then(|name| {
+                                rootlight_adapter_sdk::canonical_rust_identifier(
+                                    name,
+                                    self.request.limits().ir().max_string_bytes,
+                                )
+                            })
+                            .map(|name| (fact.local_id(), name.into_owned()))
+                    })
+                    .collect();
+                Some(RustBindings::new(
+                    &facts,
+                    &names,
+                    self.request.limits().ir().max_string_bytes,
+                    self.cancellation,
+                )?)
+            } else {
+                None
+            };
             let member_paths = ecmascript::references::member_paths(&facts, self.cancellation)?;
             let infer_bindings =
                 rootlight_adapter_sdk::typescript_infer_bindings(&facts, self.cancellation)?;
@@ -2079,6 +2213,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 .iter()
                 .map(|fact| (fact.local_id(), fact))
                 .collect::<BTreeMap<_, _>>();
+            let mut rust_macro_extents = facts
+                .iter()
+                .filter(|fact| {
+                    fact.syntax_kind().as_str() == "rust.macro_bindings_unavailable.signature"
+                })
+                .map(|fact| (fact.span().start_byte(), fact.span().end_byte()))
+                .collect::<Vec<_>>();
+            rust_macro_extents.sort_unstable();
+            let mut furthest_end = 0;
+            for (index, (_, end)) in rust_macro_extents.iter_mut().enumerate() {
+                check_periodically(index, self.cancellation)?;
+                furthest_end = furthest_end.max(*end);
+                *end = furthest_end;
+            }
             let mut ordered_facts = facts.iter().collect::<Vec<_>>();
             ordered_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
             let mut nearest_declaration = BTreeMap::<u64, Option<u64>>::new();
@@ -2126,7 +2274,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let terminal_call_names = terminal_call_names(&facts);
             let mut scope_facts = facts
                 .iter()
-                .filter(|fact| fact.kind() == SyntaxFactKind::Scope)
+                .filter(|fact| {
+                    fact.kind() == SyntaxFactKind::Scope
+                        && !(rust_bindings.is_some() && rust_binding_metadata_fact(fact))
+                })
                 .collect::<Vec<_>>();
             scope_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
             let mut rust_impl_identities = BTreeMap::new();
@@ -2142,15 +2293,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     else {
                         continue;
                     };
-                    let Some(self_type) = captures
-                        .self_type
-                        .and_then(|fact| source_text(bytes, fact.span()))
+                    let Some(self_type) = captures.self_type.and_then(|fact| text_for(fact.span()))
                     else {
                         continue;
                     };
                     let trait_type = match captures.trait_type {
                         Some(fact) => {
-                            let Some(text) = source_text(bytes, fact.span()) else {
+                            let Some(text) = text_for(fact.span()) else {
                                 continue;
                             };
                             Some(text)
@@ -2312,6 +2461,17 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 .flatten()
                         })
                 });
+                let rust_local = matches!(
+                    declaration.syntax_kind().as_str(),
+                    "rust.local_variable.declaration" | "rust.parameter.declaration"
+                );
+                let anonymous =
+                    declaration.syntax_kind().as_str() == "rust.anonymous_function.declaration";
+                if (rust_local || anonymous)
+                    && let Some(bindings) = &rust_bindings
+                {
+                    parent_declaration = bindings.declaration_owner(declaration.local_id());
+                }
                 if let Some(binding) = infer_bindings.get(&declaration.local_id()) {
                     parent_declaration = nearest_materialized_declaration
                         .get(&binding.scope())
@@ -2328,24 +2488,31 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     continue;
                 }
                 let draft = 'draft: {
-                    let Some(definition) = definition_captures
+                    let definition = definition_captures
                         .get(&declaration.local_id())
-                        .and_then(|captures| select_unique_syntax_fact(captures))
-                    else {
+                        .and_then(|captures| select_unique_syntax_fact(captures));
+                    if definition.is_none() && !anonymous {
                         break 'draft None;
+                    }
+                    let name = if anonymous {
+                        Some(std::borrow::Cow::Borrowed("<anonymous>"))
+                    } else {
+                        definition.and_then(|definition| {
+                            text_for(definition.span()).and_then(|name| {
+                                rootlight_adapter_sdk::structural_captured_name_for_fact(
+                                    self.analyzer.language.as_str(),
+                                    definition,
+                                    name,
+                                    self.request.limits().ir().max_string_bytes,
+                                )
+                            })
+                        })
                     };
-                    let Some(name) = source_text(bytes, definition.span()).and_then(|name| {
-                        rootlight_adapter_sdk::structural_captured_name_for_fact(
-                            self.analyzer.language.as_str(),
-                            definition,
-                            name,
-                            self.request.limits().ir().max_string_bytes,
-                        )
-                    }) else {
+                    let Some(name) = name else {
                         break 'draft None;
                     };
                     let name = name.as_ref();
-                    let declaration_text = source_text(bytes, declaration.span())
+                    let declaration_text = text_for(declaration.span())
                         .ok_or_else(|| provider_failure("project-declaration-span"))?;
                     let header = declaration_header(self.analyzer.language, declaration_text);
                     if header.is_empty() {
@@ -2417,15 +2584,17 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         ))
                     } else if is_ecmascript {
                         ecmascript_scope
+                    } else if let Some(bindings) = &rust_bindings {
+                        bindings.identity_scope(declaration.local_id(), scope_identity)
                     } else {
                         scope_identity
                     };
-                    let signature = if supports_symbol_signature(kind) {
+                    let signature = if supports_symbol_signature(kind) && !anonymous {
                         signature_captures
                             .get(&declaration.local_id())
                             .and_then(|captures| select_unique_syntax_fact(captures))
                             .and_then(|signature| {
-                                let text = source_text(bytes, signature.span())?;
+                                let text = text_for(signature.span())?;
                                 let maximum = self.request.limits().ir().max_string_bytes;
                                 if kind == EntityKind::Constructor
                                     && self.analyzer.language == SemanticProjectLanguage::Dart
@@ -2433,7 +2602,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                     rootlight_adapter_sdk::canonical_dart_constructor_signature(
                                         text,
                                         signature.span(),
-                                        definition.span(),
+                                        definition?.span(),
                                         name,
                                         maximum,
                                     )
@@ -2447,10 +2616,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     };
                     let arity = parameter_arity(&signature);
                     break 'draft Some((
-                        definition.span(),
+                        definition.map(SyntaxFact::span),
                         DeclarationDraft {
                             local_id: declaration.local_id(),
-                            file: definition.span().file(),
+                            file: declaration.span().file(),
                             span: declaration.span(),
                             name: name.to_owned(),
                             header,
@@ -2465,11 +2634,13 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 || declaration_is_test(
                                     self.analyzer.language,
                                     self.path_by_file
-                                        .get(&definition.span().file())
+                                        .get(&declaration.span().file())
                                         .map(String::as_str)
                                         .unwrap_or_default(),
                                     name,
                                 ),
+                            synthetic: anonymous,
+                            rust_local,
                             source: source_for_span(input, declaration.span()),
                         },
                     ));
@@ -2487,7 +2658,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     }
                     let callable_declaration =
                         is_callable_entity_kind(draft.kind).then_some(declaration.local_id());
-                    selected_definition_spans.insert(definition_span);
+                    if let Some(definition_span) = definition_span {
+                        selected_definition_spans.insert(definition_span);
+                    }
                     declaration_kinds.insert(declaration.local_id(), draft.kind);
                     declaration_names.insert(declaration.local_id(), draft.name.clone());
                     self.declarations.push(draft);
@@ -2505,6 +2678,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
 
             for (fact_index, fact) in facts.iter().enumerate() {
                 check_periodically(fact_index, self.cancellation)?;
+                for &(domain, detail) in rust_binding_gaps(fact) {
+                    self.push_rust_binding_gap(input, fact.span(), domain, detail)?;
+                }
                 match fact.kind() {
                     SyntaxFactKind::Import => {
                         if ecmascript::is_native_import(fact) {
@@ -2529,7 +2705,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             }
                             continue;
                         }
-                        let Some(text) = source_text(bytes, fact.span()) else {
+                        let Some(text) = text_for(fact.span()) else {
                             continue;
                         };
                         let imports = parse_import(self.analyzer.language, text);
@@ -2557,14 +2733,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         if is_call_name_fact(fact) || ecmascript::references::is_member_path(fact) {
                             continue;
                         }
-                        let Some(observed_text) = source_text(bytes, fact.span()) else {
+                        let Some(observed_text) = text_for(fact.span()) else {
                             continue;
                         };
                         let call = is_call_fact(fact);
                         let terminal_name = terminal_call_names
                             .get(&fact.local_id())
                             .and_then(|terminal| facts_by_id.get(terminal))
-                            .and_then(|terminal| source_text(bytes, terminal.span()));
+                            .and_then(|terminal| text_for(terminal.span()));
                         let public_name = if matches!(
                             fact.syntax_kind().as_str(),
                             "typescript.export_name.reference" | "javascript.export_name.reference"
@@ -2586,7 +2762,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 .copied()
                                 .flatten()
                                 .filter(|span| contains_span(*span, fact.span()))
-                                .and_then(|span| source_text(bytes, span))
+                                .and_then(&text_for)
                                 .map(|text| {
                                     ecmascript::references::parse_member_path(
                                         text,
@@ -2615,7 +2791,36 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             )
                         })
                         .flatten();
-                        let parsed_name = if let Some(name) = public_name.as_deref() {
+                        let rust_name = (self.analyzer.language == SemanticProjectLanguage::Rust)
+                            .then(|| {
+                                rootlight_adapter_sdk::canonical_rust_identifier(
+                                    if call {
+                                        terminal_name.unwrap_or(observed_text)
+                                    } else {
+                                        observed_text
+                                    },
+                                    self.request.limits().ir().max_string_bytes,
+                                )
+                            })
+                            .flatten();
+                        let rust_path = (self.analyzer.language == SemanticProjectLanguage::Rust
+                            && fact.syntax_kind().as_str() == "rust.scoped_call.scoped_call")
+                            .then(|| {
+                                rust_modules::path_name(
+                                    observed_text,
+                                    self.request.limits().ir().max_string_bytes,
+                                )
+                            })
+                            .flatten();
+                        let parsed_name = if fact.syntax_kind().as_str() == "rust.generic_call.call"
+                        {
+                            // The authored generic callee is retained as one unresolved
+                            // site; stripping arguments would invent dispatch evidence.
+                            Some(ParsedOccurrenceName {
+                                name: observed_text,
+                                qualifier: None,
+                            })
+                        } else if let Some(name) = public_name.as_deref() {
                             Some(ParsedOccurrenceName {
                                 name,
                                 qualifier: None,
@@ -2624,6 +2829,22 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                             Some(ParsedOccurrenceName {
                                 name,
                                 qualifier: Some(qualifier),
+                            })
+                        } else if let Some((qualifier, name)) = &rust_path {
+                            Some(ParsedOccurrenceName {
+                                name,
+                                qualifier: Some(qualifier),
+                            })
+                        } else if let Some(name) = rust_name.as_deref() {
+                            Some(ParsedOccurrenceName {
+                                name,
+                                qualifier: call
+                                    .then(|| {
+                                        terminal_name.and_then(|terminal| {
+                                            call_receiver(observed_text, terminal)
+                                        })
+                                    })
+                                    .flatten(),
                             })
                         } else if let Some(name) = ecmascript_name.as_deref() {
                             Some(ParsedOccurrenceName {
@@ -2694,6 +2915,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         } else if matches!(
                             fact.syntax_kind().as_str(),
                             "typescript.type_identifier.reference"
+                                | "rust.type_identifier.reference"
                                 | "typescript.type_member_name.reference"
                                 | "typescript.type_export_local.reference"
                                 | "javascript.type_export_local.reference"
@@ -2730,9 +2952,58 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         };
                         let enclosing = enclosing_scope(fact, &facts_by_id, &scope_symbols)
                             .or_else(|| self.module_by_file.get(&fact.span().file()).copied());
+                        if role != OccurrenceRole::Definition
+                            && let Some(bindings) = &rust_bindings
+                        {
+                            let macro_extent = rust_macro_extents
+                                .partition_point(|(start, _)| *start <= fact.span().start_byte())
+                                .checked_sub(1)
+                                .and_then(|index| rust_macro_extents.get(index))
+                                .is_some_and(|(_, end)| *end >= fact.span().end_byte());
+                            if macro_extent {
+                                self.rust_bindings.insert((fact.span(), role), None);
+                            } else {
+                                if role == OccurrenceRole::CallSite
+                                    && let Some(proof) = bindings.direct_call(
+                                        fact,
+                                        observed_text,
+                                        self.cancellation,
+                                    )?
+                                    && let Some(definition) = facts_by_id.get(&proof.definition)
+                                {
+                                    self.rust_direct_calls.insert(
+                                        fact.span(),
+                                        RustDirectCallDraft {
+                                            declaration: proof.declaration,
+                                            definition: definition.span(),
+                                            canonical_name: proof.canonical_name,
+                                        },
+                                    );
+                                }
+                                match bindings.lookup(fact, parsed_name.name, self.cancellation)? {
+                                    RustBindingLookup::Definition(definition) => {
+                                        self.rust_bindings.insert(
+                                            (fact.span(), role),
+                                            bindings.definition_declaration(definition),
+                                        );
+                                    }
+                                    RustBindingLookup::Blocked => {
+                                        self.rust_bindings.insert((fact.span(), role), None);
+                                    }
+                                    RustBindingLookup::NotLocal => {}
+                                }
+                            }
+                        }
                         self.occurrences.push(OccurrenceDraft {
                             file: fact.span().file(),
                             name: parsed_name.name.to_owned(),
+                            spelling_hash: content_hash(
+                                if self.analyzer.language == SemanticProjectLanguage::Rust {
+                                    observed_text.as_bytes()
+                                } else {
+                                    parsed_name.name.as_bytes()
+                                },
+                            ),
                             qualifier: parsed_name.qualifier.map(str::to_owned),
                             call_text: call.then(|| observed_text.to_owned()),
                             arity: call.then(|| call_arity(observed_text)).flatten(),
@@ -2815,6 +3086,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 draft.scope_identity,
             );
             let symbol = claim.symbol;
+            if draft.rust_local {
+                self.rust_local_symbols.insert(symbol);
+            }
             let state = self
                 .states
                 .get(&draft.file)
@@ -2851,6 +3125,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             if draft.is_test {
                 flags.push(EntityFlag::Test);
             }
+            if draft.synthetic {
+                flags.push(EntityFlag::Synthetic);
+            }
             self.records.push(IrRecord::Entity(EntityRecord {
                 id: symbol,
                 repository: draft.source.repository(),
@@ -2876,8 +3153,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 )
                 .map_err(|_| provider_failure("project-symbol-identity-claim"))?,
             ));
+            let input = self.input_for_file(draft.file)?;
+            let header_bytes = if matches!(input.encoding().as_str(), "utf-16le" | "utf-16be") {
+                draft
+                    .header
+                    .encode_utf16()
+                    .count()
+                    .checked_mul(2)
+                    .ok_or_else(|| provider_failure("project-signature-length"))?
+            } else {
+                draft.header.len()
+            };
             let signature_source = source_for_span(
-                self.input_for_file(draft.file)?,
+                input,
                 SourceSpan::new(
                     draft.file,
                     draft.span.start_byte(),
@@ -2885,7 +3173,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         .span
                         .start_byte()
                         .checked_add(
-                            u64::try_from(draft.header.len())
+                            u64::try_from(header_bytes)
                                 .map_err(|_| provider_failure("project-signature-length"))?,
                         )
                         .ok_or_else(|| provider_failure("project-signature-length"))?,
@@ -2926,8 +3214,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 RelationEndpoint::Entity(symbol),
                 EXACT_CONFIDENCE,
                 EvidenceKind::Syntax,
-                draft.source,
+                draft.source.clone(),
             )?;
+            if draft.rust_local || draft.synthetic {
+                self.push_relation(
+                    draft.file,
+                    subject,
+                    RelationPredicate::Contains,
+                    RelationEndpoint::Entity(symbol),
+                    EXACT_CONFIDENCE,
+                    EvidenceKind::Syntax,
+                    draft.source,
+                )?;
+            }
         }
         Ok(())
     }
@@ -2994,6 +3293,41 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 }
             };
             let target = occurrence_target(&draft.name, &resolution);
+            self.materialize_rust_direct_call(&draft)?;
+            if self.rust_module_calls.contains_key(&draft.source.span()) {
+                let input = self.input_for_file(draft.file)?.clone();
+                self.push_rust_binding_gap(
+                    &input,
+                    draft.source.span(),
+                    FactDomain::Relations,
+                    "rust-call-typecheck-and-instantiation-unverified",
+                )?;
+            }
+            if self.analyzer.language == SemanticProjectLanguage::Rust
+                && candidates.is_empty()
+                && draft.role != OccurrenceRole::Definition
+            {
+                let detail = if draft.role == OccurrenceRole::CallSite {
+                    if draft.syntax_kind == "rust.generic_call.call" {
+                        "rust-generic-instantiation-and-typecheck-unverified"
+                    } else if matches!(draft.syntax_kind.as_str(), "rust.scoped_call.scoped_call")
+                        || self.imports.iter().any(|import| import.file == draft.file)
+                    {
+                        "rust-written-module-call-proof-unavailable"
+                    } else {
+                        "rust-call-dispatch-target-unavailable"
+                    }
+                } else {
+                    "rust-namespace-and-binding-target-unavailable"
+                };
+                let input = self.input_for_file(draft.file)?.clone();
+                self.push_rust_binding_gap(
+                    &input,
+                    draft.source.span(),
+                    FactDomain::Relations,
+                    detail,
+                )?;
+            }
             let provenance = self.provenance_for_file(draft.file)?;
             let enclosing = draft
                 .enclosing_declaration
@@ -3013,12 +3347,15 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 role: draft.role,
                 enclosing,
                 target,
-                syntactic_text_hash: content_hash(draft.name.as_bytes()),
+                syntactic_text_hash: draft.spelling_hash,
                 syntax_kind: draft.syntax_kind,
                 provenance,
                 confidence: confidence(confidence_value)?,
                 evidence: direct_evidence(draft.source.clone()),
             };
+            if let Some(proof) = self.rust_module_calls.get(&record.source.span()) {
+                record.evidence.derivation = proof.derivation.clone();
+            }
             record.id = derive_occurrence_record_id(&record)
                 .map_err(|_| provider_failure("project-occurrence-identity"))?;
             if draft.role == OccurrenceRole::Definition {
@@ -3079,6 +3416,65 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             }
         }
         Ok((definitions, import_targets))
+    }
+
+    fn materialize_rust_direct_call(
+        &mut self,
+        call: &OccurrenceDraft,
+    ) -> Result<bool, AdapterError> {
+        if call.role != OccurrenceRole::CallSite {
+            return Ok(false);
+        }
+        let Some(proof) = self.rust_direct_calls.get(&call.source.span()).copied() else {
+            return Ok(false);
+        };
+        let Some(target) = self
+            .symbol_by_declaration
+            .get(&(call.file, proof.declaration))
+            .copied()
+        else {
+            return Ok(false);
+        };
+        let provenance = self.provenance_for_file(call.file)?;
+        let entity_matches = self.records.iter().any(|record| {
+            matches!(record, IrRecord::Entity(entity)
+                if entity.id == target
+                    && entity.kind == EntityKind::Function
+                    && !entity.flags.contains(&EntityFlag::Synthetic)
+                    && entity.provenance == provenance
+                    && content_hash(entity.canonical_name.as_bytes()) == proof.canonical_name)
+        });
+        let definition_matches = self.occurrences.iter().any(|definition| {
+            definition.file == call.file
+                && definition.role == OccurrenceRole::Definition
+                && definition.enclosing_declaration == Some(proof.declaration)
+                && definition.source.span() == proof.definition
+                && definition.source.repository() == call.source.repository()
+                && definition.source.generation() == call.source.generation()
+                && definition.source.content_hash() == call.source.content_hash()
+                && content_hash(definition.name.as_bytes()) == proof.canonical_name
+        });
+        if !entity_matches || !definition_matches {
+            return Ok(false);
+        }
+        // The resolver owns call-target adoption. This envelope retains the
+        // written definition proof while the producer occurrence stays unresolved.
+        let envelope = new_rust_direct_call_envelope(
+            call.source.repository(),
+            call.source.generation(),
+            provenance,
+            call.source.clone(),
+            RustDirectCall {
+                target,
+                definition: proof.definition,
+                canonical_name: proof.canonical_name,
+            },
+        )
+        .map_err(|_| provider_failure("project-rust-direct-call-proof"))?;
+        self.records.push(IrRecord::Extension(envelope));
+        self.state_mut_by_file(call.file)?
+            .increment(FactDomain::Extensions)?;
+        Ok(true)
     }
 
     fn materialize_go_route(
@@ -3292,6 +3688,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     let occurrence = OccurrenceDraft {
                         file: declaration.file,
                         name: local_name.to_owned(),
+                        spelling_hash: content_hash(local_name.as_bytes()),
                         qualifier,
                         call_text: None,
                         arity: None,
@@ -3341,9 +3738,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         if self.analyzer.language == SemanticProjectLanguage::Rust {
             for parsed_index in 0..self.parsed.len() {
                 let parsed = &self.parsed[parsed_index];
-                let text = std::str::from_utf8(parsed.input.source().bytes())
-                    .map_err(|_| provider_failure("project-utf8"))?;
-                for (type_name, trait_name) in rust_impl_pairs(text) {
+                let text = rust_source::RustSourceText::new(
+                    parsed.input.source().bytes(),
+                    parsed.input.encoding().as_str(),
+                    &[],
+                    self.request.limits(),
+                    self.cancellation,
+                )?;
+                for (type_name, trait_name) in rust_impl_pairs(text.as_str()) {
                     let Some(subject) = definitions
                         .get(&type_name)
                         .and_then(|entities| entities.first())
@@ -3771,10 +4173,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             // Import declarations identify the local alias, not the callable or
             // value behind it. Their definitions bind directly; references follow
             // the reviewed import-target path instead of adding the alias as a candidate.
-            if !matches!(
-                entity.kind,
-                EntityKind::Module | EntityKind::Namespace | EntityKind::Import
-            ) {
+            if !self.rust_local_symbols.contains(&entity.symbol)
+                && !matches!(
+                    entity.kind,
+                    EntityKind::Module | EntityKind::Namespace | EntityKind::Import
+                )
+            {
                 index
                     .entry(entity.name.clone())
                     .or_default()
@@ -3927,6 +4331,35 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         if self.analyzer.language == SemanticProjectLanguage::Dart {
             return self.resolve_dart_occurrence(occurrence, definitions, import_targets);
         }
+        if self.analyzer.language == SemanticProjectLanguage::Rust
+            && occurrence.role == OccurrenceRole::CallSite
+        {
+            return ResolutionCandidates {
+                symbols: self
+                    .rust_module_calls
+                    .get(&occurrence.source.span())
+                    .map(|proof| proof.target)
+                    .into_iter()
+                    .collect(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if let Some(declaration) = self
+            .rust_bindings
+            .get(&(occurrence.source.span(), occurrence.role))
+        {
+            return ResolutionCandidates {
+                symbols: declaration
+                    .and_then(|declaration| {
+                        self.symbol_by_declaration
+                            .get(&(occurrence.file, declaration))
+                    })
+                    .copied()
+                    .into_iter()
+                    .collect(),
+                kind: ResolutionKind::Binding,
+            };
+        }
         if matches!(
             occurrence.syntax_kind.as_str(),
             "typescript.export_name.reference" | "javascript.export_name.reference"
@@ -3951,6 +4384,30 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         // Native type identifiers select the type namespace; typeof operands
         // remain ordinary value identifiers. Imports may expose both namespaces.
         let admits_namespace = |entity: &&SemanticEntity| {
+            // Lexical Rust bindings require the source-position lookup above.
+            // A name-only path cannot recover visibility or callable dispatch.
+            if self.rust_local_symbols.contains(&entity.symbol) {
+                return false;
+            }
+            if self.analyzer.language == SemanticProjectLanguage::Rust {
+                return match occurrence.role {
+                    OccurrenceRole::TypeUse => matches!(
+                        entity.kind,
+                        EntityKind::Struct
+                            | EntityKind::Enum
+                            | EntityKind::Union
+                            | EntityKind::Trait
+                            | EntityKind::TypeAlias
+                            | EntityKind::TypeParameter
+                    ),
+                    OccurrenceRole::CallSite => is_callable_entity_kind(entity.kind),
+                    OccurrenceRole::Reference => !matches!(
+                        entity.kind,
+                        EntityKind::TypeAlias | EntityKind::TypeParameter | EntityKind::Trait
+                    ),
+                    _ => true,
+                };
+            }
             if !matches!(
                 self.analyzer.language,
                 SemanticProjectLanguage::JavaScript | SemanticProjectLanguage::TypeScript
@@ -4434,7 +4891,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             confidence: confidence(confidence_value)?,
             evidence_kind,
             provenance: self.provenance_for_file(file)?,
-            evidence: direct_evidence(source),
+            evidence: FactEvidence {
+                derivation: self
+                    .rust_module_calls
+                    .get(&source.span())
+                    .map(|proof| proof.derivation.clone())
+                    .unwrap_or_default(),
+                source: Some(source),
+            },
         };
         record.id = derive_relation_record_id(&record)
             .map_err(|_| provider_failure("project-relation-identity"))?;
@@ -4557,13 +5021,23 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         span: SourceSpan,
         detail: &str,
     ) -> Result<(), AdapterError> {
+        self.push_rust_binding_gap(input, span, FactDomain::Relations, detail)
+    }
+
+    fn push_rust_binding_gap(
+        &mut self,
+        input: &ProjectSourceInput<'_>,
+        span: SourceSpan,
+        domain: FactDomain,
+        detail: &str,
+    ) -> Result<(), AdapterError> {
         let source = source_for_span(input, span);
         let mut record = SkippedRegion {
             id: FactId::from_bytes([0; 20]),
             repository: source.repository(),
             generation: source.generation(),
             source: source.clone(),
-            domain: FactDomain::Relations,
+            domain,
             reason: SkippedRegionReason::UnsupportedConstruct,
             detail: detail.to_owned(),
             provenance: self.provenance_for(input)?,
@@ -5458,6 +5932,7 @@ fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
         && fact.syntax_kind().as_str().ends_with(".signature")
         && !ecmascript::is_export_metadata(fact)
         && !ecmascript::lexical::is_binding_metadata(fact)
+        && !rust_binding_metadata_fact(fact)
         && !matches!(
             fact.syntax_kind().as_str(),
             "typescript.conditional_right.signature"

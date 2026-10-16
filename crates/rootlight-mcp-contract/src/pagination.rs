@@ -213,6 +213,16 @@ impl AuthenticatedCursor {
         self.context.snapshot_id
     }
 
+    /// Returns the claimed physical-plan fingerprint.
+    ///
+    /// A parsed cursor is untrusted until [`Self::validate`] succeeds. This
+    /// accessor supports request authentication before loading plan metadata;
+    /// callers must then compare the authenticated fingerprint with that data.
+    #[must_use]
+    pub const fn plan_fingerprint(&self) -> [u8; 32] {
+        self.context.plan_fingerprint
+    }
+
     /// Returns the immutable generation bound into this cursor.
     #[must_use]
     pub const fn generation(&self) -> GenerationId {

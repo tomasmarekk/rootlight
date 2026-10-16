@@ -122,6 +122,7 @@ impl ResolutionEngine {
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
+        reconcile_rust_target_gaps(&mut document, cancellation)?;
         reconcile_fsharp_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
         reconcile_elm_import_relations(&mut document, cancellation)?;
@@ -526,6 +527,7 @@ impl ResolutionEngine {
             remap_existing_relations(&mut document.relations, &occurrence_remap, cancellation)?;
         ensure_relation_remap_is_safe(&document, &relation_remap)?;
         reconcile_perl_target_gaps(&mut document, cancellation)?;
+        reconcile_rust_target_gaps(&mut document, cancellation)?;
         reconcile_fsharp_target_gaps(&mut document, cancellation)?;
         reconcile_groovy_import_gaps(&mut document, cancellation)?;
         reconcile_elm_import_relations(&mut document, cancellation)?;
@@ -1259,6 +1261,57 @@ fn reconcile_vba_target_gaps(
     Ok(())
 }
 
+fn reconcile_rust_target_gaps(
+    document: &mut NormalizedIrDocument,
+    cancellation: &Cancellation,
+) -> Result<(), ResolutionError> {
+    let producers = document
+        .provenance
+        .iter()
+        .filter(|record| record.rule.as_deref() == Some("rust-direct-function-v1.written_module"))
+        .map(|record| record.id)
+        .collect::<BTreeSet<_>>();
+    if producers.is_empty() {
+        return Ok(());
+    }
+    let mut sources = BTreeMap::new();
+    for occurrence in &document.occurrences {
+        cancellation.check()?;
+        if occurrence.role == OccurrenceRole::CallSite
+            && occurrence.syntax_kind == "rust.direct_call.call"
+            && producers.contains(&occurrence.provenance)
+            && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+        {
+            sources.insert(occurrence.source.clone(), occurrence.provenance);
+        }
+    }
+    let mut remap = BTreeMap::new();
+    for gap in &mut document.skipped_regions {
+        cancellation.check()?;
+        if gap.detail == "rust-call-dispatch-target-unavailable"
+            && let Some(&provenance) = sources.get(&gap.source)
+        {
+            let old = gap.id;
+            // Naming a written function does not prove type checking or its
+            // generic instantiation. Preserve that distinct semantic gap.
+            gap.detail = "rust-call-typecheck-and-instantiation-unverified".to_owned();
+            gap.provenance = provenance;
+            gap.id = rootlight_ir::derive_skipped_region_id(gap)
+                .map_err(ResolutionError::FactIdentity)?;
+            remap.insert(old, gap.id);
+        }
+    }
+    ensure_nonrelation_remap_is_safe(document, &remap)?;
+    if document
+        .relations
+        .iter()
+        .any(|relation| contains_remapped_fact(&relation.evidence.derivation, &remap))
+    {
+        return Err(ResolutionError::UnsupportedIdentityRemap);
+    }
+    Ok(())
+}
+
 fn reconcile_perl_target_gaps(
     document: &mut NormalizedIrDocument,
     cancellation: &Cancellation,
@@ -1944,7 +1997,14 @@ fn build_provenance(
 ) -> Result<ProvenanceRecord, ResolutionError> {
     // Candidate imports are selected again from immutable native evidence. Using
     // a prior resolver context here would nest its digest on every repeated pass.
-    let parent_id = if decision.explanation.rule == ResolutionRule::GroovyStaticImport {
+    let parent_id = if decision.explanation.rule == ResolutionRule::RustDirectFunctionCall {
+        lookup
+            .rust
+            .proof(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?
+            .envelope
+            .provenance
+    } else if decision.explanation.rule == ResolutionRule::GroovyStaticImport {
         lookup
             .files
             .get(&occurrence.file)
@@ -1962,6 +2022,32 @@ fn build_provenance(
     let mut derivation_parents = Vec::new();
     let mut context_digests = vec![parent.build_context.digest()];
     let mut tier = parent.tier;
+
+    if decision.explanation.rule == ResolutionRule::RustDirectFunctionCall {
+        let proof = lookup
+            .rust
+            .proof(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        derivation_parents.push(FactRef::Fact(proof.envelope.id));
+        derivation_parents.push(FactRef::Fact(proof.definition_id));
+        sources.push(proof.definition.clone());
+        if let Some((example, witness)) = proof.example {
+            derivation_parents.push(FactRef::Entity(example.id));
+            derivation_parents.push(FactRef::Fact(witness));
+            sources.extend(example.evidence.source.iter().cloned());
+        }
+        if let Some(module) = proof.module {
+            derivation_parents.push(FactRef::Entity(module.id));
+            sources.extend(module.evidence.source.iter().cloned());
+        } else {
+            let file = lookup
+                .files
+                .get(&occurrence.file)
+                .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+            derivation_parents.push(FactRef::File(file.id));
+            sources.extend(file.evidence.source.iter().cloned());
+        }
+    }
 
     if matches!(
         decision.explanation.rule,
@@ -2203,6 +2289,7 @@ fn build_provenance(
         ResolutionRule::GroovyQualifiedHeader => "groovy-qualified-header-v1.indexed_snapshot",
         ResolutionRule::GroovyTypeImport => "groovy-type-import-v1.indexed_snapshot",
         ResolutionRule::PerlPackageStorage => "perl-package-storage-v1.indexed_snapshot",
+        ResolutionRule::RustDirectFunctionCall => "rust-direct-function-v1.written_module",
         ResolutionRule::FSharpQualifiedModule => lookup
             .fsharp
             .rule(occurrence)

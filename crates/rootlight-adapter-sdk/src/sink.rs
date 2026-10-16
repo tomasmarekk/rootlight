@@ -1061,13 +1061,13 @@ impl IrBatchSink for BoundedIrSink {
 
 /// Executes one parser transaction and commits only a valid successful report.
 ///
-/// `cancellation` must carry a process-local monotonic deadline. The explicit
+/// `cancellation` may carry a process-local monotonic deadline. The explicit
 /// `memory_policy` either admits hard/reported enforcement or intentionally
 /// selects the visible unavailable-enforcement fallback.
 ///
 /// # Errors
 ///
-/// Returns [`AdapterError`] for missing deadline or cancellation checkpoints,
+/// Returns [`AdapterError`] for missing cancellation checkpoints,
 /// request-capability mismatch, rejected memory admission, cancellation,
 /// provider failure, sink rejection, or inconsistent reporting.
 pub fn execute_parse<P: ParseProvider + ?Sized>(
@@ -1113,7 +1113,6 @@ pub fn execute_parse_transaction<T>(
         &Cancellation,
     ) -> Result<(ParseReport, T), AdapterError>,
 ) -> Result<(ParseOutput, T), AdapterError> {
-    validate_deadline_admission(cancellation)?;
     validate_parse_capabilities(capabilities, request)?;
     let memory_admission = admit_memory(capabilities.memory_enforcement(), memory_policy)?;
     let mut sink = BoundedSyntaxSink::new(
@@ -1170,7 +1169,7 @@ pub fn execute_parse_transaction<T>(
 
 /// Executes one analyzer transaction and commits only canonical valid IR.
 ///
-/// `cancellation` must carry a process-local monotonic deadline. The explicit
+/// `cancellation` may carry a process-local monotonic deadline. The explicit
 /// `memory_policy` either admits hard/reported enforcement or intentionally
 /// selects the visible unavailable-enforcement fallback.
 /// Encoded lexical projections must match the immutable original source bytes;
@@ -1178,7 +1177,7 @@ pub fn execute_parse_transaction<T>(
 ///
 /// # Errors
 ///
-/// Returns [`AdapterError`] for missing deadline, request-capability mismatch,
+/// Returns [`AdapterError`] for request-capability mismatch,
 /// rejected memory admission, cancellation, provider failure, sink rejection,
 /// invalid IR, or inconsistent reporting.
 pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
@@ -1188,7 +1187,6 @@ pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
     memory_policy: MemoryAdmissionPolicy,
     cancellation: &Cancellation,
 ) -> Result<AnalysisOutput, AdapterError> {
-    validate_deadline_admission(cancellation)?;
     validate_analyzer_descriptor(analyzer.descriptor(), request)?;
     let memory_admission = admit_memory(analyzer.descriptor().memory_enforcement(), memory_policy)?;
     let mut sink = BoundedIrSink::new(
@@ -1266,7 +1264,7 @@ pub fn execute_analysis<A: LanguageAnalyzer + ?Sized>(
 ///
 /// # Errors
 ///
-/// Returns [`AdapterError`] for missing deadline, descriptor mismatch,
+/// Returns [`AdapterError`] for descriptor mismatch,
 /// rejected memory admission, cancellation, provider failure, sink rejection,
 /// invalid IR, exceeded output quota, or inconsistent project reporting.
 pub fn execute_project_analysis<A: ProjectLanguageAnalyzer + ?Sized>(
@@ -1276,7 +1274,6 @@ pub fn execute_project_analysis<A: ProjectLanguageAnalyzer + ?Sized>(
     memory_policy: MemoryAdmissionPolicy,
     cancellation: &Cancellation,
 ) -> Result<ProjectAnalysisOutput, AdapterError> {
-    validate_deadline_admission(cancellation)?;
     validate_project_analyzer_descriptor(analyzer.descriptor(), request)?;
     let memory_admission = admit_memory(analyzer.descriptor().memory_enforcement(), memory_policy)?;
     let mut sink = BoundedIrSink::new_project(
@@ -1565,14 +1562,6 @@ fn validate_memory_report(
         Err(ReportError::MissingMemoryAccounting)
     } else {
         Ok(())
-    }
-}
-
-fn validate_deadline_admission(cancellation: &Cancellation) -> Result<(), RequestError> {
-    if cancellation.has_deadline() {
-        Ok(())
-    } else {
-        Err(RequestError::DeadlineRequired)
     }
 }
 

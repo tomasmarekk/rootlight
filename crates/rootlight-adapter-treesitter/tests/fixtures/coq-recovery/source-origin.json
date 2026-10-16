@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "source_path": "template-rocq/theories/TemplateMonad/Common.v",
+  "source_bytes": 2204,
+  "source_sha256": "68d209364bdb8db2fd1d1587e065adb56016ee5dc76d15949f6e105a7e1d440c",
+  "source_unchanged": true,
+  "license": "MIT",
+  "license_path": "LICENSE",
+  "purpose": "Native ERROR-root recovery data; not a complete Coq structural or semantic qualification"
+}

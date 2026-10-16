@@ -10,12 +10,13 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use rootlight_cancel::Cancellation;
 use rootlight_config::{ConfigLayer, ConfigSnapshot, ConfigSource, MAX_CONFIG_LAYER_BYTES};
 use rootlight_discovery::{DiscoveryLimits, DiscoveryManifest, DiscoveryPolicy, discover};
-use rootlight_git::{GitCollectLimits, collect_tracked_paths};
+use rootlight_git::{GitTrackedPathLimits, collect_tracked_paths_streaming};
 use rootlight_ids::{ContentHash, derive_repository};
 use rootlight_vfs::RepositoryRoot;
 use serde::Serialize;
@@ -25,6 +26,16 @@ mod admission;
 
 const DIAGNOSTIC_NAMESPACE: &str = "rootlight.source-inventory.diagnostic/1";
 const USAGE: &str = "usage: source_inventory REPOSITORY [CONFIG_FILE] [--probe-fsharp-admission]";
+
+// Separate metadata-only admission from content traversal so a slow inventory
+// identifies its actual cost without turning elapsed time into an acceptance cap.
+#[derive(Default, Serialize)]
+struct InventoryTiming {
+    repository_open_micros: u128,
+    tracked_inventory_micros: u128,
+    tracked_path_admission_micros: u128,
+    discovery_micros: u128,
+}
 
 #[derive(Serialize)]
 struct InventoryReport<'a> {
@@ -36,6 +47,8 @@ struct InventoryReport<'a> {
     exclusion_ledger_scope: &'static str,
     manifest_hash: ContentHash,
     manifest: &'a DiscoveryManifest,
+    timing: &'a InventoryTiming,
+    timing_scope: &'static str,
     full_semantic_completeness_proven: bool,
     installed_mcp_qualified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,31 +84,48 @@ fn resolve_config(contents: Option<&str>) -> Result<ConfigSnapshot, Box<dyn Erro
 fn inventory(
     repository: &Path,
     config: &ConfigSnapshot,
-) -> Result<DiscoveryManifest, Box<dyn Error>> {
+) -> Result<(DiscoveryManifest, InventoryTiming), Box<dyn Error>> {
     let cancellation = Cancellation::new();
     let repository_id = derive_repository(DIAGNOSTIC_NAMESPACE.as_bytes()).id();
+    let started = Instant::now();
     let root = RepositoryRoot::open(repository_id, repository)?;
-    let tracked = collect_tracked_paths(
+    let repository_open_micros = started.elapsed().as_micros();
+    let started = Instant::now();
+    let tracked = collect_tracked_paths_streaming(
         root.local_path(),
-        GitCollectLimits::default(),
+        GitTrackedPathLimits::new(rootlight_vfs::MAX_PATH_BYTES)?,
         &cancellation,
     )?;
+    let tracked_inventory_micros = started.elapsed().as_micros();
+    let started = Instant::now();
     let policy = DiscoveryPolicy::build(Vec::new(), true)?.with_tracked_files_in_root(
         &root,
         tracked,
         &cancellation,
     )?;
-    Ok(discover(
+    let tracked_path_admission_micros = started.elapsed().as_micros();
+    let started = Instant::now();
+    let manifest = discover(
         &root,
         config,
         &policy,
         DiscoveryLimits::from_config(config),
         &cancellation,
-    )?)
+    )?;
+    Ok((
+        manifest,
+        InventoryTiming {
+            repository_open_micros,
+            tracked_inventory_micros,
+            tracked_path_admission_micros,
+            discovery_micros: started.elapsed().as_micros(),
+        },
+    ))
 }
 
 fn write_report(
     manifest: &DiscoveryManifest,
+    timing: &InventoryTiming,
     explicit_configuration: bool,
     fsharp_admission: Option<&admission::AdmissionReport>,
     output: &mut impl Write,
@@ -109,6 +139,8 @@ fn write_report(
         exclusion_ledger_scope: "observed entries only; descendants of excluded directories are not enumerated",
         manifest_hash: manifest.hash()?,
         manifest,
+        timing,
+        timing_scope: "monotonic wall time per discovery phase; excludes configuration, optional parser probe and report serialization; not an indexing benchmark",
         full_semantic_completeness_proven: false,
         installed_mcp_qualified: false,
         fsharp_admission,
@@ -143,7 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (repository, config_path, probe) = arguments(std::env::args_os().skip(1))?;
     let contents = config_path.as_deref().map(read_config).transpose()?;
     let config = resolve_config(contents.as_deref())?;
-    let manifest = inventory(&repository, &config)?;
+    let (manifest, timing) = inventory(&repository, &config)?;
     let fsharp_admission = if probe {
         let root = RepositoryRoot::open(
             derive_repository(DIAGNOSTIC_NAMESPACE.as_bytes()).id(),
@@ -160,6 +192,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     write_report(
         &manifest,
+        &timing,
         contents.is_some(),
         fsharp_admission.as_ref(),
         &mut std::io::stdout().lock(),
@@ -171,7 +204,10 @@ mod tests {
     use super::*;
     use rootlight_discovery::{ExclusionReason, PolicyLayer, PolicyRule};
     use rootlight_ids::content_hash;
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        process::{Command, Stdio},
+    };
 
     fn fixture(files: &[(&str, &[u8])]) -> (tempfile::TempDir, RepositoryRoot) {
         let directory = tempfile::tempdir().unwrap();
@@ -213,6 +249,65 @@ mod tests {
 
     fn limits() -> DiscoveryLimits {
         DiscoveryLimits::new(100, 16, 1024, 100).unwrap()
+    }
+
+    #[test]
+    fn large_tracked_index_keeps_ignored_source_available_to_discovery() {
+        let source = b"pub fn retained() {}\r\n";
+        let (_directory, root) = fixture(&[
+            ("nested/cache/retained.rs", source),
+            ("nested/cache/untracked.rs", b"pub fn hidden() {}\n"),
+            (".gitignore", b"nested/cache/\n"),
+        ]);
+        let git = |arguments: &[&str]| {
+            let output = Command::new("git")
+                .args(arguments)
+                .current_dir(root.local_path())
+                .output()
+                .expect("fixture Git command starts");
+            assert!(output.status.success(), "{:?}", output.stderr);
+            output.stdout
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "--force", "--", "nested/cache/retained.rs"]);
+        let object = String::from_utf8(git(&["rev-parse", ":nested/cache/retained.rs"])).unwrap();
+        let mut child = Command::new("git")
+            .args(["update-index", "--index-info"])
+            .current_dir(root.local_path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fixture index writer starts");
+        {
+            let mut input = std::io::BufWriter::new(child.stdin.take().unwrap());
+            let prefix = "a".repeat(210);
+            // Index-only paths cross the former stdout ceiling without requiring
+            // a large worktree or exercising unrelated discovery entry budgets.
+            for index in 0..65_536 {
+                writeln!(input, "100644 {}\t{prefix}{index:06}.rs", object.trim()).unwrap();
+            }
+            input.flush().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let (manifest, _) = inventory(root.local_path(), &resolve_config(None).unwrap())
+            .expect("large tracked inventory reaches discovery");
+        assert!(manifest.coverage.complete);
+        let retained = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "nested/cache/retained.rs")
+            .expect("tracked source survives the ignore rule");
+        assert_eq!(retained.content_hash, content_hash(source));
+        assert_eq!(retained.bytes, u64::try_from(source.len()).unwrap());
+        assert_eq!(retained.encoding, "utf-8");
+        assert!(
+            !manifest
+                .inputs
+                .iter()
+                .any(|input| input.path == "nested/cache/untracked.rs")
+        );
     }
 
     #[test]
@@ -379,7 +474,14 @@ mod tests {
         let (_directory, root) = fixture(&[("source.rs", b"pub fn source() {}\n")]);
         let manifest = audit(&root, &[], Vec::new(), limits());
         let mut output = Vec::new();
-        write_report(&manifest, false, None, &mut output).unwrap();
+        write_report(
+            &manifest,
+            &InventoryTiming::default(),
+            false,
+            None,
+            &mut output,
+        )
+        .unwrap();
         let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
         let restored: DiscoveryManifest =
             serde_json::from_value(report["manifest"].clone()).unwrap();

@@ -33,15 +33,21 @@ pub(super) struct CompressedNormalizedFileChunk {
 }
 
 impl CompressedNormalizedFileChunk {
-    /// The caller must admit `staged_memory_bytes` before entering this phase.
+    /// The caller admits staging memory and bounds payload plus descriptor/Arc ownership.
     pub(super) fn new(
         document: &NormalizedIrDocument,
         limits: &IrLimits,
         extensions: &ExtensionSupport,
         workspace_bytes: u64,
+        maximum_accounted_bytes: usize,
         cancellation: &Cancellation,
     ) -> Result<Self, FirstSliceError> {
         check_cancellation(cancellation)?;
+        let maximum_payload_bytes = maximum_accounted_bytes
+            .min(MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES)
+            .checked_sub(Self::retained_overhead_bytes())
+            .filter(|bytes| *bytes > 0)
+            .ok_or(FirstSliceError::Limits)?;
         let chunk =
             CanonicalNormalizedFileChunk::new_with_checkpoint(document, limits, extensions, || {
                 cancellation.check().is_ok()
@@ -56,7 +62,7 @@ impl CompressedNormalizedFileChunk {
         let document = chunk.into_document();
         let destination = BoundedBytes {
             bytes: Vec::new(),
-            maximum_bytes: canonical_json_bytes.min(MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES),
+            maximum_bytes: canonical_json_bytes.min(maximum_payload_bytes),
         };
         let gzip =
             gzip::Writer::new(destination, cancellation).map_err(|_| rejected(cancellation))?;
@@ -92,7 +98,12 @@ impl CompressedNormalizedFileChunk {
     /// Charges every retained payload byte, the descriptor and the Arc header.
     /// Container bookkeeping and parser accounting retain their existing policy.
     pub(super) fn accounted_bytes(&self) -> usize {
-        self.encoded.len() + std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()
+        self.encoded.len() + Self::retained_overhead_bytes()
+    }
+
+    /// Charges the descriptor and Arc counters before admitting any payload bytes.
+    pub(super) const fn retained_overhead_bytes() -> usize {
+        std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()
     }
 
     pub(super) fn reconstruction_memory_bytes(&self) -> Result<u64, FirstSliceError> {
@@ -402,6 +413,7 @@ mod tests {
             service.analysis_limits.ir(),
             &service.extensions,
             workspace,
+            MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES,
             &cancellation,
         )
         .unwrap();
@@ -436,6 +448,74 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn compressed_chunk_obeys_payload_and_owner_byte_boundary() {
+        let (expected, document, cancellation) = fixture();
+        let extensions = ExtensionSupport::default();
+        let limits = IrLimits::default();
+        let maximum = expected.accounted_bytes();
+        let exact = CompressedNormalizedFileChunk::new(
+            &document,
+            &limits,
+            &extensions,
+            expected.workspace_bytes,
+            maximum,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(exact.accounted_bytes(), maximum);
+        assert_eq!(exact.encoded, expected.encoded);
+        assert_eq!(exact.digest, expected.digest);
+        assert_eq!(
+            exact
+                .rebind(
+                    GenerationId::from_bytes([71; 20]),
+                    &limits,
+                    &extensions,
+                    &cancellation,
+                )
+                .unwrap(),
+            expected
+                .rebind(
+                    GenerationId::from_bytes([71; 20]),
+                    &limits,
+                    &extensions,
+                    &cancellation,
+                )
+                .unwrap(),
+        );
+        for maximum in [
+            maximum - 1,
+            CompressedNormalizedFileChunk::retained_overhead_bytes(),
+        ] {
+            assert!(
+                CompressedNormalizedFileChunk::new(
+                    &document,
+                    &limits,
+                    &extensions,
+                    expected.workspace_bytes,
+                    maximum,
+                    &cancellation,
+                )
+                .is_err()
+            );
+        }
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            CompressedNormalizedFileChunk::new(
+                &document,
+                &limits,
+                &extensions,
+                expected.workspace_bytes,
+                0,
+                &cancellation,
+            ),
+            Err(FirstSliceError::Cancelled(
+                CancellationReason::ClientRequest
+            )),
+        ));
     }
 
     #[test]
@@ -542,6 +622,7 @@ mod tests {
                 &IrLimits::default(),
                 &extensions,
                 chunk.workspace_bytes,
+                MAX_RETAINED_STRUCTURAL_ARTIFACT_BYTES,
                 &cancellation
             ),
             Err(FirstSliceError::Cancelled(

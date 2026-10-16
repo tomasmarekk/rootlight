@@ -8634,7 +8634,35 @@ fn assert_native_admission_resource_bounded(
         .filter(|diagnostic| diagnostic.code == "language-admission-resource-bounded")
         .collect::<Vec<_>>();
     assert_eq!(diagnostics.len(), 1);
+    let message = "bounded native language admission exhausted its analysis resources and source remains available without a language determination";
+    assert!(
+        receipt.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "language-admission-resource-bounded"
+                && diagnostic.message == message
+        }),
+        "bounded native admission must retain its precise public diagnostic: {:?}",
+        receipt.diagnostics
+    );
+    assert_eq!(diagnostics[0].message, message);
     assert_eq!(diagnostics[0].source.as_ref(), Some(reference));
+    assert_eq!(diagnostics[0].evidence.source.as_ref(), Some(reference));
+    assert_eq!(diagnostics[0].coverage_effect, CoverageStatus::Unknown);
+    assert_eq!(diagnostics[0].provenance, file.provenance);
+    let producer = document
+        .provenance
+        .iter()
+        .find(|proof| proof.id == diagnostics[0].provenance)
+        .unwrap();
+    assert_eq!(
+        producer.binary_digest,
+        content_hash(LANGUAGE_DISPOSITION_PROVIDER_SEED)
+    );
+    assert_eq!(
+        producer.rule.as_deref(),
+        Some("language-admission-resource-bounded")
+    );
+    assert_eq!(producer.input_sources, std::slice::from_ref(reference));
+    assert_eq!(producer.evidence_sources, std::slice::from_ref(reference));
     assert!(!document.skipped_regions.is_empty());
     for gap in &document.skipped_regions {
         assert_eq!(gap.reason, SkippedRegionReason::ResourceLimit);

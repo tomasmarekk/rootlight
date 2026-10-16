@@ -49,8 +49,8 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
             "markdown",
             concat!(
                 "# value\n\n",
-                "~~~rust\nfn value() {}\nfn caller() { value(); }\n~~~\n\n",
-                "~~~rust\nfn value() {}\nfn caller() { value(); }\n~~~\n\n",
+                "~~~rust\nfn value() {}\nfn caller() { let local = 1; let closure = || local; value(); }\n~~~\n\n",
+                "~~~rust\nfn value() {}\nfn caller() { let local = 2; { let local = local; let closure = || local; } value(); }\n~~~\n\n",
                 "~~~rust\nfn alone() { value(); }\n~~~\n\n",
                 "~~~yaml\nname: &entry first\ncopy: *entry\n~~~\n\n",
                 "~~~yaml\nname: &entry second\ncopy: *entry\n~~~\n\n",
@@ -95,6 +95,13 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
         let document = full.document();
         let engine = ResolutionEngine::default();
         let batch = engine.resolve(document, &cancellation).unwrap();
+        let applied = engine
+            .apply_document(
+                document.clone(),
+                rootlight_resolve::ResolverFactContext::new(snapshot.content_hash()),
+                &cancellation,
+            )
+            .unwrap();
         let mut call_count = 0;
         let mut local_targets = BTreeSet::new();
         let mut calls: Vec<_> = document
@@ -111,27 +118,40 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
             let decision = batch
                 .decisions
                 .iter()
-                .find(|entry| entry.occurrence == call.id)
-                .unwrap();
+                .find(|entry| entry.occurrence == call.id);
             if host == "markdown" && call_count == 3 {
                 assert!(
-                    matches!(decision.outcome, ResolutionOutcome::Unresolved { .. }),
-                    "{decision:?}"
+                    decision.is_none(),
+                    "an unproven Rust call has no resolver work"
                 );
+                assert_eq!(
+                    applied
+                        .occurrences
+                        .iter()
+                        .find(|site| site.id == call.id)
+                        .unwrap(),
+                    call
+                );
+                assert!(!applied.relations.iter().any(|edge| {
+                    edge.predicate == rootlight_ir::RelationPredicate::Calls
+                        && edge.evidence.source.as_ref() == Some(&call.source)
+                }));
                 continue;
             }
-            let ResolutionOutcome::Candidates {
-                symbols,
-                total_count: 1,
-                ..
-            } = &decision.outcome
-            else {
-                panic!("native syntax must retain its one local candidate: {decision:?}");
+            let decision = decision.unwrap();
+            let symbol = match &decision.outcome {
+                ResolutionOutcome::Resolved { symbol, .. } if host == "markdown" => *symbol,
+                ResolutionOutcome::Candidates {
+                    symbols,
+                    total_count: 1,
+                    ..
+                } if host == "html" => symbols[0],
+                _ => panic!("native evidence must retain its exact source scope: {decision:?}"),
             };
             let target = document
                 .entities
                 .iter()
-                .find(|entity| entity.id == symbols[0])
+                .find(|entity| entity.id == symbol)
                 .unwrap();
             assert_eq!(
                 target.language,
@@ -146,6 +166,68 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
                     <= call.source.span().start_byte()
             );
             local_targets.insert(target.id);
+            if host == "markdown" {
+                assert_eq!(
+                    decision.explanation.rule,
+                    rootlight_resolve::ResolutionRule::RustDirectFunctionCall,
+                    "{decision:?}"
+                );
+                let Some(rootlight_ir::ContainerRef::Entity(block)) = target.container else {
+                    panic!("the written Rust function must belong to its example");
+                };
+                let witness = document
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.syntax_kind == "markdown.code_block.module"
+                            && site.role == OccurrenceRole::Definition
+                            && site.target
+                                == rootlight_ir::OccurrenceTarget::Resolved { symbol: block }
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing example witness: decision={decision:#?}, target={target:#?}, parent={:#?}, witnesses={:#?}",
+                            document.entities.iter().find(|entity| entity.id == block),
+                            document.occurrences.iter().filter(|site| site.syntax_kind == "markdown.code_block.module").collect::<Vec<_>>(),
+                        )
+                    });
+                let resolved = applied
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::CallSite && site.source == call.source
+                    })
+                    .unwrap();
+                assert_eq!(
+                    resolved.target,
+                    rootlight_ir::OccurrenceTarget::Resolved { symbol }
+                );
+                let producer = applied
+                    .provenance
+                    .iter()
+                    .find(|entry| entry.id == resolved.provenance)
+                    .unwrap();
+                assert_eq!(producer.language, "markdown");
+                assert_eq!(producer.tier, rootlight_ir::AnalysisTier::TierD);
+                assert!(
+                    producer
+                        .derivation_parents
+                        .contains(&rootlight_ir::FactRef::Fact(witness.id))
+                );
+                assert!(producer.input_sources.contains(&witness.source));
+                assert_eq!(
+                    applied
+                        .relations
+                        .iter()
+                        .filter(|edge| {
+                            edge.predicate == rootlight_ir::RelationPredicate::Calls
+                                && edge.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+                                && edge.evidence.source.as_ref() == Some(&call.source)
+                        })
+                        .count(),
+                    1
+                );
+            }
         }
         assert_eq!(call_count, expected_calls);
         assert_eq!(local_targets.len(), if host == "markdown" { 2 } else { 1 });
@@ -228,6 +310,22 @@ fn embedded_native_resolution_and_replay_preserve_source_scopes() {
             .unwrap();
         assert_eq!(fresh.document(), replay.document());
         assert_eq!(fresh.report(), replay.report());
+        assert_eq!(
+            engine
+                .apply_document(
+                    fresh.document().clone(),
+                    rootlight_resolve::ResolverFactContext::new(snapshot.content_hash()),
+                    &cancellation
+                )
+                .unwrap(),
+            engine
+                .apply_document(
+                    replay.document().clone(),
+                    rootlight_resolve::ResolverFactContext::new(snapshot.content_hash()),
+                    &cancellation
+                )
+                .unwrap(),
+        );
         assert_eq!(
             document
                 .entities

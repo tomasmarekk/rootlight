@@ -1895,6 +1895,16 @@ fn verify_snapshot_identities(
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
             }
+            rootlight_ir::RUST_DIRECT_CALL_NAMESPACE => {
+                rootlight_ir::decode_rust_direct_call_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             FILE_IDENTITY_CLAIM_NAMESPACE => {
                 let claim = decode_file_identity_claim_envelope_with_checkpoint(envelope, || {
                     context.check().is_ok()

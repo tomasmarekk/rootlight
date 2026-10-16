@@ -1,0 +1,1 @@
+#[export] Instance quote_name : ground_quotable name := ltac:(destruct 1; exact _).

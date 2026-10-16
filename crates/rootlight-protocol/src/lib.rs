@@ -28,9 +28,21 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 26;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 28;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.26";
+pub const PROTOCOL_VERSION: &str = "1.28";
+/// First daemon protocol preserving omitted source verification deadlines.
+pub const SOURCE_VERIFICATION_DURATION_PROTOCOL_MINOR: u32 = 28;
+/// First daemon protocol carrying generation-pinned literal source matching.
+pub const SOURCE_FIND_PROTOCOL_MINOR: u32 = 27;
+/// Maximum UTF-8 query bytes for exact literal source matching.
+pub const MAX_SOURCE_FIND_LITERAL_BYTES: usize = 64 * 1024;
+/// Maximum forward physical-byte scan allowance for one source-find page.
+pub const MAX_SOURCE_FIND_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum requested match-reference count for one source-find page.
+pub const MAX_SOURCE_FIND_MATCHES: u32 = 1024;
+/// Default requested match-reference count for one source-find page.
+pub const DEFAULT_SOURCE_FIND_MATCHES: u32 = 128;
 /// First daemon protocol carrying resident source-prefix metadata quotes.
 pub const SOURCE_TEXT_PREFIX_METADATA_QUOTE_PROTOCOL_MINOR: u32 = 26;
 /// Supported cumulative source-prefix metadata bound policy.
@@ -475,6 +487,42 @@ mod tests {
     }
 
     #[test]
+    fn source_find_wire_tags_are_additive_and_round_trip() {
+        use generated::daemon::v1 as daemon;
+
+        let request = daemon::RequestEnvelope {
+            request: Some(daemon::request_envelope::Request::SourceFind(
+                daemon::SourceFindRequest::default(),
+            )),
+            ..Default::default()
+        };
+        let response = daemon::ResponseEnvelope {
+            response: Some(daemon::response_envelope::Response::SourceFind(
+                daemon::SourceFindResponse::default(),
+            )),
+            ..Default::default()
+        };
+        let wire = [0xaa, 0x03, 0x00];
+        assert_eq!(request.encode_to_vec(), wire);
+        assert_eq!(response.encode_to_vec(), wire);
+        assert_eq!(
+            daemon::RequestEnvelope::decode(wire.as_slice()).unwrap(),
+            request
+        );
+        assert_eq!(
+            daemon::ResponseEnvelope::decode(wire.as_slice()).unwrap(),
+            response
+        );
+        assert_eq!(SOURCE_FIND_PROTOCOL_MINOR, 27);
+        assert_eq!(daemon::SourceFindStop::EndOfSource as i32, 0);
+        assert_eq!(daemon::SourceFindStop::ScanLimit as i32, 1);
+        assert_eq!(daemon::SourceFindStop::MatchLimit as i32, 2);
+        assert_eq!(daemon::SourceFindStop::MatcherMemoryLimit as i32, 3);
+        assert_eq!(daemon::SourceFindStop::ResponseMemoryLimit as i32, 4);
+        assert_eq!(daemon::SourceFindStop::ResultLimit as i32, 5);
+    }
+
+    #[test]
     fn clean_rebuild_wire_tags_are_additive_and_frozen() {
         use generated::daemon::v1 as daemon;
 
@@ -657,6 +705,7 @@ mod tests {
                 duration_micros: 500_000,
                 depth: Some(4),
                 paths: Some(5),
+                source_verification_duration_explicit: None,
             }),
             request: Some(v1::request_envelope::Request::Health(v1::HealthRequest {})),
         };
@@ -664,6 +713,19 @@ mod tests {
         let decoded =
             v1::RequestEnvelope::decode(encoded.as_slice()).expect("request envelope decodes");
         assert_eq!(decoded, envelope);
+
+        for explicit in [None, Some(false), Some(true)] {
+            let mut with_provenance = envelope.clone();
+            with_provenance
+                .effective_budget
+                .as_mut()
+                .expect("fixture has a complete budget")
+                .source_verification_duration_explicit = explicit;
+            let encoded = with_provenance.encode_to_vec();
+            let decoded = v1::RequestEnvelope::decode(encoded.as_slice())
+                .expect("source duration provenance decodes");
+            assert_eq!(decoded, with_provenance);
+        }
 
         let usage = v1::FirstSliceQueryUsage {
             rows: 1,

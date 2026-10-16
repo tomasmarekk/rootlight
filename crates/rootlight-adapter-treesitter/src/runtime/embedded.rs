@@ -18,6 +18,37 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         cancellation: &Cancellation,
     ) -> Result<EmbeddedExtractionLimits, AdapterError> {
+        if request.language().as_str() == "cmake" && request.included_ranges().is_empty() {
+            let remaining_nodes = request
+                .limits()
+                .max_syntax_nodes()
+                .saturating_sub(traversal.processed_nodes);
+            if let Some(plan) = cmake_patch_input(request, source, remaining_nodes, cancellation)? {
+                require_provider_limit(
+                    ResourceKind::SyntaxDepth,
+                    plan.max_depth(),
+                    request
+                        .limits()
+                        .max_syntax_depth()
+                        .min(self.config.max_syntax_depth()),
+                )?;
+                traversal.processed_nodes = traversal
+                    .processed_nodes
+                    .checked_add(plan.required_candidate_count())
+                    .ok_or(SinkError::AccountingOverflow)?;
+                traversal.max_depth = traversal.max_depth.max(plan.max_depth());
+                plan.append_candidates(candidates, cancellation)?;
+                return Ok(EmbeddedExtractionLimits::default());
+            }
+            return self.extract_cmake_header(
+                request,
+                source,
+                traversal,
+                candidates,
+                max_facts,
+                cancellation,
+            );
+        }
         if request.language().as_str() == "perl" {
             let mut used_ranges = 0;
             return self.extract_perl_replacements(

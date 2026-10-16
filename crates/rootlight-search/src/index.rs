@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -32,15 +33,17 @@ use crate::{
         SymbolNameLexicalOmissions, SymbolNameProjection, SymbolNameTermOmissions,
     },
     tokenizer::{
-        CodeTokenizer, has_oversized_term, is_mark, normalize_text, oversized_name_tokens,
-        token_texts,
+        BoundedCodeTokenizer, CodeTokenizer, has_oversized_term, is_mark, normalize_text,
+        oversized_name_tokens, token_texts,
     },
 };
 
 const FORMAT_PREFIX: &str = "rootlight.lexical";
-const FORMAT_VERSION: &str = "7";
-const STORED_HIT_VERSION: u8 = 5;
+const FORMAT_VERSION: &str = "9";
+const STORED_HIT_VERSION: u8 = 6;
+// Tantivy's private writer constants bound its u32 arena with a 1 MB margin.
 const MIN_WRITER_HEAP_BYTES: usize = 15_000_000;
+const MAX_WRITER_HEAP_BYTES_EXCLUSIVE: usize = u32::MAX as usize - 1_000_000;
 const MAX_IDENTIFIER_BYTES: usize = 512;
 const MAX_QUALIFIED_BYTES: usize = 2_048;
 // Segmented names mirror the existing normalized IR per-string ceiling. The
@@ -61,11 +64,8 @@ const SOURCE_TERM_CHUNK_BYTES: usize = 32 * 1024;
 const MAX_SOURCE_TERM_CHUNKS: usize = 1_024;
 const MAX_PATTERN_WILDCARDS: usize = 4;
 const MIN_PATTERN_LITERALS: usize = 2;
-const HARD_MAX_DOCUMENTS: usize = 1_000_000;
-/// Aggregate validated text ceiling for one incremental in-memory index.
-pub const EPHEMERAL_MAX_TEXT_BYTES: usize = 2 * 1024 * 1024 * 1024;
-const HARD_MAX_TEXT_BYTES: usize = EPHEMERAL_MAX_TEXT_BYTES;
-const HARD_MAX_WRITER_HEAP_BYTES: usize = 256 * 1024 * 1024;
+/// Largest representable aggregate text budget for an in-memory index.
+pub const EPHEMERAL_MAX_TEXT_BYTES: usize = usize::MAX;
 const HARD_MAX_QUERY_BYTES: usize = 4_096;
 const HARD_MAX_QUERY_CANDIDATES: usize = 100_000;
 const HARD_MAX_QUERY_RESULTS: usize = 1_000;
@@ -80,6 +80,189 @@ const MAX_LANGUAGE_FILTER_BYTES: usize = 64;
 const SORT_CHECKPOINT_STRIDE: usize = 1_024;
 
 type QueryClause = (Occur, Box<dyn Query>);
+
+/// Compiled conservative admission for a query-local symbol projection.
+///
+/// This shares Text token, Unicode, prefix and qualified-name semantics with
+/// the search backend. A rejected symbol cannot match; accepted symbols still
+/// require normal indexed search, resource admission and result pagination.
+#[derive(Debug, Clone)]
+pub struct TextQueryCandidate {
+    normalized: String,
+    prefix: bool,
+    terminal: Option<String>,
+    tokens: Vec<String>,
+}
+
+impl TextQueryCandidate {
+    /// Validates and compiles one Text query under the caller's search limits.
+    ///
+    /// # Errors
+    /// Returns [`SearchError`] for an invalid query or search budget.
+    pub fn new(query: &str, budget: SearchBudget) -> Result<Self, SearchError> {
+        validate_search_budget(budget)?;
+        if query.len() > budget.max_query_bytes || query.len() > HARD_MAX_QUERY_BYTES {
+            return Err(SearchError::InvalidQuery(QueryViolation::TooLong));
+        }
+        validate_search_request(
+            &SearchRequest {
+                query: query.to_owned(),
+                mode: SearchMode::Text,
+                max_results: 1,
+                page_offset: 0,
+            },
+            budget,
+        )?;
+        let query = query.trim();
+        let normalized = normalize_exact(query);
+        Ok(Self {
+            prefix: normalized.chars().count() >= MIN_PATTERN_LITERALS,
+            terminal: qualified_symbol_terminal(&normalized),
+            normalized,
+            tokens: token_texts(query),
+        })
+    }
+
+    /// Whether symbol-only documents can match this query.
+    ///
+    /// Punctuation-only Text searches use source vocabulary postings. Symbol
+    /// projections have no such postings, even when their names contain punctuation.
+    #[must_use]
+    pub fn matches_symbols(&self) -> bool {
+        !self.tokens.is_empty()
+    }
+
+    /// Retains every possible hit in the fields of a source-free symbol document.
+    ///
+    /// The fields must be the complete display name, optional canonical alias,
+    /// qualified name, path and retained signature that would be projected.
+    /// This contract does not cover documents carrying source, documentation or
+    /// type-name postings. Oversized-term admission remains the backend's decision.
+    #[must_use]
+    pub fn may_match_symbol(
+        &self,
+        display: &str,
+        canonical: Option<&str>,
+        qualified: &str,
+        path: &str,
+        signature: Option<&str>,
+    ) -> bool {
+        self.for_path(path)
+            .may_match_symbol(display, canonical, qualified, signature)
+    }
+
+    /// Prepares shared path matching and reusable tokenization for one source file.
+    ///
+    /// Every symbol tested through the returned matcher must use this exact path.
+    /// Query limits and conservative admission are unchanged.
+    #[must_use]
+    pub fn for_path(&self, path: &str) -> TextQueryCandidateForPath<'_> {
+        let mut tokenizer = CodeTokenizer::default();
+        let path_matches = self.matches_symbols() && self.matches_name(path);
+        let path_tokens = if self.matches_symbols() && !path_matches && self.terminal.is_none() {
+            self.matching_tokens(path, &mut tokenizer, 0)
+        } else {
+            0
+        };
+        TextQueryCandidateForPath {
+            query: self,
+            path_matches,
+            path_tokens,
+            tokenizer,
+        }
+    }
+
+    fn matches_name(&self, name: &str) -> bool {
+        candidate_name_matches(name, &self.normalized, self.prefix)
+    }
+
+    fn matching_tokens(&self, field: &str, tokenizer: &mut CodeTokenizer, mut matched: u64) -> u64 {
+        let complete = u64::MAX >> (64 - self.tokens.len());
+        let mut stream = tokenizer.token_stream(field);
+        while stream.advance() {
+            for (index, token) in self.tokens.iter().enumerate() {
+                if stream.token().text == *token {
+                    matched |= 1_u64 << index;
+                }
+            }
+            if matched == complete {
+                break;
+            }
+        }
+        matched
+    }
+}
+
+/// Conservative Text admission with one file's path work shared across symbols.
+///
+/// Tokenization scratch is reused without reusing a previous symbol's matches.
+#[derive(Debug)]
+pub struct TextQueryCandidateForPath<'query> {
+    query: &'query TextQueryCandidate,
+    path_matches: bool,
+    path_tokens: u64,
+    tokenizer: CodeTokenizer,
+}
+
+impl TextQueryCandidateForPath<'_> {
+    /// Retains possible hits for a source-free symbol at the prepared path.
+    ///
+    /// Field and backend-admission requirements match
+    /// [`TextQueryCandidate::may_match_symbol`]. Reusing this matcher changes no
+    /// results, including clauses whose tokens occur in different fields.
+    #[must_use]
+    pub fn may_match_symbol(
+        &mut self,
+        display: &str,
+        canonical: Option<&str>,
+        qualified: &str,
+        signature: Option<&str>,
+    ) -> bool {
+        if !self.query.matches_symbols() {
+            return false;
+        }
+        if self.path_matches {
+            return true;
+        }
+        let names = [
+            Some(display),
+            canonical.filter(|name| *name != display),
+            (qualified != display && Some(qualified) != canonical).then_some(qualified),
+        ];
+        let mut terminal_matches = false;
+        for (index, name) in names.iter().enumerate() {
+            let Some(name) = name else { continue };
+            if self.query.matches_name(name) {
+                return true;
+            }
+            terminal_matches |= index < 2
+                && self
+                    .query
+                    .terminal
+                    .as_deref()
+                    .is_some_and(|terminal| candidate_name_matches(name, terminal, false));
+        }
+        if self.query.terminal.is_some() {
+            return terminal_matches;
+        }
+        // Query admission caps tokens at 64. A word may satisfy the same token
+        // in multiple clauses; clauses can draw their words from different fields.
+        let complete = u64::MAX >> (64 - self.query.tokens.len());
+        let mut matched = self.path_tokens;
+        if matched == complete {
+            return true;
+        }
+        for field in names.into_iter().chain([signature]).flatten() {
+            matched = self
+                .query
+                .matching_tokens(field, &mut self.tokenizer, matched);
+            if matched == complete {
+                return true;
+            }
+        }
+        false
+    }
+}
 
 /// Prepares bounded signature postings without changing admissible source text.
 ///
@@ -168,7 +351,9 @@ pub fn symbol_name_term_omissions(
     let (display_tokens, display_bytes) = oversized_name_tokens(display);
     let (qualified_tokens, qualified_bytes) = oversized_name_tokens(qualified);
     let (canonical_tokens, canonical_bytes) = if let Some(name) = canonical {
-        validate_segmented_name(name, DocumentField::Identifier)?;
+        if !name.is_empty() {
+            validate_segmented_name(name, DocumentField::Identifier)?;
+        }
         oversized_name_tokens(name)
     } else {
         (0, 0)
@@ -395,8 +580,8 @@ pub trait LexicalSearch: Send + Sync {
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::BuildBudgetExceeded`] when a field is zero, below
-/// the backend minimum, or above a construction hard ceiling.
+/// Returns [`SearchError::BuildBudgetExceeded`] when a field is zero or the
+/// writer heap lies outside the backend's supported range.
 pub fn validate_build_admission(budget: BuildBudget) -> Result<(), SearchError> {
     validate_build_budget(budget)
 }
@@ -491,7 +676,7 @@ pub struct LexicalIndex {
 /// Incremental in-memory lexical builder for independently bounded partitions.
 ///
 /// Each partition remains subject to the supplied build budget. Aggregate
-/// output remains subject to the existing backend hard document and text caps.
+/// counts use checked arithmetic and do not impose a separate admission limit.
 pub struct EphemeralLexicalIndexBuilder {
     generation: GenerationId,
     fields: Fields,
@@ -546,7 +731,7 @@ impl EphemeralLexicalIndexBuilder {
     /// # Errors
     ///
     /// Returns [`SearchError`] for invalid or duplicate documents, cancellation,
-    /// a partition-budget violation, or aggregate backend hard-cap exhaustion.
+    /// a partition-budget violation, allocation failure, or count overflow.
     pub fn push_partition(
         &mut self,
         mut documents: Vec<LexicalDocument>,
@@ -555,20 +740,16 @@ impl EphemeralLexicalIndexBuilder {
         cancellation.check()?;
         let (partition_documents, partition_text_bytes) =
             prepare_documents(&mut documents, self.partition_budget, cancellation)?;
-        let document_count = self
-            .document_count
-            .checked_add(partition_documents)
-            .filter(|count| *count <= HARD_MAX_DOCUMENTS as u64)
-            .ok_or(SearchError::BuildBudgetExceeded {
+        let document_count = self.document_count.checked_add(partition_documents).ok_or(
+            SearchError::BuildBudgetExceeded {
                 resource: "documents",
-            })?;
-        let text_bytes = self
-            .text_bytes
-            .checked_add(partition_text_bytes)
-            .filter(|bytes| *bytes <= HARD_MAX_TEXT_BYTES as u64)
-            .ok_or(SearchError::BuildBudgetExceeded {
+            },
+        )?;
+        let text_bytes = self.text_bytes.checked_add(partition_text_bytes).ok_or(
+            SearchError::BuildBudgetExceeded {
                 resource: "text_bytes",
-            })?;
+            },
+        )?;
         if documents
             .iter()
             .map(document_target)
@@ -1222,11 +1403,6 @@ fn open_reader(
         .as_deref()
         .ok_or(SearchError::IncompatibleIndex)?;
     let (actual_generation, payload_documents) = parse_payload(payload)?;
-    if payload_documents > HARD_MAX_DOCUMENTS as u64
-        || expected_documents.is_some_and(|expected| payload_documents != expected)
-    {
-        return Err(SearchError::IncompatibleIndex);
-    }
     if actual_generation != expected_generation {
         return Err(SearchError::GenerationMismatch {
             expected: expected_generation,
@@ -1244,11 +1420,24 @@ fn open_reader(
         .segment_readers()
         .iter()
         .any(|segment| segment.max_doc() != segment.num_docs())
-        || searcher.num_docs() != payload_documents
     {
         return Err(SearchError::IncompatibleIndex);
     }
+    validate_document_count(payload_documents, expected_documents, searcher.num_docs())?;
     Ok((actual_generation, reader))
+}
+
+fn validate_document_count(
+    payload_documents: u64,
+    expected_documents: Option<u64>,
+    actual_documents: u64,
+) -> Result<(), SearchError> {
+    if payload_documents != actual_documents
+        || expected_documents.is_some_and(|expected| payload_documents != expected)
+    {
+        return Err(SearchError::IncompatibleIndex);
+    }
+    Ok(())
 }
 
 fn open_reader_checked(
@@ -1285,6 +1474,7 @@ struct Fields {
     type_names: Field,
     documentation: Field,
     source_identifier_normalized: Field,
+    source_punctuation: Field,
     source_text: Field,
     generated: Field,
 }
@@ -1334,6 +1524,7 @@ impl Fields {
         let documentation = builder.add_text_field("documentation", code.clone());
         let source_identifier_normalized =
             builder.add_text_field("source_identifier_normalized", raw.clone());
+        let source_punctuation = builder.add_text_field("source_punctuation", raw);
         let source_text = builder.add_text_field("source_text", code);
         let generated =
             builder.add_bool_field("generated", NumericOptions::default().set_indexed());
@@ -1358,6 +1549,7 @@ impl Fields {
             type_names,
             documentation,
             source_identifier_normalized,
+            source_punctuation,
             source_text,
             generated,
         }
@@ -1414,6 +1606,9 @@ impl Fields {
                 self.source_identifier_normalized,
                 normalize_exact(identifier),
             );
+            if literal_punctuation_term(identifier) {
+                document.add_text(self.source_punctuation, identifier);
+            }
         }
         if let Some(source_text) = &source.source_text {
             document.add_text(self.source_text, source_text);
@@ -1421,6 +1616,9 @@ impl Fields {
         for chunk in &source.source_term_chunks {
             for word in chunk {
                 document.add_text(self.source_identifier_normalized, normalize_exact(word));
+                if literal_punctuation_term(word) {
+                    document.add_text(self.source_punctuation, word);
+                }
             }
             document.add_text(self.source_text, chunk.join(" "));
         }
@@ -1565,7 +1763,21 @@ impl Fields {
     ) -> Result<Box<dyn Query>, SearchError> {
         let tokens = token_texts(raw_query);
         if tokens.is_empty() {
-            return Err(SearchError::InvalidQuery(QueryViolation::Empty));
+            let literals = literal_punctuation_terms(raw_query);
+            if literals.is_empty() {
+                return Err(SearchError::InvalidQuery(QueryViolation::Empty));
+            }
+            let mut clauses = Vec::with_capacity(literals.len());
+            for literal in literals {
+                let (_, clause) = work.term_clause(
+                    self.source_punctuation,
+                    &literal,
+                    IndexRecordOption::Basic,
+                    8.0,
+                )?;
+                clauses.push((Occur::Must, clause));
+            }
+            return Ok(Box::new(BooleanQuery::new(clauses)));
         }
         let mut clauses = vec![
             work.term_clause(
@@ -1743,7 +1955,12 @@ fn encode_stored_hit(source: &LexicalDocument) -> Result<Vec<u8>, SearchError> {
     }
     encoded.push(u8::from(source.canonical_name.is_some()));
     if let Some(canonical) = &source.canonical_name {
-        encode_hit_name(&mut encoded, canonical, source.symbol_name_projection)?;
+        if canonical.is_empty() && source.symbol_name_projection == SymbolNameProjection::Segmented
+        {
+            encoded.push(0);
+        } else {
+            encode_hit_name(&mut encoded, canonical, source.symbol_name_projection)?;
+        }
     }
     Ok(encoded)
 }
@@ -1836,7 +2053,9 @@ fn decode_stored_hit(bytes: &[u8], score: f32) -> Result<(SearchHit, usize), Sea
     let tier = decoder.read_text(MAX_LABEL_BYTES, TextValidation::Label)?;
     let canonical_name = match decoder.read_u8()? {
         0 => None,
-        1 if symbol_id.is_some() => Some(decoder.read_name(name_projection, MAX_IDENTIFIER_BYTES)?),
+        1 if symbol_id.is_some() => {
+            Some(decoder.read_canonical_alias(name_projection, MAX_IDENTIFIER_BYTES)?)
+        }
         _ => return Err(SearchError::IncompatibleIndex),
     };
     if !decoder.is_finished() {
@@ -1940,6 +2159,25 @@ impl<'a> StoredHitDecoder<'a> {
             return Err(SearchError::IncompatibleIndex);
         }
         Ok(text.to_owned())
+    }
+
+    fn read_canonical_alias(
+        &mut self,
+        projection: SymbolNameProjection,
+        inline_limit: usize,
+    ) -> Result<String, SearchError> {
+        let start = self.offset;
+        let empty = match projection {
+            SymbolNameProjection::Inline => u32::from_be_bytes(self.read_array()?) == 0,
+            SymbolNameProjection::Segmented => self.read_u8()? == 0,
+        };
+        // The caller has already proved an explicit symbol and present alias.
+        // Empty alias metadata does not admit an empty display, path or query.
+        if empty {
+            return Ok(String::new());
+        }
+        self.offset = start;
+        self.read_name(projection, inline_limit)
     }
 
     fn read_name(
@@ -2279,12 +2517,13 @@ fn compile_literal_prefix(input: &str) -> Result<BoundedPattern, SearchError> {
     )
 }
 
-/// Projects source words from the entire input into bounded lexical batches.
+/// Projects source words and punctuation from the entire input into bounded batches.
 ///
 /// Word identity and tokenization use the same Unicode rules as query-time
 /// source selection. Oversized words remain outside the bounded vocabulary;
 /// callers must not describe this lexical projection as semantic coverage.
 /// Duplicate words within a batch need no additional posting evidence.
+/// Punctuation scalars use literal raw postings without changing code tokenization.
 ///
 /// # Errors
 ///
@@ -2299,11 +2538,12 @@ pub fn project_source_term_chunks(
         .map(|projection| projection.chunks)
 }
 
-/// Validates the whole source and retains bounded words with exact omission counts.
+/// Validates whole source and retains bounded words and literal punctuation.
 ///
 /// UTF-8 and BOM-backed UTF-16 preserve their original-byte omission counts.
 /// Unsupported encodings retain no vocabulary and report missing encoding evidence.
 /// Budget exhaustion fails construction instead of silently dropping batches.
+/// Omission counters describe oversized words; punctuation is admitted in full.
 ///
 /// # Errors
 /// Returns [`SearchError`] for cancellation, allocation failure, or exhausted bounds.
@@ -2330,12 +2570,18 @@ pub fn project_source_terms_with_coverage(
         });
     };
     coverage.encoding = Some(source.encoding());
-    let maximum_text_bytes = maximum_text_bytes.min(HARD_MAX_TEXT_BYTES);
     let mut chunks = Vec::new();
     let mut words = BTreeSet::new();
     let mut chunk_bytes = 0usize;
     let mut total_bytes = 0usize;
-    visit_source_words(source, cancellation, None, |word, original_bytes| {
+    visit_source_words(source, cancellation, None, false, |word, original_bytes| {
+        let word = match word {
+            SourceWord::Whole(word) => Some(word),
+            SourceWord::Oversized => None,
+            SourceWord::CodeToken(_) | SourceWord::QueryWord(_) => {
+                return Err(SearchError::IncompatibleIndex);
+            }
+        };
         let Some(word) =
             word.filter(|word| normalize_text(word).len() <= MAX_SOURCE_IDENTIFIER_BYTES)
         else {
@@ -2382,6 +2628,13 @@ pub fn project_source_terms_with_coverage(
         total_bytes = total_bytes
             .checked_add(word.len())
             .and_then(|bytes| bytes.checked_add(text_addition))
+            .and_then(|bytes| {
+                bytes.checked_add(if literal_punctuation_term(word) {
+                    word.len()
+                } else {
+                    0
+                })
+            })
             .filter(|bytes| *bytes <= maximum_text_bytes)
             .ok_or(SearchError::BuildBudgetExceeded {
                 resource: "text_bytes",
@@ -2414,12 +2667,13 @@ pub fn project_source_terms_with_coverage(
     Ok(SourceTermProjection { chunks, coverage })
 }
 
-/// Selects bounded, genuinely occurring source words relevant to one text query.
+/// Selects bounded, genuinely occurring source terms relevant to one text query.
 ///
 /// The scan uses the index's tokenizer and Unicode normalization, retaining at
 /// most one new witness per query term or identifier-prefix match. It never
 /// increases persisted source prefixes or manufactures a term absent from the
 /// source. The caller remains responsible for binding source bytes to a file.
+/// Punctuation-only queries retain each distinct literal scalar as a witness.
 ///
 /// # Errors
 ///
@@ -2440,6 +2694,33 @@ pub fn select_query_source_text(
         cancellation,
         Instant::now(),
     )
+}
+
+/// Projects a query witness into the existing source-identifier field limit.
+///
+/// Short witnesses retain their authored spelling. A longer witness must be one
+/// complete bounded source word whose canonical form fits the unchanged term
+/// limit. Its alias is lexical metadata; callers must retain the original witness
+/// separately as source text and must not treat the alias as original source bytes.
+///
+/// # Errors
+/// Returns [`SearchError`] when a longer witness cannot be admitted as one complete
+/// normalized source word.
+pub fn project_query_source_identifier(word: &str) -> Result<Cow<'_, str>, SearchError> {
+    if word.len() <= MAX_SOURCE_IDENTIFIER_BYTES {
+        return Ok(Cow::Borrowed(word));
+    }
+    let unavailable = || SearchError::BuildBudgetExceeded {
+        resource: "source_identifiers",
+    };
+    if word.len() > MAX_SOURCE_TEXT_BYTES || !word.chars().all(source_word_character) {
+        return Err(unavailable());
+    }
+    let canonical = normalize_text(word);
+    if canonical.is_empty() || canonical.len() > MAX_SOURCE_IDENTIFIER_BYTES {
+        return Err(unavailable());
+    }
+    Ok(Cow::Owned(canonical))
 }
 
 /// Selects bounded query witnesses from original UTF-8 or BOM-backed UTF-16 bytes.
@@ -2495,12 +2776,22 @@ fn select_query_source_view(
         budget,
     )?;
     let normalized = normalize_text(query);
-    let tokens = token_texts(query.trim());
+    let mut tokens = token_texts(query.trim());
+    let punctuation_only = tokens.is_empty();
+    if punctuation_only {
+        tokens = literal_punctuation_terms(query.trim());
+        if tokens.is_empty() {
+            return Err(SearchError::InvalidQuery(QueryViolation::Empty));
+        }
+    }
     let mut selection = SourceQuerySelection {
+        punctuation_only,
+        prefix: !punctuation_only && normalized.chars().count() >= MIN_PATTERN_LITERALS,
         terminal: qualified_symbol_terminal(&normalized),
         normalized,
         matched: vec![false; tokens.len()],
         tokens,
+        tokenizer: CodeTokenizer::default(),
         output: String::new(),
         maximum_bytes: maximum_bytes.min(MAX_SOURCE_TEXT_BYTES),
         complete: false,
@@ -2509,9 +2800,13 @@ fn select_query_source_view(
         source,
         cancellation,
         Some((started, budget.max_duration)),
+        !selection.punctuation_only && selection.terminal.is_none(),
         |word, _| {
-            if let Some(word) = word {
-                selection.observe(word)?;
+            match word {
+                SourceWord::Whole(word) => selection.observe(word)?,
+                SourceWord::CodeToken(token) => selection.observe_code_token(token)?,
+                SourceWord::QueryWord(word) => selection.observe_query_word_prefix(word)?,
+                SourceWord::Oversized => {}
             }
             Ok(selection.complete)
         },
@@ -2524,22 +2819,33 @@ fn select_query_source_view(
 }
 
 struct SourceQuerySelection {
+    punctuation_only: bool,
+    prefix: bool,
     normalized: String,
     terminal: Option<String>,
     tokens: Vec<String>,
     matched: Vec<bool>,
+    tokenizer: CodeTokenizer,
     output: String,
     maximum_bytes: usize,
     complete: bool,
 }
 
-// UTF-8 borrows each word; UTF-16 reuses one bounded word buffer. Oversized
-// words carry only their original byte count, never an unbounded decoded copy.
+enum SourceWord<'a> {
+    Whole(&'a str),
+    Oversized,
+    CodeToken(&'a str),
+    QueryWord(&'a str),
+}
+
+// Persisted vocabulary keeps its whole-word omission accounting. Query scans can
+// additionally inspect bounded whole-word prefixes and complete code tokens.
 fn visit_source_words(
     source: SourceText<'_>,
     cancellation: &Cancellation,
     timing: Option<(Instant, Duration)>,
-    mut observe: impl FnMut(Option<&str>, usize) -> Result<bool, SearchError>,
+    include_code_tokens: bool,
+    mut observe: impl FnMut(SourceWord<'_>, usize) -> Result<bool, SearchError>,
 ) -> Result<(), SearchError> {
     let check = || -> Result<(), SearchError> {
         cancellation.check()?;
@@ -2563,29 +2869,38 @@ fn visit_source_words(
                 let word = text
                     .get(start..offset)
                     .ok_or(SearchError::IncompatibleIndex)?;
-                if observe(
-                    (word.len() <= MAX_SOURCE_IDENTIFIER_BYTES).then_some(word),
-                    word.len(),
-                )? {
+                if observe_utf8_source_word(word, include_code_tokens, &check, &mut observe)? {
+                    return check();
+                }
+            }
+            if source_punctuation_character(character) {
+                let end = offset + character.len_utf8();
+                let punctuation = text
+                    .get(offset..end)
+                    .ok_or(SearchError::IncompatibleIndex)?;
+                if observe(SourceWord::Whole(punctuation), punctuation.len())? {
                     return check();
                 }
             }
         }
         if let Some(start) = begin {
             let word = text.get(start..).ok_or(SearchError::IncompatibleIndex)?;
-            observe(
-                (word.len() <= MAX_SOURCE_IDENTIFIER_BYTES).then_some(word),
-                word.len(),
-            )?;
+            observe_utf8_source_word(word, include_code_tokens, &check, &mut observe)?;
         }
     } else {
+        let maximum_word_bytes = if include_code_tokens {
+            MAX_SOURCE_TEXT_BYTES
+        } else {
+            MAX_SOURCE_IDENTIFIER_BYTES
+        };
         let mut word = String::new();
         word.try_reserve_exact(MAX_SOURCE_IDENTIFIER_BYTES)
             .map_err(|_| SearchError::BuildBudgetExceeded {
                 resource: "text_bytes",
             })?;
         let mut original_bytes = 0_usize;
-        let mut oversized = false;
+        let mut streaming = false;
+        let mut tokenizer = BoundedCodeTokenizer::new(MAX_SOURCE_TEXT_BYTES);
         for (index, character) in source.chars().enumerate() {
             if index % 1024 == 0 {
                 check()?;
@@ -2596,84 +2911,288 @@ fn visit_source_words(
                     .ok_or(SearchError::BuildBudgetExceeded {
                         resource: "text_bytes",
                     })?;
-                oversized |=
-                    word.len().saturating_add(character.len_utf8()) > MAX_SOURCE_IDENTIFIER_BYTES;
-                if !oversized {
+                if !streaming
+                    && word.len().saturating_add(character.len_utf8()) <= maximum_word_bytes
+                {
+                    let required = word.len() + character.len_utf8();
+                    if required > word.capacity() {
+                        let capacity = word
+                            .capacity()
+                            .saturating_mul(2)
+                            .max(required)
+                            .min(maximum_word_bytes);
+                        word.try_reserve_exact(capacity - word.len()).map_err(|_| {
+                            SearchError::BuildBudgetExceeded {
+                                resource: "text_bytes",
+                            }
+                        })?;
+                    }
                     word.push(character);
+                } else {
+                    if include_code_tokens {
+                        let mut token_observer =
+                            |token: &str| observe(SourceWord::CodeToken(token), 0);
+                        if !streaming {
+                            for (buffered_index, buffered) in word.chars().enumerate() {
+                                if buffered_index % 1024 == 0 {
+                                    check()?;
+                                }
+                                if tokenizer.push(buffered, &mut token_observer)? {
+                                    return check();
+                                }
+                            }
+                            word.clear();
+                        }
+                        if tokenizer.push(character, &mut token_observer)? {
+                            return check();
+                        }
+                    }
+                    streaming = true;
                 }
             } else if original_bytes != 0 {
-                if observe((!oversized).then_some(word.as_str()), original_bytes)? {
+                if finish_decoded_source_word(
+                    &word,
+                    original_bytes,
+                    streaming,
+                    include_code_tokens,
+                    &mut tokenizer,
+                    &check,
+                    &mut observe,
+                )? {
                     return check();
                 }
                 word.clear();
                 original_bytes = 0;
-                oversized = false;
+                streaming = false;
+            }
+            if source_punctuation_character(character) {
+                let mut buffer = [0; 4];
+                if observe(
+                    SourceWord::Whole(character.encode_utf8(&mut buffer)),
+                    source.encoding().character_bytes(character),
+                )? {
+                    return check();
+                }
             }
         }
         if original_bytes != 0 {
-            observe((!oversized).then_some(word.as_str()), original_bytes)?;
+            finish_decoded_source_word(
+                &word,
+                original_bytes,
+                streaming,
+                include_code_tokens,
+                &mut tokenizer,
+                &check,
+                &mut observe,
+            )?;
         }
     }
     check()
+}
+
+fn finish_decoded_source_word(
+    word: &str,
+    original_bytes: usize,
+    streaming: bool,
+    include_code_tokens: bool,
+    tokenizer: &mut BoundedCodeTokenizer,
+    check: &impl Fn() -> Result<(), SearchError>,
+    observe: &mut impl FnMut(SourceWord<'_>, usize) -> Result<bool, SearchError>,
+) -> Result<bool, SearchError> {
+    if streaming {
+        if include_code_tokens
+            && tokenizer.finish(&mut |token| observe(SourceWord::CodeToken(token), 0))?
+        {
+            return Ok(true);
+        }
+        observe(SourceWord::Oversized, original_bytes)
+    } else {
+        observe_utf8_source_word(word, include_code_tokens, check, &mut |item, _| {
+            let bytes = match item {
+                SourceWord::Whole(_) | SourceWord::Oversized => original_bytes,
+                SourceWord::CodeToken(_) | SourceWord::QueryWord(_) => 0,
+            };
+            observe(item, bytes)
+        })
+    }
+}
+
+fn observe_utf8_source_word(
+    word: &str,
+    include_code_tokens: bool,
+    check: &impl Fn() -> Result<(), SearchError>,
+    observe: &mut impl FnMut(SourceWord<'_>, usize) -> Result<bool, SearchError>,
+) -> Result<bool, SearchError> {
+    if word.len() <= MAX_SOURCE_IDENTIFIER_BYTES {
+        return observe(SourceWord::Whole(word), word.len());
+    }
+    if include_code_tokens {
+        if word.len() <= MAX_SOURCE_TEXT_BYTES && observe(SourceWord::QueryWord(word), 0)? {
+            return Ok(true);
+        }
+        let mut tokenizer = BoundedCodeTokenizer::new(MAX_SOURCE_TEXT_BYTES);
+        let mut token_observer = |token: &str| observe(SourceWord::CodeToken(token), 0);
+        for (index, character) in word.chars().enumerate() {
+            if index % 1024 == 0 {
+                check()?;
+            }
+            if tokenizer.push(character, &mut token_observer)? {
+                return Ok(true);
+            }
+        }
+        if tokenizer.finish(&mut token_observer)? {
+            return Ok(true);
+        }
+    }
+    observe(SourceWord::Oversized, word.len())
 }
 
 fn source_word_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric() || is_mark(character)
 }
 
+fn source_punctuation_character(character: char) -> bool {
+    !character.is_alphanumeric()
+        && !is_mark(character)
+        && !character.is_whitespace()
+        && !character.is_control()
+}
+
+// Canonical Unicode normalization merges distinct authored punctuation scalars.
+// Dedicated raw postings preserve scalar identity without a colliding word marker.
+fn literal_punctuation_term(term: &str) -> bool {
+    let mut characters = term.chars();
+    characters.next().is_some_and(source_punctuation_character) && characters.next().is_none()
+}
+
+fn literal_punctuation_terms(query: &str) -> Vec<String> {
+    query
+        .chars()
+        .filter(|character| source_punctuation_character(*character))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|character| character.to_string())
+        .collect()
+}
+
 impl SourceQuerySelection {
+    fn observe_query_word_prefix(&mut self, word: &str) -> Result<(), SearchError> {
+        if self.prefix {
+            // Prefix metadata describes the entire authored word. Keeping that
+            // spelling also preserves token boundaries across a camel-case edge.
+            let canonical = normalize_text(word);
+            if canonical.len() <= MAX_SOURCE_IDENTIFIER_BYTES
+                && canonical.starts_with(&self.normalized)
+            {
+                self.append(word)?;
+                self.complete = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_code_token(&mut self, token: &str) -> Result<(), SearchError> {
+        let normalized = normalize_text(token);
+        let mut contributes = false;
+        for (query_token, matched) in self.tokens.iter().zip(&mut self.matched) {
+            if !*matched && normalized == *query_token {
+                *matched = true;
+                contributes = true;
+            }
+        }
+        if contributes {
+            self.append(token)?;
+        }
+        self.complete = self.matched.iter().all(|matched| *matched);
+        Ok(())
+    }
+
     fn observe(&mut self, word: &str) -> Result<(), SearchError> {
         if word.len() > MAX_SOURCE_IDENTIFIER_BYTES {
             return Ok(());
         }
-        let normalized = normalize_text(word);
-        if normalized.len() > MAX_SOURCE_IDENTIFIER_BYTES {
-            return Ok(());
-        }
-        let prefix = self.normalized.chars().count() >= MIN_PATTERN_LITERALS
-            && normalized.starts_with(&self.normalized);
-        let terminal = self.terminal.as_ref() == Some(&normalized);
+        // A tail witness visits every preceding word. Reuse tokenizer scratch
+        // and compare ASCII directly instead of allocating folded words and lists.
+        let (prefix, terminal) = if word.is_ascii() {
+            (
+                self.prefix
+                    && word
+                        .as_bytes()
+                        .get(..self.normalized.len())
+                        .is_some_and(|start| {
+                            start.eq_ignore_ascii_case(self.normalized.as_bytes())
+                        }),
+                self.terminal
+                    .as_deref()
+                    .is_some_and(|terminal| word.eq_ignore_ascii_case(terminal)),
+            )
+        } else {
+            let normalized = normalize_text(word);
+            if normalized.len() > MAX_SOURCE_IDENTIFIER_BYTES {
+                return Ok(());
+            }
+            (
+                self.prefix && normalized.starts_with(&self.normalized),
+                self.terminal.as_ref() == Some(&normalized),
+            )
+        };
         let mut contributes = prefix || terminal;
         if self.terminal.is_none() {
-            let word_tokens = token_texts(word);
-            for (query_token, matched) in self.tokens.iter().zip(&mut self.matched) {
-                if !*matched && word_tokens.contains(query_token) {
-                    *matched = true;
-                    contributes = true;
+            if self.punctuation_only {
+                for (query_token, matched) in self.tokens.iter().zip(&mut self.matched) {
+                    if !*matched && word == query_token {
+                        *matched = true;
+                        contributes = true;
+                    }
+                }
+            } else {
+                let mut stream = self.tokenizer.token_stream(word);
+                while stream.advance() {
+                    for (query_token, matched) in self.tokens.iter().zip(&mut self.matched) {
+                        if !*matched && stream.token().text == *query_token {
+                            *matched = true;
+                            contributes = true;
+                        }
+                    }
                 }
             }
         }
         if contributes {
-            let separator = usize::from(!self.output.is_empty());
-            let additional =
-                separator
-                    .checked_add(word.len())
-                    .ok_or(SearchError::BuildBudgetExceeded {
-                        resource: "source_text",
-                    })?;
-            if self
-                .output
-                .len()
-                .checked_add(additional)
-                .is_none_or(|length| length > self.maximum_bytes)
-            {
-                return Err(SearchError::BuildBudgetExceeded {
-                    resource: "source_text",
-                });
-            }
-            self.output
-                .try_reserve(additional)
-                .map_err(|_| SearchError::BuildBudgetExceeded {
-                    resource: "source_text",
-                })?;
-            if separator != 0 {
-                self.output.push(' ');
-            }
-            self.output.push_str(word);
+            self.append(word)?;
         }
         self.complete = prefix
             || terminal
             || (self.terminal.is_none() && self.matched.iter().all(|matched| *matched));
+        Ok(())
+    }
+
+    fn append(&mut self, word: &str) -> Result<(), SearchError> {
+        let separator = usize::from(!self.output.is_empty());
+        let additional =
+            separator
+                .checked_add(word.len())
+                .ok_or(SearchError::BuildBudgetExceeded {
+                    resource: "source_text",
+                })?;
+        if self
+            .output
+            .len()
+            .checked_add(additional)
+            .is_none_or(|length| length > self.maximum_bytes)
+        {
+            return Err(SearchError::BuildBudgetExceeded {
+                resource: "source_text",
+            });
+        }
+        self.output
+            .try_reserve(additional)
+            .map_err(|_| SearchError::BuildBudgetExceeded {
+                resource: "source_text",
+            })?;
+        if separator != 0 {
+            self.output.push(' ');
+        }
+        self.output.push_str(word);
         Ok(())
     }
 }
@@ -2725,17 +3244,18 @@ fn intersection_filter_clause(
 }
 
 fn validate_build_budget(budget: BuildBudget) -> Result<(), SearchError> {
-    if budget.max_documents == 0 || budget.max_documents > HARD_MAX_DOCUMENTS {
+    if budget.max_documents == 0 {
         return Err(SearchError::BuildBudgetExceeded {
             resource: "documents",
         });
     }
-    if budget.max_text_bytes == 0 || budget.max_text_bytes > HARD_MAX_TEXT_BYTES {
+    if budget.max_text_bytes == 0 {
         return Err(SearchError::BuildBudgetExceeded {
             resource: "text_bytes",
         });
     }
-    if !(MIN_WRITER_HEAP_BYTES..=HARD_MAX_WRITER_HEAP_BYTES).contains(&budget.indexer_memory_bytes)
+    if !(MIN_WRITER_HEAP_BYTES..MAX_WRITER_HEAP_BYTES_EXCLUSIVE)
+        .contains(&budget.indexer_memory_bytes)
     {
         return Err(SearchError::BuildBudgetExceeded {
             resource: "indexer_memory_bytes",
@@ -2791,29 +3311,37 @@ fn validate_document(
     }
     let mut bytes = 0usize;
     if document.symbol_name_projection == SymbolNameProjection::Segmented {
-        for (name, field) in [
+        for (name, field, empty_alias) in [
             (
                 Some(document.identifier.as_str()),
                 DocumentField::Identifier,
+                false,
             ),
             (
                 document.canonical_name.as_deref(),
                 DocumentField::Identifier,
+                true,
             ),
             (
                 Some(document.qualified_name.as_str()),
                 DocumentField::QualifiedName,
+                false,
             ),
         ] {
             if let Some(name) = name {
-                validate_segmented_name(name, field)?;
+                if !name.is_empty() || !empty_alias {
+                    validate_segmented_name(name, field)?;
+                }
                 bytes = checked_text_bytes(bytes, name.len())?;
             }
         }
     } else {
         bytes = add_optional(
             bytes,
-            document.canonical_name.as_deref(),
+            document
+                .canonical_name
+                .as_deref()
+                .filter(|name| !name.is_empty()),
             MAX_IDENTIFIER_BYTES,
             DocumentField::Identifier,
             true,
@@ -2893,6 +3421,9 @@ fn validate_document(
             DocumentField::SourceIdentifier,
             true,
         )?;
+        if literal_punctuation_term(identifier) {
+            bytes = checked_text_bytes(bytes, identifier.len())?;
+        }
     }
     bytes = add_optional(
         bytes,
@@ -2924,6 +3455,9 @@ fn validate_document(
                 DocumentField::SourceIdentifier,
                 true,
             )?;
+            if literal_punctuation_term(word) {
+                bytes = checked_text_bytes(bytes, word.len())?;
+            }
             text_bytes = checked_text_bytes(text_bytes, word.len())?;
         }
         if text_bytes > SOURCE_TERM_CHUNK_BYTES {
@@ -3020,10 +3554,18 @@ fn validate_request(request: &SearchRequest, budget: SearchBudget) -> Result<(),
     if request.max_results == 0 || request.max_results > budget.max_results {
         return Err(SearchError::InvalidResultLimit);
     }
-    if request.mode == SearchMode::Text && token_texts(query).len() > budget.max_terms {
-        return Err(SearchError::InvalidQueryBudget {
-            resource: "query_terms",
-        });
+    if request.mode == SearchMode::Text {
+        let tokens = token_texts(query);
+        let terms = if tokens.is_empty() {
+            literal_punctuation_terms(query).len()
+        } else {
+            tokens.len()
+        };
+        if terms > budget.max_terms {
+            return Err(SearchError::InvalidQueryBudget {
+                resource: "query_terms",
+            });
+        }
     }
     Ok(())
 }
@@ -3099,6 +3641,20 @@ fn register_tokenizer(index: &Index) {
             .filter(RemoveLongFilter::limit(MAX_TERM_BYTES + 1))
             .build(),
     );
+}
+
+fn candidate_name_matches(name: &str, normalized: &str, prefix: bool) -> bool {
+    // ASCII folding is exactly lowercase; candidate checks need no owned key.
+    if name.is_ascii() {
+        return name.eq_ignore_ascii_case(normalized)
+            || (prefix
+                && name
+                    .as_bytes()
+                    .get(..normalized.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(normalized.as_bytes())));
+    }
+    let name = normalize_exact(name);
+    name == normalized || (prefix && name.starts_with(normalized))
 }
 
 fn normalize_exact(input: &str) -> String {
@@ -3365,6 +3921,334 @@ mod tests {
     }
 
     #[test]
+    fn punctuation_text_queries_use_actual_source_vocabulary_in_all_encodings() {
+        let text = "{\n}\nvalue_name .* λ\u{301}";
+        let mut encodings = vec![text.as_bytes().to_vec()];
+        for little_endian in [true, false] {
+            encodings.push(
+                std::iter::once(0xfeff_u16)
+                    .chain(text.encode_utf16())
+                    .flat_map(|unit| {
+                        if little_endian {
+                            unit.to_le_bytes()
+                        } else {
+                            unit.to_be_bytes()
+                        }
+                    })
+                    .collect(),
+            );
+        }
+        for bytes in encodings {
+            let projection =
+                project_source_terms_with_coverage(&bytes, 4096, &Cancellation::new()).unwrap();
+            assert!(projection.coverage.is_complete());
+            let mut file = document(1, "config", "config.jsonc");
+            file.symbol_id = None;
+            file.source_term_chunks = projection.chunks;
+            file.source_coverage = Some(projection.coverage);
+            let index = LexicalIndex::build_ephemeral(
+                generation(1),
+                vec![file],
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            for (query, expected) in [
+                ("{", true),
+                ("}", true),
+                ("}{", true),
+                ("{ { }", true),
+                (".*", true),
+                ("_", true),
+                ("[", false),
+                ("{[", false),
+                (".+", false),
+                (".*?", false),
+            ] {
+                let hits = search(&index, query, SearchMode::Text);
+                assert_eq!(!hits.is_empty(), expected, "query={query}");
+                assert!(hits.iter().all(|hit| hit.symbol_id.is_none()));
+                let witness = select_query_source_bytes(
+                    &bytes,
+                    query,
+                    256,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+                .unwrap();
+                let mut selected = document(2, "selected", "selected.jsonc");
+                selected.symbol_id = None;
+                selected.source_identifiers =
+                    witness.split_whitespace().map(str::to_owned).collect();
+                let selected_index = LexicalIndex::build_ephemeral(
+                    generation(1),
+                    vec![selected],
+                    BuildBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+                assert_eq!(
+                    !search(&selected_index, query, SearchMode::Text).is_empty(),
+                    expected,
+                    "selected query={query}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canonically_equivalent_punctuation_preserves_authored_scalar_identity() {
+        for (source, query, expected) in [
+            (";", "\u{037e}", false),
+            ("\u{037e}", ";", false),
+            ("\u{037e}", "\u{037e}", true),
+            ("·", "\u{0387}", false),
+            ("\u{0387}", "·", false),
+            ("\u{0387}", "\u{0387}", true),
+        ] {
+            for encoding in 0..3 {
+                let bytes = match encoding {
+                    0 => source.as_bytes().to_vec(),
+                    _ => std::iter::once(0xfeff_u16)
+                        .chain(source.encode_utf16())
+                        .flat_map(|unit| {
+                            if encoding == 1 {
+                                unit.to_le_bytes()
+                            } else {
+                                unit.to_be_bytes()
+                            }
+                        })
+                        .collect(),
+                };
+                let projection =
+                    project_source_terms_with_coverage(&bytes, 1024, &Cancellation::new()).unwrap();
+                let mut file = document(1, "config", "config.jsonc");
+                file.symbol_id = None;
+                file.source_term_chunks = projection.chunks;
+                let index = LexicalIndex::build_ephemeral(
+                    generation(1),
+                    vec![file],
+                    BuildBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+                assert_eq!(
+                    !search(&index, query, SearchMode::Text).is_empty(),
+                    expected,
+                    "source={source}, query={query}, encoding={encoding}"
+                );
+                let selected = select_query_source_bytes(
+                    &bytes,
+                    query,
+                    256,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(!selected.is_empty(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn punctuation_text_filters_and_pages_survive_verified_artifact_reopen() {
+        let cancellation = Cancellation::new();
+        let mut files = Vec::new();
+        for (byte, path, source) in [
+            (1, "src/a.jsonc", "{\n}\n"),
+            (2, "src/b.jsonc", "{\n}\n"),
+            (3, "vendor/c.jsonc", "{\n}\n"),
+            (4, "src/lure.jsonc", "words only"),
+        ] {
+            let mut file = document(byte, "{", path);
+            file.symbol_id = None;
+            file.kind = "file".to_owned();
+            file.language = "jsonc".to_owned();
+            let projection =
+                project_source_terms_with_coverage(source.as_bytes(), 1024, &cancellation).unwrap();
+            file.source_term_chunks = projection.chunks;
+            file.source_coverage = Some(projection.coverage);
+            files.push(file);
+        }
+        let (directory, manifest, index) = build(files);
+        let request = SearchRequest {
+            query: "}{".to_owned(),
+            mode: SearchMode::Text,
+            max_results: 1,
+            page_offset: 1,
+        };
+        let filtered = |index: &LexicalIndex| {
+            index
+                .search_with_entity_filters_and_stats(
+                    &request,
+                    SearchFilters {
+                        languages: &["jsonc".to_owned()],
+                        path_prefixes: &["src".to_owned()],
+                        kinds: Some(&["file".to_owned()]),
+                    },
+                    SearchBudget::default(),
+                    &cancellation,
+                )
+                .unwrap()
+        };
+        let before = filtered(&index);
+        assert_eq!(before.matched_candidates, 2);
+        assert_eq!(before.hits.len(), 1);
+        assert_eq!(before.hits[0].path, "src/b.jsonc");
+        assert!(before.hits[0].symbol_id.is_none());
+        assert_eq!(search(&index, "[", SearchMode::Text).len(), 0);
+        assert_eq!(search(&index, "{", SearchMode::Text).len(), 3);
+        drop(index);
+        let reopened = open_index(directory.path(), manifest, generation(7));
+        assert_eq!(before, filtered(&reopened));
+    }
+
+    #[test]
+    fn punctuation_terms_obey_query_selection_and_projection_limits() {
+        let cancellation = Cancellation::new();
+        let request = |query: &str| SearchRequest {
+            query: query.to_owned(),
+            mode: SearchMode::Text,
+            max_results: 1,
+            page_offset: 0,
+        };
+        assert_eq!(
+            validate_request(
+                &request("{}"),
+                SearchBudget {
+                    max_terms: 1,
+                    ..SearchBudget::default()
+                }
+            ),
+            Err(SearchError::InvalidQueryBudget {
+                resource: "query_terms"
+            })
+        );
+        assert!(
+            validate_request(
+                &request("{{{{"),
+                SearchBudget {
+                    max_terms: 1,
+                    ..SearchBudget::default()
+                }
+            )
+            .is_ok()
+        );
+        for query in ["\t ", "{\0}", "{\n}"] {
+            assert!(validate_request(&request(query), SearchBudget::default()).is_err());
+        }
+        let repeated = "{".repeat(100_000);
+        let projection =
+            project_source_terms_with_coverage(repeated.as_bytes(), 3, &cancellation).unwrap();
+        assert_eq!(projection.chunks, [vec!["{".to_owned()]]);
+        assert_eq!(projection.coverage.omitted_words, 0);
+        assert_eq!(projection.coverage.omitted_word_bytes, 0);
+        assert!(project_source_terms_with_coverage(b"{}", 4, &cancellation).is_err());
+        assert!(
+            select_query_source_text("{}", "{}", 2, SearchBudget::default(), &cancellation)
+                .is_err()
+        );
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(project_source_terms_with_coverage(repeated.as_bytes(), 2, &cancellation).is_err());
+        assert!(
+            select_query_source_text(&repeated, "{", 2, SearchBudget::default(), &cancellation)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn older_word_only_index_payload_requires_reconstruction() {
+        let older = format!(
+            "{FORMAT_PREFIX};version=7;generation={};documents=1",
+            generation(7)
+        );
+        assert_eq!(parse_payload(&older), Err(SearchError::IncompatibleIndex));
+        assert_eq!(
+            parse_payload(&format_payload(generation(7), 1)),
+            Ok((generation(7), 1))
+        );
+    }
+
+    #[test]
+    fn source_selection_retains_exact_witness_order_across_encodings() {
+        let oversized = format!("{} {} tailValue", "x".repeat(241), "İ".repeat(81));
+        for (source, query, expected) in [
+            (
+                "ignored mixedValue HTTP2Server",
+                "mixed value",
+                "mixedValue",
+            ),
+            (
+                "first_value ignored secondValue",
+                "first second",
+                "first_value secondValue",
+            ),
+            ("first_value ignored", "first second", "first_value"),
+            ("irrelevant HTTP2Server", "server 2", "HTTP2Server"),
+            ("other HTTPServer", "HTTP", "HTTPServer"),
+            ("crate handler_suffix handler", "crate::handler", "handler"),
+            ("crate handler_suffix", "crate::handler", ""),
+            ("ABC other mixedValue z", "z", "z"),
+            ("a_b other", "a b", "a_b"),
+            ("a_b other", "_", "_"),
+            ("} other {", "{}", "} {"),
+            ("\u{037e} ;", ";", ";"),
+            ("; \u{037e}", "\u{037e}", "\u{037e}"),
+            ("unrelated Cafe\u{301}Value", "CAFÉ", "Cafe\u{301}Value"),
+            ("unrelated Straße", "STRASSE", "Straße"),
+            ("unrelated İValue", "i\u{307} value", "İValue"),
+            ("HTTP2Server Σίσυφος", "σίσυφοσ", "Σίσυφος"),
+            ("\u{301}Tail other", "tail", "\u{301}Tail"),
+            ("λ_value other", "λ value", "λ_value"),
+            ("other", "absent", ""),
+            (oversized.as_str(), "tail", "tailValue"),
+            (oversized.as_str(), "x", ""),
+            (oversized.as_str(), "i\u{307}", ""),
+        ] {
+            assert_eq!(
+                select_query_source_text(
+                    source,
+                    query,
+                    1024,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap(),
+                expected,
+                "source={source:?}, query={query:?}",
+            );
+            let encodings = [
+                source.as_bytes().to_vec(),
+                std::iter::once(0xfeff_u16)
+                    .chain(source.encode_utf16())
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+                std::iter::once(0xfeff_u16)
+                    .chain(source.encode_utf16())
+                    .flat_map(u16::to_be_bytes)
+                    .collect(),
+            ];
+            for bytes in encodings {
+                assert_eq!(
+                    select_query_source_bytes(
+                        &bytes,
+                        query,
+                        1024,
+                        SearchBudget::default(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+                    .as_deref(),
+                    Some(expected),
+                    "source={source:?}, query={query:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_selection_preserves_text_query_matches() {
         for (source, query, expected) in [
             ("unrelated tailOnlyMarker", "tailOnlyMarker", true),
@@ -3439,6 +4323,443 @@ mod tests {
                 )
                 .expect("selected source query executes");
             assert_eq!(!hits.is_empty(), expected, "source={source}, query={query}");
+        }
+    }
+
+    #[test]
+    fn source_selection_recovers_complete_tokens_inside_long_words() {
+        let cases = [
+            (
+                format!("{}TailMarker", "aB1cD2".repeat(60)),
+                "tail marker",
+                true,
+            ),
+            ("HTTP2Server".repeat(40), "http server 2", true),
+            (
+                format!("{}Cafe\u{301}ValueStraße", "prefix_".repeat(50)),
+                "café value strasse",
+                true,
+            ),
+            ("İValue".repeat(50), "i\u{307} value", true),
+            ("λValue9".repeat(50), "λ value 9", true),
+            (
+                format!("{}HTTP\u{301}Server", "aB1".repeat(80)),
+                "http\u{301} server",
+                true,
+            ),
+            ("HTTP2Server".repeat(40), "http missing", false),
+            ("HTTP2Server".repeat(40), "erver", false),
+            ("HTTP2Server".repeat(40), "http::server", false),
+            ("HTTP2Server".repeat(40), "serv", false),
+        ];
+        for (source, query, expected) in cases {
+            let build = |text: String, witnesses: bool| {
+                let mut file = document(1, "fixture", "fixture.txt");
+                file.symbol_id = None;
+                file.signature = None;
+                file.type_names.clear();
+                file.documentation = None;
+                if witnesses {
+                    file.source_identifiers = text.split_whitespace().map(str::to_owned).collect();
+                }
+                file.source_text = (!text.is_empty()).then_some(text);
+                LexicalIndex::build_ephemeral(
+                    generation(1),
+                    vec![file],
+                    BuildBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+            };
+            let reference = build(source.clone(), false);
+            assert_eq!(
+                !search(&reference, query, SearchMode::Text).is_empty(),
+                expected,
+                "full source query={query:?}"
+            );
+            for encoding in 0..3 {
+                let bytes = match encoding {
+                    0 => source.as_bytes().to_vec(),
+                    _ => std::iter::once(0xfeff_u16)
+                        .chain(source.encode_utf16())
+                        .flat_map(|unit| {
+                            if encoding == 1 {
+                                unit.to_le_bytes()
+                            } else {
+                                unit.to_be_bytes()
+                            }
+                        })
+                        .collect(),
+                };
+                let selected = select_query_source_bytes(
+                    &bytes,
+                    query,
+                    1024,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(
+                    selected
+                        .split_whitespace()
+                        .all(|word| source.contains(word))
+                );
+                let actual = build(selected, true);
+                assert_eq!(
+                    !search(&actual, query, SearchMode::Text).is_empty(),
+                    expected,
+                    "selected query={query:?}, encoding={encoding}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_selection_retains_raw_tokens_when_unicode_normalization_contracts() {
+        for (source, query, witness) in [
+            ("e\u{301}".repeat(81), "é".repeat(81), "e\u{301}".repeat(81)),
+            ("ſ".repeat(240), "s".repeat(240), "ſ".repeat(240)),
+            ("K".repeat(120), "k".repeat(120), "K".repeat(120)),
+            ("K".repeat(161), "k".repeat(161), "K".repeat(161)),
+            ("K".repeat(240), "k".repeat(240), "K".repeat(240)),
+            (
+                format!("{}B{}cTail", "K".repeat(81), "\u{301}".repeat(119)),
+                "k".repeat(81),
+                "K".repeat(81),
+            ),
+            (
+                "\u{1100}\u{1161}".repeat(80),
+                "가".repeat(80),
+                "\u{1100}\u{1161}".repeat(80),
+            ),
+        ] {
+            let mut file = document(1, "fixture", "fixture.txt");
+            file.symbol_id = None;
+            file.source_text = Some(source.clone());
+            let reference = LexicalIndex::build_ephemeral(
+                generation(1),
+                vec![file],
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            assert_eq!(search(&reference, &query, SearchMode::Text).len(), 1);
+            for encoding in 0..3 {
+                let bytes = match encoding {
+                    0 => source.as_bytes().to_vec(),
+                    _ => std::iter::once(0xfeff_u16)
+                        .chain(source.encode_utf16())
+                        .flat_map(|unit| {
+                            if encoding == 1 {
+                                unit.to_le_bytes()
+                            } else {
+                                unit.to_be_bytes()
+                            }
+                        })
+                        .collect(),
+                };
+                let selected = select_query_source_bytes(
+                    &bytes,
+                    &query,
+                    1024,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(selected, witness, "encoding={encoding}, query={query:?}");
+                assert_eq!(normalize_text(&selected), query);
+                let alias = project_query_source_identifier(&selected).unwrap();
+                assert!(matches!(alias, Cow::Owned(_)));
+                assert_eq!(alias, query);
+                let mut file = document(1, "fixture", "fixture.txt");
+                file.symbol_id = None;
+                file.source_identifiers = vec![alias.into_owned()];
+                file.source_text = Some(selected);
+                let actual = LexicalIndex::build_ephemeral(
+                    generation(1),
+                    vec![file],
+                    BuildBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+                assert_eq!(search(&actual, &query, SearchMode::Text).len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn contracted_source_word_prefixes_match_full_identifier_reference() {
+        for (source, query, expected) in [
+            ("e\u{301}".repeat(81), "é".repeat(20), true),
+            ("ſ".repeat(240), "s".repeat(20), true),
+            ("K".repeat(120), "k".repeat(20), true),
+            ("\u{1100}\u{1161}".repeat(80), "가".repeat(20), true),
+            (
+                format!("{}TailMarker", "e\u{301}".repeat(81)),
+                "é".repeat(20),
+                true,
+            ),
+            (
+                format!("{}TailMarker", "e\u{301}".repeat(81)),
+                format!("{}ta", "é".repeat(81)),
+                true,
+            ),
+            (
+                format!("{}TailMarker", "e\u{301}".repeat(81)),
+                "tai".to_owned(),
+                false,
+            ),
+            (
+                format!("{}TailMarker", "x".repeat(241)),
+                "tai".to_owned(),
+                false,
+            ),
+            (format!("_{}", "e\u{301}".repeat(81)), "é".repeat(20), false),
+            (
+                format!("\u{301}{}", "e\u{301}".repeat(81)),
+                "é".repeat(20),
+                false,
+            ),
+            ("x".repeat(241), "x".repeat(20), false),
+        ] {
+            // Raw backend input keeps the entire oversized negative control;
+            // public document admission would reject it before search executes.
+            let fields = Fields::new();
+            let reference = Index::create_in_ram(fields.schema.clone());
+            register_tokenizer(&reference);
+            let mut writer = reference
+                .writer_with_num_threads::<TantivyDocument>(1, MIN_WRITER_HEAP_BYTES)
+                .unwrap();
+            let mut file = TantivyDocument::default();
+            let canonical = normalize_text(&source);
+            if canonical.len() <= MAX_SOURCE_IDENTIFIER_BYTES {
+                file.add_text(fields.source_identifier_normalized, canonical);
+            }
+            file.add_text(fields.source_text, &source);
+            writer.add_document(file).unwrap();
+            writer.commit().unwrap();
+            let reader = reference.reader().unwrap();
+            let searcher = reader.searcher();
+            let cancellation = Cancellation::new();
+            let budget = SearchBudget::default();
+            let control = SearchControl::new(&cancellation, budget.max_duration);
+            let mut work = QueryWork::new(&searcher, budget, &control);
+            let backend_query = fields
+                .text_query(&query, &normalize_exact(&query), &mut work)
+                .unwrap();
+            assert_eq!(
+                searcher
+                    .search(backend_query.as_ref(), &tantivy::collector::Count)
+                    .unwrap()
+                    > 0,
+                expected,
+                "reference query={query:?}"
+            );
+            for encoding in 0..3 {
+                let bytes = match encoding {
+                    0 => source.as_bytes().to_vec(),
+                    _ => std::iter::once(0xfeff_u16)
+                        .chain(source.encode_utf16())
+                        .flat_map(|unit| {
+                            if encoding == 1 {
+                                unit.to_le_bytes()
+                            } else {
+                                unit.to_be_bytes()
+                            }
+                        })
+                        .collect(),
+                };
+                let selected = select_query_source_bytes(
+                    &bytes,
+                    &query,
+                    1024,
+                    SearchBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    selected,
+                    if expected { source.as_str() } else { "" },
+                    "encoding={encoding}, query={query:?}"
+                );
+                let mut file = document(1, "fixture", "fixture.txt");
+                file.symbol_id = None;
+                file.source_identifiers = selected
+                    .split_whitespace()
+                    .map(|word| project_query_source_identifier(word).unwrap().into_owned())
+                    .collect();
+                file.source_text = (!selected.is_empty()).then_some(selected);
+                let actual = LexicalIndex::build_ephemeral(
+                    generation(1),
+                    vec![file],
+                    BuildBudget::default(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+                assert_eq!(
+                    !search(&actual, &query, SearchMode::Text).is_empty(),
+                    expected,
+                    "selected query={query:?}, encoding={encoding}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn query_source_aliases_require_complete_bounded_normalized_words() {
+        for word in ["ShortValue", "e\u{301}", "_", "λ"] {
+            let alias = project_query_source_identifier(word).unwrap();
+            assert!(matches!(alias, Cow::Borrowed(_)));
+            assert_eq!(alias, word);
+        }
+        for word in [
+            "x".repeat(241),
+            "e\u{301}".repeat(161),
+            format!("{} Tail", "e\u{301}".repeat(81)),
+            format!("/{}", "e\u{301}".repeat(81)),
+            format!("{}\0", "e\u{301}".repeat(81)),
+        ] {
+            assert_eq!(
+                project_query_source_identifier(&word),
+                Err(SearchError::BuildBudgetExceeded {
+                    resource: "source_identifiers"
+                })
+            );
+        }
+        let raw = "e\u{301}".repeat(81);
+        let query = "é".repeat(81);
+        assert_eq!(
+            select_query_source_text(
+                &raw,
+                &query,
+                raw.len() - 1,
+                SearchBudget::default(),
+                &Cancellation::new()
+            ),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "source_text"
+            })
+        );
+        assert_eq!(
+            select_query_source_text(
+                &raw,
+                &query,
+                raw.len(),
+                SearchBudget::default(),
+                &Cancellation::new()
+            )
+            .unwrap(),
+            raw
+        );
+    }
+
+    #[test]
+    fn long_source_words_preserve_token_limits_and_work_controls() {
+        let source = format!("{}TailMarker", "x".repeat(1_000_000));
+        let checkpoints = Cell::new(0);
+        let mut observed = 0;
+        let result = observe_utf8_source_word(
+            &source,
+            true,
+            &|| {
+                checkpoints.set(checkpoints.get() + 1);
+                if checkpoints.get() == 3 {
+                    Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+                } else {
+                    Ok(())
+                }
+            },
+            &mut |_, _| {
+                observed += 1;
+                Ok(false)
+            },
+        );
+        assert_eq!(
+            result,
+            Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+        );
+        assert_eq!(checkpoints.get(), 3);
+        assert_eq!(observed, 0);
+        for encoding in 0..3 {
+            let bytes = match encoding {
+                0 => source.as_bytes().to_vec(),
+                _ => std::iter::once(0xfeff_u16)
+                    .chain(source.encode_utf16())
+                    .flat_map(|unit| {
+                        if encoding == 1 {
+                            unit.to_le_bytes()
+                        } else {
+                            unit.to_be_bytes()
+                        }
+                    })
+                    .collect(),
+            };
+            for (query, expected) in [
+                ("tail marker", "Tail Marker"),
+                ("x", ""),
+                ("ail", ""),
+                ("tail::marker", ""),
+            ] {
+                assert_eq!(
+                    select_query_source_bytes(
+                        &bytes,
+                        query,
+                        11,
+                        SearchBudget::default(),
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+                    .as_deref(),
+                    Some(expected)
+                );
+            }
+            assert_eq!(
+                select_query_source_bytes(
+                    &bytes,
+                    "tail marker",
+                    10,
+                    SearchBudget::default(),
+                    &Cancellation::new()
+                ),
+                Err(SearchError::BuildBudgetExceeded {
+                    resource: "source_text"
+                })
+            );
+            let cancelled = Cancellation::new();
+            cancelled.cancel(CancellationReason::ClientRequest);
+            assert_eq!(
+                select_query_source_bytes(&bytes, "tail", 32, SearchBudget::default(), &cancelled),
+                Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+            );
+            assert_eq!(
+                select_query_source_bytes(
+                    &bytes,
+                    "tail",
+                    32,
+                    SearchBudget {
+                        max_duration: Duration::from_nanos(1),
+                        ..SearchBudget::default()
+                    },
+                    &Cancellation::new()
+                ),
+                Err(SearchError::Cancelled(CancellationReason::DeadlineExceeded))
+            );
+            let projection =
+                project_source_terms_with_coverage(&bytes, 32, &Cancellation::new()).unwrap();
+            assert!(projection.chunks.is_empty());
+            assert_eq!(projection.coverage.omitted_words, 1);
+            assert_eq!(
+                projection.coverage.omitted_word_bytes,
+                u64::try_from(if encoding == 0 {
+                    source.len()
+                } else {
+                    source.len() * 2
+                })
+                .unwrap()
+            );
         }
     }
 
@@ -3936,6 +5257,257 @@ mod tests {
             generated: false,
             test: false,
             declaration_only: false,
+        }
+    }
+
+    fn candidate_pages(index: &LexicalIndex, query: &str) -> (Vec<SearchHit>, u64) {
+        let mut hits = Vec::new();
+        let mut offset = 0;
+        let mut count = None;
+        loop {
+            let request = SearchRequest {
+                query: query.to_owned(),
+                mode: SearchMode::Text,
+                max_results: 2,
+                page_offset: offset,
+            };
+            let first = index
+                .search_with_stats(&request, SearchBudget::default(), &Cancellation::new())
+                .unwrap();
+            let second = index
+                .search_with_stats(&request, SearchBudget::default(), &Cancellation::new())
+                .unwrap();
+            assert_eq!(first, second, "query-local paging must be deterministic");
+            assert!(count.is_none_or(|count| count == first.matched_candidates));
+            count = Some(first.matched_candidates);
+            assert!(
+                !first.hits.is_empty() || first.matched_candidates == 0,
+                "a complete result must make pagination progress"
+            );
+            offset += first.hits.len();
+            hits.extend(first.hits);
+            if u64::try_from(offset).unwrap() == first.matched_candidates {
+                break;
+            }
+            assert!(u64::try_from(offset).unwrap() < first.matched_candidates);
+        }
+        let identities = hits
+            .iter()
+            .map(|hit| (hit.symbol_id, hit.file_id))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(identities.len(), hits.len());
+        for hit in &mut hits {
+            hit.relevance_score = 0.0;
+        }
+        hits.sort_by_key(|hit| (hit.symbol_id, hit.file_id));
+        (hits, count.unwrap())
+    }
+
+    #[test]
+    fn text_query_candidates_preserve_all_symbol_hits_and_pages() {
+        let mut documents = vec![
+            document(1, "displayCarrier", "src/mixed.rs"),
+            document(2, "callTarget", "src/other.rs"),
+            document(3, "Cafe\u{301}Value", "src/straße.rs"),
+            document(4, "HTTPServer2", "src/my_path.rs"),
+            document(5, "half", "src/path_token.rs"),
+            document(6, "unrelated", "deep/PathNeedle.rs"),
+        ];
+        documents[0].canonical_name = Some("CanonicalNeedle".to_owned());
+        documents[1].qualified_name = "scope::pkg::QualifiedNeedle".to_owned();
+        documents[1].signature =
+            Some("fn callTarget(value: SignatureOnly) -> ResultValue".to_owned());
+        documents[2].canonical_name = Some("StraßeAlias".to_owned());
+        documents[2].signature = Some("fn x(Σίσυφος: İToken)".to_owned());
+        documents[4].signature = Some("fn half -> OtherHalf".to_owned());
+        for ordinal in 10..18 {
+            let mut repeated = document(ordinal, &format!("carrier_{ordinal}"), "src/repeated.rs");
+            repeated.signature = Some("fn carrier(value: SignatureOnly)".to_owned());
+            documents.push(repeated);
+        }
+        let mut segmented = document(20, &format!("Huge_{}Tail", "x".repeat(800)), "src/long.rs");
+        segmented.symbol_name_projection = SymbolNameProjection::Segmented;
+        segmented.signature = None;
+        documents.push(segmented);
+        for document in &mut documents {
+            document.type_names.clear();
+            document.documentation = None;
+        }
+        let mut source = document(100, "source", "source.dat");
+        source.symbol_id = None;
+        source.kind = "file".to_owned();
+        source.type_names.clear();
+        source.documentation = None;
+        source.signature = None;
+        source.source_term_chunks = vec![vec!["{".into(), "}".into(), "\u{037e}".into()]];
+        documents.push(source);
+        let full = LexicalIndex::build_ephemeral(
+            generation(1),
+            documents.clone(),
+            BuildBudget::default(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        for query in [
+            "  canonicalneedle  ",
+            "Canonical",
+            "unrelated::callTarget",
+            "scope::pkg::QualifiedNeedle",
+            "SignatureOnly",
+            "SignatureOnly ResultValue",
+            "call_target signature_only",
+            "CaféValue",
+            "STRASSEALIAS",
+            "σίσυφοσ",
+            "i\u{307} token",
+            "http_server_2",
+            "src/mixed.rs",
+            "PathNeedle",
+            "src",
+            "repeated signature_only",
+            "half path_token OtherHalf",
+            "Tail",
+            "{}",
+            "\u{037e}",
+            "never_ever_present",
+            "!",
+        ] {
+            let candidate = TextQueryCandidate::new(query, SearchBudget::default()).unwrap();
+            let mut scoped = BTreeMap::new();
+            let retained = documents
+                .iter()
+                .filter(|document| {
+                    document.symbol_id.is_none()
+                        || scoped
+                            .entry(document.path.as_str())
+                            .or_insert_with(|| candidate.for_path(&document.path))
+                            .may_match_symbol(
+                                &document.identifier,
+                                document.canonical_name.as_deref(),
+                                &document.qualified_name,
+                                document.signature.as_deref(),
+                            )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(retained.len() < documents.len(), "{query}");
+            let pruned = LexicalIndex::build_ephemeral(
+                generation(1),
+                retained,
+                BuildBudget::default(),
+                &Cancellation::new(),
+            )
+            .unwrap();
+            let expected = candidate_pages(&full, query);
+            assert_eq!(expected, candidate_pages(&pruned, query), "{query}");
+            assert_eq!(
+                expected.0.is_empty(),
+                matches!(query, "never_ever_present" | "!"),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_query_candidate_preserves_explicit_term_and_byte_limits() {
+        let budget = SearchBudget {
+            max_terms: 64,
+            ..SearchBudget::default()
+        };
+        let query = std::iter::repeat_n("x", 64).collect::<Vec<_>>().join(" ");
+        let candidate = TextQueryCandidate::new(&query, budget).unwrap();
+        assert!(candidate.may_match_symbol("x", None, "x", "file.rs", None));
+        assert!(!candidate.may_match_symbol("y", None, "y", "file.rs", None));
+        assert!(TextQueryCandidate::new(&(query + " x"), budget).is_err());
+        assert!(
+            TextQueryCandidate::new(
+                "alpha beta",
+                SearchBudget {
+                    max_terms: 1,
+                    ..SearchBudget::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(TextQueryCandidate::new(&" ".repeat(HARD_MAX_QUERY_BYTES + 1), budget).is_err());
+        for query in ["", " ", "value\0", "value\nvalue"] {
+            assert!(TextQueryCandidate::new(query, budget).is_err());
+        }
+    }
+
+    #[test]
+    fn prepared_text_path_reuses_scratch_without_reusing_symbol_matches() {
+        for query in [
+            "café value",
+            "STRASSEALIAS",
+            "pkg::same",
+            "folder other",
+            "{}",
+        ] {
+            let candidate = TextQueryCandidate::new(query, SearchBudget::default()).unwrap();
+            let mut scoped = candidate.for_path("folder/file.rs");
+            for _ in 0..3 {
+                for (display, canonical, qualified, signature) in [
+                    ("same", Some("same"), "same", Some("CaféValue StraßeAlias")),
+                    ("other", None, "pkg::other", None),
+                    (
+                        "unrelated",
+                        Some("alias"),
+                        "namespace::unrelated",
+                        Some("fn f()"),
+                    ),
+                ] {
+                    assert_eq!(
+                        scoped.may_match_symbol(display, canonical, qualified, signature),
+                        candidate.may_match_symbol(
+                            display,
+                            canonical,
+                            qualified,
+                            "folder/file.rs",
+                            signature
+                        ),
+                        "{query}: {display}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_name_comparisons_match_canonical_keys() {
+        let ascii = (0_u8..=127).map(char::from).collect::<String>();
+        for name in [
+            "HTTP2Server",
+            "mixed_CASE::Name",
+            "Straße",
+            "Cafe\u{301}Value",
+            "İToken",
+            "Σίσυφος",
+            "",
+            ascii.as_str(),
+        ] {
+            for query in [
+                "http",
+                "mixed_case::name",
+                "strasse",
+                "café",
+                "i\u{307}",
+                "σίσυφοσ",
+                "",
+                "é",
+                ascii.as_str(),
+            ] {
+                let normalized_query = normalize_exact(query);
+                let normalized_name = normalize_exact(name);
+                for prefix in [false, true] {
+                    assert_eq!(
+                        candidate_name_matches(name, &normalized_query, prefix),
+                        normalized_name == normalized_query
+                            || (prefix && normalized_name.starts_with(&normalized_query)),
+                        "{name:?}: {query:?}, prefix={prefix}",
+                    );
+                }
+            }
         }
     }
 
@@ -4450,6 +6022,108 @@ mod tests {
     }
 
     #[test]
+    fn empty_symbol_alias_metadata_survives_inline_segmented_and_reopened_storage() {
+        for segmented in [false, true] {
+            let mut source = document(1, "var\"\"", "src/empty.jl");
+            source.language = "julia".to_owned();
+            source.canonical_name = Some(String::new());
+            source.signature = None;
+            if segmented {
+                source.qualified_name = format!("{}::", "owner_".repeat(400));
+            }
+            source.symbol_name_projection = project_symbol_name_projection(
+                &source.identifier,
+                source.canonical_name.as_deref(),
+                &source.qualified_name,
+            );
+            assert_eq!(
+                source.symbol_name_projection == SymbolNameProjection::Segmented,
+                segmented
+            );
+            validate_document(&source, &Cancellation::new()).unwrap();
+            let encoded = encode_stored_hit(&source).unwrap();
+            let (decoded, _) = decode_stored_hit(&encoded, 1.0).unwrap();
+            assert_eq!(decoded.canonical_name.as_deref(), Some(""));
+            assert_eq!(decoded.identifier, "var\"\"");
+            assert_eq!(decoded.qualified_name, source.qualified_name);
+            assert!(decode_stored_hit(&encoded[..encoded.len() - 1], 1.0).is_err());
+            let (_directory, _manifest, index) = build(vec![source.clone()]);
+            let hits = search(&index, "src/empty.jl", SearchMode::Exact);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].canonical_name.as_deref(), Some(""));
+            assert_eq!(hits[0].symbol_id, source.symbol_id);
+            if !segmented {
+                let mut absent = source.clone();
+                absent.canonical_name = None;
+                assert_ne!(encode_stored_hit(&absent).unwrap(), encoded);
+                assert_eq!(
+                    decode_stored_hit(&encode_stored_hit(&absent).unwrap(), 1.0)
+                        .unwrap()
+                        .0
+                        .canonical_name,
+                    None
+                );
+                assert_eq!(search(&index, "var\"\"", SearchMode::Exact).len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_alias_admission_keeps_file_display_query_and_cancellation_contracts() {
+        let mut source = document(1, "var\"\"", "src/empty.jl");
+        source.canonical_name = Some(String::new());
+        let mut file = source.clone();
+        file.symbol_id = None;
+        assert!(validate_document(&file, &Cancellation::new()).is_err());
+        let mut empty_display = source.clone();
+        empty_display.identifier.clear();
+        assert!(validate_document(&empty_display, &Cancellation::new()).is_err());
+        let mut nul = source.clone();
+        nul.canonical_name = Some("bad\0name".to_owned());
+        assert!(validate_document(&nul, &Cancellation::new()).is_err());
+        for query in ["", " ", "line\nname", "tab\tname"] {
+            assert!(matches!(
+                validate_request(
+                    &SearchRequest {
+                        query: query.to_owned(),
+                        mode: SearchMode::Exact,
+                        max_results: 1,
+                        page_offset: 0,
+                    },
+                    SearchBudget::default()
+                ),
+                Err(SearchError::InvalidQuery(_))
+            ));
+        }
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            LexicalIndex::build_ephemeral(
+                generation(1),
+                vec![source],
+                BuildBudget::default(),
+                &cancelled
+            ),
+            Err(SearchError::Cancelled(CancellationReason::ClientRequest))
+        ));
+    }
+
+    #[test]
+    fn pre_empty_alias_storage_versions_require_reconstruction() {
+        let older = format!(
+            "{FORMAT_PREFIX};version=8;generation={};documents=1",
+            generation(7)
+        );
+        assert_eq!(parse_payload(&older), Err(SearchError::IncompatibleIndex));
+        let mut encoded = encode_stored_hit(&document(1, "ordinary", "src/names.jl")).unwrap();
+        encoded[0] = 5;
+        assert!(matches!(
+            decode_stored_hit(&encoded, 1.0),
+            Err(SearchError::IncompatibleIndex)
+        ));
+    }
+
+    #[test]
     fn canonical_symbol_aliases_survive_storage_and_share_one_exact_search_identity() {
         let mut source = document(1, "entry", "src/module.txt");
         let original_bytes = validate_document(&source, &Cancellation::new()).unwrap();
@@ -4551,6 +6225,12 @@ mod tests {
             &Cancellation::new(),
         )
         .expect("partitioned index starts");
+        assert!(matches!(
+            builder.push_partition(vec![first.clone(), second.clone()], &Cancellation::new()),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "documents"
+            })
+        ));
         builder
             .push_partition(vec![second], &Cancellation::new())
             .expect("second partition is admitted");
@@ -4575,6 +6255,42 @@ mod tests {
                 .search_with_stats(&request, SearchBudget::default(), &Cancellation::new())
                 .expect("batch query succeeds")
         );
+    }
+
+    #[test]
+    fn partition_totals_cross_previous_aggregate_limits_and_reject_overflow() {
+        let cancellation = Cancellation::new();
+        let mut builder = EphemeralLexicalIndexBuilder::new(
+            generation(20),
+            BuildBudget::default(),
+            &cancellation,
+        )
+        .expect("partitioned index starts");
+        // Seed only accounting to exercise the boundary without materializing
+        // a million documents. This synthetic builder is never committed.
+        builder.document_count = 1_000_000;
+        builder.text_bytes = 2 * 1024 * 1024 * 1024;
+        builder
+            .push_partition(vec![document(1, "first", "first.rs")], &cancellation)
+            .expect("aggregate counts have no separate admission ceiling");
+        assert_eq!(builder.document_count, 1_000_001);
+        assert!(builder.text_bytes > 2 * 1024 * 1024 * 1024);
+
+        builder.document_count = u64::MAX;
+        assert!(matches!(
+            builder.push_partition(vec![document(2, "second", "second.rs")], &cancellation),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "documents"
+            })
+        ));
+        builder.document_count = 1_000_001;
+        builder.text_bytes = u64::MAX;
+        assert!(matches!(
+            builder.push_partition(vec![document(2, "second", "second.rs")], &cancellation),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes"
+            })
+        ));
     }
 
     fn search(index: &LexicalIndex, query: &str, mode: SearchMode) -> Vec<SearchHit> {
@@ -6258,6 +7974,25 @@ mod tests {
                 resource: "documents",
             })
         );
+        assert_eq!(
+            LexicalIndexBuilder::build(
+                directory.path(),
+                generation(1),
+                vec![
+                    document(1, "first", "first.rs"),
+                    document(2, "second", "second.rs"),
+                ],
+                BuildBudget {
+                    max_documents: 1,
+                    ..BuildBudget::default()
+                },
+                ArtifactBudget::default(),
+                &Cancellation::new(),
+            ),
+            Err(SearchError::BuildBudgetExceeded {
+                resource: "documents",
+            })
+        );
         let (_directory, _manifest, index) = build(vec![document(1, "item", "src/lib.rs")]);
         assert_eq!(
             index.search(
@@ -6305,6 +8040,77 @@ mod tests {
                 resource: "query_terms",
             })
         );
+    }
+
+    #[test]
+    fn elastic_construction_budgets_build_and_reopen_exact_generation() {
+        let budget = BuildBudget::default();
+        assert_eq!(budget.max_documents, usize::MAX);
+        assert_eq!(budget.max_text_bytes, usize::MAX);
+        assert!(budget.max_documents > 1_000_000);
+        assert!(budget.max_text_bytes > 2 * 1024 * 1024 * 1024);
+        let (_directory, manifest, index) = build(vec![document(1, "item", "src/lib.rs")]);
+        assert_eq!(manifest.stats().documents, 1);
+        assert_eq!(index.document_count(), 1);
+        assert_eq!(index.generation(), generation(7));
+        assert_eq!(search(&index, "item", SearchMode::Exact).len(), 1);
+    }
+
+    #[test]
+    fn writer_memory_admission_matches_backend_arena_bounds() {
+        for indexer_memory_bytes in [
+            MIN_WRITER_HEAP_BYTES,
+            256 * 1024 * 1024 + 1,
+            MAX_WRITER_HEAP_BYTES_EXCLUSIVE - 1,
+        ] {
+            assert_eq!(
+                validate_build_admission(BuildBudget {
+                    indexer_memory_bytes,
+                    ..BuildBudget::default()
+                }),
+                Ok(())
+            );
+        }
+        for indexer_memory_bytes in [
+            0,
+            MIN_WRITER_HEAP_BYTES - 1,
+            MAX_WRITER_HEAP_BYTES_EXCLUSIVE,
+            usize::MAX,
+        ] {
+            assert_eq!(
+                validate_build_admission(BuildBudget {
+                    indexer_memory_bytes,
+                    ..BuildBudget::default()
+                }),
+                Err(SearchError::BuildBudgetExceeded {
+                    resource: "indexer_memory_bytes"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_count_validation_preserves_large_counts_and_exact_cardinality() {
+        for count in [0, 250_001, 1_000_001, u64::MAX] {
+            let payload = format_payload(generation(1), count);
+            let (actual_generation, documents) = parse_payload(&payload).unwrap();
+            assert_eq!(actual_generation, generation(1));
+            assert_eq!(documents, count);
+            assert_eq!(
+                validate_document_count(documents, Some(count), count),
+                Ok(())
+            );
+            assert_eq!(validate_document_count(documents, None, count), Ok(()));
+            let mismatch = count.wrapping_add(1);
+            assert_eq!(
+                validate_document_count(documents, Some(mismatch), count),
+                Err(SearchError::IncompatibleIndex)
+            );
+            assert_eq!(
+                validate_document_count(documents, Some(count), mismatch),
+                Err(SearchError::IncompatibleIndex)
+            );
+        }
     }
 
     #[test]

@@ -25,6 +25,13 @@ use crate::{
     SubmoduleCheckoutState, SubmoduleState, WorktreeState, WorktreeStatus, canonicalize_snapshot,
 };
 
+#[path = "tracked.rs"]
+mod tracked;
+
+pub use tracked::{
+    GitTrackedPathError, GitTrackedPathLimit, GitTrackedPathLimits, collect_tracked_paths_streaming,
+};
+
 const HARD_MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 const HARD_MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const HARD_MAX_FILTER_OVERRIDES: usize = 4_096;
@@ -713,6 +720,19 @@ impl<'a> GitRunner<'a> {
         S: AsRef<OsStr>,
     {
         cancellation.check()?;
+        let child = self.spawn(operation, arguments)?;
+        wait_for_output(child, operation, self.limits, cancellation)
+    }
+
+    fn spawn<I, S>(
+        &self,
+        operation: GitCollectOperation,
+        arguments: I,
+    ) -> Result<Child, GitCollectError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut command = Command::new("git");
         command
             .current_dir(self.repository_root)
@@ -749,10 +769,9 @@ impl<'a> GitRunner<'a> {
             command.arg("-c").arg(override_value);
         }
         command.args(arguments);
-        let child = command
+        command
             .spawn()
-            .map_err(|source| GitCollectError::CommandIo { operation, source })?;
-        wait_for_output(child, operation, self.limits, cancellation)
+            .map_err(|source| GitCollectError::CommandIo { operation, source })
     }
 
     fn required<I, S>(

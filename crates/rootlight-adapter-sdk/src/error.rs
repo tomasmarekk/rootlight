@@ -246,7 +246,7 @@ pub enum RequestError {
     /// An analyzer requiring source classification received no generated status.
     #[error("analysis request requires an explicit generated-source classification")]
     GeneratedStatusRequired,
-    /// The invocation omitted the required process-local monotonic deadline.
+    /// Legacy rejection retained for compatibility with earlier adapter errors.
     #[error("adapter invocation requires a monotonic deadline")]
     DeadlineRequired,
     /// The parser cannot cooperatively observe cancellation while parsing.

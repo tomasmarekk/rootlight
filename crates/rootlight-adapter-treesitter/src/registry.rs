@@ -49,6 +49,8 @@ pub enum GrammarFamily {
     Bash,
     /// JSON grammar with source-bound object members and array elements.
     Json,
+    /// JSON with comments and trailing commas, preserving physical source offsets.
+    Jsonc,
     /// TOML grammar with source-bound keys, tables and array occurrences.
     Toml,
     /// YAML grammar with document-local data and serialization identities.
@@ -123,9 +125,27 @@ pub enum GrammarFamily {
     Xml,
     /// Written DTD source; no entity expansion or declaration-kind substitution.
     Dtd,
+    /// Written CMake declarations and command sites without configuration evaluation.
+    CMake,
+    /// Written Julia source without type inference, macro expansion or multiple dispatch.
+    Julia,
+    /// Written Eiffel source without inheritance or dispatch target inference.
+    Eiffel,
+    /// Written Coq syntax without proof checking or elaborated binding inference.
+    Coq,
+    /// Written Verilog source before preprocessing and elaboration.
+    Verilog,
+    /// Written SystemVerilog source before preprocessing and elaboration.
+    SystemVerilog,
+    /// Written V source without compiler, foreign or receiver binding inference.
+    V,
 }
 
 impl GrammarFamily {
+    pub(crate) const fn is_json(self) -> bool {
+        matches!(self, Self::Json | Self::Jsonc)
+    }
+
     pub(crate) const fn is_classic_basic(self) -> bool {
         matches!(self, Self::Vba | Self::VisualBasicClassic)
     }
@@ -215,7 +235,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(55);
+        let mut descriptors = Vec::with_capacity(63);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -235,6 +255,7 @@ impl GrammarRegistry {
             GrammarFamily::Css,
             GrammarFamily::Bash,
             GrammarFamily::Json,
+            GrammarFamily::Jsonc,
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
@@ -272,6 +293,13 @@ impl GrammarRegistry {
             GrammarFamily::Wgsl,
             GrammarFamily::Xml,
             GrammarFamily::Dtd,
+            GrammarFamily::CMake,
+            GrammarFamily::Julia,
+            GrammarFamily::Eiffel,
+            GrammarFamily::Coq,
+            GrammarFamily::Verilog,
+            GrammarFamily::SystemVerilog,
+            GrammarFamily::V,
         ] {
             let language = language_for(family);
             let abi_version = language.abi_version();
@@ -385,7 +413,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Swift => tree_sitter_swift::LANGUAGE.into(),
         GrammarFamily::Css => tree_sitter_css::LANGUAGE.into(),
         GrammarFamily::Bash => tree_sitter_bash::LANGUAGE.into(),
-        GrammarFamily::Json => tree_sitter_json::LANGUAGE.into(),
+        GrammarFamily::Json | GrammarFamily::Jsonc => tree_sitter_json::LANGUAGE.into(),
         GrammarFamily::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
         GrammarFamily::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         GrammarFamily::Html => tree_sitter_html::LANGUAGE.into(),
@@ -422,6 +450,14 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Wgsl => tree_sitter_wgsl::LANGUAGE_WGSL.into(),
         GrammarFamily::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
         GrammarFamily::Dtd => tree_sitter_xml::LANGUAGE_DTD.into(),
+        GrammarFamily::CMake => tree_sitter_cmake::LANGUAGE_CMAKE.into(),
+        GrammarFamily::Julia => tree_sitter_julia::LANGUAGE_JULIA.into(),
+        GrammarFamily::Eiffel => tree_sitter_eiffel::LANGUAGE_EIFFEL.into(),
+        GrammarFamily::Coq => tree_sitter_rocq::LANGUAGE.into(),
+        GrammarFamily::V => tree_sitter_v::LANGUAGE_V.into(),
+        GrammarFamily::Verilog | GrammarFamily::SystemVerilog => {
+            tree_sitter_systemverilog::LANGUAGE_SYSTEMVERILOG.into()
+        }
     }
 }
 
@@ -436,6 +472,61 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Coq => GrammarIdentity {
+            language_id: "coq",
+            grammar_version: "0.2.0",
+            source_package_sha256: "784a5319e136d5917ac3f171f3f48f15e88785cf72f961707c9bbe2888b975de",
+            parser_sha256: "0f64dd190ed13303382087254e858ac2196c8d71aa3ab02e1b9cc3e119d6b9a3",
+            scanner_sha256: None,
+        },
+        GrammarFamily::V => GrammarIdentity {
+            language_id: "v",
+            grammar_version: "0.0.6",
+            source_package_sha256: "41b362b3f2796828ad87b08f44083ec10c280f0bb4cbf838d83d447591ef5624",
+            parser_sha256: "6c25b5ec57aa91ec0d6204208f388be315e9368f6d0e8298f79a12d6dc183040",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Verilog => GrammarIdentity {
+            language_id: "verilog",
+            grammar_version: "0.4.1",
+            source_package_sha256: "85929d95aed3c1f0b6137d80e22d6fbd852d464bc09e7915480320ffa139855a",
+            parser_sha256: "33be40fa3de246ddc819def9d78f6b4c6ab0ffbe21ea6baf7c9246d5b44d2c59",
+            scanner_sha256: None,
+        },
+        GrammarFamily::SystemVerilog => GrammarIdentity {
+            language_id: "systemverilog",
+            grammar_version: "0.4.1",
+            source_package_sha256: "85929d95aed3c1f0b6137d80e22d6fbd852d464bc09e7915480320ffa139855a",
+            parser_sha256: "33be40fa3de246ddc819def9d78f6b4c6ab0ffbe21ea6baf7c9246d5b44d2c59",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Eiffel => GrammarIdentity {
+            language_id: "eiffel",
+            grammar_version: "1.0.0",
+            source_package_sha256: "ba0e42b1159dcca70d425be406085b7db30c17746d3fe5d8ff668ea3da54a24a",
+            parser_sha256: "42a3c131c91b479b23cbb0e97e82b8612e402d76b4563c1e1589e64cc70117c0",
+            scanner_sha256: Some(
+                "10ebaa80e0a87eac2319b608d89d539243b6b3ac1060d2c71882bbb620ed2870",
+            ),
+        },
+        GrammarFamily::Julia => GrammarIdentity {
+            language_id: "julia",
+            grammar_version: "0.25.0",
+            source_package_sha256: "4a66664bee7741c0b7d75a3e384338888895e0c2c911a6b05afb6faeec563f6f",
+            parser_sha256: "420e28372baae12a7de3009a0dca532b5e99a23c3df9e24c82aa46e9a4e29914",
+            scanner_sha256: Some(
+                "e6350a2f2725d966115d56142bf4e3e43dc13e3a3060744dd25f695363886e30",
+            ),
+        },
+        GrammarFamily::CMake => GrammarIdentity {
+            language_id: "cmake",
+            grammar_version: "0.7.5",
+            source_package_sha256: "49cb0fc86bafe35be60abd17eece4a21bc9a4abb4ab74dbd105fb413b4e65a4c",
+            parser_sha256: "35011d21c98b1435645d6e41ec77e40b0629c819e04b0ede6a9ffc46e17861f1",
+            scanner_sha256: Some(
+                "4832b8eb26411d8e8ff3a9ee09096c229b26f3ce940f275bf2f165ff00ab7d0f",
+            ),
+        },
         GrammarFamily::Ocaml => GrammarIdentity {
             language_id: "ocaml",
             grammar_version: "0.25.0",
@@ -762,6 +853,10 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "a3d0a4fbefb13d518e8e46b9b18b9b8bb16ece184faa3a543a4bbe18b466f7db",
             scanner_sha256: None,
         },
+        GrammarFamily::Jsonc => GrammarIdentity {
+            language_id: "jsonc",
+            ..identity_for(GrammarFamily::Json)
+        },
         GrammarFamily::Css => GrammarIdentity {
             language_id: "css",
             grammar_version: "0.25.0",
@@ -939,7 +1034,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 55);
+        assert_eq!(registry.descriptors().len(), 63);
         for family in [
             GrammarFamily::Rust,
             GrammarFamily::Python,
@@ -959,6 +1054,7 @@ mod tests {
             GrammarFamily::Css,
             GrammarFamily::Bash,
             GrammarFamily::Json,
+            GrammarFamily::Jsonc,
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
@@ -996,6 +1092,13 @@ mod tests {
             GrammarFamily::Wgsl,
             GrammarFamily::Xml,
             GrammarFamily::Dtd,
+            GrammarFamily::CMake,
+            GrammarFamily::Julia,
+            GrammarFamily::Eiffel,
+            GrammarFamily::Coq,
+            GrammarFamily::Verilog,
+            GrammarFamily::SystemVerilog,
+            GrammarFamily::V,
         ] {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
@@ -1010,6 +1113,20 @@ mod tests {
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
             );
         }
+    }
+
+    #[test]
+    fn jsonc_has_distinct_language_and_shared_authenticated_native_inputs() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let json = registry.get(GrammarFamily::Json).unwrap();
+        let jsonc = registry.get(GrammarFamily::Jsonc).unwrap();
+        assert_eq!(json.language().as_str(), "json");
+        assert_eq!(jsonc.language().as_str(), "jsonc");
+        assert_eq!(json.grammar_version(), jsonc.grammar_version());
+        assert_eq!(json.grammar_source_sha256(), jsonc.grammar_source_sha256());
+        assert_eq!(json.parser_sha256(), jsonc.parser_sha256());
+        assert_eq!(json.scanner_sha256(), jsonc.scanner_sha256());
+        assert_eq!(json.abi_version(), jsonc.abi_version());
     }
 
     #[test]
@@ -1246,6 +1363,21 @@ mod tests {
             (GrammarFamily::Wgsl, "wgsl", "tree-sitter-wgsl"),
             (GrammarFamily::Xml, "xml", "tree-sitter-xml"),
             (GrammarFamily::Dtd, "dtd", "tree-sitter-xml"),
+            (GrammarFamily::CMake, "cmake", "tree-sitter-cmake"),
+            (GrammarFamily::Julia, "julia", "tree-sitter-julia"),
+            (GrammarFamily::Eiffel, "eiffel", "tree-sitter-eiffel"),
+            (GrammarFamily::Coq, "coq", "tree-sitter-rocq"),
+            (GrammarFamily::V, "v", "tree-sitter-v"),
+            (
+                GrammarFamily::Verilog,
+                "verilog",
+                "tree-sitter-systemverilog",
+            ),
+            (
+                GrammarFamily::SystemVerilog,
+                "systemverilog",
+                "tree-sitter-systemverilog",
+            ),
             (GrammarFamily::Ocaml, "ocaml", "tree-sitter-ocaml"),
             (
                 GrammarFamily::OcamlInterface,
@@ -1309,6 +1441,13 @@ mod tests {
                                 | GrammarFamily::Wgsl
                                 | GrammarFamily::Xml
                                 | GrammarFamily::Dtd
+                                | GrammarFamily::CMake
+                                | GrammarFamily::Julia
+                                | GrammarFamily::Eiffel
+                                | GrammarFamily::Coq
+                                | GrammarFamily::V
+                                | GrammarFamily::Verilog
+                                | GrammarFamily::SystemVerilog
                         )
                     {
                         "vendored_source_sha256"

@@ -1,12 +1,15 @@
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Instant,
+};
 
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{FileId, SymbolId};
 use rootlight_ir::{ContainerRef, EntityFlag, EntityKind, EntityRecord, NormalizedIrDocument};
 use rootlight_search::{
     BuildBudget, LexicalDocument, SearchBudget, SearchError, SymbolNameProjection,
-    project_source_terms_with_coverage, project_symbol_name_projection, select_query_source_bytes,
-    validate_build_admission,
+    TextQueryCandidate, project_query_source_identifier, project_source_terms_with_coverage,
+    project_symbol_name_projection, select_query_source_bytes, validate_build_admission,
 };
 use rootlight_storage::GenerationSnapshot;
 use rootlight_vfs::{SourceSnapshot, SourceText};
@@ -18,6 +21,60 @@ use crate::QueryError;
 pub const SOURCE_FALLBACK_TEXT_BYTES: usize = 32 * 1024;
 const MAX_SOURCE_IDENTIFIERS: usize = 4_096;
 const MAX_SOURCE_IDENTIFIER_BYTES: usize = 240;
+
+/// Opt-in numeric observations of one scoped Text projection, including failure.
+///
+/// Durations are wall microseconds. The candidate and entity-materialization
+/// durations are included in signature visitation. No source text, identifiers,
+/// paths or hashes are retained. A new invocation resets all observations.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ScopedTextProjectionObservation {
+    /// Time selecting query-relevant source words.
+    pub source_selection_micros: u128,
+    /// Time collecting scoped entity IDs and allocating their signature index.
+    pub signature_collection_micros: u128,
+    /// Time examining extension envelopes and selecting retained signatures.
+    pub signature_observation_micros: u128,
+    /// Time visiting retained signatures, testing candidates and projecting hits.
+    pub signature_visit_micros: u128,
+    /// Time testing borrowed symbol fields against the compiled Text query.
+    pub candidate_check_micros: u128,
+    /// Time materializing admitted entity documents and checking their quotas.
+    pub entity_materialization_micros: u128,
+    /// Time materializing the source document and final deterministic ordering.
+    pub source_projection_micros: u128,
+    /// Number of scoped entity IDs admitted to the signature index.
+    pub observed_entities: usize,
+    /// Number of extension envelopes examined before completion or failure.
+    pub observed_envelopes: usize,
+    /// Number of selected signature envelope workspaces visited.
+    pub visited_signature_workspaces: usize,
+    /// Number of non-conflicting signatures returned during visitation.
+    pub visited_signatures: usize,
+    /// Number of entities whose fields reached the candidate check.
+    pub candidate_entities: usize,
+    /// Number of entity documents successfully materialized.
+    pub retained_entities: usize,
+    /// Number of documents materialized before completion or failure.
+    pub projected_documents: usize,
+    /// Whether the projection returned its complete document set successfully.
+    pub complete: bool,
+}
+
+fn observe_text_projection<T>(
+    observation: Option<&mut ScopedTextProjectionObservation>,
+    duration: fn(&mut ScopedTextProjectionObservation) -> &mut u128,
+    operation: impl FnOnce(Option<&mut ScopedTextProjectionObservation>) -> Result<T, QueryError>,
+) -> Result<T, QueryError> {
+    let Some(observation) = observation else {
+        return operation(None);
+    };
+    let started = Instant::now();
+    let result = operation(Some(observation));
+    let counter = duration(observation);
+    *counter = counter.saturating_add(started.elapsed().as_micros());
+    result
+}
 
 /// Incremental bounded projection of one immutable generation into lexical documents.
 ///
@@ -295,6 +352,50 @@ impl<'generation> LexicalProjectionBuilder<'generation> {
         Ok(())
     }
 
+    /// Projects only an authenticated file's name and path, without source text.
+    ///
+    /// No vocabulary or whole-source lexical completeness is inferred. This
+    /// admits files retained outside parser snapshot memory while their exact
+    /// content remains available through source reading and literal search.
+    ///
+    /// # Errors
+    /// Returns cancellation, ordering, identity, allocation or construction-budget errors.
+    pub fn push_source_metadata(
+        &mut self,
+        file: FileId,
+        cancellation: &Cancellation,
+    ) -> Result<(), QueryError> {
+        if self.next_source_file() != Some(file) {
+            return Err(QueryError::IndexDrift);
+        }
+        let projected =
+            project_source_metadata_document(self.generation, file, self.budget, cancellation)?;
+        let additional = [
+            projected.identifier.len(),
+            projected.qualified_name.len(),
+            projected.path.len(),
+            projected.kind.len(),
+            projected.language.len(),
+            projected.tier.len(),
+        ]
+        .into_iter()
+        .try_fold(0usize, |sum, bytes| sum.checked_add(bytes))
+        .ok_or(QueryError::IndexDrift)?;
+        self.text_bytes = self
+            .text_bytes
+            .checked_add(additional)
+            .filter(|bytes| *bytes <= self.budget.max_text_bytes)
+            .ok_or(QueryError::Search(SearchError::BuildBudgetExceeded {
+                resource: "text_bytes",
+            }))?;
+        self.next_source = self
+            .next_source
+            .checked_add(1)
+            .ok_or(QueryError::IndexDrift)?;
+        self.projected.push(projected);
+        Ok(())
+    }
+
     /// Completes the projection after every required source was supplied.
     ///
     /// # Errors
@@ -335,6 +436,70 @@ pub fn project_source_fallback_document(
         budget,
         cancellation,
     )
+}
+
+/// Projects exact file metadata without claiming any source vocabulary was indexed.
+///
+/// # Errors
+/// Returns cancellation, absent file, allocation or construction-budget errors.
+pub fn project_source_metadata_document(
+    generation: &GenerationSnapshot,
+    file: FileId,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+) -> Result<LexicalDocument, QueryError> {
+    validate_build_admission(budget)?;
+    cancellation
+        .check()
+        .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+    let file = generation.find_file(file).ok_or(QueryError::IndexDrift)?;
+    let identifier = file
+        .path
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty() && name.len() <= 512)
+        .unwrap_or("file");
+    let tier = serialized_label(&analysis_tier_for_file(generation.document(), file)?)?;
+    let bytes = [
+        identifier.len(),
+        identifier.len(),
+        file.path.len(),
+        4,
+        file.language.len(),
+        tier.len(),
+    ]
+    .into_iter()
+    .try_fold(0usize, |sum, bytes| sum.checked_add(bytes))
+    .ok_or(QueryError::IndexDrift)?;
+    if bytes > budget.max_text_bytes {
+        return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+            resource: "text_bytes",
+        }));
+    }
+    Ok(LexicalDocument {
+        symbol_id: None,
+        file_id: file.id,
+        identifier: try_clone(identifier)?,
+        canonical_name: None,
+        qualified_name: try_clone(identifier)?,
+        symbol_name_projection: SymbolNameProjection::Inline,
+        path: try_clone(&file.path)?,
+        kind: "file".to_owned(),
+        language: try_clone(&file.language)?,
+        tier,
+        package: None,
+        build_target: None,
+        signature: None,
+        type_names: Vec::new(),
+        documentation: None,
+        source_identifiers: Vec::new(),
+        source_text: None,
+        source_term_chunks: Vec::new(),
+        source_coverage: None,
+        generated: file.generated,
+        test: false,
+        declaration_only: false,
+    })
 }
 
 /// Projects one verified file's entire bounded vocabulary into one lexical document.
@@ -423,9 +588,7 @@ fn project_source_document(
         }
         let mut identifiers = Vec::new();
         for word in text.split_whitespace() {
-            if identifiers.len() >= MAX_SOURCE_IDENTIFIERS
-                || word.len() > MAX_SOURCE_IDENTIFIER_BYTES
-            {
+            if identifiers.len() >= MAX_SOURCE_IDENTIFIERS {
                 return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
                     resource: "source_identifiers",
                 }));
@@ -433,7 +596,7 @@ fn project_source_document(
             identifiers
                 .try_reserve(1)
                 .map_err(|_| QueryError::MemoryUnavailable)?;
-            identifiers.push(try_clone(word)?);
+            identifiers.push(try_clone(project_query_source_identifier(word)?.as_ref())?);
         }
         (
             identifiers,
@@ -632,14 +795,16 @@ pub fn project_scoped_lexical_documents_with_source(
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<Vec<LexicalDocument>, QueryError> {
-    project_scoped_source_documents(generation, source, None, budget, cancellation)
+    project_scoped_source_documents(generation, source, None, None, budget, cancellation, None)
 }
 
 /// Projects exact-file text witnesses from anywhere in a verified source snapshot.
 ///
 /// Only query-relevant source words are retained, under the unchanged source
-/// projection ceiling. Structural entities and full-file source identity are
-/// preserved; this query-time projection never changes the persisted index.
+/// projection ceiling. Every potentially matching structural entity and full-file
+/// source identity are preserved. Irrelevant entities do not enter the ephemeral
+/// index, whose relevance statistics are local to this query's projection.
+/// This query-time projection never changes the persisted index.
 ///
 /// # Errors
 ///
@@ -653,28 +818,74 @@ pub fn project_scoped_lexical_documents_for_query(
     budget: BuildBudget,
     cancellation: &Cancellation,
 ) -> Result<Vec<LexicalDocument>, QueryError> {
-    let selected = select_query_source_bytes(
-        source.content(),
+    project_scoped_lexical_documents_for_query_with_observation(
+        generation,
+        source,
         query,
-        SOURCE_FALLBACK_TEXT_BYTES,
         search_budget,
+        budget,
         cancellation,
+        None,
+    )
+}
+
+/// Runs the ordinary scoped Text projection with optional numeric observations.
+///
+/// `None` performs no observation clocks or counter scans. Observations supplied
+/// by a caller are reset, then retain completed work even when projection fails.
+/// Query limits, cancellation and returned documents are unchanged.
+///
+/// # Errors
+/// Returns the same errors as [`project_scoped_lexical_documents_for_query`].
+pub fn project_scoped_lexical_documents_for_query_with_observation(
+    generation: &GenerationSnapshot,
+    source: &SourceSnapshot,
+    query: &str,
+    search_budget: SearchBudget,
+    budget: BuildBudget,
+    cancellation: &Cancellation,
+    mut observation: Option<&mut ScopedTextProjectionObservation>,
+) -> Result<Vec<LexicalDocument>, QueryError> {
+    if let Some(observation) = observation.as_deref_mut() {
+        *observation = ScopedTextProjectionObservation::default();
+    }
+    let candidate = TextQueryCandidate::new(query, search_budget)?;
+    let selected = observe_text_projection(
+        observation.as_deref_mut(),
+        |observation| &mut observation.source_selection_micros,
+        |_| {
+            Ok(select_query_source_bytes(
+                source.content(),
+                query,
+                SOURCE_FALLBACK_TEXT_BYTES,
+                search_budget,
+                cancellation,
+            )?)
+        },
     )?;
-    project_scoped_source_documents(
+    let result = project_scoped_source_documents(
         generation,
         source,
         selected.as_deref(),
+        Some(&candidate),
         budget,
         cancellation,
-    )
+        observation.as_deref_mut(),
+    );
+    if let Some(observation) = observation {
+        observation.complete = result.is_ok();
+    }
+    result
 }
 
 fn project_scoped_source_documents(
     generation: &GenerationSnapshot,
     source: &SourceSnapshot,
     selected_text: Option<&str>,
+    candidate: Option<&TextQueryCandidate>,
     budget: BuildBudget,
     cancellation: &Cancellation,
+    mut observation: Option<&mut ScopedTextProjectionObservation>,
 ) -> Result<Vec<LexicalDocument>, QueryError> {
     validate_build_admission(budget)?;
     cancellation
@@ -684,96 +895,185 @@ fn project_scoped_source_documents(
     let file = generation
         .find_file(source.file())
         .ok_or(QueryError::IndexDrift)?;
-    let entity_count = document
-        .entities
-        .iter()
-        .filter(|entity| {
-            entity
-                .evidence
-                .source
-                .as_ref()
-                .is_some_and(|evidence| evidence.span().file() == file.id)
-        })
-        .count();
-    let document_count = entity_count.checked_add(1).ok_or(QueryError::Search(
-        SearchError::BuildBudgetExceeded {
-            resource: "documents",
-        },
-    ))?;
-    if document_count > budget.max_documents {
-        return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
-            resource: "documents",
-        }));
-    }
-    let mut projected = Vec::new();
-    projected
-        .try_reserve_exact(document_count)
-        .map_err(|_| QueryError::MemoryUnavailable)?;
-    let mut text_bytes = 0;
-    let mut signatures = RetainedSignatureIndex::new(
-        document
-            .entities
-            .iter()
-            .filter(|entity| {
-                entity
-                    .evidence
-                    .source
-                    .as_ref()
-                    .is_some_and(|evidence| evidence.span().file() == file.id)
-            })
-            .map(|entity| entity.id),
-        entity_count,
-    )?;
-    for envelope in &document.extensions {
-        cancellation
-            .check()
-            .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
-        signatures.observe_with_checkpoint(envelope, || {
-            cancellation
-                .check()
-                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
-        })?;
-    }
-    signatures.visit_with_checkpoint(
-        || {
-            cancellation
-                .check()
-                .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
-        },
-        |event| {
-            let SignatureVisit::Evidence(symbol, signature) = event else {
-                return Ok(true);
-            };
-            let entity = document
+    let mut scoped_candidate = candidate.map(|candidate| candidate.for_path(&file.path));
+    let (mut projected, mut signatures) = observe_text_projection(
+        observation.as_deref_mut(),
+        |observation| &mut observation.signature_collection_micros,
+        |observation| {
+            let entity_count = document
                 .entities
-                .binary_search_by_key(&symbol, |entity| entity.id)
-                .ok()
-                .and_then(|index| document.entities.get(index))
-                .ok_or(QueryError::IndexDrift)?;
-            let (entity, next_text_bytes) = project_entity_document(
-                document,
-                entity,
-                signature.as_ref(),
+                .iter()
+                .filter(|entity| {
+                    candidate.is_none_or(TextQueryCandidate::matches_symbols)
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|evidence| evidence.span().file() == file.id)
+                })
+                .count();
+            if let Some(observation) = observation {
+                observation.observed_entities = entity_count;
+            }
+            let document_count = if candidate.is_some() { 0 } else { entity_count }
+                .checked_add(1)
+                .ok_or(QueryError::Search(SearchError::BuildBudgetExceeded {
+                    resource: "documents",
+                }))?;
+            if document_count > budget.max_documents {
+                return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+                    resource: "documents",
+                }));
+            }
+            let mut projected = Vec::new();
+            projected
+                .try_reserve_exact(document_count)
+                .map_err(|_| QueryError::MemoryUnavailable)?;
+            let signatures = RetainedSignatureIndex::new(
+                document
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        candidate.is_none_or(TextQueryCandidate::matches_symbols)
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|evidence| evidence.span().file() == file.id)
+                    })
+                    .map(|entity| entity.id),
+                entity_count,
+            )?;
+            Ok((projected, signatures))
+        },
+    )?;
+    let mut text_bytes = 0;
+    observe_text_projection(
+        observation.as_deref_mut(),
+        |observation| &mut observation.signature_observation_micros,
+        |mut observation| {
+            for envelope in &document.extensions {
+                cancellation
+                    .check()
+                    .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))?;
+                if let Some(observation) = observation.as_deref_mut() {
+                    observation.observed_envelopes += 1;
+                }
+                signatures.observe_with_checkpoint(envelope, || {
+                    cancellation
+                        .check()
+                        .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
+                })?;
+            }
+            Ok(())
+        },
+    )?;
+    observe_text_projection(
+        observation.as_deref_mut(),
+        |observation| &mut observation.signature_visit_micros,
+        |mut observation| {
+            signatures.visit_with_checkpoint(
+                || {
+                    cancellation
+                        .check()
+                        .map_err(|cancelled| QueryError::Cancelled(cancelled.reason()))
+                },
+                |event| {
+                    let SignatureVisit::Evidence(symbol, signature) = event else {
+                        if let Some(observation) = observation.as_deref_mut() {
+                            observation.visited_signature_workspaces += 1;
+                        }
+                        return Ok(true);
+                    };
+                    if let Some(observation) = observation.as_deref_mut() {
+                        observation.candidate_entities += 1;
+                        observation.visited_signatures += usize::from(signature.is_some());
+                    }
+                    let entity = document
+                        .entities
+                        .binary_search_by_key(&symbol, |entity| entity.id)
+                        .ok()
+                        .and_then(|index| document.entities.get(index))
+                        .ok_or(QueryError::IndexDrift)?;
+                    let admitted = observe_text_projection(
+                        observation.as_deref_mut(),
+                        |observation| &mut observation.candidate_check_micros,
+                        |_| {
+                            Ok(scoped_candidate.as_mut().is_none_or(|candidate| {
+                                candidate.may_match_symbol(
+                                    &entity.display_name,
+                                    (entity.canonical_name != entity.display_name)
+                                        .then_some(entity.canonical_name.as_str()),
+                                    &entity.qualified_name,
+                                    signature
+                                        .as_ref()
+                                        .map(rootlight_ir::LexicalEvidenceV1::text),
+                                )
+                            }))
+                        },
+                    )?;
+                    if !admitted {
+                        return Ok(true);
+                    }
+                    observe_text_projection(
+                        observation.as_deref_mut(),
+                        |observation| &mut observation.entity_materialization_micros,
+                        |observation| {
+                            if projected
+                                .len()
+                                .checked_add(2)
+                                .is_none_or(|count| count > budget.max_documents)
+                            {
+                                return Err(QueryError::Search(SearchError::BuildBudgetExceeded {
+                                    resource: "documents",
+                                }));
+                            }
+                            projected
+                                .try_reserve(1)
+                                .map_err(|_| QueryError::MemoryUnavailable)?;
+                            let (entity, next_text_bytes) = project_entity_document(
+                                document,
+                                entity,
+                                signature.as_ref(),
+                                text_bytes,
+                                budget,
+                                cancellation,
+                            )?;
+                            projected.push(entity);
+                            text_bytes = next_text_bytes;
+                            if let Some(observation) = observation {
+                                observation.retained_entities += 1;
+                                observation.projected_documents = projected.len();
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    Ok(true)
+                },
+            )
+        },
+    )?;
+    observe_text_projection(
+        observation,
+        |observation| &mut observation.source_projection_micros,
+        |observation| {
+            projected.sort_unstable_by_key(|document| document.symbol_id);
+            let (source, _) = project_source_document(
+                generation,
+                source,
                 text_bytes,
+                SOURCE_FALLBACK_TEXT_BYTES,
+                selected_text,
                 budget,
                 cancellation,
             )?;
-            projected.push(entity);
-            text_bytes = next_text_bytes;
-            Ok(true)
+            projected.push(source);
+            if let Some(observation) = observation {
+                observation.projected_documents = projected.len();
+            }
+            Ok(())
         },
     )?;
-    projected.sort_unstable_by_key(|document| document.symbol_id);
-    let (source, _) = project_source_document(
-        generation,
-        source,
-        text_bytes,
-        SOURCE_FALLBACK_TEXT_BYTES,
-        selected_text,
-        budget,
-        cancellation,
-    )?;
-    projected.push(source);
     Ok(projected)
 }
 
@@ -1010,6 +1310,23 @@ impl<'document> RetainedSignatureIndex<'document> {
         mut visit: impl FnMut(SignatureVisit<'document>) -> Result<bool, QueryError>,
     ) -> Result<bool, QueryError> {
         checkpoint()?;
+        // Most entities in a dense source have no signature. Emit this already
+        // SymbolId-ordered prefix without sorting their large reference slots.
+        // Conflicting batch children retain their distinct secondary sort key.
+        let mut retained = 0;
+        for offset in 0..self.candidates.len() {
+            checkpoint()?;
+            let candidate @ (symbol, reference, conflicting) = self.candidates[offset];
+            if reference.is_none_or(|reference| conflicting && reference.child.is_none()) {
+                if !visit(SignatureVisit::Evidence(symbol, None))? {
+                    return Ok(false);
+                }
+            } else {
+                self.candidates[retained] = candidate;
+                retained += 1;
+            }
+        }
+        self.candidates.truncate(retained);
         self.candidates
             .sort_unstable_by_key(|(symbol, reference, conflicting)| {
                 (

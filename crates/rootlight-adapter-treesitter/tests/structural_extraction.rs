@@ -685,7 +685,7 @@ fn fact_pressure_retains_late_entity_evidence_across_a_file() {
     c.extend_from_slice(b"    return 0;\n}\nint LateCSymbol(void) { return 0; }\n");
 
     let provider = provider();
-    let limits = prioritized_fact_limits();
+    let full_limits = identity_closure_fact_limits(4096);
     for (name, language, source, label, symbol) in [
         (
             "late.rs",
@@ -710,6 +710,17 @@ fn fact_pressure_retains_late_entity_evidence_across_a_file() {
         ),
     ] {
         let fixture = Fixture::new(name, source);
+        let full_request = request(
+            &fixture.snapshot,
+            &fixture.source,
+            &full_limits,
+            language,
+            Vec::new(),
+        );
+        let required = provider
+            .required_syntax_fact_count(&full_request, &deadline())
+            .unwrap();
+        let limits = prioritized_fact_limits(required);
         let request = request(
             &fixture.snapshot,
             &fixture.source,
@@ -742,7 +753,7 @@ fn fact_pressure_retains_late_entity_evidence_across_a_file() {
             definitions.contains(&symbol),
             "{language} omitted the late entity definition; retained {retained:?}"
         );
-        assert!(output.facts().len() <= 12);
+        assert!(output.facts().len() <= limits.syntax_stream().max_records());
     }
 }
 
@@ -761,8 +772,27 @@ fn fact_pressure_retains_declaration_identity_closure() {
          }\n",
     );
     let fixture = Fixture::new("identity-closure.rs", rust.as_bytes());
-    let limits = identity_closure_fact_limits(40);
     let provider = provider();
+    let full_limits = identity_closure_fact_limits(4096);
+    let full_request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &full_limits,
+        "rust",
+        Vec::new(),
+    );
+    let required = provider
+        .required_syntax_fact_count(&full_request, &deadline())
+        .unwrap();
+    let full = execute_parse(
+        &provider,
+        &full_request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(required < full.facts().len());
+    let limits = identity_closure_fact_limits(required);
     let request = request(
         &fixture.snapshot,
         &fixture.source,
@@ -785,7 +815,7 @@ fn fact_pressure_retains_declaration_identity_closure() {
             .iter()
             .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
     );
-    assert!(output.facts().len() <= 40);
+    assert_eq!(output.facts().len(), required);
 
     let facts_by_id = output
         .facts()
@@ -1019,16 +1049,25 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
     let entries: &[(&str, usize)] = match language {
         "rust" => &[
             ("rust.block.scope", 1),
-            ("rust.call.call", 1),
+            ("rust.body.signature", 1),
+            ("rust.direct_call.call", 1),
             ("rust.file.root", 1),
             ("rust.function.declaration", 1),
             ("rust.identifier.definition", 2),
-            ("rust.identifier.reference", 8),
+            ("rust.let.signature", 1),
             ("rust.line_comment.documentation", 2),
+            ("rust.local_variable.declaration", 1),
+            ("rust.local_variable.definition", 1),
             ("rust.module.module", 1),
+            ("rust.namespace_barrier.signature", 1),
+            ("rust.parameter.declaration", 1),
+            ("rust.parameter.definition", 1),
             ("rust.parameters.signature", 1),
+            ("rust.path_name.reference", 2),
+            ("rust.proof_context.signature", 1),
             ("rust.string.string", 1),
             ("rust.use.import", 1),
+            ("rust.value.reference", 3),
         ],
         "python" => &[
             ("python.block.scope", 2),
@@ -1391,6 +1430,17 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
         if fact.kind() == SyntaxFactKind::Signature {
             if matches!(
                 fact.syntax_kind().as_str(),
+                "rust.proof_context.signature" | "rust.namespace_barrier.signature"
+            ) {
+                assert_eq!(parent.kind(), SyntaxFactKind::Root);
+                assert_eq!(parent.syntax_kind().as_str(), "rust.file.root");
+                if fact.syntax_kind().as_str() == "rust.proof_context.signature" {
+                    assert_eq!(parent.span(), fact.span());
+                }
+                continue;
+            }
+            if matches!(
+                fact.syntax_kind().as_str(),
                 "groovy.value_read.expression" | "groovy.value_write.expression"
             ) {
                 assert!(
@@ -1437,6 +1487,7 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
                 continue;
             }
             let scope_kind = match fact.syntax_kind().as_str() {
+                "rust.let.signature" | "rust.body.signature" => Some("rust.block.scope"),
                 "swift.extension_header.scope_type" | "swift.extension_target.scope_trait" => {
                     Some("swift.extension.scope")
                 }
@@ -1448,6 +1499,9 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
             if let Some(scope_kind) = scope_kind {
                 assert_eq!(parent.kind(), SyntaxFactKind::Scope);
                 assert_eq!(parent.syntax_kind().as_str(), scope_kind);
+                if fact.syntax_kind().as_str() == "rust.body.signature" {
+                    assert_eq!(parent.span(), fact.span());
+                }
             } else {
                 assert_eq!(parent.kind(), SyntaxFactKind::Declaration);
             }
@@ -1592,11 +1646,19 @@ fn fact_limited_limits() -> AnalysisLimits {
     .expect("analysis limits are valid")
 }
 
-fn prioritized_fact_limits() -> AnalysisLimits {
+fn prioritized_fact_limits(required_facts: usize) -> AnalysisLimits {
     let syntax_batch =
         BatchThresholds::new(4, 16 * 1024, 2, 1024).expect("syntax batch limits are valid");
-    let syntax = StreamLimits::new(3, 12, 128 * 1024, 4, 4096, 8192, syntax_batch)
-        .expect("syntax stream limits are valid");
+    let syntax = StreamLimits::new(
+        required_facts.div_ceil(4) + 1,
+        required_facts + 1,
+        128 * 1024,
+        4,
+        4096,
+        8192,
+        syntax_batch,
+    )
+    .expect("syntax stream limits are valid");
     let ir_batch = BatchThresholds::new(16, 16 * 1024, 2, 1024).expect("IR batch limits are valid");
     let ir = StreamLimits::new(8, 128, 256 * 1024, 8, 8192, 8192, ir_batch)
         .expect("IR stream limits are valid");

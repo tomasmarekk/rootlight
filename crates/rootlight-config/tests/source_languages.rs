@@ -12,6 +12,7 @@ version = "1.0"
 critical = true
 [extensions.source-languages.data.extensions]
 bas = "vba"
+conf = "jsonc"
 [extensions.source-languages.data.paths]
 "legacy/module.bas" = "vb6"
 "#;
@@ -35,10 +36,36 @@ bas = "vba"
     );
     assert_eq!(resolved.source_language_for_path("../module.bas"), None);
     assert_eq!(resolved.source_language_for_path("folder.bas/file"), None);
+    assert_eq!(
+        resolved.source_language_for_path("settings.CONF"),
+        Some("jsonc")
+    );
     assert_ne!(
         resolved.hash(),
         ConfigSnapshot::resolve(&[]).unwrap().hash()
     );
+}
+
+#[test]
+fn cmake_assignments_preserve_exact_path_precedence() {
+    let resolved = ConfigSnapshot::resolve(&[ConfigLayer {
+        source: ConfigSource::User,
+        contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\ncmake='cmake'\n[extensions.source-languages.data.paths]\n'custom.input'='cmake'\n'CMakeLists.txt'='python'\n",
+    }]).unwrap();
+    assert_eq!(
+        resolved.source_language_for_path("src/Module.CMAKE"),
+        Some("cmake")
+    );
+    assert_eq!(
+        resolved.source_language_for_path("custom.input"),
+        Some("cmake")
+    );
+    assert_eq!(
+        resolved.source_language_for_path("CMakeLists.txt"),
+        Some("python")
+    );
+    assert_eq!(resolved.source_language_for_path("other.in"), None);
+    assert_eq!(resolved.source_language_for_path("../module.cmake"), None);
 }
 
 #[test]
@@ -115,4 +142,23 @@ fn invalid_source_language_rules_are_rejected() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn v_assignments_preserve_shared_suffix_overrides() {
+    let resolved = ConfigSnapshot::resolve(&[ConfigLayer {
+        source: ConfigSource::User,
+        contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nv='v'\nvsh='v'\n[extensions.source-languages.data.paths]\n'rtl/design.v'='verilog'\n'shader.vsh'='glsl'\n'custom.input'='v'\n",
+    }]).unwrap();
+    for (path, expected) in [
+        ("code.V", "v"),
+        ("script.VSH", "v"),
+        ("rtl/design.v", "verilog"),
+        ("shader.vsh", "glsl"),
+        ("custom.input", "v"),
+    ] {
+        assert_eq!(resolved.source_language_for_path(path), Some(expected));
+    }
+    assert_eq!(resolved.source_language_for_path("../code.v"), None);
+    assert_eq!(resolved.source_language_for_path("other.vv"), None);
 }

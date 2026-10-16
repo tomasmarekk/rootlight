@@ -189,7 +189,6 @@
             "null"
           ],
           "format": "uint64",
-          "maximum": 549755813888,
           "minimum": 1073741824
         },
         "maximum_repositories": {
@@ -207,7 +206,6 @@
             "null"
           ],
           "format": "uint64",
-          "maximum": 549755813888,
           "minimum": 134217728
         },
         "minimum_free_disk_bytes": {

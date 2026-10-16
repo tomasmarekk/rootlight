@@ -1,7 +1,7 @@
-//! BOM-backed text admission without changing immutable source bytes.
+//! Strict text admission without changing immutable source bytes.
 //!
-//! Only a bounded decoded prefix is used for classification. UTF-16 validity
-//! is checked through the entire snapshot before any binary exclusion is waived.
+//! Only a bounded prefix is used for language classification. Complete Unicode
+//! validation distinguishes raw source bytes from supported text encodings.
 
 use rootlight_cancel::Cancellation;
 use rootlight_vfs::VfsError;
@@ -27,15 +27,18 @@ pub(super) fn classify(
             || content.starts_with(b"PK\x05\x06")
             || content.starts_with(b"PK\x07\x08");
         let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES));
-        return Ok(
-            (!binary_signature && !sample.is_some_and(|sample| sample.contains(&0))).then_some(
-                SourceClassification {
-                    encoding: "utf-8",
-                    decoded_prefix: None,
-                    prefix_truncated: content.len() > MAX_CLASSIFICATION_BYTES,
-                },
-            ),
-        );
+        if binary_signature || sample.is_some_and(|sample| sample.contains(&0)) {
+            return Ok(None);
+        }
+        let mut validator = rootlight_vfs::StreamingSourceTextValidator::new();
+        validator.push(content, cancellation)?;
+        return Ok(Some(SourceClassification {
+            encoding: validator
+                .finish()
+                .map_or("bytes", |encoding| encoding.as_str()),
+            decoded_prefix: None,
+            prefix_truncated: content.len() > MAX_CLASSIFICATION_BYTES,
+        }));
     }
     let Some(text) = rootlight_vfs::SourceText::parse(content, cancellation)? else {
         return Ok(None);
@@ -66,6 +69,45 @@ pub(super) fn classify(
         decoded_prefix: Some(prefix),
         prefix_truncated,
     }))
+}
+
+pub(super) fn classify_streamed(
+    prefix: &[u8],
+    full_length: u64,
+    encoding: Option<rootlight_vfs::TextEncoding>,
+    contains_nul: bool,
+    cancellation: &Cancellation,
+) -> Result<Option<SourceClassification>, DiscoveryError> {
+    cancellation.check()?;
+    if contains_nul {
+        return Ok(None);
+    }
+    let Some(encoding) = encoding else {
+        return Ok(
+            classify(prefix, cancellation)?.map(|_| SourceClassification {
+                encoding: "bytes",
+                decoded_prefix: None,
+                prefix_truncated: true,
+            }),
+        );
+    };
+    // The complete stream is already valid. A bounded physical prefix may end
+    // inside its final scalar, which is excluded from classification evidence.
+    for removed in 0..=4.min(prefix.len()) {
+        let bounded = &prefix[..prefix.len() - removed];
+        let Some(text) = rootlight_vfs::SourceText::parse(bounded, cancellation)? else {
+            continue;
+        };
+        if text.encoding() != encoding {
+            continue;
+        }
+        let Some(mut result) = classify(bounded, cancellation)? else {
+            return Ok(None);
+        };
+        result.prefix_truncated |= u64::try_from(bounded.len()).unwrap_or(u64::MAX) < full_length;
+        return Ok(Some(result));
+    }
+    Err(DiscoveryError::IncrementalDrift)
 }
 
 #[cfg(test)]
@@ -180,6 +222,47 @@ mod tests {
     }
 
     #[test]
+    fn streamed_classification_keeps_known_encoding_across_split_prefix_scalars() {
+        let cancellation = Cancellation::new();
+        let utf8 = format!("{}😀tail", "a".repeat(MAX_CLASSIFICATION_BYTES - 1));
+        let classified = classify_streamed(
+            &utf8.as_bytes()[..MAX_CLASSIFICATION_BYTES],
+            u64::try_from(utf8.len()).unwrap(),
+            Some(rootlight_vfs::TextEncoding::Utf8),
+            false,
+            &cancellation,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(classified.encoding, "utf-8");
+        assert!(classified.prefix_truncated);
+        for little_endian in [true, false] {
+            let expected = "a".repeat((MAX_CLASSIFICATION_BYTES - 4) / 2);
+            let source = encoded(&format!("{expected}😀tail"), little_endian);
+            let encoding = if little_endian {
+                rootlight_vfs::TextEncoding::Utf16Le
+            } else {
+                rootlight_vfs::TextEncoding::Utf16Be
+            };
+            let classified = classify_streamed(
+                &source[..MAX_CLASSIFICATION_BYTES],
+                u64::try_from(source.len()).unwrap(),
+                Some(encoding),
+                false,
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(classified.encoding, encoding.as_str());
+            assert_eq!(
+                classified.decoded_prefix.as_deref(),
+                Some(expected.as_str())
+            );
+            assert!(classified.prefix_truncated);
+        }
+    }
+
+    #[test]
     fn binary_format_signatures_do_not_require_a_nul_byte() {
         for content in [
             b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".as_slice(),
@@ -210,7 +293,7 @@ mod tests {
 
     #[test]
     fn legacy_admission_and_cancellation_remain_explicit() {
-        for content in [b"fn value() {}".as_slice(), b"invalid \xff", b""] {
+        for content in [b"fn value() {}".as_slice(), b""] {
             let classified = classify(content, &Cancellation::new()).unwrap().unwrap();
             assert_eq!(classified.encoding, "utf-8");
             assert!(classified.decoded_prefix.is_none());
@@ -218,5 +301,20 @@ mod tests {
         }
         let cancellation = Cancellation::with_deadline(std::time::Instant::now());
         assert!(classify(&encoded("hello", true), &cancellation).is_err());
+    }
+
+    #[test]
+    fn malformed_utf8_remains_raw_source_even_beyond_the_language_sample() {
+        let mut beyond = vec![b'a'; MAX_CLASSIFICATION_BYTES + 1];
+        beyond.push(0xff);
+        for content in [b"invalid \xff".as_slice(), beyond.as_slice()] {
+            let classified = classify(content, &Cancellation::new()).unwrap().unwrap();
+            assert_eq!(classified.encoding, "bytes");
+            assert!(classified.decoded_prefix.is_none());
+            assert_eq!(
+                classified.prefix_truncated,
+                content.len() > MAX_CLASSIFICATION_BYTES
+            );
+        }
     }
 }

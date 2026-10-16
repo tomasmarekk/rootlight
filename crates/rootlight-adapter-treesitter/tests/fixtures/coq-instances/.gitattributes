@@ -1,0 +1,2 @@
+*.v -text
+*.json text eol=lf

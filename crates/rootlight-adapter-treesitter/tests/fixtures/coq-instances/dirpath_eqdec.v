@@ -1,0 +1,1 @@
+#[global] Instance dirpath_eqdec : Classes.EqDec dirpath := _.

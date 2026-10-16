@@ -1,0 +1,31 @@
+{
+  "schema": "rootlight.coq-original-projection-fixtures/1",
+  "upstream": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "unchanged_original_excerpts": true,
+  "composition": "Tests add explicit authored newline separators between noncontiguous unchanged excerpts.",
+  "license": {
+    "path": "LICENSE",
+    "sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390"
+  },
+  "fixtures": [
+    {
+      "path": "singleton.v",
+      "bytes": 154,
+      "sha256": "17c81232f10d8d7b13e0a02eeb50d2d2ccac3a2f2e38a6456f380ae29fdc18f4",
+      "upstream_path": "erasure/theories/EProgram.v",
+      "upstream_file_sha256": "855260c8b44970c2bfcfb1ffad3df18fda4c9f38396fa544a472dde2b0af1a80",
+      "start_byte": 2965,
+      "end_byte": 3119
+    },
+    {
+      "path": "neighbor.v",
+      "bytes": 83,
+      "sha256": "5adf290e006b24a414cfd63a9f5832490500307eae848e6488c47116f80d2275",
+      "upstream_path": "erasure/theories/EProgram.v",
+      "upstream_file_sha256": "855260c8b44970c2bfcfb1ffad3df18fda4c9f38396fa544a472dde2b0af1a80",
+      "start_byte": 4228,
+      "end_byte": 4311
+    }
+  ]
+}

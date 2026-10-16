@@ -8,6 +8,12 @@ mod process_support;
 #[path = "retrieval_process/context_prefix.rs"]
 mod context_prefix;
 
+#[path = "retrieval_process/coq_source_fallback.rs"]
+mod coq_source_fallback;
+
+#[path = "retrieval_process/streamed_source.rs"]
+mod streamed_source;
+
 use std::{
     ffi::OsStr,
     fs,
@@ -5108,6 +5114,14 @@ impl RetrievalFixture {
         extra_sources: &[(&str, impl AsRef<[u8]>)],
         layout: FixtureLayout,
     ) -> Self {
+        Self::spawn_with_sources_and_prepare(extra_sources, layout, |_| {})
+    }
+
+    fn spawn_with_sources_and_prepare(
+        extra_sources: &[(&str, impl AsRef<[u8]>)],
+        layout: FixtureLayout,
+        prepare: impl FnOnce(&Path),
+    ) -> Self {
         let root = process_support::private_process_tempdir("rl-retrieval-");
         let repository_root = root.path().join("repository");
         fs::create_dir_all(repository_root.join("src"))
@@ -5156,6 +5170,7 @@ impl RetrievalFixture {
             .expect("omitted-word source writes");
         }
 
+        prepare(&repository_root);
         let state_dir = root.path().join("state");
         let runtime_dir = root.path().join("runtime");
         let daemon_binary = ensure_daemon_binary();
@@ -5303,6 +5318,11 @@ fn ensure_daemon_binary() -> PathBuf {
 }
 
 fn build_daemon_binary() -> PathBuf {
+    if let Some(binary) = std::env::var_os("ROOTLIGHT_TEST_DAEMON_BINARY") {
+        let binary = PathBuf::from(binary);
+        assert!(binary.is_file(), "the selected test daemon exists");
+        return binary;
+    }
     let mcp_binary = PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp"));
     let profile_dir = mcp_binary
         .parent()
@@ -5424,7 +5444,10 @@ struct McpProcess {
 
 impl McpProcess {
     fn spawn(state_dir: &Path, runtime_dir: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rootlight-mcp"))
+        let binary = std::env::var_os("ROOTLIGHT_TEST_MCP_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_rootlight-mcp")));
+        let mut child = Command::new(binary)
             .current_dir(
                 state_dir
                     .parent()

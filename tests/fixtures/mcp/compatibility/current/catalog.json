@@ -33331,7 +33331,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Read bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding, or explicitly request historical UTF-8/base64 modes; optional context, overlap merging, line projection and caller-reduced ceilings apply. Conditional activity is source-bound for classic Visual Basic/VBA; direct file selectors are unsupported.",
+        "description": "Read bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding, or explicitly request historical UTF-8/base64 modes; optional context, overlap merging, line projection and caller-reduced ceilings apply. Omitted budget.timeout_ms imposes no implicit full-source verification deadline; supplied timeouts remain bounded by server ceilings. Conditional activity is source-bound for classic Visual Basic/VBA; direct file selectors are unsupported.",
         "execution": {
           "taskSupport": "forbidden"
         },
@@ -39928,6 +39928,1204 @@
           "unevaluatedProperties": false
         },
         "title": "Batch query"
+      },
+      {
+        "_meta": {
+          "rootlight/capabilities": {
+            "batchEligible": false,
+            "batchSharedBudget": false,
+            "budget": "per_request",
+            "contractVersion": "1.1",
+            "explainSupported": false,
+            "fallbackSummary": "exact case-sensitive unicode literals in one known generation-pinned source file",
+            "generation": "selects_generation",
+            "inputShapeHash": "d94bf0662cf851700d18b91e356ee5c9ff0dd38c7b55c7fdfb9290f9d78d596d",
+            "limitations": [
+              {
+                "field": "response_profile",
+                "status": "fallback_limited",
+                "summary": "only compact source references are served"
+              }
+            ],
+            "pagination": "authenticated_cursor",
+            "profiles": [
+              "scout",
+              "analysis",
+              "developer"
+            ],
+            "responseProfiles": {
+              "default": "compact",
+              "mode": "selectable",
+              "supported": [
+                "compact"
+              ],
+              "wireField": "response_profile"
+            },
+            "status": "fallback_limited"
+          }
+        },
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Find exact case-sensitive Unicode literals in one known generation-pinned source file; returns overlapping original-byte source references with explicit scan limits, source provenance, and authenticated continuation, without tokenization or structural and semantic support claims. Omitted budget.timeout_ms imposes no implicit full-source verification deadline; supplied timeouts remain bounded by server ceilings.",
+        "execution": {
+          "taskSupport": "forbidden"
+        },
+        "inputSchema": {
+          "$defs": {
+            "ActiveGeneration": {
+              "description": "Active-generation keyword.",
+              "oneOf": [
+                {
+                  "const": "active",
+                  "description": "Select the active generation.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ContinuationCursor": {
+              "description": "A bounded opaque continuation cursor.",
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "FileId": {
+              "pattern": "^file1_[a-z2-7]{39}$",
+              "type": "string"
+            },
+            "GenerationId": {
+              "pattern": "^gen1_[a-z2-7]{39}$",
+              "type": "string"
+            },
+            "GenerationSelector": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActiveGeneration",
+                  "description": "Resolve the currently active immutable generation."
+                },
+                {
+                  "$ref": "#/$defs/GenerationId",
+                  "description": "Pin an explicit immutable generation."
+                }
+              ],
+              "description": "Generation selector shared by first-slice read tools."
+            },
+            "RepositoryId": {
+              "pattern": "^repo1_[a-z2-7]{32}$",
+              "type": "string"
+            },
+            "RepositoryIdSelector": {
+              "additionalProperties": false,
+              "description": "Stable repository-ID selector.",
+              "properties": {
+                "repository_id": {
+                  "$ref": "#/$defs/RepositoryId",
+                  "description": "Repository identity."
+                }
+              },
+              "required": [
+                "repository_id"
+              ],
+              "type": "object"
+            },
+            "RepositorySelector": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RepositoryIdSelector",
+                  "description": "Select by stable repository identifier."
+                }
+              ],
+              "description": "Repository selector accepted by first-slice read tools."
+            },
+            "SourceFindResponseBudget": {
+              "additionalProperties": false,
+              "properties": {
+                "max_results": {
+                  "format": "uint16",
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_tokens": {
+                  "format": "uint16",
+                  "maximum": 16000,
+                  "minimum": 100,
+                  "type": "integer"
+                },
+                "timeout_ms": {
+                  "format": "uint32",
+                  "maximum": 30000,
+                  "minimum": 10,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "SourceFindResponseProfile": {
+              "const": "compact",
+              "type": "string"
+            }
+          },
+          "$id": "https://rootlight.local/schema/mcp/source.find/input/1.1",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "description": "Strict source.find input; the literal is never interpreted as a regex or token.",
+          "properties": {
+            "budget": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SourceFindResponseBudget"
+                }
+              ],
+              "description": "Lower result, token, or timeout ceilings; other controls are unsupported."
+            },
+            "cursor": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContinuationCursor"
+                }
+              ],
+              "description": "Authenticated continuation preserving an unfinished literal prefix."
+            },
+            "file_id": {
+              "$ref": "#/$defs/FileId",
+              "description": "Exact indexed file identity; caller paths are not accepted."
+            },
+            "generation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GenerationSelector"
+                }
+              ],
+              "description": "Active or omitted on the first page; exact generation on continuation."
+            },
+            "literal": {
+              "description": "Nonempty exact scalar sequence, limited to 65536 UTF-8 bytes.",
+              "maxLength": 65536,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maximum_matches": {
+              "description": "Matches per page; omitted means 128. Overlapping matches are included.",
+              "format": "uint16",
+              "maximum": 1024,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_scan_bytes": {
+              "description": "Forward physical bytes per page; omitted means 64 MiB.",
+              "format": "uint64",
+              "maximum": 67108864,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "repository": {
+              "$ref": "#/$defs/RepositorySelector",
+              "description": "Owning repository selected by its stable identity."
+            },
+            "response_profile": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SourceFindResponseProfile"
+                }
+              ],
+              "description": "Optional compact representation; source identity is always retained."
+            }
+          },
+          "required": [
+            "repository",
+            "file_id",
+            "literal"
+          ],
+          "title": "SourceFindInput",
+          "type": "object"
+        },
+        "name": "source.find",
+        "outputSchema": {
+          "$defs": {
+            "CacheStatus": {
+              "description": "Cache classification for usage reporting.",
+              "oneOf": [
+                {
+                  "const": "miss",
+                  "description": "No cache entry was used.",
+                  "type": "string"
+                },
+                {
+                  "const": "hit",
+                  "description": "A verified generation-bound cache entry was used.",
+                  "type": "string"
+                },
+                {
+                  "const": "not_applicable",
+                  "description": "The operator does not use a cache.",
+                  "type": "string"
+                }
+              ]
+            },
+            "ContentHash": {
+              "pattern": "^b3_[a-z2-7]{58}$",
+              "type": "string"
+            },
+            "ContinuationCursor": {
+              "description": "A bounded opaque continuation cursor.",
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "DetailKey": {
+              "description": "A validated key for a bounded public error detail.",
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-z0-9_]+$",
+              "type": "string"
+            },
+            "EntityErrorResponse": {
+              "additionalProperties": false,
+              "description": "Checked domain error under one exact source-entity contract revision.",
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/PublicError",
+                  "description": "Source-free error and remediation."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/SourceFindSchemaVersion",
+                  "description": "Exact error contract version."
+                }
+              },
+              "required": [
+                "schema_version",
+                "error"
+              ],
+              "type": "object"
+            },
+            "ErrorCode": {
+              "description": "Stable public error families shared by all Rootlight boundaries.",
+              "oneOf": [
+                {
+                  "const": "INVALID_ARGUMENT",
+                  "description": "The caller supplied an invalid value.",
+                  "type": "string"
+                },
+                {
+                  "const": "NOT_FOUND",
+                  "description": "The requested entity does not exist.",
+                  "type": "string"
+                },
+                {
+                  "const": "CONFLICT",
+                  "description": "The request conflicts with current state.",
+                  "type": "string"
+                },
+                {
+                  "const": "STALE_GENERATION",
+                  "description": "The selected generation is no longer valid for this operation.",
+                  "type": "string"
+                },
+                {
+                  "const": "UNSUPPORTED_CAPABILITY",
+                  "description": "The requested capability is unavailable.",
+                  "type": "string"
+                },
+                {
+                  "const": "INCOMPLETE_COVERAGE",
+                  "description": "The result is incomplete for the requested coverage.",
+                  "type": "string"
+                },
+                {
+                  "const": "BUDGET_EXCEEDED",
+                  "description": "The operation exceeded an explicit work budget.",
+                  "type": "string"
+                },
+                {
+                  "const": "RESOURCE_EXHAUSTED",
+                  "description": "A bounded resource is exhausted.",
+                  "type": "string"
+                },
+                {
+                  "const": "CANCELLED",
+                  "description": "The operation was cancelled before completion.",
+                  "type": "string"
+                },
+                {
+                  "const": "ADAPTER_FAILED",
+                  "description": "An isolated adapter failed.",
+                  "type": "string"
+                },
+                {
+                  "const": "INDEX_CORRUPT",
+                  "description": "An index failed integrity checks.",
+                  "type": "string"
+                },
+                {
+                  "const": "MIGRATION_REQUIRED",
+                  "description": "Stored data requires a supported migration.",
+                  "type": "string"
+                },
+                {
+                  "const": "PERMISSION_DENIED",
+                  "description": "Policy denied the requested operation.",
+                  "type": "string"
+                },
+                {
+                  "const": "PROTOCOL_MISMATCH",
+                  "description": "A protocol or contract version is incompatible.",
+                  "type": "string"
+                },
+                {
+                  "const": "BUSY",
+                  "description": "A conflicting operation temporarily owns the resource.",
+                  "type": "string"
+                },
+                {
+                  "const": "INTERNAL",
+                  "description": "An internal failure cannot be safely disclosed.",
+                  "type": "string"
+                },
+                {
+                  "const": "INVALID_CURSOR",
+                  "description": "A pagination cursor is invalid, expired, forged, or context-mismatched.",
+                  "type": "string"
+                },
+                {
+                  "const": "TYPE_MISMATCH",
+                  "description": "A supplied value has the wrong type for its target field.",
+                  "type": "string"
+                },
+                {
+                  "const": "COST_LIMIT",
+                  "description": "The request exceeded a cost limit before execution.",
+                  "type": "string"
+                },
+                {
+                  "const": "OPERATOR_FORBIDDEN",
+                  "description": "The query uses an operator outside the documented allowlist.",
+                  "type": "string"
+                },
+                {
+                  "const": "BINDING_INVALID",
+                  "description": "A batch binding reference is malformed or unresolved.",
+                  "type": "string"
+                },
+                {
+                  "const": "BINDING_TYPE_MISMATCH",
+                  "description": "A batch binding produced a value of the wrong type for its target.",
+                  "type": "string"
+                }
+              ]
+            },
+            "FileId": {
+              "pattern": "^file1_[a-z2-7]{39}$",
+              "type": "string"
+            },
+            "GenerationId": {
+              "pattern": "^gen1_[a-z2-7]{39}$",
+              "type": "string"
+            },
+            "LineRange": {
+              "additionalProperties": false,
+              "description": "A validated one-based inclusive source line range.",
+              "properties": {
+                "end_line": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "start_line": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start_line",
+                "end_line"
+              ],
+              "type": "object"
+            },
+            "NextAction": {
+              "description": "Stable remediation hints generated from a closed set of templates.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "Correct one named input field.",
+                  "properties": {
+                    "action": {
+                      "const": "correct_field",
+                      "type": "string"
+                    },
+                    "field": {
+                      "$ref": "#/$defs/DetailKey",
+                      "description": "Stable name of the invalid field."
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "field"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Retry after the bounded delay in the envelope.",
+                  "properties": {
+                    "action": {
+                      "const": "retry",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Select a compatible contract version.",
+                  "properties": {
+                    "action": {
+                      "const": "select_supported_version",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Inspect the associated operation status.",
+                  "properties": {
+                    "action": {
+                      "const": "inspect_operation",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Rebuild the affected repository generation.",
+                  "properties": {
+                    "action": {
+                      "const": "rebuild_repository",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Collect a protected source-free support bundle.",
+                  "properties": {
+                    "action": {
+                      "const": "collect_support_bundle",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Restart the enumeration or query from the beginning after an invalid\ncontinuation cursor.",
+                  "properties": {
+                    "action": {
+                      "const": "restart_enumeration",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "OperationId": {
+              "pattern": "^op1_[a-z2-7]{32}$",
+              "type": "string"
+            },
+            "PublicError": {
+              "additionalProperties": false,
+              "description": "A stable source-redacted failure safe to serialize across public boundaries.",
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/ErrorCode"
+                },
+                "details": {
+                  "additionalProperties": false,
+                  "patternProperties": {
+                    "^[a-z0-9_]+$": {
+                      "$ref": "#/$defs/PublicValue"
+                    }
+                  },
+                  "type": "object"
+                },
+                "generation": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/GenerationId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "message": {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                "next_actions": {
+                  "items": {
+                    "$ref": "#/$defs/NextAction"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                },
+                "operation": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OperationId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "repository": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/RepositoryId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_after_ms": {
+                  "format": "uint64",
+                  "maximum": 86400000,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "retryable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable",
+                "details",
+                "next_actions"
+              ],
+              "type": "object"
+            },
+            "PublicValue": {
+              "description": "Bounded primitive values permitted in public error details.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "A boolean property.",
+                  "properties": {
+                    "type": {
+                      "const": "boolean",
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A signed integer property.",
+                  "properties": {
+                    "type": {
+                      "const": "integer",
+                      "type": "string"
+                    },
+                    "value": {
+                      "format": "int64",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "An unsigned integer property.",
+                  "properties": {
+                    "type": {
+                      "const": "unsigned",
+                      "type": "string"
+                    },
+                    "value": {
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A repository identity.",
+                  "properties": {
+                    "type": {
+                      "const": "repository",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/RepositoryId"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A generation identity.",
+                  "properties": {
+                    "type": {
+                      "const": "generation",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/GenerationId"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "An operation identity.",
+                  "properties": {
+                    "type": {
+                      "const": "operation",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/OperationId"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "A validated source-free label.",
+                  "properties": {
+                    "type": {
+                      "const": "label",
+                      "type": "string"
+                    },
+                    "value": {
+                      "$ref": "#/$defs/SafeLabel"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "RepositoryId": {
+              "pattern": "^repo1_[a-z2-7]{32}$",
+              "type": "string"
+            },
+            "RequiredNullable": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContinuationCursor"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A property that must be present and may contain JSON `null`."
+            },
+            "ResolvedRepository": {
+              "additionalProperties": false,
+              "description": "Resolved repository metadata.",
+              "properties": {
+                "display_name": {
+                  "description": "Rootlight-owned display label.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "repository_id": {
+                  "$ref": "#/$defs/RepositoryId",
+                  "description": "Stable repository identity."
+                }
+              },
+              "required": [
+                "repository_id",
+                "display_name"
+              ],
+              "type": "object"
+            },
+            "SafeLabel": {
+              "description": "A short source-free label permitted in public diagnostics.",
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.:-]+$",
+              "type": "string"
+            },
+            "SourceFindData": {
+              "additionalProperties": false,
+              "description": "One bounded page; match bodies and unknown total counts are never copied.",
+              "properties": {
+                "file": {
+                  "$ref": "#/$defs/SourceFindFile",
+                  "description": "Shared physical source identity and repository metadata."
+                },
+                "matches": {
+                  "description": "Exact matches in strictly increasing start order, including overlaps.",
+                  "items": {
+                    "$ref": "#/$defs/SourceRef"
+                  },
+                  "maxItems": 1024,
+                  "type": "array"
+                },
+                "restoration_bytes": {
+                  "description": "Independently charged lookbehind used to validate a restored prefix.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "scanned_end_byte": {
+                  "description": "Exclusive original-byte forward scan end.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "scanned_start_byte": {
+                  "description": "Inclusive original-byte forward scan start; UTF-16 begins after its BOM.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stop": {
+                  "$ref": "#/$defs/SourceFindStop",
+                  "description": "Actual stop boundary, distinct from whole-language completeness."
+                },
+                "total_metadata_bytes": {
+                  "description": "Exact UTF-8 byte lengths of the shared path and language metadata.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "total_response_memory_bytes": {
+                  "description": "Owned source-response allocation, excluding matched bodies (never copied).",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "file",
+                "matches",
+                "scanned_start_byte",
+                "scanned_end_byte",
+                "restoration_bytes",
+                "stop",
+                "total_metadata_bytes",
+                "total_response_memory_bytes"
+              ],
+              "type": "object"
+            },
+            "SourceFindEnvelope": {
+              "additionalProperties": false,
+              "description": "Generation-pinned source-only response, without structural coverage claims.",
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/SourceFindData",
+                  "description": "Bounded physical source work and exact matches."
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationId",
+                  "description": "Immutable generation used for every page and source reference."
+                },
+                "next_cursor": {
+                  "$ref": "#/$defs/RequiredNullable",
+                  "description": "Authenticated continuation, absent exactly at end of source."
+                },
+                "repository": {
+                  "$ref": "#/$defs/ResolvedRepository",
+                  "description": "Resolved repository identity."
+                },
+                "schema_version": {
+                  "$ref": "#/$defs/SourceFindSchemaVersion",
+                  "description": "Exact tool contract revision."
+                },
+                "truncated": {
+                  "description": "True exactly when the page stopped before end of source.",
+                  "type": "boolean"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Classification for all repository-derived metadata and references."
+                },
+                "usage": {
+                  "$ref": "#/$defs/UsageSummary",
+                  "description": "Runtime response and execution accounting; source_bytes is zero."
+                }
+              },
+              "required": [
+                "schema_version",
+                "repository",
+                "generation",
+                "data",
+                "truncated",
+                "next_cursor",
+                "usage",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "SourceFindFile": {
+              "additionalProperties": false,
+              "description": "Single shared file identity for all original-byte match references.",
+              "properties": {
+                "byte_length": {
+                  "description": "Complete physical source length including any BOM.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "content_hash": {
+                  "$ref": "#/$defs/ContentHash",
+                  "description": "Hash of the complete original physical source."
+                },
+                "encoding": {
+                  "$ref": "#/$defs/SourceTextEncoding",
+                  "description": "Original physical encoding."
+                },
+                "extracted_from": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SourceRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Whole immediate physical container of an extracted source, if any."
+                },
+                "generated": {
+                  "description": "Indexed generated-file marker.",
+                  "type": "boolean"
+                },
+                "id": {
+                  "$ref": "#/$defs/FileId",
+                  "description": "Indexed file identity."
+                },
+                "language": {
+                  "description": "Indexed language identity without a support-level claim.",
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Repository-relative display path, never a host selector.",
+                  "maxLength": 65536,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "trust": {
+                  "$ref": "#/$defs/TrustClassification",
+                  "description": "Mandatory classification of repository-controlled metadata."
+                }
+              },
+              "required": [
+                "id",
+                "path",
+                "language",
+                "content_hash",
+                "byte_length",
+                "encoding",
+                "generated",
+                "trust"
+              ],
+              "type": "object"
+            },
+            "SourceFindSchemaVersion": {
+              "description": "Exact source-find response revision with verification-duration provenance.",
+              "oneOf": [
+                {
+                  "const": "1.1",
+                  "description": "Source find contract 1.1.",
+                  "type": "string"
+                }
+              ]
+            },
+            "SourceFindStop": {
+              "description": "Actual reason a page stopped; only EndOfSource completes the scan.",
+              "oneOf": [
+                {
+                  "const": "end_of_source",
+                  "description": "The forward scan reached the complete physical source end.",
+                  "type": "string"
+                },
+                {
+                  "const": "scan_limit",
+                  "description": "The requested forward physical-byte ceiling was reached.",
+                  "type": "string"
+                },
+                {
+                  "const": "match_limit",
+                  "description": "The caller's maximum_matches ceiling was reached.",
+                  "type": "string"
+                },
+                {
+                  "const": "matcher_memory_limit",
+                  "description": "Internal matcher memory limited the returned page.",
+                  "type": "string"
+                },
+                {
+                  "const": "response_memory_limit",
+                  "description": "Owned source-response memory limited the returned page.",
+                  "type": "string"
+                },
+                {
+                  "const": "result_limit",
+                  "description": "A transport result ceiling below maximum_matches stopped the page.",
+                  "type": "string"
+                }
+              ]
+            },
+            "SourceRef": {
+              "additionalProperties": false,
+              "description": "A generation-bound reference to immutable repository source.",
+              "properties": {
+                "content_hash": {
+                  "$ref": "#/$defs/ContentHash"
+                },
+                "generation": {
+                  "$ref": "#/$defs/GenerationId"
+                },
+                "line_hint": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/LineRange"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "repository": {
+                  "$ref": "#/$defs/RepositoryId"
+                },
+                "span": {
+                  "$ref": "#/$defs/SourceSpan"
+                }
+              },
+              "required": [
+                "repository",
+                "generation",
+                "span",
+                "content_hash"
+              ],
+              "type": "object"
+            },
+            "SourceSpan": {
+              "additionalProperties": false,
+              "description": "A validated half-open source byte span within one file.",
+              "properties": {
+                "end_byte": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "file": {
+                  "$ref": "#/$defs/FileId"
+                },
+                "start_byte": {
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "file",
+                "start_byte",
+                "end_byte"
+              ],
+              "type": "object"
+            },
+            "SourceTextEncoding": {
+              "description": "Physical encoding of original source bytes.",
+              "oneOf": [
+                {
+                  "const": "utf-8",
+                  "description": "Original UTF-8 bytes.",
+                  "type": "string"
+                },
+                {
+                  "const": "utf-16le",
+                  "description": "BOM-marked UTF-16 little endian.",
+                  "type": "string"
+                },
+                {
+                  "const": "utf-16be",
+                  "description": "BOM-marked UTF-16 big endian.",
+                  "type": "string"
+                }
+              ]
+            },
+            "TrustClassification": {
+              "description": "Trust classification attached to every future source-bearing value.",
+              "oneOf": [
+                {
+                  "const": "untrusted_repository_data",
+                  "description": "Content originated in a repository and must be treated as data.",
+                  "type": "string"
+                }
+              ]
+            },
+            "UsageSummary": {
+              "additionalProperties": false,
+              "description": "Bounded counters returned by each read tool.",
+              "properties": {
+                "cache_status": {
+                  "$ref": "#/$defs/CacheStatus",
+                  "description": "Cache outcome."
+                },
+                "edges": {
+                  "description": "Relationship edges examined.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "estimated_tokens": {
+                  "description": "Deterministic token estimate.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "json_bytes": {
+                  "description": "Encoded structured result bytes.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "rows": {
+                  "description": "Storage rows examined.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "source_bytes": {
+                  "description": "Raw source bytes returned.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "trace_id": {
+                  "description": "Source-free trace identity.",
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "wall_time_ms": {
+                  "description": "Cooperative wall time in milliseconds.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "rows",
+                "edges",
+                "source_bytes",
+                "json_bytes",
+                "estimated_tokens",
+                "wall_time_ms",
+                "cache_status",
+                "trace_id"
+              ],
+              "type": "object"
+            }
+          },
+          "$id": "https://rootlight.local/schema/mcp/source.find/output/1.1",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceFindEnvelope",
+              "description": "Tool-specific successful result."
+            },
+            {
+              "$ref": "#/$defs/EntityErrorResponse",
+              "description": "Checked source-redacted domain error."
+            }
+          ],
+          "description": "Success or checked domain error sharing one exact contract revision.",
+          "title": "EntityToolResponse",
+          "type": "object",
+          "unevaluatedProperties": false
+        },
+        "title": "Find exact source literal"
       }
     ]
   },

@@ -1,0 +1,75 @@
+{
+  "schema": "rootlight.coq-original-record-fixtures/1",
+  "upstream": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "unchanged_original_excerpts": true,
+  "license": {
+    "path": "LICENSE",
+    "sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390"
+  },
+  "fixtures": [
+    {
+      "path": "binder_annot.v",
+      "bytes": 94,
+      "sha256": "e9ed511f247e7d3a0b2607608616c17ea1297fc3c073f77441b0715e0dd7ed58",
+      "upstream_path": "common/theories/BasicAst.v",
+      "upstream_file_sha256": "a31b7a3389f5c23b51be4b03b4391bf18f54df47a32d3fef49efe88a58da9e25",
+      "start_byte": 607,
+      "end_byte": 701
+    },
+    {
+      "path": "checker_flags.v",
+      "bytes": 401,
+      "sha256": "b3ca2ab1ad1bbe30c32a0c9d048f2978a6bd77ca999217f04160d637d4361dfd",
+      "upstream_path": "common/theories/config.v",
+      "upstream_file_sha256": "54bf75b0af87ff6ef9de78bb41efecc1c30d2088a2f40c966d5aeb75a53e9d95",
+      "start_byte": 204,
+      "end_byte": 605
+    },
+    {
+      "path": "retroknowledge.v",
+      "bytes": 180,
+      "sha256": "feac9d565d2299054c214fe8bfa36adc3f6296724ac9dd29436a5204d8c26cfd",
+      "upstream_path": "common/theories/Environment.v",
+      "upstream_file_sha256": "1d646432ad73189d1a4e093c82c106c4b6acfbfc71a70ed888cc9aa09310e734",
+      "start_byte": 1679,
+      "end_byte": 1859
+    },
+    {
+      "path": "listable.v",
+      "bytes": 99,
+      "sha256": "f4895905a09c7bfbe2e19a008f3bb6dcbc3f4d3baba156d539863fed81efbbc2",
+      "upstream_path": "utils/theories/MRListable.v",
+      "upstream_file_sha256": "3cd43c8afa6afece784996ba718cd32fcd85c39ea50d266a9b8a9315946473f5",
+      "start_byte": 295,
+      "end_byte": 394
+    },
+    {
+      "path": "debug_opt.v",
+      "bytes": 38,
+      "sha256": "b439016fafb374ef2d829ce369a61f459f7c6bd7c233db2702fb069e5ee2c596",
+      "upstream_path": "quotation/theories/CommonUtils.v",
+      "upstream_file_sha256": "c63c072e4f4ea1a65e0f367686e1a919378842ebcfec4c8e1f6ccf6d6eb9fcee",
+      "start_byte": 423,
+      "end_byte": 461
+    },
+    {
+      "path": "sigma.v",
+      "bytes": 80,
+      "sha256": "ae09326e29884d8f0f72b20c9e2d0570b5865d954a75a4b568badac4948bee84",
+      "upstream_path": "translations/sigma.v",
+      "upstream_file_sha256": "ac93e63de57a0db6476c674fb144a18e87abf343831e2cc76b6f060bdb58c073",
+      "start_byte": 203,
+      "end_byte": 283
+    },
+    {
+      "path": "dependent_sigma.v",
+      "bytes": 79,
+      "sha256": "75a572a871d572821b4cbe9c3a5e97f36e6ba5430bc65bb6b2af2922bf6895c6",
+      "upstream_path": "test-suite/proj.v",
+      "upstream_file_sha256": "912db096dcddd738609c200231b9b4e28fc2573c74cd275e44593f676ef0d8f2",
+      "start_byte": 219,
+      "end_byte": 298
+    }
+  ]
+}

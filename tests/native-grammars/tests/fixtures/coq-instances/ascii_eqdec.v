@@ -1,0 +1,1 @@
+Global Instance ascii_eqdec : EqDec ascii := ascii_dec.

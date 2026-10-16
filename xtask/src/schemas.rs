@@ -110,7 +110,7 @@ const COMPATIBILITY_BASELINES: [&str; 13] = [
     STORAGE_COMPATIBILITY_BASELINES[5],
     STORAGE_COMPATIBILITY_BASELINES[6],
 ];
-const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 22] = [
+const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 24] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
     ("1.2", "protobuf/1.2/rootlight.desc"),
     ("1.3", "protobuf/1.3/rootlight.desc"),
@@ -133,8 +133,10 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 22] = [
     ("1.22", "protobuf/1.22/rootlight.desc"),
     ("1.23", "protobuf/1.23/rootlight.desc"),
     ("1.25", "protobuf/1.25/rootlight.desc"),
+    ("1.26", "protobuf/1.26/rootlight.desc"),
+    ("1.27", "protobuf/1.27/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 27] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 31] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -152,12 +154,16 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 27] = [
     "crates/rootlight-mcp-contract/src/repository.rs",
     "crates/rootlight-mcp-contract/src/source_entity.rs",
     "crates/rootlight-mcp-contract/src/source_text.rs",
+    "crates/rootlight-mcp-contract/src/source_find.rs",
+    "crates/rootlight-mcp-contract/src/pagination.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
     "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-input-1.0.schema.json",
     "tests/fixtures/mcp/1.0/schemas/mcp-repo-list-output-1.0.schema.json",
     "tests/fixtures/mcp/1.0/tool-contracts.json",
     "tests/fixtures/mcp/1.0/tool-transcript.jsonl",
     "tests/fixtures/mcp/2.0/repo-list-contract.json",
+    "schemas/generated/json/mcp-source-find-input-1.0.schema.json",
+    "schemas/generated/json/mcp-source-find-output-1.0.schema.json",
     "xtask/Cargo.toml",
     "xtask/src/cargo_metadata.rs",
     "xtask/src/main.rs",
@@ -323,7 +329,10 @@ pub(crate) fn check_compatibility() -> Result<(), SchemaError> {
     validate_storage_compatibility(&workspace_root)?;
     println!("compatibility: frozen configuration 1.0 and 1.1 fixtures verified");
     println!("compatibility: frozen protobuf descriptor is a compatible subset");
-    println!("compatibility: daemon protocol 1.1 through 1.15 descriptors verified");
+    println!(
+        "compatibility: {} frozen daemon protocol descriptors verified",
+        DAEMON_PROTOCOL_DESCRIPTOR_BASELINES.len()
+    );
     println!("compatibility: frozen protobuf wire semantics verified");
     println!("compatibility: frozen IR 1.0 and normalized IR 1.1 documents verified");
     println!("compatibility: frozen rootlight.lexical extension version 1 verified");
@@ -894,6 +903,8 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         write_bytes(&schema_root.join(name), &read_bytes(&fixture)?)?;
     }
     for name in [
+        "mcp-source-find-input-1.0.schema.json",
+        "mcp-source-find-output-1.0.schema.json",
         "mcp-architecture-overview-input-1.0.schema.json",
         "mcp-architecture-overview-output-1.0.schema.json",
         "mcp-architecture-cycles-input-1.0.schema.json",
@@ -1305,6 +1316,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
         "1.1",
     )?;
     write_mcp_tool_schema::<SourceReadInput>(&schema_root, "source.read", "input")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_find::SourceFindInput>(
+        &schema_root,
+        "source.find",
+        "input",
+        rootlight_mcp_contract::source_find::SOURCE_FIND_VERSION,
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_find::SourceFindOutput>(
+        &schema_root,
+        "source.find",
+        "output",
+        rootlight_mcp_contract::source_find::SOURCE_FIND_VERSION,
+    )?;
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
     write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.1")?;
     write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.2")?;
@@ -3317,6 +3340,10 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-find-input-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-find-output-1.0.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-find-input-1.1.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-find-output-1.1.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.3.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-code-locate-output-1.9.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-symbol-explain-input-1.9.schema.json"),

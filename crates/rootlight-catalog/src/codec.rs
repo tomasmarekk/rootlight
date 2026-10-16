@@ -3,8 +3,6 @@
 //! Decoding treats every database scalar as hostile and reconstructs checked
 //! IDs, spans, line ranges, confidence, and closed enum values without panics.
 
-use std::collections::BTreeMap;
-
 use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
     Confidence, ContainerRef, CoverageScope, FactRef, LineRange, RelationEndpoint, SourceRef,
@@ -119,17 +117,18 @@ pub(crate) fn source_ref(
 }
 
 pub(crate) fn source_by_ordinal(
-    sources: &BTreeMap<i64, SourceRef>,
+    sources: &[SourceRef],
     ordinal: i64,
 ) -> Result<SourceRef, CatalogError> {
-    sources
-        .get(&ordinal)
+    usize::try_from(ordinal)
+        .ok()
+        .and_then(|ordinal| sources.get(ordinal))
         .cloned()
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))
 }
 
 pub(crate) fn optional_source_by_ordinal(
-    sources: &BTreeMap<i64, SourceRef>,
+    sources: &[SourceRef],
     ordinal: Option<i64>,
 ) -> Result<Option<SourceRef>, CatalogError> {
     ordinal

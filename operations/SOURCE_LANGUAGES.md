@@ -35,6 +35,12 @@ semantic completeness. Binary, linked, unreadable, excluded or oversized sources
 remain subject to the normal discovery safety policy. Assigning a language does
 not add support for extracting binary containers such as MATLAB live scripts.
 
+CMake uses the `cmake` label. `CMakeLists.txt`, `.cmake` sources and their
+`.in` templates route to the same written-source profile at any depth, with
+case-insensitive filename recognition. Template substitutions and CMake execution
+remain unevaluated; physical definitions and command sites do not establish
+effective variables, targets, macro expansion or command dispatch.
+
 F# uses `fsharp` for implementation sources and `fsharp-signature` for signature
 contracts. Unambiguous `.fsx` and `.fsi` filenames select those distinct profiles.
 The `.fs` suffix is also used by Forth: automatic F# routing requires bounded
@@ -54,3 +60,22 @@ instead of silently interpreting the same source with a different language.
 User configuration applies to repositories indexed by that daemon. Choose narrow
 path rules where repositories need different interpretations of a shared suffix.
 Do not treat configured indexing results as successful automatic language detection.
+
+V uses the `v` label. `.vv` compiler-input fixtures select V by extension;
+validity is reported separately by analysis. `.v` is shared with Verilog and
+Coq, so automatic V selection requires bounded written-code or literal V
+interpreter evidence. `.vsh` retains its GLSL extension default unless V code
+or a literal V shebang identifies a script. Comments and quoted data cannot
+supply declaration evidence. Exact path assignments can resolve ambiguous
+sources without assigning every file with the shared suffix to one language.
+
+Coq/Rocq uses the canonical `coq` label and accepts the `rocq` alias. Complete
+written command sentences can provide bounded content evidence for `.v` sources.
+Nested comments and strings do not supply commands, and contradictory written
+language signals remain explicit. A suffix alone does not select Coq.
+The native Coq adapter extracts written declarations and names for reviewed
+constructs. Parse recovery, unmodeled commands, module or section ownership,
+and incomplete reference analysis retain explicit source-bound gaps. The adapter
+does not elaborate terms, evaluate tactics, resolve proof environments, or check
+proofs. Exact source availability remains separate from these analysis limits.
+Use exact path assignments for sources whose bounded prefix supplies no evidence.

@@ -1,7 +1,7 @@
 {
   "schema": "rootlight.response-profile-matrix/1",
   "source": "canonical capability registry",
-  "tool_count": 19,
+  "tool_count": 20,
   "tools": [
     {
       "tool": "repo.index",
@@ -224,6 +224,17 @@
           "compact",
           "standard",
           "evidence"
+        ],
+        "default": "compact"
+      }
+    },
+    {
+      "tool": "source.find",
+      "support": {
+        "mode": "selectable",
+        "wire_field": "response_profile",
+        "supported": [
+          "compact"
         ],
         "default": "compact"
       }

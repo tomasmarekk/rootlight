@@ -22,9 +22,10 @@ use rootlight_ids::{
     FileIdentity, GenerationId, RepositoryId, content_hash, derive_file, derive_repository,
 };
 use rootlight_ir::{
-    AnalysisTier, CoverageScope, CoverageStatus, ExtensionSupport, FactDomain, OccurrenceRole,
-    OccurrenceTarget, RelationPredicate, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
-    SYMBOL_IDENTITY_CLAIM_VERSION,
+    AnalysisTier, CoverageScope, CoverageStatus, EntityKind, ExtensionSupport, FactDomain,
+    NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    RUST_DIRECT_CALL_NAMESPACE, RelationPredicate, SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+    SYMBOL_IDENTITY_CLAIM_VERSION, SourceSpan, decode_rust_direct_call_envelope,
 };
 use rootlight_protocol::{
     adapter_contract::{ADAPTER_NONCE_BYTES, NegotiatedSession},
@@ -158,7 +159,7 @@ fn actual_isolated_binary_returns_multifile_tier_b() {
             ),
             (
                 "src/main.rs",
-                b"use crate::dep::ping;\npub fn run() { ping(); }\n".as_slice(),
+                b"mod dep;\nuse crate::dep::ping;\npub fn run() { ping(); }\n".as_slice(),
                 false,
                 Vec::new(),
             ),
@@ -237,6 +238,299 @@ fn actual_isolated_binary_returns_multifile_tier_b() {
         ),
         (1, 1, 0)
     );
+}
+
+#[test]
+fn actual_isolated_rust_missing_module_declaration_keeps_imported_call_unresolved() {
+    let executable = adapter_executable();
+    let session = negotiated_session(&executable, resource_limits(8 * 1024 * 1024));
+    let source = b"use crate::dep::ping;\npub fn run() { ping(); }\n";
+    let request = project_request(
+        &session,
+        "rust",
+        &[
+            ("src/dep.rs", b"pub fn ping() {}\n", false, Vec::new()),
+            ("src/main.rs", source.as_slice(), false, Vec::new()),
+        ],
+    );
+    let output = execute_isolated_project_adapter(
+        &executable,
+        &session,
+        &request,
+        &ExtensionSupport::default(),
+        &deadline(),
+    )
+    .expect("the isolated project retains incomplete written module context");
+    assert!(output.isolation().permits_deep_adapter());
+    let document = output.document();
+    let file = document
+        .files
+        .iter()
+        .find(|file| file.path == "src/main.rs")
+        .unwrap();
+    let start = u64::try_from(
+        source
+            .windows(4)
+            .rposition(|bytes| bytes == b"ping")
+            .unwrap(),
+    )
+    .unwrap();
+    let span = SourceSpan::new(file.id, start, start + 4).unwrap();
+    let calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite && site.source.span() == span)
+        .collect();
+    assert_eq!(calls.len(), 1, "the exact written callee remains available");
+    let call = calls[0];
+    assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+    assert_eq!(call.source.content_hash(), content_hash(source));
+    assert_eq!(call.syntactic_text_hash, content_hash(b"ping"));
+    assert!(!document.extensions.iter().any(|extension| {
+        extension.namespace == RUST_DIRECT_CALL_NAMESPACE
+            && extension.evidence.source.as_ref() == Some(&call.source)
+    }));
+    assert!(!document.relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Calls
+            && relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
+    }));
+    assert!(document.skipped_regions.iter().any(|region| {
+        region.source == call.source
+            && region.reason == rootlight_ir::SkippedRegionReason::UnsupportedConstruct
+            && !region.detail.is_empty()
+    }));
+}
+
+#[test]
+fn actual_isolated_rust_utf8_preserves_physical_proof_and_bindings() {
+    assert_rust_project_physical_encoding("utf-8");
+}
+
+#[test]
+fn actual_isolated_rust_utf16le_preserves_physical_proof_and_bindings() {
+    assert_rust_project_physical_encoding("utf-16le");
+}
+
+#[test]
+fn actual_isolated_rust_utf16be_preserves_physical_proof_and_bindings() {
+    assert_rust_project_physical_encoding("utf-16be");
+}
+
+fn assert_rust_project_physical_encoding(encoding: &str) {
+    let text = "// λ 😀\nfn /*function*/helper() {} fn run() { let /*binding*/local = 1; let value = /*read*/local; /*call*/helper(); }\n";
+    let bytes = project_fixture_encoding(text, encoding);
+    let executable = adapter_executable();
+    let session = negotiated_session(&executable, resource_limits(8 * 1024 * 1024));
+    let request = project_request(
+        &session,
+        "rust",
+        &[("src/lib.rs", bytes.as_slice(), false, Vec::new())],
+    );
+    let output = execute_isolated_project_adapter(
+        &executable,
+        &session,
+        &request,
+        &ExtensionSupport::default(),
+        &deadline(),
+    )
+    .expect("the actual isolated Rust project accepts its physical encoding");
+    assert!(output.isolation().permits_deep_adapter());
+    let document = output.document();
+    assert_eq!(document.files.len(), 1);
+    let file = &document.files[0];
+    assert_eq!(file.path, "src/lib.rs");
+    assert_eq!(file.language, "rust");
+    assert_eq!(file.encoding, encoding);
+    assert_eq!(file.byte_length, u64::try_from(bytes.len()).unwrap());
+    assert_eq!(file.content_hash, content_hash(&bytes));
+    let physical_source = file.evidence.source.as_ref().unwrap();
+    assert_eq!(physical_source.repository(), document.repository);
+    assert_eq!(physical_source.generation(), document.generation);
+    assert_eq!(physical_source.content_hash(), content_hash(&bytes));
+    assert_eq!(
+        physical_source.span(),
+        SourceSpan::new(file.id, 0, u64::try_from(bytes.len()).unwrap()).unwrap()
+    );
+    let definition = project_encoded_occurrence(
+        document,
+        text,
+        encoding,
+        "/*function*/",
+        "helper",
+        OccurrenceRole::Definition,
+    );
+    let binding = project_encoded_occurrence(
+        document,
+        text,
+        encoding,
+        "/*binding*/",
+        "local",
+        OccurrenceRole::Definition,
+    );
+    let read = project_encoded_occurrence(
+        document,
+        text,
+        encoding,
+        "/*read*/",
+        "local",
+        OccurrenceRole::Reference,
+    );
+    let call = project_encoded_occurrence(
+        document,
+        text,
+        encoding,
+        "/*call*/",
+        "helper",
+        OccurrenceRole::CallSite,
+    );
+    assert_eq!(read.target, binding.target);
+    assert!(matches!(binding.target, OccurrenceTarget::Resolved { .. }));
+    assert!(matches!(call.target, OccurrenceTarget::Unresolved { .. }));
+    assert_eq!(call.syntax_kind, "rust.direct_call.call");
+    let OccurrenceTarget::Resolved { symbol: target } = definition.target else {
+        panic!("the exact written function definition is resolved");
+    };
+    let proofs: Vec<_> = document
+        .extensions
+        .iter()
+        .filter(|envelope| {
+            envelope.namespace == RUST_DIRECT_CALL_NAMESPACE
+                && envelope.evidence.source.as_ref() == Some(&call.source)
+        })
+        .collect();
+    assert_eq!(proofs.len(), 1, "one exact typed call proof");
+    let envelope = proofs[0];
+    let proof = decode_rust_direct_call_envelope(envelope).unwrap();
+    assert_eq!(proof.target, target);
+    assert_eq!(proof.definition, definition.source.span());
+    assert_eq!(proof.canonical_name, content_hash(b"helper"));
+    assert_eq!(envelope.provenance, call.provenance);
+    assert_eq!(envelope.provenance, definition.provenance);
+    assert_eq!(envelope.provenance, file.provenance);
+    let function = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == target)
+        .unwrap();
+    assert_eq!(function.kind, EntityKind::Function);
+    assert_eq!(function.canonical_name, "helper");
+    assert_eq!(function.provenance, envelope.provenance);
+    let producer = document
+        .provenance
+        .iter()
+        .find(|provenance| provenance.id == envelope.provenance)
+        .unwrap();
+    assert_eq!(producer.tier, AnalysisTier::TierB);
+    assert_eq!(producer.producer.name(), PROJECT_ADAPTER_NAME);
+    assert_eq!(producer.producer.version(), PROJECT_ADAPTER_VERSION);
+    assert_eq!(
+        producer.binary_digest.as_bytes(),
+        session.adapter().source_digest.as_slice()
+    );
+    assert!(producer.input_sources.contains(physical_source));
+    for (occurrence, spelling) in [
+        (definition, "helper"),
+        (binding, "local"),
+        (read, "local"),
+        (call, "helper"),
+    ] {
+        assert_eq!(occurrence.source.repository(), document.repository);
+        assert_eq!(occurrence.source.generation(), document.generation);
+        assert_eq!(occurrence.source.content_hash(), content_hash(&bytes));
+        assert_eq!(occurrence.provenance, file.provenance);
+        let span = occurrence.source.span();
+        let actual = &bytes[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        let expected = match encoding {
+            "utf-8" => spelling.as_bytes().to_vec(),
+            "utf-16le" => spelling.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            "utf-16be" => spelling.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(actual, expected, "{encoding}: exact physical source bytes");
+        assert_eq!(
+            occurrence.syntactic_text_hash,
+            content_hash(spelling.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn actual_isolated_rust_malformed_utf16_fails_without_a_partial_transaction() {
+    let executable = adapter_executable();
+    let session = negotiated_session(&executable, resource_limits(8 * 1024 * 1024));
+    for bytes in [
+        &[0xff, 0xfe, 0x61][..],
+        &[0xfe, 0xff, 0x00][..],
+        &[0xff, 0xfe, 0x00, 0xd8][..],
+        &[0xfe, 0xff, 0xd8, 0x00][..],
+    ] {
+        let request = project_request(
+            &session,
+            "rust",
+            &[("src/lib.rs", bytes, false, Vec::new())],
+        );
+        let output = execute_isolated_project_adapter(
+            &executable,
+            &session,
+            &request,
+            &ExtensionSupport::default(),
+            &deadline(),
+        );
+        assert!(
+            matches!(output, Err(AdapterHostError::ProcessFailed)),
+            "malformed source retains the adapter failure category: {output:?}"
+        );
+    }
+}
+
+fn project_fixture_encoding(text: &str, encoding: &str) -> Vec<u8> {
+    match encoding {
+        "utf-8" => text.as_bytes().to_vec(),
+        "utf-16le" => [0xff, 0xfe]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect(),
+        "utf-16be" => [0xfe, 0xff]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect(),
+        _ => unreachable!(),
+    }
+}
+
+fn project_encoded_occurrence<'a>(
+    document: &'a NormalizedIrDocument,
+    text: &str,
+    encoding: &str,
+    marker: &str,
+    spelling: &str,
+    role: OccurrenceRole,
+) -> &'a OccurrenceRecord {
+    let logical_start = text.find(marker).unwrap() + marker.len();
+    let physical_start = if encoding == "utf-8" {
+        logical_start
+    } else {
+        2 + text[..logical_start].encode_utf16().count() * 2
+    };
+    let length = if encoding == "utf-8" {
+        spelling.len()
+    } else {
+        spelling.encode_utf16().count() * 2
+    };
+    let span = SourceSpan::new(
+        document.files[0].id,
+        u64::try_from(physical_start).unwrap(),
+        u64::try_from(physical_start + length).unwrap(),
+    )
+    .unwrap();
+    let occurrences: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == role && occurrence.source.span() == span)
+        .collect();
+    assert_eq!(occurrences.len(), 1, "{encoding}: {marker}: {role:?}");
+    occurrences[0]
 }
 
 #[test]
@@ -645,7 +939,22 @@ impl Drop for TemporaryExecutable {
 }
 
 fn adapter_executable() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rootlight-adapter-host"))
+    // Retained process tests must use the host from the same Cargo build,
+    // even after another source frame replaces the default target executable.
+    let executable = std::env::var_os("ROOTLIGHT_ADAPTER_HOST_TEST_EXECUTABLE").map_or_else(
+        || PathBuf::from(env!("CARGO_BIN_EXE_rootlight-adapter-host")),
+        PathBuf::from,
+    );
+    assert!(
+        executable.is_absolute(),
+        "the test executable path is absolute"
+    );
+    let metadata = fs::symlink_metadata(&executable).expect("the test executable exists");
+    assert!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "the test executable is an ordinary file"
+    );
+    executable
 }
 
 fn resource_limits(output_bytes: u64) -> ResourceLimits {

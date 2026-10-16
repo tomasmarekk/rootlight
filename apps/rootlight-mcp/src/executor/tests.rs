@@ -113,6 +113,9 @@ mod context_relationship_tests;
 #[path = "source_metadata_quote_tests.rs"]
 mod source_metadata_quote_tests;
 
+#[path = "source_find_tests.rs"]
+mod source_find_tests;
+
 type CodeLocateOutput = ToolResponse<ReadEnvelope<CodeLocateData>>;
 type SourceReadOutput = ToolResponse<ReadEnvelope<SourceReadData>>;
 
@@ -154,6 +157,11 @@ enum FakeOutcome {
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
     SymbolExplainPerRequest(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
+    SourceFindSequence(Arc<Mutex<VecDeque<Result<client::SourceFindResult, ClientPortError>>>>),
+    PendingSourceFind {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    },
     SourceMetadataQuotes {
         responses: Arc<
             Mutex<VecDeque<Result<client::SourceTextPrefixMetadataQuoteResult, ClientPortError>>>,
@@ -268,6 +276,7 @@ enum ObservedCall {
     CodeLocate(ObservedAnalyticCall<CodeLocatePortRequest>),
     SymbolExplain(ObservedAnalyticCall<SymbolExplainPortRequest>),
     SourceRead(ObservedAnalyticCall<SourceReadPortRequest>),
+    SourceFind(ObservedAnalyticCall<source_find_tests::ObservedSourceFind>),
     SourceReadLossless(ObservedAnalyticCall<SourceReadPortRequest>),
     SourceMetadataQuote(ObservedAnalyticCall<SourceReadPortRequest>),
     SourceReadLosslessPrefix {
@@ -500,6 +509,42 @@ fn catalog_page(
 }
 
 impl FirstSliceClientPort for FakePort {
+    fn source_find(
+        &self,
+        request: SourceFindPortRequest,
+        options: client::RequestOptions,
+        _cancellation: RequestCancellation,
+    ) -> ClientPortFuture<client::SourceFindResult> {
+        self.record(ObservedCall::SourceFind(ObservedAnalyticCall::new(
+            source_find_tests::ObservedSourceFind {
+                repository: request.repository(),
+                generation: request.generation(),
+                file: request.file(),
+                literal: request.literal().to_owned(),
+                search: request.search(),
+            },
+            options,
+        )));
+        if let FakeOutcome::PendingSourceFind { started, dropped } = &self.outcome {
+            let started = Arc::clone(started);
+            let dropped = Arc::clone(dropped);
+            return Box::pin(async move {
+                let _marker = DropMarker(dropped);
+                started.notify_one();
+                std::future::pending().await
+            });
+        }
+        let result = match &self.outcome {
+            FakeOutcome::SourceFindSequence(responses) => responses
+                .lock()
+                .expect("source find queue is not poisoned")
+                .pop_front()
+                .expect("source find queue is not exhausted"),
+            _ => Err(ClientPortError::Executor),
+        };
+        Box::pin(async move { result })
+    }
+
     fn prepare(&self, _cancellation: RequestCancellation) -> ClientPortFuture<()> {
         let invocation = self.prepare_count.fetch_add(1, Ordering::Relaxed);
         let delay = if invocation == 0 {
@@ -903,6 +948,9 @@ impl FirstSliceClientPort for FakePort {
                 Ok(repository_status_response())
             }
             FakeOutcome::PlanChange(Ok(_)) => Ok(repository_status_response()),
+            FakeOutcome::SourceFindSequence(_) | FakeOutcome::PendingSourceFind { .. } => {
+                Ok(repository_status_response())
+            }
             _ => Err(ClientPortError::Executor),
         };
         Box::pin(async move { outcome })
@@ -1303,6 +1351,95 @@ fn context_evidence_options_use_the_reserved_json_envelope_for_daemon_tokens() {
             .expect("child request carries a bounded transport deadline")
             .duration(),
         Duration::from_millis(reservation.time_ms) + ANALYTICAL_TRANSPORT_OVERHEAD
+    );
+}
+
+#[test]
+fn streamed_source_budget_preserves_omitted_and_explicit_duration_provenance() {
+    let omitted = AnalyticalBudget::new_source(None).unwrap();
+    assert!(omitted.options.timeout().is_none());
+    assert_eq!(
+        omitted
+            .options
+            .effective_budget()
+            .unwrap()
+            .source_verification_duration_explicit(),
+        Some(false)
+    );
+    for milliseconds in [2000, 5000] {
+        let requested: ResponseBudget =
+            serde_json::from_value(json!({"timeout_ms": milliseconds})).unwrap();
+        let explicit = AnalyticalBudget::new_source(Some(&requested)).unwrap();
+        assert_eq!(
+            explicit
+                .options
+                .effective_budget()
+                .unwrap()
+                .source_verification_duration_explicit(),
+            Some(true)
+        );
+        assert_eq!(
+            explicit.options.timeout().unwrap().duration(),
+            Duration::from_secs(2) + ANALYTICAL_TRANSPORT_OVERHEAD
+        );
+        assert_eq!(explicit.limits.maximums().time_ms, 2000);
+        if milliseconds == 5000 {
+            assert!(explicit.limits.maximums().time_ms < milliseconds);
+        }
+    }
+    let ordinary = AnalyticalBudget::new(None).unwrap();
+    assert!(ordinary.options.timeout().is_some());
+    assert_eq!(
+        ordinary
+            .options
+            .effective_budget()
+            .unwrap()
+            .source_verification_duration_explicit(),
+        None
+    );
+}
+
+#[test]
+fn measured_streamed_source_success_retains_elapsed_time_without_an_implicit_deadline() {
+    #[derive(Clone, serde::Serialize)]
+    struct Measured {
+        usage: UsageSummary,
+    }
+    let output = Measured {
+        usage: serde_json::from_value(json!({
+            "rows":0,"edges":0,"source_bytes":0,"json_bytes":0,"estimated_tokens":0,
+            "wall_time_ms":0,"cache_status":"not_applicable","trace_id":"source-duration-control"
+        }))
+        .unwrap(),
+    };
+    let elapsed = Duration::from_millis(BudgetLimits::server_ceiling().maximums().time_ms + 1);
+    let started = Instant::now().checked_sub(elapsed).unwrap();
+    let response = serialize_measured_source_success(
+        output.clone(),
+        started,
+        AnalyticalBudget::new_source(None).unwrap(),
+        |value| &mut value.usage,
+    )
+    .unwrap();
+    assert!(
+        response["usage"]["wall_time_ms"].as_u64().unwrap()
+            >= u64::try_from(elapsed.as_millis()).unwrap()
+    );
+    let requested: ResponseBudget = serde_json::from_value(json!({"timeout_ms": 2000})).unwrap();
+    assert!(
+        serialize_measured_source_success(
+            output.clone(),
+            started,
+            AnalyticalBudget::new_source(Some(&requested)).unwrap(),
+            |value| &mut value.usage
+        )
+        .is_err()
+    );
+    assert!(
+        serialize_measured_success(output, started, BudgetLimits::server_ceiling(), |value| {
+            &mut value.usage
+        })
+        .is_err()
     );
 }
 
@@ -3711,6 +3848,9 @@ fn admission_harness(tool: VerticalTool) -> Harness {
         VerticalTool::SourceRead => Harness::new(FakeOutcome::SourceRead(executor_failure())),
         VerticalTool::QueryAdvanced => Harness::new(FakeOutcome::QueryAdvanced(executor_failure())),
         VerticalTool::QueryBatch => batch_harness(),
+        VerticalTool::SourceFind => Harness::new(FakeOutcome::SourceFindSequence(Arc::new(
+            Mutex::new(VecDeque::from([executor_failure()])),
+        ))),
     }
 }
 
@@ -6052,7 +6192,35 @@ async fn every_retained_example_reaches_runtime_without_capability_rejection() {
     let examples = fixture["tools"]
         .as_array()
         .expect("retained tool contracts contain an array");
-    assert_eq!(examples.len(), VerticalTool::ALL.len());
+    let names: std::collections::BTreeSet<_> = examples
+        .iter()
+        .map(|example| example["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from([
+            "repo.index",
+            "repo.status",
+            "repo.list",
+            "operation.status",
+            "code.locate",
+            "symbol.explain",
+            "symbol.relationships",
+            "flow.trace",
+            "change.impact",
+            "tests.select",
+            "architecture.overview",
+            "architecture.cycles",
+            "code.dead",
+            "history.compare",
+            "plan.change",
+            "context.pack",
+            "source.read",
+            "query.advanced",
+            "query.batch",
+        ])
+    );
+    assert_eq!(examples.len(), names.len());
 
     for example in examples {
         let name = example["tool"].as_str().expect("tool name is a string");
@@ -13579,6 +13747,7 @@ enum AcceptedFieldOracle {
     LocalTimeout,
     FixedDiscriminator,
     CursorContinuation,
+    SourceFindRuntime,
 }
 
 #[derive(Debug)]
@@ -13922,6 +14091,21 @@ fn accepted_field_evidence() -> Vec<AcceptedFieldEvidence> {
         DefaultEquivalent,
         ["generation", "response_profile"]
     );
+    group!(
+        SourceFind,
+        SourceFindRuntime,
+        [
+            "repository",
+            "generation",
+            "file_id",
+            "literal",
+            "maximum_scan_bytes",
+            "maximum_matches",
+            "cursor",
+            "budget",
+            "response_profile"
+        ]
+    );
     evidence
 }
 
@@ -13970,8 +14154,32 @@ fn accepted_schema_paths_have_effect_evidence() {
         );
     }
     accepted.sort_unstable();
+    let source_find_paths: Vec<_> = accepted
+        .iter()
+        .filter(|(tool, _)| *tool == "source.find")
+        .map(|(_, path)| path.as_str())
+        .collect();
+    assert_eq!(
+        source_find_paths,
+        [
+            "budget",
+            "budget.max_results",
+            "budget.max_tokens",
+            "budget.timeout_ms",
+            "cursor",
+            "file_id",
+            "generation",
+            "literal",
+            "maximum_matches",
+            "maximum_scan_bytes",
+            "repository",
+            "repository.repository_id",
+            "response_profile"
+        ]
+    );
     let accepted_snapshot = accepted
         .iter()
+        .filter(|(tool, _)| *tool != "source.find")
         .map(|(tool, path)| format!("{tool}:{path}"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -14020,6 +14228,7 @@ fn accepted_schema_paths_have_effect_evidence() {
         AcceptedFieldOracle::LocalTimeout,
         AcceptedFieldOracle::FixedDiscriminator,
         AcceptedFieldOracle::CursorContinuation,
+        AcceptedFieldOracle::SourceFindRuntime,
     ]
     .map(|oracle| {
         categorized
@@ -14028,7 +14237,7 @@ fn accepted_schema_paths_have_effect_evidence() {
             .count()
     });
     println!(
-        "accepted_paths={} normalized_delta={} budget_runtime={} structured_variant={} structured_query_ast={} default_equivalent={} explain_plan={} output_selection={} context_runtime={} batch_runtime={} local_timeout={} fixed_discriminator={} cursor_continuation={}",
+        "accepted_paths={} normalized_delta={} budget_runtime={} structured_variant={} structured_query_ast={} default_equivalent={} explain_plan={} output_selection={} context_runtime={} batch_runtime={} local_timeout={} fixed_discriminator={} cursor_continuation={} source_find_runtime={}",
         categorized.len(),
         counts[0],
         counts[1],
@@ -14042,9 +14251,10 @@ fn accepted_schema_paths_have_effect_evidence() {
         counts[9],
         counts[10],
         counts[11],
+        counts[12],
     );
-    assert_eq!(counts, [221, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4]);
-    assert_eq!(categorized.len(), 502);
+    assert_eq!(counts, [221, 105, 4, 69, 29, 16, 5, 23, 25, 1, 0, 4, 13]);
+    assert_eq!(categorized.len(), 515);
 }
 
 fn capability_path_is_within(path: &str, ancestor: &str) -> bool {
@@ -14204,7 +14414,10 @@ fn normalized_base_arguments(tool: VerticalTool) -> Value {
             "repository": {"repository_id": repository()},
             "query": {"op": "scan", "entity": "function"}
         }),
-        VerticalTool::RepoList | VerticalTool::ContextPack | VerticalTool::QueryBatch => {
+        VerticalTool::RepoList
+        | VerticalTool::ContextPack
+        | VerticalTool::QueryBatch
+        | VerticalTool::SourceFind => {
             panic!("tool uses a service-level effect oracle")
         }
     }
@@ -14860,7 +15073,10 @@ fn normalized_field_observation(tool: VerticalTool, field: &str, arguments: Valu
                 _ => panic!("unknown query.advanced observation field"),
             }
         }
-        VerticalTool::RepoList | VerticalTool::ContextPack | VerticalTool::QueryBatch => {
+        VerticalTool::RepoList
+        | VerticalTool::ContextPack
+        | VerticalTool::QueryBatch
+        | VerticalTool::SourceFind => {
             panic!("tool uses a service-level effect oracle")
         }
     }

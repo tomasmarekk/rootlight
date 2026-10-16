@@ -53,6 +53,10 @@ mod inner_type_bindings;
 mod receiver_dispatch;
 #[path = "project_semantic_adapters/reexports.rs"]
 mod reexports;
+#[path = "project_semantic_adapters/rust_bindings.rs"]
+mod rust_bindings;
+#[path = "project_semantic_adapters/rust_module_calls.rs"]
+mod rust_module_calls;
 #[path = "project_semantic_adapters/type_parameters.rs"]
 mod type_parameters;
 
@@ -929,7 +933,7 @@ fn typescript_references_select_the_written_type_or_value_namespace() {
 }
 
 #[test]
-fn every_language_emits_complete_tier_b_project_semantics() {
+fn every_language_reports_source_bound_tier_b_project_semantics() {
     for case in language_cases() {
         let fixture = ProjectFixture::new(case.paths, case.sources, case.language);
         let limits = limits();
@@ -950,7 +954,11 @@ fn every_language_emits_complete_tier_b_project_semantics() {
         );
         assert_eq!(
             output.report().work().coverage().status(),
-            CoverageStatus::Complete
+            if case.language == SemanticProjectLanguage::Rust {
+                CoverageStatus::Bounded
+            } else {
+                CoverageStatus::Complete
+            }
         );
         assert_eq!(output.report().build_context(), fixture.build_context);
         assert_eq!(output.report().work().coverage().domains().len(), 8);
@@ -964,14 +972,31 @@ fn every_language_emits_complete_tier_b_project_semantics() {
             "{} import was not materialized",
             case.language.as_str()
         );
-        assert!(
-            output.document().occurrences.iter().any(|occurrence| {
-                occurrence.role == OccurrenceRole::CallSite
-                    && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
-            }),
-            "{} call was not resolved",
-            case.language.as_str()
-        );
+        if case.language == SemanticProjectLanguage::Rust {
+            let calls: Vec<_> = output
+                .document()
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.role == OccurrenceRole::CallSite)
+                .collect();
+            assert!(!calls.is_empty(), "Rust call syntax is retained");
+            for call in calls {
+                rust_bindings::assert_unproven_call_with_gap(
+                    output.document(),
+                    call,
+                    "rust-written-module-call-proof-unavailable",
+                );
+            }
+        } else {
+            assert!(
+                output.document().occurrences.iter().any(|occurrence| {
+                    occurrence.role == OccurrenceRole::CallSite
+                        && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+                }),
+                "{} call was not resolved",
+                case.language.as_str()
+            );
+        }
         assert!(
             output
                 .document()
@@ -1460,7 +1485,7 @@ fn call_occurrences_are_owned_by_the_declaring_function() {
         .iter()
         .find(|entity| entity.kind == EntityKind::Function && entity.display_name == "run")
         .expect("caller function is materialized");
-    let ping = output
+    let _ping = output
         .document()
         .entities
         .iter()
@@ -1472,18 +1497,16 @@ fn call_occurrences_are_owned_by_the_declaring_function() {
         .iter()
         .find(|occurrence| {
             occurrence.role == OccurrenceRole::CallSite
-                && matches!(
-                    occurrence.target,
-                    OccurrenceTarget::Resolved { symbol } if symbol == ping.id
-                )
+                && occurrence.file == fixture.snapshots[1].file()
         })
-        .expect("resolved call is materialized");
+        .expect("imported call syntax is materialized");
 
     assert_eq!(call.enclosing, Some(run.id));
+    rust_bindings::assert_unproven_call(output.document(), call);
 }
 
 #[test]
-fn rust_type_qualified_calls_select_only_the_qualified_impl() {
+fn rust_type_qualified_calls_retain_exact_source_without_unproven_targets() {
     let fixture = ProjectFixture::new(
         ["src/cli.rs", "src/lib.rs"],
         [
@@ -1529,23 +1552,27 @@ fn rust_type_qualified_calls_select_only_the_qualified_impl() {
         .iter()
         .find(|occurrence| {
             occurrence.role == OccurrenceRole::CallSite
-                && occurrence.syntactic_text_hash == content_hash(b"from_flags")
+                && occurrence.file == fixture.snapshots[0].file()
+                && fixture.snapshots[0].content().get(
+                    usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                        ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                ) == Some(b"CliFactory::from_flags")
         })
         .expect("type-qualified call is materialized");
     assert_eq!(
-        call.target,
-        OccurrenceTarget::Resolved {
-            symbol: factory_method.id
-        }
+        call.syntactic_text_hash,
+        content_hash(b"CliFactory::from_flags")
     );
-    assert!(output.document().relations.iter().any(|relation| {
-        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(call.id)
-            && relation.predicate == RelationPredicate::Calls
-            && relation.object == rootlight_ir::RelationEndpoint::Entity(factory_method.id)
-    }));
+    assert_eq!(
+        call.source.content_hash(),
+        fixture.snapshots[0].content_hash()
+    );
+    rust_bindings::assert_unproven_call(output.document(), call);
     assert!(output.document().relations.iter().all(|relation| {
         relation.subject != rootlight_ir::RelationEndpoint::Occurrence(call.id)
-            || relation.object != rootlight_ir::RelationEndpoint::Entity(options_method.id)
+            || ![options_method.id, factory_method.id]
+                .iter()
+                .any(|method| relation.object == rootlight_ir::RelationEndpoint::Entity(*method))
     }));
 }
 
@@ -2857,11 +2884,19 @@ fn bounded_rust_call_selection_preserves_owners_and_unknown_targets() {
             .iter()
             .find(|entity| entity.display_name == name)
             .expect("caller identity is retained");
-        assert!(document.occurrences.iter().any(|occurrence| {
-            occurrence.role == OccurrenceRole::CallSite
-                && occurrence.enclosing == Some(caller.id)
-                && matches!(occurrence.target, OccurrenceTarget::Resolved { symbol } if symbol == callee.id)
-        }), "distinct callable owner {name} must retain its call");
+        let retained = document
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::CallSite
+                    && occurrence.enclosing == Some(caller.id)
+                    && fixture.snapshots[0].content().get(
+                        usize::try_from(occurrence.source.span().start_byte()).unwrap()
+                            ..usize::try_from(occurrence.source.span().end_byte()).unwrap(),
+                    ) == Some(b"read_data")
+            })
+            .unwrap_or_else(|| panic!("distinct callable owner {name} must retain its call"));
+        rust_bindings::assert_direct_call_proof(document, retained, callee.id);
     }
     let dispatch = document
         .entities
@@ -2875,14 +2910,7 @@ fn bounded_rust_call_selection_preserves_owners_and_unknown_targets() {
             occurrence.role == OccurrenceRole::CallSite && occurrence.enclosing == Some(dispatch.id)
         })
         .expect("unknown call syntax is retained");
-    assert!(matches!(
-        unknown.target,
-        OccurrenceTarget::Unresolved { .. }
-    ));
-    assert!(!document.relations.iter().any(|relation| {
-        relation.subject == rootlight_ir::RelationEndpoint::Occurrence(unknown.id)
-            && relation.predicate == RelationPredicate::Calls
-    }));
+    rust_bindings::assert_unproven_call(document, unknown);
 }
 
 #[test]

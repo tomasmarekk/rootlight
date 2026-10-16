@@ -20,18 +20,24 @@ use crate::{
 
 mod apex;
 mod assembly;
+pub(crate) mod c;
+mod cmake;
 mod cobol;
 mod common_lisp;
+mod coq;
 mod dart;
 #[cfg(test)]
 mod deferred_tests;
 mod ecmascript;
+mod eiffel;
 mod fortran;
 mod fsharp;
 mod glsl;
 mod groovy;
 mod haskell;
+mod hdl;
 mod hlsl;
+mod julia;
 mod markdown;
 mod matlab;
 mod nix;
@@ -42,11 +48,13 @@ mod perl;
 mod plsql;
 mod powershell;
 mod r;
+mod rust;
 mod sas;
 mod scala;
 mod scheme;
 mod sql;
 mod sql_admission;
+mod v;
 pub(super) mod vba;
 mod vba_calls;
 mod wgsl;
@@ -358,6 +366,9 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Coq {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
+        }
         if matches!(family, GrammarFamily::Ocaml | GrammarFamily::OcamlInterface) {
             expected.retain(|name| *name != "import");
             if family == GrammarFamily::OcamlInterface {
@@ -430,7 +441,7 @@ impl QueryPack {
         if family.is_classic_basic() {
             expected.push("expression");
         }
-        if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
+        if family.is_json() || family == GrammarFamily::Toml {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
         }
         if family == GrammarFamily::Yaml {
@@ -438,6 +449,18 @@ impl QueryPack {
         }
         if family == GrammarFamily::Xml {
             expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
+        }
+        if matches!(
+            family,
+            GrammarFamily::Eiffel | GrammarFamily::Verilog | GrammarFamily::SystemVerilog
+        ) {
+            expected.retain(|name| !matches!(*name, "import" | "scope" | "documentation"));
+        }
+        if matches!(
+            family,
+            GrammarFamily::CMake | GrammarFamily::Julia | GrammarFamily::V
+        ) {
+            expected.retain(|name| !matches!(*name, "scope" | "documentation"));
         }
         if family == GrammarFamily::Dtd {
             expected.retain(|name| {
@@ -556,17 +579,12 @@ impl QueryPack {
         cancellation: &Cancellation,
     ) -> Result<QueryExtraction, AdapterError> {
         cancellation.check()?;
-        let max_facts = max_facts.min(HARD_MAX_QUERY_FACTS);
-        let identity_limits = identity_scan_limits(max_nodes)?;
+        let identity_limits = identity_scan_limits(max_nodes);
         let mut identity_candidates =
             self.extract_identity(family, tree, source, max_nodes, cancellation)?;
 
-        let budgeted_matches = max_facts
-            .checked_mul(QUERY_MATCHES_PER_RETAINED_FACT)
-            .ok_or_else(|| query_failure("query-match-accounting"))?;
-        let budgeted_captures = max_facts
-            .checked_mul(QUERY_CAPTURES_PER_RETAINED_FACT)
-            .ok_or_else(|| query_failure("query-capture-accounting"))?;
+        let budgeted_matches = max_facts.saturating_mul(QUERY_MATCHES_PER_RETAINED_FACT);
+        let budgeted_captures = max_facts.saturating_mul(QUERY_CAPTURES_PER_RETAINED_FACT);
         let optional_max_matches = identity_limits.matches.min(budgeted_matches);
         let optional_max_captures = identity_limits.captures.min(budgeted_captures);
         if optional_max_matches == 0 || optional_max_captures == 0 || max_facts == 0 {
@@ -599,6 +617,11 @@ impl QueryPack {
             |candidate| {
                 let candidate = RetainedCandidate(candidate);
                 if candidates.len() < max_facts {
+                    if candidates.len() == candidates.capacity() {
+                        candidates
+                            .try_reserve(1)
+                            .map_err(|_| AdapterError::Sink(SinkError::AllocationFailed))?;
+                    }
                     candidates.push(candidate);
                     return Ok(());
                 }
@@ -639,7 +662,7 @@ impl QueryPack {
         cancellation: &Cancellation,
     ) -> Result<Vec<QueryCandidate>, AdapterError> {
         cancellation.check()?;
-        let limits = identity_scan_limits(max_nodes)?;
+        let limits = identity_scan_limits(max_nodes);
         let mut candidates = Vec::new();
         let limit = self.scan_query(
             &self.identity_query,
@@ -661,6 +684,7 @@ impl QueryPack {
                         || matches!(
                             family,
                             GrammarFamily::Json
+                                | GrammarFamily::Jsonc
                                 | GrammarFamily::Toml
                                 | GrammarFamily::Yaml
                                 | GrammarFamily::FSharp
@@ -723,6 +747,12 @@ impl QueryPack {
         let mut matches =
             cursor.matches_with_options(query, input.tree.root_node(), input.source, options);
         let mut limit = None;
+        let c_dialect = match input.family {
+            GrammarFamily::C => Some(c::PreprocessorDialect::C),
+            GrammarFamily::Cpp => Some(c::PreprocessorDialect::Cpp),
+            _ => None,
+        };
+        let c_included_ranges = c_dialect.map(|_| input.tree.included_ranges());
         let mut objective_c_parameters = objective_c::TypeParameterCaptures::default();
         let mut groovy_members = groovy::MemberKinds::default();
         let mut groovy_callables = groovy::CallableKinds::default();
@@ -745,6 +775,16 @@ impl QueryPack {
         let mut hlsl_captures = hlsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut wgsl_captures = wgsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut xml_captures = xml::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut cmake_captures = cmake::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut coq_captures = coq::CaptureCache::new(
+            input.tree.root_node(),
+            limits.captures.min(limits.body_nodes),
+        );
+        let mut julia_captures = julia::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut hdl_captures = hdl::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut v_captures = v::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut rust_captures = rust::CaptureCache::default();
+        let mut eiffel_captures = eiffel::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut ocaml_captures = ocaml::CaptureCache::new(limits.captures.min(limits.body_nodes));
         // A full-extent root can still omit bytes between included ranges, while
         // standalone roots may exclude leading or trailing trivia from their span.
@@ -789,6 +829,23 @@ impl QueryPack {
                     continue;
                 }
                 let mut capture = *capture;
+                if input.family == GrammarFamily::Coq {
+                    let candidate = coq::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut coq_captures,
+                    )?;
+                    if coq_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
                 if matches!(
                     input.family,
                     GrammarFamily::Ocaml | GrammarFamily::OcamlInterface
@@ -802,6 +859,95 @@ impl QueryPack {
                         &mut ocaml_captures,
                     )?;
                     if ocaml_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if matches!(
+                    input.family,
+                    GrammarFamily::Verilog | GrammarFamily::SystemVerilog
+                ) {
+                    let candidate = hdl::candidate(
+                        input.family,
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut hdl_captures,
+                    )?;
+                    if hdl_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::V {
+                    let candidate = v::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut v_captures,
+                    )?;
+                    if v_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Eiffel {
+                    let candidate = eiffel::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut eiffel_captures,
+                    )?;
+                    if eiffel_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Julia {
+                    let candidate = julia::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut julia_captures,
+                    )?;
+                    if julia_captures.exhausted() {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::CMake {
+                    let candidate = cmake::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut cmake_captures,
+                    )?;
+                    if cmake_captures.exhausted() {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1152,6 +1298,16 @@ impl QueryPack {
                 {
                     continue;
                 }
+                if input.family == GrammarFamily::Rust
+                    && !rust_captures.retain(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                    )?
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Dart && !dart::retain_capture(capture.node, role)
                 {
                     continue;
@@ -1202,6 +1358,58 @@ impl QueryPack {
                         continue;
                     };
                     capture.node = name;
+                }
+                let c_macro_end = if let Some(dialect) = c_dialect
+                    && matches!(capture.node.kind(), "preproc_def" | "preproc_function_def")
+                {
+                    let Some(end) = c::macro_end(
+                        capture.node,
+                        input.source,
+                        c_included_ranges.as_deref().unwrap_or(&[]),
+                        dialect,
+                        input.cancellation,
+                    )?
+                    else {
+                        continue;
+                    };
+                    Some(end)
+                } else {
+                    None
+                };
+                if let Some(dialect) = c_dialect
+                    && matches!(capture.node.kind(), "preproc_def" | "preproc_function_def")
+                    && matches!(
+                        role,
+                        StructuralRole::Signature | StructuralRole::StringLiteral
+                    )
+                {
+                    let mode = if role == StructuralRole::Signature {
+                        c::ReplacementMode::Gaps
+                    } else {
+                        c::ReplacementMode::Lexical
+                    };
+                    let generated = c::replacement_candidates(
+                        capture.node,
+                        input.source,
+                        c_macro_end.ok_or_else(|| query_failure("query-c-preprocessor-owner"))?,
+                        mode,
+                        limits.captures.saturating_sub(capture_count),
+                        dialect,
+                        input.cancellation,
+                        &mut |candidate| {
+                            capture_count = capture_count
+                                .checked_add(1)
+                                .ok_or_else(|| query_failure("query-capture-accounting"))?;
+                            retain(candidate)
+                        },
+                    )?;
+                    if generated.exhausted {
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if role == StructuralRole::StringLiteral {
+                        continue;
+                    }
                 }
                 if input.family == GrammarFamily::Groovy
                     && !groovy_calls.retain(capture.node, role, input.cancellation)?
@@ -1280,6 +1488,22 @@ impl QueryPack {
                         input.cancellation,
                         &mut sas_captures,
                     )
+                } else if input.family == GrammarFamily::Rust
+                    && let Some(syntax) = rust_captures.syntax(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                    )?
+                {
+                    Ok(QueryCandidate {
+                        start: capture.node.start_byte(),
+                        end: capture.node.end_byte(),
+                        role,
+                        syntax,
+                        required: false,
+                        native_depth: 0,
+                    })
                 } else {
                     candidate_for_capture(
                         input.family,
@@ -1306,6 +1530,16 @@ impl QueryPack {
                     break 'query;
                 }
                 let mut candidate = candidate?;
+                if let Some(dialect) = c_dialect
+                    && let Some(syntax) = c::macro_syntax(capture.node, role, dialect)
+                {
+                    candidate.syntax = syntax;
+                    candidate.end =
+                        c_macro_end.ok_or_else(|| query_failure("query-c-preprocessor-owner"))?;
+                }
+                if input.family == GrammarFamily::Rust {
+                    rust_captures.adjust(capture.node, &mut candidate, input.cancellation)?;
+                }
                 if input.family == GrammarFamily::Groovy && candidate.syntax == "groovy.field" {
                     candidate.syntax = groovy_members.kind(capture.node, input.cancellation)?;
                 }
@@ -1409,18 +1643,12 @@ impl QueryPack {
     }
 }
 
-fn identity_scan_limits(max_nodes: usize) -> Result<QueryScanLimits, AdapterError> {
-    Ok(QueryScanLimits {
-        matches: max_nodes
-            .checked_mul(8)
-            .ok_or_else(|| query_failure("query-match-accounting"))?
-            .min(HARD_MAX_QUERY_MATCHES),
-        captures: max_nodes
-            .checked_mul(8)
-            .ok_or_else(|| query_failure("query-capture-accounting"))?
-            .min(HARD_MAX_QUERY_CAPTURES),
+fn identity_scan_limits(max_nodes: usize) -> QueryScanLimits {
+    QueryScanLimits {
+        matches: max_nodes.saturating_mul(8).min(HARD_MAX_QUERY_MATCHES),
+        captures: max_nodes.saturating_mul(8).min(HARD_MAX_QUERY_CAPTURES),
         body_nodes: max_nodes,
-    })
+    }
 }
 
 pub(crate) struct QueryPackRegistry {
@@ -1833,8 +2061,10 @@ fn candidate_for_capture(
                     .ok_or_else(|| query_failure("query-toml-scope-kind"))?
             }
         }
-        StructuralRole::Scope if family == GrammarFamily::Json => {
+        StructuralRole::Scope if family.is_json() => {
             match capture.node.parent().map(|node| node.kind()) {
+                Some("array") if family == GrammarFamily::Jsonc => "jsonc.array_element",
+                Some("document") if family == GrammarFamily::Jsonc => "jsonc.document_value",
                 Some("array") => "json.array_element",
                 Some("document") => "json.document_value",
                 _ => canonical_syntax(family, capture.node.kind())
@@ -1970,6 +2200,14 @@ fn candidate_for_capture(
             GrammarFamily::Xml | GrammarFamily::Dtd => {
                 return Err(query_failure("query-xml-unproven-call"));
             }
+            GrammarFamily::CMake => return Err(query_failure("query-cmake-unproven-call")),
+            GrammarFamily::Coq => return Err(query_failure("query-coq-unproven-call")),
+            GrammarFamily::Julia => return Err(query_failure("query-julia-unproven-call")),
+            GrammarFamily::Eiffel => return Err(query_failure("query-eiffel-unproven-call")),
+            GrammarFamily::V => return Err(query_failure("query-v-unproven-call")),
+            GrammarFamily::Verilog | GrammarFamily::SystemVerilog => {
+                return Err(query_failure("query-hdl-unproven-call"));
+            }
             GrammarFamily::Pascal => return Err(query_failure("query-pascal-unproven-call")),
             GrammarFamily::CommonLisp => {
                 return Err(query_failure("query-common-lisp-unproven-call"));
@@ -1979,7 +2217,9 @@ fn candidate_for_capture(
                 return Err(query_failure("query-ocaml-unproven-call"));
             }
             GrammarFamily::Css => return Err(query_failure("query-css-call-kind")),
-            GrammarFamily::Json => return Err(query_failure("query-json-call-kind")),
+            GrammarFamily::Json | GrammarFamily::Jsonc => {
+                return Err(query_failure("query-json-call-kind"));
+            }
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
             GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
             GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
@@ -2188,7 +2428,12 @@ fn candidate_for_capture(
             | GrammarFamily::FSharpSignature
             | GrammarFamily::CobolFixed
             | GrammarFamily::CobolFree
-    ) {
+    ) || (family == GrammarFamily::Markdown
+        && matches!(role, StructuralRole::Module | StructuralRole::Signature)
+        && capture.node.kind() == "fenced_code_block")
+    {
+        // A sole fence can share the file's extent. Its actual native nesting
+        // keeps the file outside the example instead of winning a lexical tie.
         native_depth(capture.node, cancellation)?
     } else {
         0
@@ -2510,6 +2755,12 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Json, "array") => Some("json.array"),
         (GrammarFamily::Json, "string") => Some("json.string"),
         (GrammarFamily::Json, "comment") => Some("json.comment"),
+        (GrammarFamily::Jsonc, "document") => Some("jsonc.file"),
+        (GrammarFamily::Jsonc, "pair") => Some("jsonc.property"),
+        (GrammarFamily::Jsonc, "object") => Some("jsonc.object"),
+        (GrammarFamily::Jsonc, "array") => Some("jsonc.array"),
+        (GrammarFamily::Jsonc, "string") => Some("jsonc.string"),
+        (GrammarFamily::Jsonc, "comment") => Some("jsonc.comment"),
         (GrammarFamily::Bash, "program") => Some("bash.file"),
         (GrammarFamily::Bash, "function_definition") => Some("bash.function"),
         (GrammarFamily::Bash, "variable_assignment") => Some("bash.variable"),
@@ -2772,6 +3023,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::C, "type_definition") => Some("c.type"),
         (GrammarFamily::C, "preproc_def") => Some("c.macro"),
         (GrammarFamily::C, "preproc_function_def") => Some("c.function_macro"),
+        (GrammarFamily::C, "preproc_if" | "preproc_ifdef") => Some("c.preprocessor_condition"),
         (GrammarFamily::C, "parameter_list") => Some("c.parameters"),
         (GrammarFamily::C, "compound_statement") => Some("c.block"),
         (GrammarFamily::C, "identifier") => Some("c.identifier"),
@@ -2792,6 +3044,10 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Cpp, "type_definition") => Some("cpp.type"),
         (GrammarFamily::Cpp, "template_declaration") => Some("cpp.template"),
         (GrammarFamily::Cpp, "preproc_include") => Some("cpp.include"),
+        (GrammarFamily::Cpp, "preproc_def") => Some("cpp.macro"),
+        (GrammarFamily::Cpp, "preproc_function_def") => Some("cpp.function_macro"),
+        (GrammarFamily::Cpp, "preproc_params") => Some("cpp.preprocessor_parameters"),
+        (GrammarFamily::Cpp, "preproc_if" | "preproc_ifdef") => Some("cpp.preprocessor_condition"),
         (GrammarFamily::Cpp, "parameter_list") => Some("cpp.parameters"),
         (GrammarFamily::Cpp, "template_parameter_list") => Some("cpp.template_parameters"),
         (GrammarFamily::Cpp, "compound_statement") => Some("cpp.block"),
@@ -2907,7 +3163,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(55);
+        let mut packs = Vec::with_capacity(64);
         for (family, source) in [
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
@@ -2933,6 +3189,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Css, include_str!("../queries/css.scm")),
             (GrammarFamily::Bash, include_str!("../queries/bash.scm")),
             (GrammarFamily::Json, include_str!("../queries/json.scm")),
+            (GrammarFamily::Jsonc, include_str!("../queries/json.scm")),
             (GrammarFamily::Toml, include_str!("../queries/toml.scm")),
             (GrammarFamily::Yaml, include_str!("../queries/yaml.scm")),
             (GrammarFamily::Html, include_str!("../queries/html.scm")),
@@ -2967,6 +3224,16 @@ impl QueryPackRegistry {
             (GrammarFamily::Wgsl, include_str!("../queries/wgsl.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
             (GrammarFamily::Dtd, include_str!("../queries/dtd.scm")),
+            (GrammarFamily::CMake, include_str!("../queries/cmake.scm")),
+            (GrammarFamily::Coq, include_str!("../queries/coq.scm")),
+            (GrammarFamily::Julia, include_str!("../queries/julia.scm")),
+            (GrammarFamily::Eiffel, include_str!("../queries/eiffel.scm")),
+            (GrammarFamily::V, include_str!("../queries/v.scm")),
+            (GrammarFamily::Verilog, include_str!("../queries/hdl.scm")),
+            (
+                GrammarFamily::SystemVerilog,
+                include_str!("../queries/hdl.scm"),
+            ),
             (GrammarFamily::Pascal, include_str!("../queries/pascal.scm")),
             (
                 GrammarFamily::Assembly,
@@ -3127,7 +3394,7 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 56);
+        assert_eq!(registry.len(), 64);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
@@ -3149,6 +3416,7 @@ mod tests {
             GrammarFamily::Css,
             GrammarFamily::Bash,
             GrammarFamily::Json,
+            GrammarFamily::Jsonc,
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
@@ -3186,11 +3454,22 @@ mod tests {
             GrammarFamily::Wgsl,
             GrammarFamily::Xml,
             GrammarFamily::Dtd,
+            GrammarFamily::CMake,
+            GrammarFamily::Julia,
+            GrammarFamily::Eiffel,
+            GrammarFamily::Coq,
+            GrammarFamily::V,
+            GrammarFamily::Verilog,
+            GrammarFamily::SystemVerilog,
         ] {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Coq {
+                expected
+                    .retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
+            }
             if matches!(family, GrammarFamily::Ocaml | GrammarFamily::OcamlInterface) {
                 expected.retain(|name| *name != "import");
                 if family == GrammarFamily::OcamlInterface {
@@ -3277,6 +3556,18 @@ mod tests {
             if family == GrammarFamily::Xml {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
             }
+            if matches!(
+                family,
+                GrammarFamily::Eiffel | GrammarFamily::Verilog | GrammarFamily::SystemVerilog
+            ) {
+                expected.retain(|name| !matches!(*name, "import" | "scope" | "documentation"));
+            }
+            if matches!(
+                family,
+                GrammarFamily::CMake | GrammarFamily::Julia | GrammarFamily::V
+            ) {
+                expected.retain(|name| !matches!(*name, "scope" | "documentation"));
+            }
             if family == GrammarFamily::Dtd {
                 expected.retain(|name| {
                     !matches!(
@@ -3291,7 +3582,7 @@ mod tests {
             if family == GrammarFamily::Sql {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
             }
-            if matches!(family, GrammarFamily::Json | GrammarFamily::Toml) {
+            if family.is_json() || family == GrammarFamily::Toml {
                 expected
                     .retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
             }
@@ -3340,6 +3631,62 @@ mod tests {
             assert_eq!(names, expected, "capture contract differs for {family:?}");
             assert_eq!(pack.roles_by_capture.len(), expected.len());
         }
+    }
+
+    #[test]
+    fn optional_fact_credit_is_not_an_allocation_or_arithmetic_request() {
+        let source = b"fn example() { first(); second(); }\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Rust))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::Rust).unwrap();
+        let extract = |credit| {
+            pack.extract(
+                GrammarFamily::Rust,
+                &tree,
+                source,
+                usize::MAX,
+                credit,
+                &Cancellation::new(),
+            )
+            .unwrap()
+        };
+        let unrestricted = extract(usize::MAX);
+        assert_eq!(unrestricted.limit, None);
+        assert_eq!(unrestricted.fact_limit, usize::MAX);
+        assert!(
+            unrestricted
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.required)
+                .count()
+                > 1
+        );
+        let limited = extract(1);
+        assert_eq!(limited.limit, Some(QueryLimit::Fact));
+        let identity_only = extract(0);
+        assert_eq!(limited.candidates.len(), identity_only.candidates.len() + 1);
+        assert!(limited.candidates.starts_with(&identity_only.candidates));
+        assert!(
+            unrestricted
+                .candidates
+                .starts_with(&identity_only.candidates)
+        );
+        assert_eq!(
+            limited
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.required)
+                .count(),
+            unrestricted
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.required)
+                .count()
+        );
     }
 
     #[test]

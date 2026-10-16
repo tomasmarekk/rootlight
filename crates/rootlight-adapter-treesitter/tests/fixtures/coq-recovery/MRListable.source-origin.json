@@ -1,0 +1,13 @@
+{
+  "schema": "rootlight.original-coq-recovery-fixture/1",
+  "repository": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "original_path": "utils/theories/MRListable.v",
+  "bytes": 6813,
+  "sha256": "3cd43c8afa6afece784996ba718cd32fcd85c39ea50d266a9b8a9315946473f5",
+  "license": {
+    "path": "LICENSE",
+    "sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390"
+  },
+  "unchanged_complete_original": true
+}

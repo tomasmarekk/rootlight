@@ -95,7 +95,9 @@ pub(crate) fn emit(options: &Options) -> Result<(), DiscoveryError> {
             .into_iter()
             .map(|tool| ToolDisposition {
                 tool: tool.name(),
-                disposition: if tool == McpTool::OperationStatus {
+                disposition: if tool == McpTool::SourceFind {
+                    "added"
+                } else if tool == McpTool::OperationStatus {
                     "implemented"
                 } else {
                     "narrowed"
@@ -111,13 +113,11 @@ pub(crate) fn emit(options: &Options) -> Result<(), DiscoveryError> {
                 "_meta.rootlight/capabilities.limitations",
                 "_meta.rootlight/capabilities.responseProfiles",
                 "annotations.idempotentHint for repo.index",
+                "added source.find tool and title",
+                "source.find input and output schemas",
+                "source.find exposure profile membership",
             ],
-            unchanged_contracts: [
-                "tool names and titles",
-                "input and output schemas",
-                "exposure profile membership",
-                "authorization policy",
-            ],
+            unchanged_contracts: ["existing tool names and titles", "authorization policy"],
             not_assessed: ["runtime behavior"],
         },
     };
@@ -231,8 +231,8 @@ struct ToolDisposition {
 #[derive(Serialize)]
 struct CompatibilityImpact {
     breaking: bool,
-    changed_fields: [&'static str; 5],
-    unchanged_contracts: [&'static str; 4],
+    changed_fields: [&'static str; 8],
+    unchanged_contracts: [&'static str; 2],
     not_assessed: [&'static str; 1],
 }
 
