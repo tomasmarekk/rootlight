@@ -35,8 +35,10 @@ pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V6: u32 = 6;
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V7: u32 = 7;
 /// Frozen support-bundle schema with authoritative repository-capacity accounting.
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V8: u32 = 8;
+/// Complete-or-error language-capability support schema.
+pub const SUPPORT_BUNDLE_SCHEMA_VERSION_V9: u32 = 9;
 /// Current support-bundle schema.
-pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = SUPPORT_BUNDLE_SCHEMA_VERSION_V8;
+pub const CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = SUPPORT_BUNDLE_SCHEMA_VERSION_V9;
 /// Schema version for normalized telemetry snapshots.
 pub const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 /// Maximum encoded support archive returned through daemon IPC.
@@ -61,6 +63,8 @@ pub const MAX_SUPPORT_REPOSITORIES: usize = 128;
 pub const MAX_SUPPORT_GENERATIONS: usize = 256;
 /// Maximum installed language capabilities included in one support archive.
 pub const MAX_SUPPORT_LANGUAGE_CAPABILITIES: usize = 64;
+/// Maximum complete language table accepted by schema v9; overflow fails export.
+pub const MAX_SUPPORT_LANGUAGE_CAPABILITIES_V9: usize = 256;
 /// Maximum language or tier labels retained in one inventory record.
 pub const MAX_SUPPORT_RECORD_LABELS: usize = 32;
 /// Maximum encoded bytes for one structured JSON log line, including its newline.
@@ -116,6 +120,8 @@ pub const SUPPORT_ENTRY_NAMES_V6: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY
 pub const SUPPORT_ENTRY_NAMES_V7: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
 /// Ordered allow-list for current production support archives.
 pub const SUPPORT_ENTRY_NAMES_V8: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
+/// Ordered allow-list for complete language-table support archives.
+pub const SUPPORT_ENTRY_NAMES_V9: [&str; SUPPORT_ENTRY_COUNT_V4] = SUPPORT_ENTRY_NAMES_V4;
 /// Data classes that the frozen support schema must explicitly omit.
 pub const OMITTED_DATA_CLASSES: [&str; 12] = [
     "absolute_roots",
@@ -171,6 +177,8 @@ pub const OMITTED_DATA_CLASSES_V6: [&str; 12] = OMITTED_DATA_CLASSES_V5;
 pub const OMITTED_DATA_CLASSES_V7: [&str; 12] = OMITTED_DATA_CLASSES_V6;
 /// Data classes omitted by current repository-capacity support archives.
 pub const OMITTED_DATA_CLASSES_V8: [&str; 12] = OMITTED_DATA_CLASSES_V7;
+/// Data classes omitted by complete language-table support archives.
+pub const OMITTED_DATA_CLASSES_V9: [&str; 12] = OMITTED_DATA_CLASSES_V8;
 
 /// Closed daemon protocol version emitted by this support schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +207,9 @@ pub enum ProtocolVersion {
     /// Rootlight daemon protocol 1.15.
     #[serde(rename = "1.15")]
     V1_15,
+    /// Rootlight daemon protocol 1.29.
+    #[serde(rename = "1.29")]
+    V1_29,
 }
 
 /// Closed target operating-system family emitted by support evidence.
@@ -927,6 +938,9 @@ pub struct SupportInventory {
     /// Authoritative installed language detection and analysis capabilities.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub languages: Vec<SupportLanguageCapabilityInventory>,
+    /// Exact installed capability count; v9 requires all rows, older schemas omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language_capabilities_total: Option<u64>,
     /// Bounded repository inventory.
     pub repositories: Vec<SupportRepositoryInventory>,
     /// Catalog-wide repository-capacity accounting, independent of detail truncation.
@@ -1420,6 +1434,8 @@ pub enum SupportBundleSchema {
     V7,
     /// Production schema with authoritative repository-capacity accounting.
     V8,
+    /// Complete installed language table or an explicit export failure.
+    V9,
 }
 
 /// Inputs accepted by the support-bundle privacy boundary.
@@ -2040,6 +2056,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V6 => ProtocolVersion::V1_13,
         SupportBundleSchema::V7 => ProtocolVersion::V1_14,
         SupportBundleSchema::V8 => ProtocolVersion::V1_15,
+        SupportBundleSchema::V9 => ProtocolVersion::V1_29,
     };
     if input.protocol_version != expected_protocol {
         return Err(SupportBundleError::ProtocolVersionMismatch);
@@ -2053,6 +2070,7 @@ pub fn build_support_bundle_for_schema(
         SupportBundleSchema::V6 => build_support_bundle_v6(input),
         SupportBundleSchema::V7 => build_support_bundle_v7(input),
         SupportBundleSchema::V8 => build_support_bundle_v8(input),
+        SupportBundleSchema::V9 => build_support_bundle_v9(input),
     }
 }
 
@@ -2200,6 +2218,16 @@ fn build_support_bundle_v8(
     )
 }
 
+fn build_support_bundle_v9(
+    input: &SupportBundleInput,
+) -> Result<SupportBundle, SupportBundleError> {
+    build_production_support_bundle(
+        input,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V9,
+        &OMITTED_DATA_CLASSES_V9,
+    )
+}
+
 fn build_production_support_bundle(
     input: &SupportBundleInput,
     schema_version: u32,
@@ -2255,16 +2283,35 @@ fn validate_production_input(
     schema_version: u32,
 ) -> Result<(), SupportBundleError> {
     let minimum_protocol_minor = match schema_version {
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V9 => 29,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V8 => 15,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V7 => 14,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V6 => 13,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V5 => 12,
         _ => 8,
     };
+    let language_limit = if schema_version >= SUPPORT_BUNDLE_SCHEMA_VERSION_V9 {
+        MAX_SUPPORT_LANGUAGE_CAPABILITIES_V9
+    } else {
+        MAX_SUPPORT_LANGUAGE_CAPABILITIES
+    };
+    if inventory.languages.len() > language_limit {
+        return Err(SupportBundleError::LanguageInventoryLimit {
+            dimension: "languages",
+            actual: inventory.languages.len(),
+            limit: language_limit,
+        });
+    }
+    if schema_version >= SUPPORT_BUNDLE_SCHEMA_VERSION_V9 {
+        if inventory.language_capabilities_total != u64::try_from(inventory.languages.len()).ok() {
+            return Err(SupportBundleError::InvalidInventory);
+        }
+    } else if inventory.language_capabilities_total.is_some() {
+        return Err(SupportBundleError::InvalidInventory);
+    }
     if input.terminal_operations.len() > MAX_SUPPORT_TERMINAL_OPERATIONS
         || inventory.dependencies.len() > MAX_SUPPORT_DEPENDENCIES
         || inventory.adapters.len() > MAX_SUPPORT_ADAPTERS
-        || inventory.languages.len() > MAX_SUPPORT_LANGUAGE_CAPABILITIES
         || inventory.repositories.len() > MAX_SUPPORT_REPOSITORIES
         || inventory.generations.len() > MAX_SUPPORT_GENERATIONS
         || inventory.runtime.protocol_major != 1
@@ -2316,6 +2363,20 @@ fn validate_production_input(
     }
     let mut languages = std::collections::BTreeSet::new();
     for language in &inventory.languages {
+        for (dimension, labels) in [
+            ("suffixes", &language.suffixes),
+            ("aliases", &language.aliases),
+            ("detectors", &language.detectors),
+            ("analyzers", &language.analyzers),
+        ] {
+            if labels.len() > MAX_SUPPORT_RECORD_LABELS {
+                return Err(SupportBundleError::LanguageInventoryLimit {
+                    dimension,
+                    actual: labels.len(),
+                    limit: MAX_SUPPORT_RECORD_LABELS,
+                });
+            }
+        }
         if !languages.insert(language.language.as_str())
             || !is_language_capability_label(&language.language)
             || language.suffixes.len() > MAX_SUPPORT_RECORD_LABELS
@@ -2382,7 +2443,7 @@ fn validate_production_input(
         validate_authoritative_storage_accounting(inventory)?;
     }
     match (
-        schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
+        schema_version >= SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
         inventory.repository_capacity.as_ref(),
     ) {
         (true, Some(capacity)) => validate_repository_capacity(capacity)?,
@@ -2981,6 +3042,16 @@ pub enum SupportBundleError {
     /// Production inventory violated a reviewed size or privacy bound.
     #[error("support bundle inventory violates its bounded schema")]
     InvalidInventory,
+    /// A complete language table cannot fit the selected schema's row or label bound.
+    #[error("complete support language inventory exceeds its {dimension} limit")]
+    LanguageInventoryLimit {
+        /// Closed row or per-record label dimension.
+        dimension: &'static str,
+        /// Complete source-table cardinality, before any export projection.
+        actual: usize,
+        /// Maximum accepted cardinality for this schema and dimension.
+        limit: usize,
+    },
     /// The selected support schema and daemon protocol version did not match.
     #[error("support bundle protocol version does not match its schema")]
     ProtocolVersionMismatch,
@@ -3223,6 +3294,7 @@ mod tests {
             }),
         }];
         input.inventory = Some(SupportInventory {
+            language_capabilities_total: None,
             runtime: SupportRuntimeInventory {
                 product_version: "0.1.0".to_owned(),
                 binary_name: "rootlight-daemon".to_owned(),
@@ -4005,6 +4077,145 @@ mod tests {
         assert!(matches!(
             build_support_bundle_for_schema(&obsolete_protocol, SupportBundleSchema::V5),
             Err(SupportBundleError::InvalidInventory)
+        ));
+    }
+
+    fn complete_language_input(count: usize) -> SupportBundleInput {
+        let mut input = production_input();
+        make_schema_v8_input(&mut input);
+        input.protocol_version = ProtocolVersion::V1_29;
+        let inventory = input.inventory.as_mut().expect("inventory exists");
+        inventory.runtime.protocol_minor = 29;
+        let capability = inventory.languages[0].clone();
+        inventory.languages = (0..count)
+            .map(|ordinal| SupportLanguageCapabilityInventory {
+                language: format!("language-{ordinal:03}"),
+                ..capability.clone()
+            })
+            .collect();
+        inventory.language_capabilities_total =
+            Some(u64::try_from(count).expect("fixture count fits"));
+        input
+    }
+
+    #[test]
+    fn schema_v9_round_trips_complete_eighty_row_table() {
+        let input = complete_language_input(80);
+        let expected = input.inventory.clone().expect("inventory exists");
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V9)
+            .expect("all eighty rows fit");
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bundle.archive())).expect("archive opens");
+        let mut bytes = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .expect("entry exists")
+            .read_to_end(&mut bytes)
+            .expect("entry reads");
+        let actual: SupportInventory = serde_json::from_slice(&bytes).expect("inventory decodes");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.language_capabilities_total, Some(80));
+        assert_eq!(
+            actual.languages.last().expect("tail exists").language,
+            "language-079"
+        );
+        assert!(bytes.len() <= MAX_SUPPORT_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn schema_v9_rejects_prefix_missing_total_and_future_overflow() {
+        let mut input = complete_language_input(80);
+        input
+            .inventory
+            .as_mut()
+            .expect("inventory exists")
+            .languages
+            .truncate(64);
+        assert!(matches!(
+            build_support_bundle_for_schema(&input, SupportBundleSchema::V9),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+        input
+            .inventory
+            .as_mut()
+            .expect("inventory exists")
+            .language_capabilities_total = None;
+        assert!(matches!(
+            build_support_bundle_for_schema(&input, SupportBundleSchema::V9),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+        let overflow = complete_language_input(MAX_SUPPORT_LANGUAGE_CAPABILITIES_V9 + 1);
+        assert!(matches!(
+            build_support_bundle_for_schema(&overflow, SupportBundleSchema::V9),
+            Err(SupportBundleError::LanguageInventoryLimit {
+                dimension: "languages",
+                actual: 257,
+                limit: 256
+            })
+        ));
+        let mut legacy = complete_language_input(80);
+        legacy.protocol_version = ProtocolVersion::V1_15;
+        legacy
+            .inventory
+            .as_mut()
+            .expect("inventory exists")
+            .language_capabilities_total = None;
+        assert!(matches!(
+            build_support_bundle_for_schema(&legacy, SupportBundleSchema::V8),
+            Err(SupportBundleError::LanguageInventoryLimit {
+                actual: 80,
+                limit: 64,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn schema_v9_preserves_privacy_uniqueness_labels_and_byte_bounds() {
+        let mut duplicate = complete_language_input(80);
+        let inventory = duplicate.inventory.as_mut().expect("inventory exists");
+        inventory.languages[1].language = inventory.languages[0].language.clone();
+        assert!(matches!(
+            build_support_bundle_for_schema(&duplicate, SupportBundleSchema::V9),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+        let mut path = complete_language_input(80);
+        path.inventory.as_mut().expect("inventory exists").languages[0]
+            .aliases
+            .push("/private/source".to_owned());
+        assert!(matches!(
+            build_support_bundle_for_schema(&path, SupportBundleSchema::V9),
+            Err(SupportBundleError::InvalidInventory)
+        ));
+        let mut labels = complete_language_input(80);
+        labels
+            .inventory
+            .as_mut()
+            .expect("inventory exists")
+            .languages[0]
+            .aliases = vec!["alias".to_owned(); MAX_SUPPORT_RECORD_LABELS + 1];
+        assert!(matches!(
+            build_support_bundle_for_schema(&labels, SupportBundleSchema::V9),
+            Err(SupportBundleError::LanguageInventoryLimit {
+                dimension: "aliases",
+                actual: 33,
+                limit: 32
+            })
+        ));
+        let mut oversized = complete_language_input(256);
+        for capability in &mut oversized
+            .inventory
+            .as_mut()
+            .expect("inventory exists")
+            .languages
+        {
+            capability.aliases = vec!["a".repeat(128); MAX_SUPPORT_RECORD_LABELS];
+        }
+        assert!(matches!(
+            build_support_bundle_for_schema(&oversized, SupportBundleSchema::V9),
+            Err(SupportBundleError::EntryTooLarge {
+                name: "inventory.json"
+            })
         ));
     }
 

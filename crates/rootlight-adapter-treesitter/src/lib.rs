@@ -13,6 +13,7 @@ mod groovy_calls;
 mod groovy_members;
 mod haskell_bindings;
 mod incremental;
+mod json_schema_pointer;
 mod lowering;
 mod lua_bindings;
 mod markdown_bindings;
@@ -42,7 +43,8 @@ pub use rootlight_adapter_sdk::{
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 pub use runtime::{
-    CacheStats, FSharpAdmissionKind, FSharpAdmissionWitness, RuntimeStats, TreeSitterProvider,
+    CacheStats, FSharpAdmissionKind, FSharpAdmissionWitness, NativeIdentityWorkLimit, RuntimeStats,
+    TreeSitterProvider,
 };
 
 /// Exact adapter crate version compiled into this runtime.

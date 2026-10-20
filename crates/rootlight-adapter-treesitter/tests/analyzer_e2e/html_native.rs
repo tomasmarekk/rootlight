@@ -71,6 +71,53 @@ fn html_embedded_languages_keep_host_source_and_distinct_owners() {
 }
 
 #[test]
+fn html_empty_embedded_bodies_preserve_nonempty_siblings() {
+    for source in [
+        "<script></script><script>function kept() {}</script><style></style><style>.kept {color:red}</style>",
+        "<script src='external.js'></script><script id='loader'></script><script>function kept() {}</script><style>.kept {color:red}</style>",
+    ] {
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, HTML);
+        let fixture = Fixture::new(HTML, source.as_bytes());
+        let budget = limits();
+        let initial = request(&fixture.snapshot, &fixture.source, HTML, &budget);
+        let demand = provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .unwrap();
+        let artifact = analyzer.prepare_artifact(&initial, &deadline()).unwrap();
+        assert_eq!(
+            demand,
+            artifact.required_syntax_fact_count(&deadline()).unwrap()
+        );
+        let result = analyzer
+            .analyze_from_artifact(
+                &initial,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+        for (name, language) in [("kept", "javascript"), (".kept", "css")] {
+            let entities: Vec<_> = result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| entity.canonical_name == name && entity.language == language)
+                .collect();
+            assert_eq!(entities.len(), 1, "{source}");
+            let reference = entities[0].evidence.source.as_ref().unwrap();
+            assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+            assert_eq!(reference.generation(), fixture.source.generation());
+            assert!(reference.span().start_byte() < reference.span().end_byte());
+        }
+        assert_eq!(result.document().files.len(), 1);
+        assert_eq!(result.document().files[0].language, "html");
+    }
+}
+
+#[test]
 fn html_embedded_routing_uses_host_attributes_not_body_heuristics() {
     let provider = Arc::new(provider());
     let analyzer = analyzer(&provider, HTML);

@@ -368,6 +368,30 @@ pub(super) fn retain_capture(
     role: StructuralRole,
     cancellation: &Cancellation,
 ) -> Result<bool, AdapterError> {
+    let interface_property =
+        if role == StructuralRole::Declaration && node.kind() == "property_signature" {
+            Some(node)
+        } else if role == StructuralRole::Definition && node.kind() == "property_identifier" {
+            node.parent().filter(|property| {
+                property.kind() == "property_signature"
+                    && property.child_by_field_name("name") == Some(node)
+            })
+        } else {
+            None
+        };
+    if let Some(property) = interface_property {
+        cancellation.check()?;
+        let owner = property
+            .parent()
+            .filter(|body| body.kind() == "interface_body")
+            .and_then(|body| {
+                body.parent().filter(|owner| {
+                    owner.kind() == "interface_declaration"
+                        && owner.child_by_field_name("body") == Some(body)
+                })
+            });
+        return Ok(owner.is_some_and(|owner| !owner.has_error() && !owner.is_missing()));
+    }
     if role == StructuralRole::Definition
         && node.kind() == "type_identifier"
         && let Some(parent) = node.parent()

@@ -5,7 +5,7 @@
 (list) @scope
 (list) @expression
 (symbol) @declaration @definition
-; Identity-only extraction discards reads, so references need an optional pattern.
+; Certified direct calls join identity closure; ordinary reads need optional capture.
 (symbol) @reference
 (symbol) @expression
 [(directive) (ERROR)] @expression

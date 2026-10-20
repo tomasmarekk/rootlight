@@ -37,6 +37,10 @@
   (infer_type (type_identifier) @definition)
 ]
 
+; Only direct ordinary interface member names establish field identity.
+(interface_body
+  (property_signature name: (property_identifier) @definition) @declaration)
+
 (import_statement) @import
 (import_statement source: (string) @signature)
 (import_clause (identifier) @signature)

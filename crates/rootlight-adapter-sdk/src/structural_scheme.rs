@@ -63,7 +63,7 @@ pub(super) fn captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
     accepted.then_some(text)
 }
 
-/// Borrows only exact Scheme definition or unresolved symbol-reference occurrences.
+/// Borrows exact Scheme definitions, symbol references and native direct-call operators.
 ///
 /// The language dispatch owns the namespace fence; native capture, source spans
 /// and generation provenance remain caller responsibilities.
@@ -76,7 +76,9 @@ pub(super) fn captured_name_for_fact<'a>(
         return None;
     }
     match fact.syntax_kind().as_str() {
-        "scheme.name.definition" | "scheme.symbol.reference" => captured_name(text, maximum_bytes),
+        "scheme.name.definition"
+        | "scheme.symbol.reference"
+        | "scheme.direct_file_call.reference" => captured_name(text, maximum_bytes),
         _ => None,
     }
 }
@@ -361,7 +363,11 @@ mod tests {
 
     #[test]
     fn only_exact_definition_and_symbol_reference_occurrences_have_names() {
-        for label in ["scheme.name.definition", "scheme.symbol.reference"] {
+        for label in [
+            "scheme.name.definition",
+            "scheme.symbol.reference",
+            "scheme.direct_file_call.reference",
+        ] {
             for kind in FACT_KINDS {
                 let occurrence = fact(kind, label);
                 let expected = (kind == SyntaxFactKind::Occurrence).then_some("|Written Name|");
@@ -401,7 +407,11 @@ mod tests {
 
     #[test]
     fn public_name_dispatch_fences_foreign_languages_and_invalid_spelling() {
-        for label in ["scheme.name.definition", "scheme.symbol.reference"] {
+        for label in [
+            "scheme.name.definition",
+            "scheme.symbol.reference",
+            "scheme.direct_file_call.reference",
+        ] {
             let occurrence = fact(SyntaxFactKind::Occurrence, label);
             for foreign in [
                 "rust",

@@ -1,0 +1,18 @@
+{
+  "repository": "102_Liquid_Timber",
+  "source": "snippets/blog-sidebar.liquid",
+  "source_identity": {
+    "bytes": 888,
+    "sha256": "4fd3dbcd192efe279baf44aa49d1163d753555516343d7b293d66631f5e82a60"
+  },
+  "license_identity": {
+    "bytes": 1105,
+    "sha256": "aaac51cbe4ffe2f3ee28e7f51739d46c09c05bef29b27100f1810c6542a089ea"
+  },
+  "original_obligation_authority": {
+    "path": "target/corpus-progress-20261020/secondary-programming-next-batch-r3/combined-176.json",
+    "bytes": 1760425,
+    "sha256": "2fc683b5f2f39f45604f69b86cbbc48dfab03bc82207f4c1a7bf6307e2255881"
+  },
+  "purpose": "Exact original development fixture for source-only Liquid attribution. No grammar, structural or semantic support is claimed."
+}

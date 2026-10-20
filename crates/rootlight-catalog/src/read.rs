@@ -488,7 +488,7 @@ pub(crate) fn read_generation_with_admission<E>(
     Ok(snapshot)
 }
 
-fn oracle_read_memory_plan(
+pub(crate) fn oracle_read_memory_plan(
     contract_version: GenerationContractVersion,
     stats: GenerationStats,
     maximum_payload_bytes: u64,
@@ -1867,6 +1867,135 @@ mod tests {
 
     fn stats(rows: u64, text: u64) -> GenerationStats {
         GenerationStats::new(2, 0, 0, 0, 0, 1, 0, 1, 1, 2, 0, rows, text).unwrap()
+    }
+
+    #[test]
+    fn sealed_write_read_plan_matches_independent_reader() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let encoded = include_bytes!("../../../tests/fixtures/compatibility/ir/1.1/document.json");
+        let template = rootlight_ir::decode_normalized_ir_document_with_checkpoint(
+            encoded,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .unwrap();
+        let manifest = rootlight_ids::content_hash(b"manifest");
+        let configuration = rootlight_ids::content_hash(b"configuration");
+        let providers = rootlight_ids::content_hash(b"providers");
+        let generation = rootlight_ids::derive_generation(rootlight_ids::GenerationIdentity {
+            repository: template.repository,
+            parent: None,
+            manifest_hash: manifest,
+            config_hash: configuration,
+            provider_set_hash: providers,
+            format_version: (u32::from(GENERATION_CONTRACT_VERSION.major()) << 16)
+                | u32::from(GENERATION_CONTRACT_VERSION.minor()),
+        })
+        .id();
+        let metadata = GenerationMetadata::new(
+            template.repository,
+            generation,
+            None,
+            manifest,
+            configuration,
+            providers,
+        )
+        .unwrap();
+        let rebound = std::str::from_utf8(encoded)
+            .unwrap()
+            .replace(&template.generation.to_string(), &generation.to_string());
+        let mut document = rootlight_ir::decode_normalized_ir_document_with_checkpoint(
+            rebound.as_bytes(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            || true,
+        )
+        .unwrap();
+        let relative =
+            rootlight_vfs::RelativePath::parse(std::path::Path::new("src/\u{3bb}.txt")).unwrap();
+        document.files[0].path = relative.as_str().to_owned();
+        document.files[0].path_locator = Some(relative.to_locator());
+        document.diagnostics[0].message = "encoded \u{3bb} and \u{1f600} payload".repeat(32);
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        #[cfg(target_os = "macos")]
+        let directory = tempfile::tempdir_in("/private/tmp").unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let directory = tempfile::tempdir().unwrap();
+        drop(OracleWriter::create_in(directory.path()).unwrap());
+        let mut connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+        crate::schema::install_generation_cancellation(&connection, &context).unwrap();
+        let written =
+            crate::write::write_generation_with_metadata(&mut connection, &snapshot, &context)
+                .unwrap();
+        let expected_maximum = [
+            serde_json::to_vec(
+                snapshot.document().files[0]
+                    .path_locator
+                    .as_ref()
+                    .unwrap()
+                    .components(),
+            )
+            .unwrap()
+            .len(),
+            serde_json::to_vec(&snapshot.document().diagnostics[0])
+                .unwrap()
+                .len(),
+            snapshot
+                .document()
+                .extensions
+                .iter()
+                .map(|record| serde_json::to_vec(record).unwrap().len())
+                .max()
+                .unwrap_or(0),
+            snapshot
+                .document()
+                .source_mappings
+                .iter()
+                .map(|record| serde_json::to_vec(record).unwrap().len())
+                .max()
+                .unwrap_or(0),
+            snapshot
+                .document()
+                .skipped_regions
+                .iter()
+                .map(|record| serde_json::to_vec(record).unwrap().len())
+                .max()
+                .unwrap_or(0),
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+        assert_eq!(
+            written.maximum_payload_bytes,
+            u64::try_from(expected_maximum).unwrap()
+        );
+        let measured = oracle_read_memory_plan(
+            metadata.contract_version(),
+            written.stats,
+            written.maximum_payload_bytes,
+        )
+        .unwrap();
+        drop(connection);
+        let reader = OracleReader::open_in(directory.path(), &context).unwrap();
+        let mut observed = None;
+        let stopped = reader.read_with_admission(&context, |plan| {
+            observed = Some(plan);
+            Err::<(), ()>(())
+        });
+        assert!(matches!(
+            stopped,
+            Err(OracleReadAdmissionError::Admission(()))
+        ));
+        assert_eq!(observed, Some(measured));
+        assert_eq!(reader.read(&context).unwrap(), snapshot);
     }
 
     fn payload_connection() -> Connection {

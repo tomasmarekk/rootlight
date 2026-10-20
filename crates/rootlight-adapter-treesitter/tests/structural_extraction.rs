@@ -142,9 +142,11 @@ fn audited_crlf_unicode_fixtures_match_structural_goldens() {
 
         if case.language == "python" {
             assert_python_non_doc_string(&output, &bytes);
+            assert_python_parameter_bindings(&output, &bytes);
         }
         if case.language == "java" {
             assert_java_annotation_element(&output, &bytes);
+            assert_java_parameter_bindings(&output, &bytes);
         }
         if case.language == "lua" {
             let mut references = output
@@ -1075,10 +1077,11 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("python.class.declaration", 1),
             ("python.file.module", 1),
             ("python.function.declaration", 1),
-            ("python.identifier.definition", 2),
-            ("python.identifier.reference", 7),
+            ("python.identifier.definition", 4),
+            ("python.identifier.reference", 5),
             ("python.import.import", 1),
             ("python.module.root", 1),
+            ("python.parameter.declaration", 2),
             ("python.parameters.signature", 1),
             ("python.string.documentation", 3),
             ("python.string.string", 5),
@@ -1112,12 +1115,13 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("java.block.scope", 1),
             ("java.block_comment.documentation", 2),
             ("java.class.declaration", 1),
-            ("java.identifier.definition", 6),
-            ("java.identifier.reference", 6),
+            ("java.identifier.definition", 7),
+            ("java.identifier.reference", 5),
             ("java.import.import", 1),
             ("java.local_variable.declaration", 1),
             ("java.method.declaration", 1),
             ("java.package.module", 1),
+            ("java.parameter.declaration", 1),
             ("java.parameters.signature", 2),
             ("java.program.root", 1),
             ("java.string.string", 1),
@@ -1544,6 +1548,93 @@ fn assert_python_non_doc_string(output: &ParseOutput, source: &[u8]) {
         .expect("standalone string is extracted");
     assert_eq!(fact.kind(), SyntaxFactKind::StringLiteral);
     assert!(!fact.syntax_kind().as_str().ends_with(".documentation"));
+}
+
+fn assert_python_parameter_bindings(output: &ParseOutput, source: &[u8]) {
+    let spans = |label| {
+        let mut values = output
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == label)
+            .map(|fact| {
+                (
+                    fact.span().start_byte(),
+                    fact.span().end_byte(),
+                    source_text(source, fact),
+                )
+            })
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        values
+    };
+    // These are independently written CRLF byte witnesses, including the
+    // Unicode module documentation before the method's formal binders.
+    assert_eq!(
+        spans("python.parameter.declaration"),
+        [(115, 119, "self"), (121, 125, "name")]
+    );
+    assert_eq!(
+        spans("python.identifier.definition"),
+        [
+            (57, 64, "Greeter"),
+            (109, 114, "greet"),
+            (115, 119, "self"),
+            (121, 125, "name"),
+        ]
+    );
+    let references = spans("python.identifier.reference");
+    assert!(references.contains(&(211, 215, "name")));
+    let mut written = references
+        .iter()
+        .map(|reference| reference.2)
+        .collect::<Vec<_>>();
+    written.sort_unstable();
+    assert_eq!(written, ["name", "os", "print", "text", "text"]);
+}
+
+fn assert_java_parameter_bindings(output: &ParseOutput, source: &[u8]) {
+    let spans = |label| {
+        let mut values = output
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == label)
+            .map(|fact| {
+                (
+                    fact.span().start_byte(),
+                    fact.span().end_byte(),
+                    source_text(source, fact),
+                )
+            })
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        values
+    };
+    // The authored name is narrower than its retained type-bearing formal.
+    // The later body use stays a reference at its independent physical span.
+    assert_eq!(
+        spans("java.parameter.declaration"),
+        [(196, 207, "String name")]
+    );
+    assert_eq!(
+        spans("java.identifier.definition"),
+        [
+            (8, 12, "demo"),
+            (91, 97, "Marker"),
+            (147, 152, "value"),
+            (168, 175, "Greeter"),
+            (190, 195, "greet"),
+            (203, 207, "name"),
+            (227, 231, "text"),
+        ]
+    );
+    let references = spans("java.identifier.reference");
+    assert!(references.contains(&(264, 268, "name")));
+    let mut written = references
+        .iter()
+        .map(|reference| reference.2)
+        .collect::<Vec<_>>();
+    written.sort_unstable();
+    assert_eq!(written, ["List", "java", "name", "text", "util"]);
 }
 
 fn assert_java_annotation_element(output: &ParseOutput, source: &[u8]) {

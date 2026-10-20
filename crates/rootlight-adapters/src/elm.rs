@@ -114,6 +114,7 @@ impl ParseProvider for ElmParseProvider {
             label("elm.source_file"),
         ));
         let mut next_id = 2_u64;
+        let mut module_id = None;
         let mut constructor_index = 0_usize;
         let mut field_index = 0_usize;
         let mut type_reference_index = 0_usize;
@@ -123,10 +124,21 @@ impl ParseProvider for ElmParseProvider {
             next_id = next_id
                 .checked_add(2)
                 .ok_or_else(|| failure("elm-syntax-node-limit"))?;
-            let end = parsed
-                .headers
-                .get(index + 1)
-                .map_or(source.bytes().len(), |next| next.line_start);
+            let is_module_owner = parsed.module_owner == Some(index);
+            let (parent, depth) = if is_module_owner {
+                module_id = Some(local_id);
+                (1, 1)
+            } else {
+                module_id.map_or((1, 1), |owner| (owner, 2))
+            };
+            let end = if is_module_owner {
+                source.bytes().len()
+            } else {
+                parsed
+                    .headers
+                    .get(index + 1)
+                    .map_or(source.bytes().len(), |next| next.line_start)
+            };
             let span = if header.kind == SyntaxFactKind::Import {
                 source_span(file, header.name_start, header.name_end)?
             } else {
@@ -134,10 +146,10 @@ impl ParseProvider for ElmParseProvider {
             };
             facts.push(SyntaxFact::new(
                 local_id,
-                Some(1),
+                Some(parent),
                 header.kind,
                 span,
-                1,
+                depth,
                 label(header.label),
             ));
             if header.kind != SyntaxFactKind::Import {
@@ -146,7 +158,7 @@ impl ParseProvider for ElmParseProvider {
                     Some(local_id),
                     SyntaxFactKind::Occurrence,
                     source_span(file, header.name_start, header.name_end)?,
-                    2,
+                    depth + 1,
                     label("elm.name.definition"),
                 ));
             }
@@ -162,7 +174,7 @@ impl ParseProvider for ElmParseProvider {
                     Some(local_id),
                     SyntaxFactKind::Declaration,
                     source_span(file, constructor.name_start, constructor.span_end)?,
-                    2,
+                    depth + 1,
                     label("elm.constructor.declaration"),
                 ));
                 facts.push(SyntaxFact::new(
@@ -170,7 +182,7 @@ impl ParseProvider for ElmParseProvider {
                     Some(constructor_id),
                     SyntaxFactKind::Occurrence,
                     source_span(file, constructor.name_start, constructor.name_end)?,
-                    3,
+                    depth + 2,
                     label("elm.name.definition"),
                 ));
                 constructor_index += 1;
@@ -187,7 +199,7 @@ impl ParseProvider for ElmParseProvider {
                     Some(local_id),
                     SyntaxFactKind::Declaration,
                     source_span(file, field.name_start, field.span_end)?,
-                    2,
+                    depth + 1,
                     label("elm.field.declaration"),
                 ));
                 facts.push(SyntaxFact::new(
@@ -195,7 +207,7 @@ impl ParseProvider for ElmParseProvider {
                     Some(field_id),
                     SyntaxFactKind::Occurrence,
                     source_span(file, field.name_start, field.name_end)?,
-                    3,
+                    depth + 2,
                     label("elm.name.definition"),
                 ));
                 field_index += 1;
@@ -208,7 +220,7 @@ impl ParseProvider for ElmParseProvider {
                     Some(local_id),
                     SyntaxFactKind::Occurrence,
                     source_span(file, reference.name_start, reference.name_end)?,
-                    2,
+                    depth + 1,
                     label(if reference.ambiguous {
                         "elm.ambiguous_type.reference"
                     } else {
@@ -318,6 +330,7 @@ struct TypeReference {
 }
 
 struct ParsedSource {
+    module_owner: Option<usize>,
     headers: Vec<Header>,
     constructors: Vec<Constructor>,
     record_fields: Vec<RecordField>,
@@ -376,11 +389,16 @@ fn scan_source(
         return Err(failure("elm-syntax-node-limit"));
     }
     std::str::from_utf8(bytes).map_err(|_| failure("invalid-utf8"))?;
-    let masked = mask_non_code(bytes, cancellation)?;
+    let MaskedSource {
+        bytes: masked,
+        first_code,
+        first_literal,
+    } = mask_non_code(bytes, cancellation)?;
     let mut headers = Vec::new();
     let mut header_fact_count = 1_usize;
     let mut start = 0;
     let mut annotation: Option<Annotation> = None;
+    let mut module_introducers = 0_usize;
     while start < masked.len() {
         cancellation.check()?;
         let end = masked[start..]
@@ -388,6 +406,15 @@ fn scan_source(
             .position(|byte| *byte == b'\n')
             .map_or(masked.len(), |offset| start + offset);
         let line = &masked[start..end];
+        let mut words = line
+            .split(u8::is_ascii_whitespace)
+            .filter(|word| !word.is_empty());
+        let introducer = match words.next() {
+            Some(b"module") => true,
+            Some(b"port" | b"effect") => words.next() == Some(b"module".as_slice()),
+            _ => false,
+        };
+        module_introducers = module_introducers.saturating_add(usize::from(introducer));
         if let Some(mut header) = parse_header(line, start) {
             header_fact_count = header_fact_count
                 .checked_add(if header.kind == SyntaxFactKind::Import {
@@ -527,12 +554,77 @@ fn scan_source(
             )?;
         }
     }
+    let module_owner = if module_introducers == 1
+        && let Some(header) = headers.first()
+        && header.kind == SyntaxFactKind::Module
+        && first_code == Some(header.line_start)
+        && complete_module_header(
+            &masked,
+            header,
+            headers.get(1).map_or(masked.len(), |next| next.line_start),
+            first_literal,
+            cancellation,
+        )? {
+        Some(0)
+    } else {
+        None
+    };
     Ok(ParsedSource {
+        module_owner,
         headers,
         constructors: collector.constructors,
         record_fields: fields.fields,
         type_references,
     })
+}
+
+// The full-file scope requires one complete leading header. A partial or late
+// header still supplies its existing bounded identity, never file ownership.
+fn complete_module_header(
+    masked: &[u8],
+    header: &Header,
+    end: usize,
+    first_literal: Option<usize>,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let mut tail = masked[header.name_end..end].trim_ascii_start();
+    if masked[header.line_start..header.name_start].starts_with(b"effect ") {
+        let Some(after_where) = tail.strip_prefix(b"where") else {
+            return Ok(false);
+        };
+        let Some(after_brace) = after_where.trim_ascii_start().strip_prefix(b"{") else {
+            return Ok(false);
+        };
+        let Some(close) = after_brace.iter().position(|byte| *byte == b'}') else {
+            return Ok(false);
+        };
+        tail = after_brace[close + 1..].trim_ascii_start();
+    }
+    let Some(after_keyword) = tail.strip_prefix(b"exposing") else {
+        return Ok(false);
+    };
+    let Some(exports) = after_keyword.trim_ascii_start().strip_prefix(b"(") else {
+        return Ok(false);
+    };
+    let mut depth = 1_usize;
+    for (offset, byte) in exports.iter().enumerate() {
+        if offset % CHECK_INTERVAL == 0 {
+            cancellation.check()?;
+        }
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let close = end - exports.len() + offset;
+                    return Ok(exports[offset + 1..].trim_ascii().is_empty()
+                        && first_literal.is_none_or(|literal| literal > close));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 fn declaration_type_region(
@@ -890,7 +982,13 @@ fn parse_annotation(line: &[u8], start: usize) -> Option<Annotation> {
     })
 }
 
-fn mask_non_code(bytes: &[u8], cancellation: &Cancellation) -> Result<Vec<u8>, AdapterError> {
+struct MaskedSource {
+    bytes: Vec<u8>,
+    first_code: Option<usize>,
+    first_literal: Option<usize>,
+}
+
+fn mask_non_code(bytes: &[u8], cancellation: &Cancellation) -> Result<MaskedSource, AdapterError> {
     let mut masked = Vec::new();
     masked
         .try_reserve_exact(bytes.len())
@@ -900,6 +998,8 @@ fn mask_non_code(bytes: &[u8], cancellation: &Cancellation) -> Result<Vec<u8>, A
     let mut block_depth = 0_usize;
     let mut line_comment = false;
     let mut quote = None;
+    let mut first_code = None;
+    let mut first_literal = None;
     while index < bytes.len() {
         if index % CHECK_INTERVAL == 0 {
             cancellation.check()?;
@@ -939,12 +1039,19 @@ fn mask_non_code(bytes: &[u8], cancellation: &Cancellation) -> Result<Vec<u8>, A
             block_depth = 1;
             2
         } else if tail.starts_with(b"\"\"\"") {
+            first_code.get_or_insert(index);
+            first_literal.get_or_insert(index);
             quote = Some((b'"', true));
             3
         } else if matches!(bytes[index], b'"' | b'\'') {
+            first_code.get_or_insert(index);
+            first_literal.get_or_insert(index);
             quote = Some((bytes[index], false));
             1
         } else {
+            if !bytes[index].is_ascii_whitespace() {
+                first_code.get_or_insert(index);
+            }
             index += 1;
             continue;
         };
@@ -955,7 +1062,11 @@ fn mask_non_code(bytes: &[u8], cancellation: &Cancellation) -> Result<Vec<u8>, A
         }
         index += length;
     }
-    Ok(masked)
+    Ok(MaskedSource {
+        bytes: masked,
+        first_code,
+        first_literal,
+    })
 }
 
 fn source_span(file: FileId, start: usize, end: usize) -> Result<SourceSpan, AdapterError> {
@@ -977,6 +1088,24 @@ fn failure(value: &str) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_leading_module_scope_keeps_fact_limits_and_cancellation() {
+        for source in [
+            "module Demo exposing (..)\nvalue = 1\n",
+            "{- Ω {- nested -} -}\r\nport module Demo exposing\r\n    ( value\r\n    )\r\nvalue = 1\r\n",
+            "effect module Demo where { command = Cmd } exposing (value)\nvalue = 1\n",
+        ] {
+            let parsed = scan_source(source.as_bytes(), 5, &Cancellation::new()).unwrap();
+            assert_eq!(parsed.module_owner, Some(0));
+            assert_eq!(syntax_fact_count(&parsed), 5);
+            assert_eq!(required_syntax_fact_count(&parsed), 5);
+            assert!(scan_source(source.as_bytes(), 4, &Cancellation::new()).is_err());
+        }
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(scan_source(b"module Demo exposing (..)\nvalue = 1\n", 5, &cancellation).is_err());
+    }
 
     #[test]
     fn headers_ignore_nested_comments_and_multiline_literals() {

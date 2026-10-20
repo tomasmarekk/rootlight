@@ -45,9 +45,9 @@ pub use model::{
     RelationDirection, RelationFamily, RelationshipEdgeTarget, RelationshipGroup,
     RepositoryDataTrust, ResolvedChangeRecord, SemanticChangeRecord, SourceChunkEncoding,
     SourceChunkResult, SourceReadPlan, SourceReadQueryResult, SourceTextPrefixReadPlan,
-    SourceTextReadPlan, SymbolExplainPlan, SymbolExplainResult, SymbolRelationshipsPlan,
-    SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap, TestsSelectKind,
-    TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
+    SourceTextReadPlan, SymbolExplainPlan, SymbolExplainRelationEndpoints, SymbolExplainResult,
+    SymbolRelationshipsPlan, SymbolRelationshipsResult, TestsSelectCoverage, TestsSelectGap,
+    TestsSelectKind, TestsSelectPlan, TestsSelectResult, TokenAccountingProfile,
 };
 pub use projection::{
     LexicalProjectionBuilder, SOURCE_FALLBACK_TEXT_BYTES, ScopedTextProjectionObservation,
@@ -56,8 +56,8 @@ pub use projection::{
     project_scoped_lexical_documents_for_query,
     project_scoped_lexical_documents_for_query_with_observation,
     project_scoped_lexical_documents_with_source, project_source_document_with_full_terms,
-    project_source_metadata_document,
     project_source_fallback_document, project_source_fallback_document_with_text_limit,
+    project_source_metadata_document,
 };
 pub use service::QueryService;
 pub use source_metadata_quote::{
@@ -68,3 +68,6 @@ pub use source_text::{
     QuerySourceTextChunk, SourceTextPrefixReadQueryResult, SourceTextReadQueryResult,
 };
 pub use store::{GenerationLease, GenerationSet};
+
+/// Exact source reads that do not require lexical or semantic graph residency.
+pub use service::read_source_authority;

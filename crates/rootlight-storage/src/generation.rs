@@ -50,7 +50,10 @@ pub const HARD_MAX_GENERATION_ROWS: u64 = 50_000_000;
 /// Hard ceiling for distinct source references in one generation operation.
 pub const HARD_MAX_GENERATION_SOURCE_REFS: u64 = 20_000_000;
 /// Hard ceiling for owned dynamic text crossing one generation operation.
-pub const HARD_MAX_GENERATION_TEXT_BYTES: u64 = 256 * 1024 * 1024;
+///
+/// Generation accounting combines the independently admitted default IR string
+/// and extension-payload quotas. File-only catalog text shares this capacity.
+pub const HARD_MAX_GENERATION_TEXT_BYTES: u64 = IrLimits::DEFAULT_MAX_TOTAL_TEXT_BYTES as u64;
 /// Hard ceiling for lossless locator and backend-encoded UTF-8 bytes.
 pub const HARD_MAX_GENERATION_ENCODED_TEXT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -676,7 +679,10 @@ impl SymbolExplainIndexes {
         let mut entries = reserved_index_vec(counts.relations)?;
         for (ordinal, relation) in document.relations.iter().enumerate() {
             checkpoint().map_err(IndexConstructionError::Checkpoint)?;
-            for symbol in direct_relation_entities(relation).into_iter().flatten() {
+            for symbol in relation_entity_owners(document, relation)
+                .into_iter()
+                .flatten()
+            {
                 entries.push((symbol, ordinal));
             }
         }
@@ -745,12 +751,28 @@ impl SymbolPostingCounts {
         };
         for relation in &document.relations {
             checkpoint().map_err(IndexConstructionError::Checkpoint)?;
-            for _ in direct_relation_entities(relation).into_iter().flatten() {
-                result.relations = result
-                    .relations
-                    .checked_add(1)
-                    .ok_or_else(index_workspace_unavailable)?;
-            }
+            // Estimates also accept noncanonical occurrence order. Reserving
+            // every possible endpoint owner avoids an uncharged lookup index
+            // and remains conservative when an owner is absent or duplicated.
+            let endpoints = [relation.subject, relation.object];
+            let count = endpoints
+                .into_iter()
+                .filter(|endpoint| {
+                    matches!(
+                        endpoint,
+                        RelationEndpoint::Entity(_) | RelationEndpoint::Occurrence(_)
+                    )
+                })
+                .count();
+            let count = if relation.subject == relation.object {
+                count.min(1)
+            } else {
+                count
+            };
+            result.relations = result
+                .relations
+                .checked_add(count)
+                .ok_or_else(index_workspace_unavailable)?;
         }
         for occurrence in &document.occurrences {
             checkpoint().map_err(IndexConstructionError::Checkpoint)?;
@@ -819,19 +841,22 @@ fn index_capacity_bytes<T>(capacity: usize) -> Result<u64, GenerationValidationE
     u64::try_from(bytes).map_err(|_| GenerationValidationError::IndexResourceUnavailable)
 }
 
-fn direct_relation_entities(relation: &rootlight_ir::RelationRecord) -> [Option<SymbolId>; 2] {
-    let subject = match relation.subject {
+fn relation_entity_owners(
+    document: &NormalizedIrDocument,
+    relation: &rootlight_ir::RelationRecord,
+) -> [Option<SymbolId>; 2] {
+    let owner = |endpoint| match endpoint {
         RelationEndpoint::Entity(symbol) => Some(symbol),
-        RelationEndpoint::Repository(_)
-        | RelationEndpoint::File(_)
-        | RelationEndpoint::Occurrence(_) => None,
+        RelationEndpoint::Occurrence(id) => document
+            .occurrences
+            .binary_search_by_key(&id, |record| record.id)
+            .ok()
+            .and_then(|ordinal| document.occurrences.get(ordinal))
+            .and_then(|record| record.enclosing),
+        RelationEndpoint::Repository(_) | RelationEndpoint::File(_) => None,
     };
-    let object = match relation.object {
-        RelationEndpoint::Entity(symbol) => (Some(symbol) != subject).then_some(symbol),
-        RelationEndpoint::Repository(_)
-        | RelationEndpoint::File(_)
-        | RelationEndpoint::Occurrence(_) => None,
-    };
+    let subject = owner(relation.subject);
+    let object = owner(relation.object).filter(|symbol| Some(*symbol) != subject);
     [subject, object]
 }
 
@@ -1478,7 +1503,7 @@ impl IdentityVerifiedGeneration {
             context,
         )
         .map_err(IdentityVerificationError::from_snapshot)?;
-        Self::verify_snapshot(snapshot, context)
+        Self::verify_admitted_snapshot(snapshot, context)
     }
 
     /// Verifies an already canonical generation snapshot.
@@ -1503,6 +1528,21 @@ impl IdentityVerifiedGeneration {
             context,
         )
         .map_err(IdentityVerificationError::Control)?;
+        Self::verify_admitted_snapshot(snapshot, context)
+    }
+
+    // Both callers have just admitted this unchanged snapshot with this context.
+    // Fresh construction can share identity checks without repeating its census.
+    fn verify_admitted_snapshot(
+        snapshot: GenerationSnapshot,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        if snapshot.metadata().contract_version() != GENERATION_CONTRACT_VERSION {
+            return Err(IdentityVerificationError::LegacyContract);
+        }
         verify_snapshot_identities(&snapshot, context)?;
         context
             .check()
@@ -1816,6 +1856,8 @@ fn verify_snapshot_identities(
     context: &GenerationContext<'_>,
 ) -> Result<(), IdentityVerificationError> {
     let document = snapshot.document();
+    let mut aggregate_recovery = None;
+    let mut aggregate_origins = BTreeMap::new();
     let mut file_claims = BTreeMap::new();
     let mut symbol_claims = BTreeMap::new();
     let mut lexical_batch_files = None;
@@ -1825,6 +1867,58 @@ fn verify_snapshot_identities(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         match envelope.namespace.as_str() {
+            rootlight_ir::AGGREGATE_SOURCE_RECOVERY_NAMESPACE => {
+                let cause = rootlight_ir::decode_aggregate_source_recovery_envelope(envelope)
+                    .map_err(|_| {
+                        IdentityVerificationError::IdentityMismatch(
+                            IdentityMismatchComponent::ClaimEnvelope,
+                        )
+                    })?;
+                let anchor = envelope
+                    .evidence
+                    .source
+                    .clone()
+                    .ok_or(IdentityVerificationError::MissingClaim)?;
+                if aggregate_recovery.replace((cause, anchor)).is_some() {
+                    return Err(IdentityVerificationError::DuplicateClaim);
+                }
+            }
+            rootlight_ir::AGGREGATE_SOURCE_ORIGIN_NAMESPACE => {
+                let (derived, container) = rootlight_ir::decode_aggregate_source_origin_envelope(
+                    envelope,
+                )
+                .map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                let origin_anchor = envelope
+                    .evidence
+                    .source
+                    .clone()
+                    .ok_or(IdentityVerificationError::MissingClaim)?;
+                let derived_record = snapshot
+                    .find_file(derived.span().file())
+                    .ok_or(IdentityVerificationError::MissingClaim)?;
+                let container_record = snapshot
+                    .find_file(container.span().file())
+                    .ok_or(IdentityVerificationError::MissingClaim)?;
+                if derived_record.evidence.source.as_ref() != Some(&derived)
+                    || container_record.evidence.source.as_ref() != Some(&container)
+                    || derived.span().end_byte() != derived_record.byte_length
+                    || container.span().end_byte() != container_record.byte_length
+                    || aggregate_origins
+                        .insert(
+                            derived.span().file(),
+                            (container.span().file(), origin_anchor),
+                        )
+                        .is_some()
+                {
+                    return Err(IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    ));
+                }
+            }
             rootlight_ir::GROOVY_VALUE_LOOKUP_NAMESPACE => {
                 rootlight_ir::decode_groovy_value_lookup_envelope(envelope).map_err(|_| {
                     IdentityVerificationError::IdentityMismatch(
@@ -2188,6 +2282,59 @@ fn verify_snapshot_identities(
             .map_err(IdentityVerificationError::Control)?;
     }
 
+    if let Some((cause, anchor_source)) = aggregate_recovery {
+        if cause.source_inventory != snapshot.metadata().manifest_hash()
+            || u64::try_from(snapshot.file_count()).ok() != Some(cause.members)
+            || u64::try_from(aggregate_origins.len()).ok() != Some(cause.derived_members)
+            || document.files.len() != 1
+            || !document.entities.is_empty()
+            || document.files.first().is_none_or(|anchor| {
+                anchor.evidence.source.as_ref() != Some(&anchor_source)
+                    || anchor_source.span().start_byte() != 0
+                    || anchor_source.span().end_byte() != anchor.byte_length
+            })
+            || !document.occurrences.is_empty()
+            || !document.relations.is_empty()
+            || !document.source_mappings.is_empty()
+            || !document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "source-file-fallback-resource-bounded")
+            || !document.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == rootlight_ir::AGGREGATE_SOURCE_RECOVERY_DIAGNOSTIC
+            })
+            || aggregate_origins.values().any(|(parent, origin_anchor)| {
+                aggregate_origins.contains_key(parent) || origin_anchor != &anchor_source
+            })
+            || [
+                rootlight_ir::FactDomain::Entities,
+                rootlight_ir::FactDomain::Occurrences,
+                rootlight_ir::FactDomain::Relations,
+            ]
+            .iter()
+            .any(|domain| {
+                !document.coverage_records.iter().any(|coverage| {
+                    coverage.scope == rootlight_ir::CoverageScope::Repository(document.repository)
+                        && coverage.domain == *domain
+                        && coverage.status == rootlight_ir::CoverageStatus::Unknown
+                        && coverage.indexed == 0
+                        && coverage.discovered == cause.members
+                        && coverage.skipped == cause.members
+                })
+            })
+        {
+            return Err(IdentityVerificationError::IdentityMismatch(
+                IdentityMismatchComponent::ClaimEnvelope,
+            ));
+        }
+    } else if !aggregate_origins.is_empty()
+        || document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == rootlight_ir::AGGREGATE_SOURCE_RECOVERY_DIAGNOSTIC)
+    {
+        return Err(IdentityVerificationError::MissingClaim);
+    }
     verify_fact_ids(document, context)
 }
 
@@ -3330,7 +3477,7 @@ mod tests {
     }
 
     #[test]
-    fn symbol_postings_preserve_canonical_direct_endpoint_and_target_ranges() {
+    fn symbol_postings_preserve_canonical_effective_endpoint_and_target_ranges() {
         let (metadata, document, first, second) = symbol_posting_fixture();
         let canonical = CanonicalNormalizedIrDocument::new(
             document.clone(),
@@ -3356,9 +3503,9 @@ mod tests {
                 .iter()
                 .enumerate()
                 .filter_map(|(ordinal, relation)| {
-                    (relation.subject == RelationEndpoint::Entity(symbol)
-                        || relation.object == RelationEndpoint::Entity(symbol))
-                    .then_some(ordinal)
+                    relation_entity_owners(snapshot.document(), relation)
+                        .contains(&Some(symbol))
+                        .then_some(ordinal)
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
@@ -3384,7 +3531,7 @@ mod tests {
                 expected_occurrences
             );
         }
-        assert_eq!(snapshot.relation_ordinals_for_symbol(first).len(), 2);
+        assert_eq!(snapshot.relation_ordinals_for_symbol(first).len(), 3);
         assert_eq!(snapshot.relation_ordinals_for_symbol(second).len(), 2);
         assert_eq!(snapshot.occurrence_ordinals_for_symbol(first).len(), 2);
         assert_eq!(snapshot.occurrence_ordinals_for_symbol(second).len(), 1);
@@ -3408,6 +3555,79 @@ mod tests {
         assert!(snapshot.relation_ordinals_for_symbol(missing).is_empty());
         assert!(snapshot.occurrence_ordinals_for_symbol(missing).is_empty());
         assert!(snapshot.lexical_ordinals_for_symbol(missing).is_empty());
+    }
+
+    #[test]
+    fn occurrence_relation_postings_keep_missing_owners_and_self_edges_bounded() {
+        let (metadata, mut document, first, second) = symbol_posting_fixture();
+        let mut missing_owner = document.occurrences[0].clone();
+        missing_owner.enclosing = None;
+        missing_owner.id = rootlight_ir::derive_occurrence_record_id(&missing_owner).unwrap();
+        let missing_id = missing_owner.id;
+        document.occurrences.push(missing_owner);
+        let first_id = document.occurrences[0].id;
+        let template = document.relations[0].clone();
+        document.relations.clear();
+        for (subject, object) in [
+            (
+                RelationEndpoint::Occurrence(first_id),
+                RelationEndpoint::Entity(first),
+            ),
+            (
+                RelationEndpoint::Occurrence(first_id),
+                RelationEndpoint::Occurrence(first_id),
+            ),
+            (
+                RelationEndpoint::Occurrence(missing_id),
+                RelationEndpoint::Entity(second),
+            ),
+            (
+                RelationEndpoint::Entity(second),
+                RelationEndpoint::Occurrence(first_id),
+            ),
+        ] {
+            let mut relation = template.clone();
+            relation.subject = subject;
+            relation.object = object;
+            relation.id = rootlight_ir::derive_relation_record_id(&relation).unwrap();
+            document.relations.push(relation);
+        }
+        document
+            .occurrences
+            .sort_unstable_by_key(|record| std::cmp::Reverse(record.id));
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let estimate =
+            GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(&document, &context)
+                .unwrap();
+        let snapshot = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        assert!(estimate >= snapshot.retained_symbol_explain_index_bytes());
+        assert_eq!(snapshot.relation_ordinals_for_symbol(first).len(), 3);
+        assert_eq!(snapshot.relation_ordinals_for_symbol(second).len(), 2);
+        for symbol in [first, second] {
+            assert!(
+                snapshot
+                    .relation_ordinals_for_symbol(symbol)
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
+        }
+        let relation = snapshot
+            .document()
+            .relations
+            .iter()
+            .find(|relation| relation.subject == RelationEndpoint::Occurrence(missing_id))
+            .unwrap();
+        assert_eq!(
+            relation_entity_owners(snapshot.document(), relation),
+            [None, Some(second)]
+        );
     }
 
     #[test]
@@ -4923,6 +5143,79 @@ mod tests {
     }
 
     #[test]
+    fn generation_budget_admits_combined_ir_quotas_and_charges_catalog_text() {
+        let (metadata, document, catalog) = file_only_generation(true);
+        let mut limits = IrLimits::default();
+        let usage = rootlight_ir::IrDocumentUsage::measure(&document, &limits)
+            .expect("fixture has valid independent IR quotas");
+        limits.max_total_string_bytes = usage.total_string_bytes();
+        limits.max_total_extension_bytes = usage.total_extension_bytes();
+        assert!(limits.max_total_string_bytes > 0);
+        assert!(limits.max_total_extension_bytes > 0);
+        let catalog_text_bytes: usize = catalog
+            .entries()
+            .iter()
+            .map(|entry| {
+                let file = entry.file();
+                file.path.len() + file.language.len() + file.encoding.len()
+            })
+            .sum();
+        assert!(catalog_text_bytes > 0);
+        let required = u64::try_from(
+            limits.max_total_string_bytes + limits.max_total_extension_bytes + catalog_text_bytes,
+        )
+        .expect("small fixture text fits u64");
+        let cancellation = Cancellation::new();
+        let default_ir_limits = IrLimits::default();
+        let default_combined = u64::try_from(
+            default_ir_limits.max_total_string_bytes + default_ir_limits.max_total_extension_bytes,
+        )
+        .expect("default combined IR quota fits u64");
+        let combined_budget = GenerationBudget::new(1_000, 1_000, default_combined)
+            .expect("both default IR text quotas fit the generation ceiling");
+
+        for text_limit in [default_combined, required] {
+            let budget = GenerationBudget::new(1_000, 1_000, text_limit)
+                .expect("combined text budget is valid");
+            let context = GenerationContext::new(&cancellation, budget);
+            IdentityVerifiedGeneration::verify_with_source_files(
+                metadata,
+                document.clone(),
+                catalog.clone(),
+                &limits,
+                &ExtensionSupport::default(),
+                &context,
+            )
+            .expect("independent IR quotas and the exact combined storage quota admit the fixture");
+        }
+        assert_eq!(
+            combined_budget.limit(GenerationResource::TextBytes),
+            default_combined
+        );
+
+        let budget = GenerationBudget::new(1_000, 1_000, required - 1)
+            .expect("explicit lower caller budget is valid");
+        let context = GenerationContext::new(&cancellation, budget);
+        assert_eq!(
+            IdentityVerifiedGeneration::verify_with_source_files(
+                metadata,
+                document,
+                catalog,
+                &limits,
+                &ExtensionSupport::default(),
+                &context,
+            ),
+            Err(IdentityVerificationError::Control(
+                GenerationControlError::BudgetExceeded {
+                    resource: GenerationResource::TextBytes,
+                    observed: required,
+                    limit: required - 1,
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn metadata_rejects_an_underived_generation_id() {
         let result = GenerationMetadata::new(
             RepositoryId::from_bytes([1; 16]),
@@ -4974,6 +5267,52 @@ mod tests {
                 maximum: HARD_MAX_GENERATION_ROWS,
             })
         );
+        assert_eq!(
+            GenerationBudget::new(1, 1, 0),
+            Err(GenerationBudgetError::Zero(GenerationResource::TextBytes))
+        );
+        for maximum in [HARD_MAX_GENERATION_TEXT_BYTES + 1, u64::MAX] {
+            assert_eq!(
+                GenerationBudget::new(1, 1, maximum),
+                Err(GenerationBudgetError::AboveHardLimit {
+                    resource: GenerationResource::TextBytes,
+                    maximum: HARD_MAX_GENERATION_TEXT_BYTES,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn text_budget_failures_preserve_accounting_and_check_overflow() {
+        let cancellation = Cancellation::new();
+        let budget = GenerationBudget::new(1, 1, 3).expect("small caller budget is valid");
+        let context = GenerationContext::new(&cancellation, budget);
+        let mut text_bytes = 2;
+        assert_eq!(
+            observe_text("ab", &mut text_bytes, &context),
+            Err(GenerationControlError::BudgetExceeded {
+                resource: GenerationResource::TextBytes,
+                observed: 4,
+                limit: 3,
+            })
+        );
+        assert_eq!(text_bytes, 2);
+        assert_eq!(
+            checked_add_resource(u64::MAX, 1, GenerationResource::TextBytes, &context),
+            Err(GenerationControlError::BudgetExceeded {
+                resource: GenerationResource::TextBytes,
+                observed: u64::MAX,
+                limit: 3,
+            })
+        );
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert_eq!(
+            observe_text("a", &mut text_bytes, &context),
+            Err(GenerationControlError::Cancelled {
+                reason: CancellationReason::ClientRequest,
+            })
+        );
+        assert_eq!(text_bytes, 2);
     }
 
     #[test]
@@ -5046,6 +5385,177 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn fresh_and_snapshot_verification_preserve_each_source_file_budget() {
+        let (metadata, document, catalog) = file_only_generation(true);
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let cancellation = Cancellation::new();
+        let admitted = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &limits,
+            &extensions,
+            &admitted,
+        )
+        .expect("complete file-only fixture verifies before tightening caller budgets");
+        let snapshot = GenerationSnapshot::new_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &limits,
+            &extensions,
+        )
+        .expect("the same fixture is independently canonical");
+        assert_eq!(
+            IdentityVerifiedGeneration::verify_snapshot(snapshot, &admitted),
+            Ok(verified)
+        );
+
+        for resource in [
+            GenerationResource::Rows,
+            GenerationResource::SourceReferences,
+            GenerationResource::TextBytes,
+        ] {
+            let budget = GenerationBudget::new(
+                if resource == GenerationResource::Rows {
+                    2
+                } else {
+                    HARD_MAX_GENERATION_ROWS
+                },
+                if resource == GenerationResource::SourceReferences {
+                    1
+                } else {
+                    HARD_MAX_GENERATION_SOURCE_REFS
+                },
+                if resource == GenerationResource::TextBytes {
+                    1
+                } else {
+                    HARD_MAX_GENERATION_TEXT_BYTES
+                },
+            )
+            .expect("one tighter caller quota remains a valid budget");
+            let context = GenerationContext::new(&cancellation, budget);
+            let snapshot = GenerationSnapshot::new_with_source_files(
+                metadata,
+                document.clone(),
+                catalog.clone(),
+                &limits,
+                &extensions,
+            )
+            .expect("a canonical snapshot has no authority to bypass a later caller budget");
+            for result in [
+                IdentityVerifiedGeneration::verify_with_source_files(
+                    metadata,
+                    document.clone(),
+                    catalog.clone(),
+                    &limits,
+                    &extensions,
+                    &context,
+                ),
+                IdentityVerifiedGeneration::verify_snapshot(snapshot, &context),
+            ] {
+                assert!(
+                    matches!(
+                        result,
+                        Err(IdentityVerificationError::Control(
+                            GenerationControlError::BudgetExceeded {
+                                resource: observed_resource,
+                                observed,
+                                limit,
+                            }
+                        )) if observed_resource == resource
+                            && limit == budget.limit(resource)
+                            && observed > limit
+                    ),
+                    "{resource:?}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_and_snapshot_verification_reject_canonical_ir_with_a_corrupt_claim() {
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let claim = document
+            .extensions
+            .iter_mut()
+            .find(|envelope| envelope.namespace == FILE_IDENTITY_CLAIM_NAMESPACE)
+            .expect("fixture has an authored file claim");
+        claim.payload.push(' ');
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let snapshot = GenerationSnapshot::new_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &limits,
+            &extensions,
+        )
+        .expect("ordinary IR validation does not certify identity-claim payloads");
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        for result in [
+            IdentityVerifiedGeneration::verify_with_source_files(
+                metadata,
+                document,
+                catalog,
+                &limits,
+                &extensions,
+                &context,
+            ),
+            IdentityVerifiedGeneration::verify_snapshot(snapshot, &context),
+        ] {
+            assert_eq!(
+                result,
+                Err(IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::ClaimEnvelope
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_and_snapshot_verification_preserve_client_cancellation() {
+        let (metadata, document, catalog) = file_only_generation(true);
+        let limits = IrLimits::default();
+        let extensions = ExtensionSupport::default();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let snapshot = GenerationSnapshot::new_with_source_files_and_context(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &limits,
+            &extensions,
+            &context,
+        )
+        .expect("fixture is admitted under the same context before cancellation");
+        cancellation.cancel(CancellationReason::ClientRequest);
+        for result in [
+            IdentityVerifiedGeneration::verify_with_source_files(
+                metadata,
+                document,
+                catalog,
+                &limits,
+                &extensions,
+                &context,
+            ),
+            IdentityVerifiedGeneration::verify_snapshot(snapshot, &context),
+        ] {
+            assert_eq!(
+                result,
+                Err(IdentityVerificationError::Control(
+                    GenerationControlError::Cancelled {
+                        reason: CancellationReason::ClientRequest,
+                    }
+                ))
+            );
+        }
     }
 
     #[test]

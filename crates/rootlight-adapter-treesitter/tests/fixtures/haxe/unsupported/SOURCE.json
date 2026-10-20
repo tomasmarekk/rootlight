@@ -1,0 +1,56 @@
+{
+  "origin": "Locally authored Haxe quotation and reification source controls",
+  "meaning": "Source-defined host declarations are distinct from quoted generated content; native recovery is not repaired syntax",
+  "files": [
+    {
+      "name": "nested-block-splice-queued.hx",
+      "bytes": 82,
+      "sha256": "9db52644eded95e285fae6f00bbd1be87a4979ce7b0d4f51e9fcd7b621d81133"
+    },
+    {
+      "name": "selector-a.hx",
+      "bytes": 69,
+      "sha256": "b9ca6370f1e554c85bda877288371bad742b89e13af1e14a849a639bed730930"
+    },
+    {
+      "name": "selector-b.hx",
+      "bytes": 69,
+      "sha256": "7e62b1d8ec99234710fc2d62b8826b092f05c3b0504e2b340b9ab9ead9b8f441"
+    },
+    {
+      "name": "selector-e.hx",
+      "bytes": 69,
+      "sha256": "e2968b7e8f18604915c489545de94f6919b38540fb8875150d1e79a500feb8bf"
+    },
+    {
+      "name": "selector-empty.hx",
+      "bytes": 68,
+      "sha256": "1095c951e5976ddde09f94441d5a100ef8efd97d380e663249e7e63a8965ab9f"
+    },
+    {
+      "name": "selector-i.hx",
+      "bytes": 69,
+      "sha256": "a262a087f7fa7fc78e4c7b290418175dff1b4bbeb91a25f09b81527248e3a52f"
+    },
+    {
+      "name": "selector-p.hx",
+      "bytes": 69,
+      "sha256": "04b7bd7493c89e8826ae7cd0b23be7d84a8c0d7eb46cf981f00f80bbd40f29b6"
+    },
+    {
+      "name": "selector-v.hx",
+      "bytes": 69,
+      "sha256": "4b8910bf4586eccb0ac6719b2b3e87b7ac81841447b3ae28258778f1cd16310d"
+    },
+    {
+      "name": "type-reification-queued.hx",
+      "bytes": 65,
+      "sha256": "bace97943f929c6098515f7e2f506a02482426a7aef321d25e3c597efed2505c"
+    },
+    {
+      "name": "unknown-reification-selector.hx",
+      "bytes": 69,
+      "sha256": "dd01a269caed71f22bfe414df26b2ec6faab3adade9df0c8704cdb91fcd96402"
+    }
+  ]
+}

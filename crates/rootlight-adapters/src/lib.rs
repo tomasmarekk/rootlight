@@ -9,15 +9,19 @@ mod agda;
 mod awk;
 mod elm;
 mod erlang;
+mod flux;
 mod ini;
+mod less;
 mod make;
 mod project_context;
 mod project_semantics;
 mod prolog;
 mod runtime_trace;
+mod sass;
 mod scip_export;
 mod scip_import;
 mod scss;
+mod source_projection;
 mod tcl;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,7 +42,9 @@ pub use agda::AgdaParseProvider;
 pub use awk::AwkParseProvider;
 pub use elm::ElmParseProvider;
 pub use erlang::ErlangParseProvider;
+pub use flux::FluxParseProvider;
 pub use ini::IniParseProvider;
+pub use less::LessParseProvider;
 pub use make::MakeParseProvider;
 pub use project_context::{
     CxxProjectContext, DotnetProjectContext, GeneratedOriginMapping, GoProjectContext,
@@ -59,6 +65,7 @@ pub use runtime_trace::{
     RuntimeTraceLimits, RuntimeTraceOverlay, RuntimeTraceProvenance, RuntimeTraceRelation,
     RuntimeTraceRelationKind, RuntimeTraceResource, import_runtime_trace,
 };
+pub use sass::SassParseProvider;
 pub use scip_export::{
     SCIP_EXPORT_SUBSET_VERSION, ScipExportError, ScipExportLimits, ScipExportOmissions,
     ScipExportOutcome, ScipExportReport, ScipExportRequest, ScipExportResource, ScipExportSource,

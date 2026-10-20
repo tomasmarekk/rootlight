@@ -170,6 +170,18 @@ impl AnalyticalBudget {
         Self::from_limits(limits)
     }
 
+    fn projected_response_options(self) -> Result<client::RequestOptions, ToolExecutionError> {
+        let mut maximums = self.limits.maximums();
+        // The rich daemon DTO precedes the public projection. Its transport
+        // allowance uses the existing JSON bound while final shaping retains
+        // the caller's output-token limit and all server ceilings.
+        maximums.tokens = maximums
+            .tokens
+            .max(maximums.json_bytes)
+            .min(BudgetLimits::server_ceiling().maximums().tokens);
+        Self::from_limits(BudgetLimits::from_maximums(maximums)).map(|budget| budget.options)
+    }
+
     fn with_source_limit(
         requested: Option<&ResponseBudget>,
         source_bytes: Option<u32>,
@@ -2906,14 +2918,22 @@ where
             .await
         }
         BatchTool::SourceRead => {
-            execute_source_read(
+            let output = execute_source_read(
                 port,
                 arguments,
                 cancellation,
                 unsupported,
                 invalid_arguments,
             )
-            .await
+            .await?;
+            if output
+                .get("data")
+                .and_then(|data| data.get("source_recovery"))
+                .is_some_and(|recovery| !recovery.is_null())
+            {
+                return Err(source_recovery::retained_contract_error());
+            }
+            Ok(output)
         }
         BatchTool::SymbolRelationships => {
             execute_symbol_relationships(
@@ -4585,7 +4605,11 @@ where
         );
     }
     let expected = request.clone();
-    let future = port.symbol_explain(request, budget.options, cancellation.clone());
+    let future = port.symbol_explain(
+        request,
+        budget.projected_response_options()?,
+        cancellation.clone(),
+    );
     let response = await_port(future, cancellation).await?;
     let output = map_symbol_explain(response, &expected)?;
     serialize_profiled_read_success(output, response_profile, started_at, shaping, budget.limits)
@@ -6894,6 +6918,9 @@ fn query_completeness_from_label(label: &str) -> Result<QueryCompleteness, ToolE
         .map_err(|_| internal(ToolExecutionFailure::InvalidResponse))
 }
 
+#[path = "executor/source_recovery.rs"]
+mod source_recovery;
+
 async fn execute_source_read<P>(
     port: Arc<P>,
     arguments: Map<String, Value>,
@@ -6936,8 +6963,16 @@ where
     let expected = request.clone();
     let future = port.source_read(request, budget.options, cancellation.clone());
     let response = await_port(future, cancellation).await?;
+    source_recovery::validate_analysis(
+        response.result.source_recovery.as_ref(),
+        &response.result.context,
+        response.result.chunks.iter().map(|chunk| chunk.tier),
+    )?;
+    let recovery = response.result.source_recovery.clone();
     let output = map_source_read(response, &expected)?;
-    serialize_source_read_success(output, response_profile, started_at, budget)
+    let mut output = serialize_source_read_success(output, response_profile, started_at, budget)?;
+    source_recovery::attach(&mut output, recovery)?;
+    Ok(output)
 }
 
 async fn execute_lossless_source_read<P>(
@@ -7002,9 +7037,18 @@ where
         cancellation,
     )
     .await?;
+    source_recovery::validate_analysis(
+        response.result.source_recovery.as_ref(),
+        &response.result.context,
+        response.result.chunks.iter().map(|chunk| chunk.tier),
+    )?;
+    let recovery = response.result.source_recovery.clone();
     let mut output = map_lossless_source_read(response, &expected)?;
     rootlight_agent::response_profile::shape_read_envelope(&mut output, response_profile);
-    serialize_measured_source_success(output, started_at, budget, |output| &mut output.usage)
+    let mut output =
+        serialize_measured_source_success(output, started_at, budget, |output| &mut output.usage)?;
+    source_recovery::attach(&mut output, recovery)?;
+    Ok(output)
 }
 
 async fn await_port<T>(
@@ -7155,7 +7199,7 @@ fn normalize_repository_index(
         root,
         mode: input.mode.unwrap_or(IndexMode::Auto),
         wait_ms: input.wait_ms,
-        detached: input.detached.unwrap_or(false),
+        detached: input.detached.unwrap_or(true),
     })
 }
 

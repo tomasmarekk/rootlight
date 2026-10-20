@@ -32,15 +32,31 @@ mod coq;
 mod coq_contract;
 #[cfg(test)]
 mod coq_corpus_observation;
+#[cfg(test)]
+mod elixir_tests;
 mod encoding;
 mod fsharp;
 mod fsproj;
+#[cfg(test)]
+mod haxe_tests;
 mod hdl;
 mod incremental;
+mod json_schema;
+#[cfg(test)]
+mod json_schema_tests;
 mod matlab;
+mod modelica;
+#[cfg(test)]
+mod modelica_tests;
 mod objective_c;
 mod office;
 mod prolog;
+#[cfg(test)]
+mod qml_tests;
+mod racket_reader;
+mod rust_hint;
+#[cfg(test)]
+mod rust_hint_contract_tests;
 mod scheme;
 mod shebang;
 mod streamed;
@@ -60,7 +76,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.50";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.64";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -119,6 +135,23 @@ pub fn fsharp_native_probe_allowed(
     Ok(allowed)
 }
 
+#[cfg(test)]
+mod protobuf_source_identity_tests {
+    use super::{canonical_language, extension_language};
+
+    #[test]
+    fn canonical_protobuf_discovery_is_general_and_suffix_bounded() {
+        for path in ["schema.proto", "schemas/nested.PROTO", "C#/schema.proto"] {
+            assert_eq!(extension_language(path), Some("protobuf"));
+        }
+        for alias in ["protobuf", "proto", "protocol-buffers"] {
+            assert_eq!(canonical_language(alias), Some("protobuf"));
+        }
+        assert_ne!(extension_language("schema.proto.bak"), Some("protobuf"));
+        assert_ne!(extension_language("schema.txt"), Some("protobuf"));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RetainedSnapshotBudget {
     observed: u64,
@@ -159,6 +192,14 @@ impl RetainedSnapshotBudget {
             });
         }
         self.observed = observed;
+        Ok(())
+    }
+
+    fn release(&mut self, bytes: u64) -> Result<(), DiscoveryError> {
+        self.observed = self
+            .observed
+            .checked_sub(bytes)
+            .ok_or(DiscoveryError::IncrementalDrift)?;
         Ok(())
     }
 
@@ -1485,11 +1526,12 @@ impl<'a> DiscoveryState<'a> {
             },
             |prefix| prefix.as_bytes(),
         );
-        let (class, mut language_signals) = classify_prefix(
+        let (class, mut language_signals) = classify_validated_prefix(
             &path,
             content,
             classification.prefix_truncated,
             classification.decoded_prefix.is_some(),
+            matches!(classification.encoding, "utf-8" | "utf-16le" | "utf-16be"),
         );
         if let Some(language) = self.config.source_language_for_path(path.as_str()) {
             language_signals.push(LanguageSignal {
@@ -1565,6 +1607,12 @@ impl<'a> DiscoveryState<'a> {
             encoding::classify(snapshot.content(), self.cancellation)?
         };
         let Some(classification) = classification else {
+            let bytes = snapshot.metadata().length;
+            drop(snapshot);
+            if self.retain_snapshots {
+                // Discarded captures no longer consume retained or transient bytes.
+                self.snapshot_budget.release(bytes)?;
+            }
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
         };
@@ -1572,7 +1620,7 @@ impl<'a> DiscoveryState<'a> {
             .decoded_prefix
             .as_ref()
             .map_or(snapshot.content(), |prefix| prefix.as_bytes());
-        let (class, mut language_signals) = classify_prefix(
+        let (class, mut language_signals) = classify_validated_prefix(
             &path,
             if container_format.is_some() {
                 b""
@@ -1581,6 +1629,7 @@ impl<'a> DiscoveryState<'a> {
             },
             classification.prefix_truncated,
             classification.decoded_prefix.is_some(),
+            matches!(classification.encoding, "utf-8" | "utf-16le" | "utf-16be"),
         );
         if let Some(format) = container_format {
             language_signals.clear();
@@ -1917,19 +1966,37 @@ fn read_directory_with_entry_budget(
 
 #[cfg(test)]
 fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSignal>) {
-    classify_prefix(
+    classify_validated_prefix(
         path,
         content,
         content.len() > MAX_CLASSIFICATION_BYTES,
         false,
+        std::str::from_utf8(content).is_ok(),
     )
 }
 
+#[cfg(test)]
 fn classify_prefix(
     path: &RelativePath,
     content: &[u8],
     prefix_truncated: bool,
     decoded_prefix: bool,
+) -> (InputClass, Vec<LanguageSignal>) {
+    classify_validated_prefix(
+        path,
+        content,
+        prefix_truncated,
+        decoded_prefix,
+        !prefix_truncated && std::str::from_utf8(content).is_ok(),
+    )
+}
+
+fn classify_validated_prefix(
+    path: &RelativePath,
+    content: &[u8],
+    prefix_truncated: bool,
+    decoded_prefix: bool,
+    validated_text: bool,
 ) -> (InputClass, Vec<LanguageSignal>) {
     let normalized = path.as_str().to_ascii_lowercase();
     let class = if generated_path(&normalized) || generated_content(content) {
@@ -1943,6 +2010,7 @@ fn classify_prefix(
     let mut signals = BTreeSet::new();
     let extension = extension_language(&normalized);
     if let Some(language) = extension
+        && language != "modelica"
         && (language != "scheme" || scheme::extension_allowed(content, prefix_truncated))
     {
         signals.insert(LanguageSignal {
@@ -1968,7 +2036,31 @@ fn classify_prefix(
             evidence: LanguageEvidence::Shebang,
         });
     }
-    if common_lisp::is_content_candidate(&normalized)
+    if validated_text && racket_reader::has_header(content, prefix_truncated) {
+        signals.insert(LanguageSignal {
+            language: "racket".to_owned(),
+            evidence: LanguageEvidence::Content,
+        });
+    }
+    let json_schema_document =
+        validated_text && json_schema::has_content_hint(content, prefix_truncated);
+    if json_schema_document {
+        signals.insert(LanguageSignal {
+            language: "json-schema".to_owned(),
+            evidence: LanguageEvidence::Content,
+        });
+    }
+    let modelica_header = validated_text
+        && normalized.ends_with(".mo")
+        && modelica::has_content_hint(content, prefix_truncated);
+    if modelica_header {
+        signals.insert(LanguageSignal {
+            language: "modelica".to_owned(),
+            evidence: LanguageEvidence::Content,
+        });
+    }
+    if !json_schema_document
+        && common_lisp::is_content_candidate(&normalized)
         && common_lisp::has_content_hint(
             &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
             prefix_truncated,
@@ -1979,7 +2071,11 @@ fn classify_prefix(
             evidence: LanguageEvidence::Content,
         });
     }
-    let content_hint = if Path::new(&normalized)
+    // A complete JSON object has no executable header outside its strings.
+    // Generic code hints must not mine schema annotations or example payloads.
+    let content_hint = if json_schema_document || extension == Some("qml") {
+        None
+    } else if Path::new(&normalized)
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("fs"))
@@ -2040,6 +2136,15 @@ fn classify_prefix(
         } else {
             vba::has_classic_content_hint(sample).then_some("visual-basic-classic")
         }
+    } else if prefix_truncated {
+        content_language_with_prefix_context(
+            content,
+            extension == Some("objective-c"),
+            modelica_header,
+            true,
+        )
+    } else if modelica_header {
+        content_language_with_context(content, false, true)
     } else if extension == Some("objective-c") {
         content_language_with_scripts(content, true)
     } else {
@@ -2173,6 +2278,46 @@ pub const fn language_capabilities() -> &'static [LanguageCapability] {
 }
 
 const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
+    LanguageCapability {
+        language: "modelica",
+        suffixes: &[".mo"],
+        aliases: &[],
+        detectors: &["content", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "graphql",
+        suffixes: &[".graphql", ".gql"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "elixir",
+        suffixes: &[".ex", ".exs"],
+        aliases: &[],
+        detectors: &["extension", "shebang", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "protobuf",
+        suffixes: &[".proto"],
+        aliases: &["proto", "protocol-buffers"],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "thrift",
+        suffixes: &[".thrift"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
     LanguageCapability {
         language: "julia",
         suffixes: &[".jl"],
@@ -2342,6 +2487,150 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "qsharp",
+        suffixes: &[".qs"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "standard-ml",
+        suffixes: &[".sml"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "webassembly",
+        suffixes: &[".wat"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "mojo",
+        suffixes: &[".mojo", ".🔥"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "hare",
+        suffixes: &[".ha"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "haxe",
+        suffixes: &[".hx"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "qml",
+        suffixes: &[".qml"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "hcl",
+        suffixes: &[".hcl", ".tf", ".tfvars", ".tf.example"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "ada",
+        suffixes: &[".adb", ".ads", ".ada"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "d",
+        suffixes: &[".d", ".di"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "zig",
+        suffixes: &[".zig"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "crystal",
+        suffixes: &[".cr"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "cue",
+        suffixes: &[".cue"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "fish",
+        suffixes: &[".fish"],
+        aliases: &[],
+        detectors: &["extension", "shebang", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "nim",
+        suffixes: &[".nim", ".nims", ".nimble"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "clojure",
+        suffixes: &[".clj", ".cljs", ".cljc"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "racket",
+        suffixes: &[".rkt"],
+        aliases: &[],
+        detectors: &["extension", "content", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "vhdl",
+        suffixes: &[".vhd", ".vhdl"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "systemverilog",
         suffixes: &[".sv", ".svh"],
         aliases: &[],
@@ -2370,6 +2659,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".app.src", ".erl", ".hrl"],
         aliases: &[],
         detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
+    },
+    LanguageCapability {
+        language: "flux",
+        suffixes: &[".flux"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["native"],
     },
@@ -2413,6 +2710,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["content", "extension", "manifest"],
         maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
+    },
+    LanguageCapability {
+        language: "capnp",
+        suffixes: &[".capnp"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "groovy",
@@ -2503,6 +2808,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "json-schema",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["content"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "jsonc",
         suffixes: &[".jsonc"],
         aliases: &[],
@@ -2531,6 +2844,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".less"],
         aliases: &[],
         detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
+    },
+    LanguageCapability {
+        language: "liquid",
+        suffixes: &[".liquid"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["source-fallback"],
     },
@@ -2650,9 +2971,9 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "pony",
         suffixes: &[".pony"],
         aliases: &[],
-        detectors: &["extension"],
+        detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "prolog",
@@ -2675,6 +2996,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".r"],
         aliases: &[],
         detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "ring",
+        suffixes: &[".ring"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -2708,7 +3037,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["native"],
     },
     LanguageCapability {
         language: "scala",
@@ -2909,14 +3238,44 @@ fn content_language(content: &[u8]) -> Option<&'static str> {
 }
 
 fn content_language_with_scripts(content: &[u8], matlab_scripts: bool) -> Option<&'static str> {
+    content_language_with_context(content, matlab_scripts, false)
+}
+
+fn content_language_with_context(
+    content: &[u8],
+    matlab_scripts: bool,
+    modelica_header: bool,
+) -> Option<&'static str> {
+    content_language_with_prefix_context(
+        content,
+        matlab_scripts,
+        modelica_header,
+        content.len() > MAX_CLASSIFICATION_BYTES,
+    )
+}
+
+fn content_language_with_prefix_context(
+    content: &[u8],
+    matlab_scripts: bool,
+    modelica_header: bool,
+    prefix_truncated: bool,
+) -> Option<&'static str> {
     let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES))?;
     let text = String::from_utf8_lossy(sample);
-    let matlab = matlab::hints(sample);
-    if matlab.declaration || matlab_scripts && matlab.script {
+    let matlab = matlab::hints(
+        sample,
+        prefix_truncated || content.len() > MAX_CLASSIFICATION_BYTES,
+    );
+    let matlab_declaration = if modelica_header {
+        matlab.distinctive_declaration
+    } else {
+        matlab.declaration
+    };
+    if matlab_declaration || matlab_scripts && matlab.script {
         Some("matlab")
     } else if objective_c::has_content_hint(sample) {
         Some("objective-c")
-    } else if text.contains("fn main(") || text.contains("pub struct ") {
+    } else if rust_hint::has_content_hint(sample) {
         Some("rust")
     } else if text.contains("package main") && text.contains("func ") {
         Some("go")
@@ -6368,15 +6727,235 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn hcl_sources_route_compound_examples_without_json_or_template_reclassification() {
+        for path in [
+            "source.tf",
+            "SOURCE.HCL",
+            "nested/values.tfvars",
+            "nested/main.tf.example",
+            "MAIN.TF.EXAMPLE",
+        ] {
+            assert_eq!(extension_language(path), Some("hcl"), "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"written = { nested = 1 }\n",
+            );
+            assert!(
+                signals.iter().any(|signal| signal.language == "hcl"
+                    && signal.evidence == LanguageEvidence::Extension)
+            );
+        }
+        for path in [
+            "source.tf.bak",
+            "source.tf.example.bak",
+            "source.tftpl",
+            "source.hclx",
+        ] {
+            assert_ne!(extension_language(path), Some("hcl"), "{path}");
+        }
+        for path in ["source.tf.json", "source.tfvars.json"] {
+            assert_eq!(extension_language(path), Some("json"), "{path}");
+        }
+        assert_eq!(canonical_language("hcl"), Some("hcl"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "hcl")
+            .unwrap();
+        assert_eq!(
+            capability.suffixes,
+            &[".hcl", ".tf", ".tfvars", ".tf.example"]
+        );
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn ada_sources_retain_distinct_bounded_native_routes() {
+        for path in [
+            "body.adb",
+            "spec.ads",
+            "unit.ada",
+            "NESTED/BODY.ADB",
+            "SPEC.ADS",
+            "UNIT.ADA",
+        ] {
+            assert_eq!(extension_language(path), Some("ada"));
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"procedure Sample is begin null; end Sample;\n",
+            );
+            assert!(
+                signals.iter().any(|signal| signal.language == "ada"
+                    && signal.evidence == LanguageEvidence::Extension)
+            );
+        }
+        for path in [
+            "body.adb.bak",
+            "spec.ads.txt",
+            "unit.adam",
+            "folder.adb/other.txt",
+        ] {
+            assert_ne!(extension_language(path), Some("ada"), "{path}");
+        }
+        assert_eq!(canonical_language("ada"), Some("ada"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "ada")
+            .unwrap();
+        assert_eq!(capability.suffixes, &[".adb", ".ads", ".ada"]);
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn d_sources_and_interfaces_keep_distinct_bounded_routes() {
+        for path in [
+            "source.d",
+            "SOURCE.D",
+            "nested/interface.di",
+            "INTERFACE.DI",
+        ] {
+            assert_eq!(extension_language(path), Some("d"), "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"module sample; void measure(int value) {}
+",
+            );
+            assert!(
+                signals.iter().any(|signal| signal.language == "d"
+                    && signal.evidence == LanguageEvidence::Extension)
+            );
+        }
+        for path in [
+            "source.d.bak",
+            "source.di.txt",
+            "source.dmd",
+            "source.dylib",
+            "folder.d/file.txt",
+        ] {
+            assert_ne!(extension_language(path), Some("d"), "{path}");
+        }
+        assert_eq!(canonical_language("d"), Some("d"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "d")
+            .unwrap();
+        assert_eq!(capability.suffixes, &[".d", ".di"]);
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn zig_sources_route_to_partial_structure_without_zon_reclassification() {
+        for path in ["source.zig", "SOURCE.ZIG", "nested/source.zig"] {
+            assert_eq!(extension_language(path), Some("zig"));
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"pub fn written() void {}\n",
+            );
+            assert!(
+                signals.iter().any(|signal| signal.language == "zig"
+                    && signal.evidence == LanguageEvidence::Extension)
+            );
+        }
+        for path in [
+            "source.zig.bak",
+            "source.zig.zon",
+            "build.zon",
+            "source.ziggy",
+        ] {
+            assert_ne!(extension_language(path), Some("zig"), "{path}");
+        }
+        assert_eq!(canonical_language("zig"), Some("zig"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "zig")
+            .unwrap();
+        assert_eq!(capability.suffixes, &[".zig"]);
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn crystal_sources_route_to_partial_structure_without_templates() {
+        for path in ["source.cr", "SOURCE.CR", "nested/source.cr"] {
+            assert_eq!(extension_language(path), Some("crystal"));
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"class Written\n  def value\n    1\n  end\nend\n",
+            );
+            assert!(signals.iter().any(|signal| signal.language == "crystal"
+                && signal.evidence == LanguageEvidence::Extension));
+        }
+        for path in ["source.cr.bak", "source.crystal", "view.ecr", "VIEW.ECR"] {
+            assert_eq!(extension_language(path), None, "{path}");
+        }
+        assert_eq!(canonical_language("crystal"), Some("crystal"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "crystal")
+            .unwrap();
+        assert_eq!(capability.suffixes, &[".cr"]);
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn cue_and_pony_sources_route_to_partial_structural_providers() {
+        for (path, language) in [
+            ("config.cue", "cue"),
+            ("actor.pony", "pony"),
+            ("CONFIG.CUE", "cue"),
+            ("ACTOR.PONY", "pony"),
+        ] {
+            assert_eq!(extension_language(path), Some(language));
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"written source\n",
+            );
+            assert!(signals.iter().any(|signal| signal.language == language
+                && signal.evidence == LanguageEvidence::Extension));
+            assert_eq!(canonical_language(language), Some(language));
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == language)
+                .unwrap();
+            assert_eq!(capability.analyzers, &["treesitter"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
+        }
+        for path in ["config.cue.bak", "actor.pony.txt"] {
+            assert_eq!(extension_language(path), None);
+        }
+    }
+
+    #[test]
+    fn native_stylesheet_frontends_advertise_source_scoped_analysis() {
+        for (path, language) in [("theme.less", "less"), ("theme.sass", "sass")] {
+            assert_eq!(extension_language(path), Some(language));
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"source content\n",
+            );
+            assert!(signals.iter().any(|signal| {
+                signal.language == language && signal.evidence == LanguageEvidence::Extension
+            }));
+            assert_eq!(canonical_language(language), Some(language));
+            let capability = language_capabilities()
+                .iter()
+                .find(|capability| capability.language == language)
+                .unwrap();
+            assert_eq!(capability.analyzers, &["native"]);
+            assert_eq!(capability.maximum_tier, "tier_d");
+        }
+    }
+
+    #[test]
     fn unparsed_language_suffixes_advertise_only_file_retrieval() {
         for (path, language) in [
             ("Shape.impl.carbon", "carbon"),
             ("Main.idr", "idris"),
             ("Main.lidr", "idris"),
             ("Algebra.lean", "lean"),
-            ("actor.pony", "pony"),
-            ("theme.less", "less"),
-            ("theme.sass", "sass"),
         ] {
             assert_eq!(extension_language(path), Some(language), "{path}");
             let (_, signals) = classify(
@@ -6929,6 +7508,87 @@ max_source_file_bytes = 2097152
             assert_ne!(extension_language(path), Some("make"), "{path}");
         }
         assert_eq!(canonical_language("make"), Some("make"));
+    }
+
+    #[test]
+    fn clojure_source_routes_distinguish_source_dialects_from_data_and_bitbake() {
+        for path in ["src/written.clj", "src/written.cljs", "src/written.cljc"] {
+            assert_eq!(extension_language(path), Some("clojure"));
+        }
+        for path in ["data.edn", "recipe.bb", "written.clj.bak", "written.scm"] {
+            assert_ne!(extension_language(path), Some("clojure"));
+        }
+        assert_eq!(canonical_language("clojure"), Some("clojure"));
+    }
+
+    #[test]
+    fn nim_routes_source_and_scripts_without_claiming_compiler_selection() {
+        for path in ["source.nim", "config.nims", "project.nimble", "SOURCE.NIM"] {
+            assert_eq!(extension_language(path), Some("nim"));
+        }
+        for path in ["source.nim.bak", "source.nims.txt", "source.nimble.lock"] {
+            assert_ne!(extension_language(path), Some("nim"));
+        }
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "nim")
+            .unwrap();
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("nim"), Some("nim"));
+    }
+
+    #[test]
+    fn fish_routing_keeps_shell_identity_separate_from_other_interpreters() {
+        assert_eq!(extension_language("source.fish"), Some("fish"));
+        assert_ne!(extension_language("source.fish.bak"), Some("fish"));
+        for header in [
+            b"#!/usr/bin/fish\n".as_slice(),
+            b"#!/usr/bin/env fish\n",
+            b"#!/usr/bin/env -S fish --no-config\n",
+        ] {
+            assert_eq!(shebang_language(header), Some("fish"));
+        }
+        assert_eq!(shebang_language(b"#!/usr/bin/env sh\n"), Some("bash"));
+        assert_ne!(shebang_language(b"#!/usr/bin/env fish3\n"), Some("fish"));
+        assert_eq!(canonical_language("fish"), Some("fish"));
+    }
+
+    #[test]
+    fn racket_source_route_does_not_claim_custom_reader_data() {
+        assert_eq!(extension_language("src/written.rkt"), Some("racket"));
+        for path in [
+            "written.scm",
+            "document.scrbl",
+            "written.rktd",
+            "written.rkt.bak",
+        ] {
+            assert_ne!(extension_language(path), Some("racket"));
+        }
+        assert_eq!(canonical_language("racket"), Some("racket"));
+    }
+
+    #[test]
+    fn vhdl_suffixes_are_unambiguous_and_do_not_borrow_other_hdl_routes() {
+        for path in [
+            "rtl/unit.vhd",
+            "rtl/unit.vhdl",
+            "rtl/UNIT.VHD",
+            "rtl/UNIT.VHDL",
+        ] {
+            assert_eq!(extension_language(path), Some("vhdl"), "{path}");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"entity Written is end Written;",
+            );
+            assert!(signals.iter().any(|signal| signal.language == "vhdl"
+                && signal.evidence == LanguageEvidence::Extension));
+        }
+        for path in ["unit.vhd.txt", "unit.vhd.bak", "unit.vh", "unit.sv"] {
+            assert_ne!(extension_language(path), Some("vhdl"), "{path}");
+        }
+        assert_eq!(canonical_language("vhdl"), Some("vhdl"));
+        assert_eq!(canonical_language("VHDL"), None);
     }
 
     #[test]
@@ -7778,6 +8438,91 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn thrift_suffix_and_configuration_share_one_canonical_identity() {
+        assert_eq!(canonical_language("thrift"), Some("thrift"));
+        for path in ["schema.thrift", "SCHEMA.THRIFT"] {
+            assert_eq!(extension_language(path), Some("thrift"));
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"struct Item {}
+",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "thrift".to_owned(),
+                    evidence: LanguageEvidence::Extension
+                }]
+            );
+        }
+        for path in ["schema.thrift.bak", "schema.thrift.json", "thrift.js"] {
+            assert_ne!(extension_language(path), Some("thrift"));
+        }
+    }
+
+    #[test]
+    fn capnp_suffix_is_canonical_without_neighbor_extension_aliases() {
+        let capability = LANGUAGE_CAPABILITIES
+            .iter()
+            .find(|entry| entry.language == "capnp")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".capnp"]);
+        assert_eq!(canonical_language("capnp"), Some("capnp"));
+        for path in ["schema.capnp", "SCHEMA.CAPNP", "nested/service.capnp"] {
+            assert_eq!(extension_language(path), Some("capnp"));
+        }
+        for path in [
+            "schema.capnp.bak",
+            "capnp.js",
+            "schema.proto",
+            "schema.capnproto",
+        ] {
+            assert_ne!(extension_language(path), Some("capnp"));
+        }
+    }
+
+    #[test]
+    fn graphql_suffixes_share_one_canonical_source_identity() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "graphql")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".graphql", ".gql"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("graphql"), Some("graphql"));
+        assert_eq!(canonical_language("GraphQL"), None);
+        for path in [
+            "schema.graphql",
+            "operation.gql",
+            "SCHEMA.GRAPHQL",
+            "QUERY.GQL",
+        ] {
+            assert_eq!(extension_language(path), Some("graphql"));
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"type Query { value: String }",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "graphql".to_owned(),
+                    evidence: LanguageEvidence::Extension
+                }]
+            );
+        }
+        for path in [
+            "schema.graphql.bak",
+            "schema.gql.json",
+            "graphql.js",
+            "schema.graphqls",
+        ] {
+            assert_ne!(extension_language(path), Some("graphql"));
+        }
+    }
+
+    #[test]
     fn wgsl_admission_uses_only_its_exact_installed_suffix_and_canonical_name() {
         let capability = language_capabilities()
             .iter()
@@ -7958,7 +8703,7 @@ max_source_file_bytes = 2097152
             assert!(!signals.iter().any(|signal| signal.language == "scheme"));
         }
         assert!(
-            classify(&path, b"(written) @name\n; fn main(")
+            !classify(&path, b"(written) @name\n; fn main(")
                 .1
                 .contains(&LanguageSignal {
                     language: "rust".to_owned(),
@@ -8199,7 +8944,10 @@ max_source_file_bytes = 2097152
     #[test]
     fn common_lisp_content_preserves_independent_foreign_evidence() {
         let path = RelativePath::parse(Path::new("package.lisp")).expect("fixture path");
-        let (_, signals) = classify(&path, b"(defpackage :sample) ; fn main(\n");
+        let (_, signals) = classify(
+            &path,
+            b"(defpackage :sample)\npub struct Written { field: u8 }\n",
+        );
         for signal in [
             LanguageSignal {
                 language: "common-lisp".to_owned(),
@@ -9515,3 +10263,72 @@ max_source_file_bytes = 2097152
         }
     }
 }
+
+#[cfg(test)]
+mod ring_source_hint_contract_tests {
+    use super::*;
+
+    #[test]
+    fn ring_source_suffix_and_canonical_hint_are_general_without_parser_claims() {
+        for path in [
+            "source.ring",
+            "nested/Other.RING",
+            "arbitrary/path/definition.RiNg",
+        ] {
+            assert_eq!(extension_language(path), Some("ring"));
+        }
+        assert_eq!(canonical_language("ring"), Some("ring"));
+        for path in [
+            "source.ringo",
+            "source.ring.bak",
+            "source.ring/notes.txt",
+            "ring",
+            "source.txt",
+        ] {
+            assert_ne!(extension_language(path), Some("ring"));
+        }
+        let capability = LANGUAGE_CAPABILITIES
+            .iter()
+            .find(|entry| entry.language == "ring")
+            .unwrap();
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.detectors, &["extension", "configuration"]);
+    }
+
+    #[test]
+    fn exact_original_ring_source_receives_only_a_filename_attribution_claim() {
+        let source =
+            include_bytes!("../tests/fixtures/snapshot-retention-original/htmlfunctions.ring");
+        assert_eq!(source.len(), 1778);
+        assert!(
+            source
+                .windows(b"class HTMLFunctions".len())
+                .any(|part| part == b"class HTMLFunctions")
+        );
+        let path = RelativePath::parse(Path::new("unrelated/HTMLFunctions.RING")).unwrap();
+        let (class, signals) = classify(&path, source);
+        assert_eq!(class, InputClass::Source);
+        assert!(
+            signals.iter().any(|signal| signal.language == "ring"
+                && signal.evidence == LanguageEvidence::Extension)
+        );
+    }
+}
+
+#[cfg(test)]
+mod flux_tests;
+
+#[cfg(test)]
+mod mojo_tests;
+
+#[cfg(test)]
+mod hare_tests;
+
+#[cfg(test)]
+mod liquid_tests;
+
+#[cfg(test)]
+mod sml_wat_tests;
+
+#[cfg(test)]
+mod qsharp_tests;

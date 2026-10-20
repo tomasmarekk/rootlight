@@ -323,7 +323,7 @@ impl DurableCatalog {
             &repository,
             &generation,
             file.repository,
-            source_storage_layout(manifest.version, manifest.source_storage)?,
+            source_authority::manifest_source_layout(&manifest)?,
         )?;
         let identity = StreamedSourceBytesIdentity {
             byte_length: file.byte_length,

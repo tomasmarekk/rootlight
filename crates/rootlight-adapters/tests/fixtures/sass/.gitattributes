@@ -1,0 +1,3 @@
+# Preserve authored physical witnesses and the adjacent original license.
+*.sass -text
+LICENSE -text

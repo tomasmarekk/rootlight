@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/VBA-tools/VBA-Web",
+  "revision": "9dbcc751d177099f20c96c5ee332ec10ef47423c",
+  "source_path": "examples/analytics/Analytics.bas",
+  "source": {
+    "bytes": 2105,
+    "sha256": "806ade56b2287694c97ac73a9e28d3dede63caaa0778f924838599d24806e2a2"
+  },
+  "license_path": "LICENSE",
+  "license": {
+    "bytes": 1101,
+    "sha256": "53980e568b6b98e27479659148fb045f675c00a1c715a418891c088e3c73dede"
+  },
+  "scope": "Exact original external export; explicit requested profile does not attest Office host membership."
+}

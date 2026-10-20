@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/phoenixframework/phoenix",
+  "path": "lib/phoenix/digester/gzip.ex",
+  "bytes": 406,
+  "sha256": "8432a0667f68a9f8191841d3aaa31e78a95443064f1361345903f03d8a907d78",
+  "license": "MIT; PHOENIX-LICENSE.md",
+  "scope": "Finite written declarations and containment only; not a corpus or whole-language qualification"
+}

@@ -1,0 +1,11 @@
+{
+  "upstream": "https://github.com/shadcn-ui/ui",
+  "revision": "6261bd89f72d794aea491482cc2acfd8dc3d63e2",
+  "source": "apps/v4/registry/bases/base/ui/skeleton.tsx",
+  "bytes": 300,
+  "sha256": "bc8935f3d6774625383290bc0f9005460fa8297f2fcc357204906026d02af3c7",
+  "license": "MIT",
+  "license_source": "LICENSE.md",
+  "license_sha256": "a14c2d6fb5ba9925cba04633226a3b93e6c5566ca6b550dbfaead7ab3fa93b24",
+  "scope": "Exact original authored source and physical spans; no runtime React semantics."
+}

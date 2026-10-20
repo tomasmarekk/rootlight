@@ -47,3 +47,11 @@
   (#match? @documentation "^/\\*\\*"))
 
 [(string_literal) (concatenated_string)] @string
+
+; Native header ownership rejects nested prototype/function-pointer binders.
+(parameter_declaration) @declaration
+(parameter_declaration declarator: (_) @definition)
+
+; Keep the native proof reference mandatory without adding identity material.
+(function_definition) @signature
+(identifier) @reference @signature

@@ -18,11 +18,11 @@ use super::QueryRequest;
 #[serde(deny_unknown_fields)]
 /// A generation-owned file and optional verified continuation parts.
 pub(super) struct FindRequest {
-    file: FileId,
+    pub(super) file: FileId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cursor: Option<CursorParts>,
     #[serde(default)]
-    read_matches: bool,
+    pub(super) read_matches: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]

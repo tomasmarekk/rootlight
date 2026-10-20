@@ -136,6 +136,7 @@ async fn prefix_batches(
             query_context.usage.memory_bytes = Some(u64::try_from(batch.len() * 128).unwrap());
             client::SourceTextPrefixReadResult {
                 result: client::SourceTextReadResult {
+                    source_recovery: None,
                     context: query_context,
                     chunks: batch
                         .iter()

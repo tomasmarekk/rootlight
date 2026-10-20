@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/jorgebucaran/fisher",
+  "path": "functions/fisher.fish",
+  "bytes": 12079,
+  "sha256": "59dcf1a95b0056c957c378dab9e67912b2f81d5a90368d0966f127d6637404cc",
+  "license": "MIT; FISHER-LICENSE.md",
+  "scope": "Written function, named arguments and exact source containment; runtime command binding remains unavailable"
+}

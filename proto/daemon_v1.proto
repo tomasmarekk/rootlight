@@ -1076,6 +1076,66 @@ message FirstSliceSourceChunk {
   optional SourcePhysicalEncoding physical_encoding = 17;
 }
 
+// One generation-wide cause; member coverage is separate from source availability.
+enum AggregateSourceRecoveryStage {
+  AGGREGATE_SOURCE_RECOVERY_STAGE_UNSPECIFIED = 0;
+  AGGREGATE_SOURCE_RECOVERY_STAGE_STRUCTURAL_APPEND = 1;
+  AGGREGATE_SOURCE_RECOVERY_STAGE_GENERATION_TEXT = 2;
+}
+
+enum AggregateSourceRecoveryResource {
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_UNSPECIFIED = 0;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_FILES = 1;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_ENTITIES = 2;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_OCCURRENCES = 3;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_RELATIONS = 4;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_PROVENANCE = 5;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_SOURCE_MAPPINGS = 6;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_COVERAGE = 7;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_SKIPPED_REGIONS = 8;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_DIAGNOSTICS = 9;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_EXTENSIONS = 10;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_RECORDS = 11;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_NESTED_ITEMS = 12;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_STRING_BYTES = 13;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_EXTENSION_BYTES = 14;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_DIAGNOSTIC_BYTES = 15;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_TEXT_BYTES = 16;
+  AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_ENCODED_TEXT_BYTES = 17;
+}
+
+enum SourceRecoveryTextSearch {
+  SOURCE_RECOVERY_TEXT_SEARCH_UNSPECIFIED = 0;
+  // All source bytes participated in lexical projection; vocabulary omissions remain separate.
+  SOURCE_RECOVERY_TEXT_SEARCH_WHOLE_SOURCE_PROJECTION = 1;
+  SOURCE_RECOVERY_TEXT_SEARCH_METADATA_ONLY_CAPTURED = 2;
+  SOURCE_RECOVERY_TEXT_SEARCH_UNSUPPORTED_ENCODING = 3;
+}
+
+// Exact generation-wide membership and observed aggregate capacity rejection.
+message AggregateSourceRecoveryCause {
+  rootlight.common.v1.ContentHash source_inventory = 1;
+  uint64 members = 2;
+  AggregateSourceRecoveryStage stage = 3;
+  AggregateSourceRecoveryResource resource = 4;
+  uint64 observed = 5;
+  uint64 limit = 6;
+  uint64 text_snapshot_bytes = 7;
+  uint64 derived_members = 8;
+}
+
+// One returned file's text-search capture, independent of source availability.
+message SourceRecoveryFile {
+  rootlight.common.v1.FileId file = 1;
+  SourceRecoveryTextSearch text_search = 2;
+}
+
+// Files are sorted, distinct, and exactly cover the returned source-chunk file set.
+message SourceReadRecovery {
+  AggregateSourceRecoveryCause cause = 1;
+  repeated SourceRecoveryFile files = 2;
+}
+
 // Returns exact verified source chunks.
 message SourceReadResponse {
   rootlight.common.v1.ContractVersion schema_version = 1;
@@ -1089,6 +1149,8 @@ message SourceReadResponse {
   uint64 total_text_bytes = 8;
   // Prefix intent is distinct from execution truncation; absent for exact reads.
   optional bool prefix_truncated = 9;
+  // Negotiated at protocol 1.30; absence does not assert complete analysis.
+  optional SourceReadRecovery source_recovery = 10;
 }
 
 // Quotes resident metadata only; source bodies and freshness are not inspected.

@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/vuejs/vue",
+  "source_path": "src/shared/util.ts",
+  "source_bytes": 9700,
+  "source_sha256": "016aab5bc434f3d2805f4fd227a6f1de20e382a3fe093b13c0db1d935acc3889",
+  "license": "MIT",
+  "license_path": "VUE-LICENSE",
+  "license_sha256": "3079d1740e5af772b2af8f1d459822ecc3cc4597a688c680911359dc5284cc9c",
+  "scope": "Unmodified written TypeScript source used to validate exact static call provenance; no repository-specific production behavior."
+}

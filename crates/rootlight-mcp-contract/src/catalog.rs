@@ -107,7 +107,7 @@ impl McpTool {
         match self {
             Self::ChangeImpact | Self::HistoryCompare => crate::source_entity::CHANGE_VERSION,
             Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
-            Self::SourceRead => crate::source_text::SOURCE_READ_TEXT_VERSION,
+            Self::SourceRead => crate::source_recovery::SOURCE_READ_RECOVERY_VERSION,
             Self::SourceFind => crate::source_find::SOURCE_FIND_VERSION,
             Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
@@ -476,7 +476,7 @@ mod tests {
         );
         assert_eq!(
             McpTool::SourceRead.contract_version(),
-            crate::source_text::SOURCE_READ_TEXT_VERSION
+            crate::source_recovery::SOURCE_READ_RECOVERY_VERSION
         );
         assert_eq!(
             McpTool::QueryAdvanced.contract_version(),

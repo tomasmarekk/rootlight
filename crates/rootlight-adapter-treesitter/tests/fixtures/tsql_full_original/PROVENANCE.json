@@ -1,0 +1,8 @@
+{
+  "upstream": "https://github.com/olahallengren/sql-server-maintenance-solution",
+  "path": "CommandExecute.sql",
+  "bytes": 12267,
+  "sha256": "0e6b75a39b225676dc87de4315031afe66dbae0a4c08bdd8ca62b4e744c9ac53",
+  "license": "Exact repository MIT LICENSE retained",
+  "scope": "Unmodified full original; no product qualification"
+}

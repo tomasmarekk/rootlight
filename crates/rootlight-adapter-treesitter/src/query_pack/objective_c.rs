@@ -296,6 +296,33 @@ pub(super) fn capture_syntax(node: Node<'_>, role: StructuralRole) -> Option<&'s
     })
 }
 
+pub(super) fn unavailable_declarator(
+    node: Node<'_>,
+    role: StructuralRole,
+) -> Option<super::QueryCandidate> {
+    if role != StructuralRole::Definition || !node.has_error() {
+        return None;
+    }
+    let missing_name = match node.kind() {
+        "struct_declarator" => declarator_name(node).is_none(),
+        "method_definition" => capture_range(node, role).is_none(),
+        _ => false,
+    };
+    if !missing_name {
+        return None;
+    }
+    // Recovery can resemble a field or method without a proven written binding.
+    // Keep its exact extent as mandatory metadata instead of guessing a name.
+    Some(super::QueryCandidate {
+        start: node.start_byte(),
+        end: node.end_byte(),
+        role: StructuralRole::Signature,
+        syntax: "objective_c.unavailable_declarator",
+        required: true,
+        native_depth: 0,
+    })
+}
+
 pub(super) fn capture_range(node: Node<'_>, role: StructuralRole) -> Option<Range<usize>> {
     if role == StructuralRole::Declaration
         && node.kind() == "identifier"
@@ -366,6 +393,153 @@ pub(super) fn capture_range(node: Node<'_>, role: StructuralRole) -> Option<Rang
 mod tests {
     use super::*;
     use crate::GrammarFamily;
+
+    #[test]
+    fn original_event_emitter_native_capture_ranges() {
+        use tree_sitter::StreamingIterator;
+
+        let source = include_bytes!("../../../../tests/fixtures/objective-c/event-emitter.m");
+        assert_eq!(source.len(), 4_447);
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_objc::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let pack = super::super::QueryPack::compile(
+            GrammarFamily::ObjectiveC,
+            include_str!("../../queries/objective_c.scm"),
+        )
+        .unwrap();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut matches = cursor.matches(&pack.identity_query, tree.root_node(), source.as_slice());
+        let cancellation = Cancellation::new();
+        let mut parameters = TypeParameterCaptures::default();
+        let mut fsharp = super::super::fsharp::CaptureCache::new(1_024, false, 1_024);
+        let mut plsql = super::super::plsql::CaptureCache::new(1_024);
+        let mut failures = Vec::new();
+        while let Some(matched) = matches.next() {
+            for capture in matched.captures {
+                let role = pack.role_for_capture(capture.index).unwrap();
+                if !retain_capture(capture.node, role)
+                    || !parameters
+                        .retain(capture.node, role, &cancellation)
+                        .unwrap()
+                {
+                    continue;
+                }
+                if let Err(error) = super::super::candidate_for_capture(
+                    GrammarFamily::ObjectiveC,
+                    *capture,
+                    role,
+                    source,
+                    &cancellation,
+                    &mut fsharp,
+                    &mut plsql,
+                ) {
+                    failures.push(format!(
+                        "error={error:?}; role={role:?}; kind={}; range={:?}; has_error={}; parent={:?}; tree={}",
+                        capture.node.kind(),
+                        capture.node.byte_range(),
+                        capture.node.has_error(),
+                        capture.node.parent().map(|parent| (parent.kind(), parent.byte_range())),
+                        capture.node.to_sexp(),
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        let candidates = pack
+            .extract_identity(
+                GrammarFamily::ObjectiveC,
+                &tree,
+                source,
+                1_024,
+                &cancellation,
+            )
+            .unwrap();
+        let unavailable: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.syntax == "objective_c.unavailable_declarator")
+            .collect();
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!((unavailable[0].start, unavailable[0].end), (3_608, 3_673));
+        assert_eq!(unavailable[0].role, StructuralRole::Signature);
+        assert!(unavailable[0].required);
+    }
+
+    #[test]
+    fn clean_and_recovered_methods_with_proven_names_are_not_unavailable() {
+        for (source, recovered) in [
+            (
+                "@implementation Sample\n- (void)known { int value = 1; value++; }\n@end\n",
+                false,
+            ),
+            (
+                "@implementation Sample\n- (void)known { int value = ; }\n@end\n",
+                true,
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_objc::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            let mut pending = vec![tree.root_node()];
+            let method = loop {
+                let node = pending.pop().expect("the source contains a method");
+                if node.kind() == "method_definition" {
+                    break node;
+                }
+                let mut cursor = node.walk();
+                pending.extend(node.named_children(&mut cursor));
+            };
+            assert_eq!(method.has_error(), recovered);
+            let range = capture_range(method, StructuralRole::Definition).unwrap();
+            assert_eq!(&source[range], "known");
+            assert!(unavailable_declarator(method, StructuralRole::Definition).is_none());
+        }
+    }
+
+    #[test]
+    fn conditional_property_original_keeps_required_unavailable_declarator() {
+        let source =
+            include_bytes!("../../../../tests/fixtures/objective-c/preprocessor-property.h");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_objc::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let pack = super::super::QueryPack::compile(
+            GrammarFamily::ObjectiveC,
+            include_str!("../../queries/objective_c.scm"),
+        )
+        .unwrap();
+        assert!(tree.root_node().has_error());
+        let candidates = pack
+            .extract_identity(
+                GrammarFamily::ObjectiveC,
+                &tree,
+                source,
+                1024,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        let gaps: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.syntax == "objective_c.unavailable_declarator")
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        let gap = gaps[0];
+        assert_eq!(gap.role, StructuralRole::Signature);
+        assert_eq!((gap.start, gap.end), (511, 676));
+        assert!(gap.required);
+        assert_eq!(gap.native_depth, 0);
+        assert!(!candidates.iter().any(|candidate| {
+            candidate.role == StructuralRole::Definition
+                && candidate.start >= gap.start
+                && candidate.end <= gap.end
+        }));
+    }
 
     #[test]
     fn generic_list_classification_is_cached_and_cancellable() {

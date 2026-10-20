@@ -27,6 +27,170 @@ fn output(source: &str) -> AnalysisOutput {
 }
 
 #[test]
+fn objective_c_original_event_emitter_keeps_written_sibling_methods() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/event-emitter.m");
+    assert_eq!(source.len(), 4_447);
+    let result = output(source);
+    let document = result.document();
+    for (header, prefix, name) in [
+        ("+ (NSString *)moduleName", "+ (NSString *)", "moduleName"),
+        ("- (void)startObserving", "- (void)", "startObserving"),
+        ("- (void)stopObserving", "- (void)", "stopObserving"),
+    ] {
+        let start = source.find(header).unwrap() + prefix.len();
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(start + name.len()).unwrap()
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1, "written sibling {name}");
+        assert_eq!(
+            definitions[0].source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+            panic!("a written sibling method has its own source identity");
+        };
+        assert!(document.entities.iter().any(|entity| {
+            entity.id == symbol
+                && entity.kind == EntityKind::Method
+                && entity.canonical_name == name
+        }));
+    }
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Unknown);
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        let gaps: Vec<_> = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| {
+                gap.domain == domain
+                    && gap.detail == "objective-c-native-declarator-unavailable"
+                    && gap.reason == SkippedRegionReason::UnsupportedConstruct
+            })
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        let reference = gaps[0].evidence.source.as_ref().unwrap();
+        assert_eq!(reference.span().start_byte(), 3_608);
+        assert_eq!(reference.span().end_byte(), 3_673);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+    }
+    assert!(document.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "syntax-error-recovery" && diagnostic.evidence.source.is_some()
+    }));
+    assert!(!document.entities.iter().any(|entity| {
+        entity.kind == EntityKind::Method
+            && entity.evidence.source.as_ref().is_some_and(|reference| {
+                reference.span().start_byte() == 3_608 && reference.span().end_byte() == 3_673
+            })
+    }));
+}
+
+#[test]
+fn objective_c_method_recovery_keeps_names_when_their_range_is_proven() {
+    for source in [
+        "@implementation Sample\n- (void)known { int value = 1; value++; if (value == 2) { [self known]; } }\n@end\n",
+        "@implementation Sample\n- (void)known { int value = ; }\n@end\n",
+    ] {
+        let result = output(source);
+        assert!(result.document().entities.iter().any(|entity| {
+            entity.kind == EntityKind::Method && entity.canonical_name == "known"
+        }));
+        assert!(
+            !result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.detail == "objective-c-native-declarator-unavailable" })
+        );
+        let start = source.find("known").unwrap();
+        assert!(result.document().occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                && site.source.span().end_byte() == u64::try_from(start + "known".len()).unwrap()
+                && site.source.content_hash() == content_hash(source.as_bytes())
+        }));
+    }
+}
+
+#[test]
+fn objective_c_recovered_method_metadata_preserves_artifact_quota_and_cancellation() {
+    let source = include_bytes!("../../../../tests/fixtures/objective-c/event-emitter.m");
+    let fixture = Fixture::new(OBJECTIVE_C, source);
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, OBJECTIVE_C);
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &budget);
+    let required = provider
+        .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+        .unwrap();
+    let full = analyzer.prepare_artifact(&initial, &deadline()).unwrap();
+    assert_eq!(
+        full.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    let exact = limits_with_syntax_records(required);
+    let bounded_request = request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &exact);
+    let artifact = analyzer
+        .prepare_artifact(&bounded_request, &deadline())
+        .unwrap();
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    let lowered = analyzer
+        .analyze_prepared_artifact(
+            &bounded_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        assert!(lowered.document().skipped_regions.iter().any(|gap| {
+            gap.domain == domain
+                && gap.detail == "objective-c-native-declarator-unavailable"
+                && gap.evidence.source.as_ref().is_some_and(|reference| {
+                    reference.span().start_byte() == 3_608
+                        && reference.span().end_byte() == 3_673
+                        && reference.content_hash() == content_hash(source)
+                })
+        }));
+    }
+    let too_small = limits_with_syntax_records(required - 1);
+    let rejected = analyzer.prepare_artifact(
+        &request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &too_small),
+        &deadline(),
+    );
+    assert!(matches!(
+        rejected,
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed,
+            limit,
+        })) if observed == required && limit == required - 1
+    ));
+    let cancellation = deadline();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        provider.required_syntax_fact_count(&initial.to_parse_request(), &cancellation),
+        Err(AdapterError::Cancelled { .. })
+    ));
+}
+
+#[test]
 fn objective_c_forward_generic_parameters_belong_to_each_written_class() {
     let source = "@class Left<Item>, Right<Item>;\n@class Left<Item>;\n";
     let result = output(source);
@@ -618,6 +782,150 @@ fn objective_c_property_declarators_keep_written_pointer_names() {
         .collect();
     names.sort();
     assert_eq!(names, ["count", "next"]);
+}
+
+#[test]
+fn objective_c_conditional_property_original_keeps_named_sibling() {
+    let source = include_str!("../../../../tests/fixtures/objective-c/preprocessor-property.h");
+    assert_eq!(source.len(), 762);
+    let result = output(source);
+    let property = result
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Property && entity.canonical_name == "inspectable"
+        })
+        .expect("a conditional property must not discard its written sibling");
+    let span = property.evidence.source.as_ref().unwrap().span();
+    assert_eq!(
+        &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()],
+        "@property (nonatomic, readonly, getter=isInspectable) BOOL inspectable;"
+    );
+    assert_eq!(result.report().coverage().status(), CoverageStatus::Unknown);
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        let gaps: Vec<_> = result
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| {
+                gap.domain == domain
+                    && gap.detail == "objective-c-native-declarator-unavailable"
+                    && gap.reason == SkippedRegionReason::UnsupportedConstruct
+            })
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        let reference = gaps[0].evidence.source.as_ref().unwrap();
+        assert_eq!(reference.span().start_byte(), 511);
+        assert_eq!(reference.span().end_byte(), 676);
+        assert_eq!(reference.content_hash(), content_hash(source.as_bytes()));
+    }
+    assert!(result.document().diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "syntax-error-recovery" && diagnostic.evidence.source.is_some()
+    }));
+    for unavailable in [
+        "react",
+        "jsinspector_modern",
+        "HostTarget",
+        "inspectorTarget",
+    ] {
+        assert!(
+            result
+                .document()
+                .entities
+                .iter()
+                .all(|entity| entity.canonical_name != unavailable)
+        );
+    }
+}
+
+#[test]
+fn objective_c_conditional_property_generic_keeps_named_sibling() {
+    let source = "@interface Sample (Inspector)\n\
+        @property (nonatomic, readonly)\n\
+        #ifdef __cplusplus\n\
+        outer::Target *\n\
+        #else\n\
+        void *\n\
+        #endif\n\
+        handle;\n\
+        @property int count;\n\
+        @end\n";
+    let result = output(source);
+    assert!(
+        result.document().entities.iter().any(|entity| {
+            entity.kind == EntityKind::Property && entity.canonical_name == "count"
+        })
+    );
+}
+
+#[test]
+fn objective_c_conditional_property_metadata_preserves_artifact_quota_and_cancellation() {
+    let source = include_bytes!("../../../../tests/fixtures/objective-c/preprocessor-property.h");
+    let fixture = Fixture::new(OBJECTIVE_C, source);
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, OBJECTIVE_C);
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &budget);
+    let required = provider
+        .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+        .unwrap();
+    let full = analyzer.prepare_artifact(&initial, &deadline()).unwrap();
+    assert_eq!(
+        full.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    let exact = limits_with_syntax_records(required);
+    let bounded_request = request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &exact);
+    let artifact = analyzer
+        .prepare_artifact(&bounded_request, &deadline())
+        .unwrap();
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    let lowered = analyzer
+        .analyze_prepared_artifact(
+            &bounded_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        assert!(lowered.document().skipped_regions.iter().any(|gap| {
+            gap.domain == domain && gap.detail == "objective-c-native-declarator-unavailable"
+        }));
+    }
+    let too_small = limits_with_syntax_records(required - 1);
+    let rejected = analyzer.prepare_artifact(
+        &request(&fixture.snapshot, &fixture.source, OBJECTIVE_C, &too_small),
+        &deadline(),
+    );
+    assert!(matches!(
+        rejected,
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed,
+            limit,
+        })) if observed == required && limit == required - 1
+    ));
+    let cancellation = deadline();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        provider.required_syntax_fact_count(&initial.to_parse_request(), &cancellation),
+        Err(AdapterError::Cancelled { .. })
+    ));
 }
 
 #[test]

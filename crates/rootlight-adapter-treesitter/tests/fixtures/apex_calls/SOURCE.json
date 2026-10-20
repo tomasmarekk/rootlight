@@ -1,0 +1,25 @@
+{
+  "upstream": "https://github.com/kevinohara80/sfdc-trigger-framework",
+  "revision": "b7e36c76a3608674979e44fe3a823b55016fff7c",
+  "license": "MIT",
+  "files": [
+    {
+      "file": "TriggerHandler.cls",
+      "upstream_path": "src/classes/TriggerHandler.cls",
+      "bytes": 6910,
+      "sha256": "2b3fd9d3314e280a665a398370fab2b6bbc8bbee37b1e4cfa47c401d7c7d7124"
+    },
+    {
+      "file": "TriggerHandler_Test.cls",
+      "upstream_path": "src/classes/TriggerHandler_Test.cls",
+      "bytes": 8468,
+      "sha256": "3cfabfaac0f693411a04ef260dd57857f8bba2ec98a7e1a4133f60a15f0eb50c"
+    },
+    {
+      "file": "LICENSE",
+      "upstream_path": "LICENSE",
+      "bytes": 1082,
+      "sha256": "84f0de39dffa834f468c95307ed77fca65d9fb18c672ccaa3a3b0268f7acab0e"
+    }
+  ]
+}

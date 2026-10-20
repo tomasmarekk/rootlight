@@ -1,0 +1,10 @@
+{
+  "upstream": "https://github.com/laravel/framework",
+  "revision": "8df67f9d176d1d0375a866d8c6780be95ce0336e",
+  "path": "src/Illuminate/Support/HtmlString.php",
+  "bytes": 1145,
+  "sha256": "59d333c0de421196cb51489a3f43202cf569186f4cae6e92eca0da034cc79fb0",
+  "license": "MIT",
+  "license_path": "LICENSE",
+  "scope": "Unchanged original physical bytes; finite constructor identity and class containment regression only"
+}

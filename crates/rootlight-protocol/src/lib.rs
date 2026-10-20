@@ -28,9 +28,13 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 /// authenticated operation submission and cannot satisfy the current contract.
 pub const MINIMUM_PROTOCOL_MINOR: u32 = 1;
 /// Latest daemon protocol implemented by the current client and server.
-pub const CURRENT_PROTOCOL_MINOR: u32 = 28;
+pub const CURRENT_PROTOCOL_MINOR: u32 = 30;
 /// Current production protocol contract version.
-pub const PROTOCOL_VERSION: &str = "1.28";
+pub const PROTOCOL_VERSION: &str = "1.30";
+/// First protocol carrying authenticated aggregate recovery on source reads.
+pub const AGGREGATE_SOURCE_RECOVERY_PROTOCOL_MINOR: u32 = 30;
+/// First protocol requiring complete-or-error installed capability support archives.
+pub const COMPLETE_SUPPORT_LANGUAGE_TABLE_PROTOCOL_MINOR: u32 = 29;
 /// First daemon protocol preserving omitted source verification deadlines.
 pub const SOURCE_VERIFICATION_DURATION_PROTOCOL_MINOR: u32 = 28;
 /// First daemon protocol carrying generation-pinned literal source matching.
@@ -745,5 +749,60 @@ mod tests {
         let decoded =
             v1::FirstSliceQueryUsage::decode(encoded.as_slice()).expect("query usage decodes");
         assert_eq!(decoded, usage);
+    }
+
+    #[test]
+    fn aggregate_source_recovery_is_additive_and_preserves_exact_cause_fields() {
+        use generated::daemon::v1 as daemon;
+
+        #[derive(Clone, PartialEq, Message)]
+        struct LegacySource {
+            #[prost(uint64, tag = "4")]
+            total_source_bytes: u64,
+        }
+        let response = daemon::SourceReadResponse {
+            total_source_bytes: 13,
+            source_recovery: Some(daemon::SourceReadRecovery {
+                cause: Some(daemon::AggregateSourceRecoveryCause {
+                    source_inventory: Some(generated::common::v1::ContentHash {
+                        value: vec![7; 32],
+                    }),
+                    members: 20,
+                    derived_members: 3,
+                    stage: daemon::AggregateSourceRecoveryStage::StructuralAppend as i32,
+                    resource: daemon::AggregateSourceRecoveryResource::Occurrences as i32,
+                    observed: 5000001,
+                    limit: 5000000,
+                    text_snapshot_bytes: 8192,
+                }),
+                files: vec![daemon::SourceRecoveryFile {
+                    file: Some(generated::common::v1::FileId { value: vec![8; 20] }),
+                    text_search: daemon::SourceRecoveryTextSearch::MetadataOnlyCaptured as i32,
+                }],
+            }),
+            ..Default::default()
+        };
+        let encoded = response.encode_to_vec();
+        assert_eq!(
+            daemon::SourceReadResponse::decode(encoded.as_slice()).unwrap(),
+            response
+        );
+        assert_eq!(
+            LegacySource::decode(encoded.as_slice())
+                .unwrap()
+                .total_source_bytes,
+            13
+        );
+        let absent = daemon::SourceReadResponse {
+            total_source_bytes: 13,
+            ..Default::default()
+        };
+        assert_eq!(
+            absent.encode_to_vec(),
+            LegacySource {
+                total_source_bytes: 13
+            }
+            .encode_to_vec()
+        );
     }
 }

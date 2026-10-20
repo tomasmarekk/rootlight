@@ -1,5 +1,8 @@
 //! Crash-safe generation publication and restoration for the first-slice service.
 
+#[path = "durable/source_authority.rs"]
+mod source_authority;
+
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
@@ -18,7 +21,7 @@ use cap_std::{ambient_authority, fs::Dir};
 #[cfg(test)]
 use flate2::{Compression, write::GzEncoder};
 use rootlight_cancel::{Cancellation, CancellationReason};
-use rootlight_catalog::{OracleReadAdmissionError, OracleReader};
+use rootlight_catalog::{OracleReadAdmissionError, OracleReadMemoryPlan, OracleReader};
 use rootlight_config::MAX_SOURCE_FILE_BYTES;
 use rootlight_discovery::IncrementalDiscoveryBaseline;
 use rootlight_ids::{
@@ -80,7 +83,8 @@ const REPOSITORY_METADATA_FILENAME: &str = "metadata.json";
 const LEGACY_GENERATION_MANIFEST_VERSION: u16 = 1;
 const PACKED_GENERATION_MANIFEST_VERSION: u16 = 2;
 const CATALOG_GENERATION_MANIFEST_VERSION: u16 = 3;
-const GENERATION_MANIFEST_VERSION: u16 = 4;
+const RAW_CATALOG_GENERATION_MANIFEST_VERSION: u16 = 4;
+const GENERATION_MANIFEST_VERSION: u16 = 5;
 pub(super) const REPOSITORY_METADATA_VERSION: u16 = 1;
 const LEGACY_SOURCE_STORAGE_VERSION: u16 = 1;
 const SOURCE_STORAGE_VERSION: u16 = 2;
@@ -295,6 +299,7 @@ pub(super) struct DurablePreparedGeneration {
     accounted_bytes: AtomicU64,
     incremental_state: Mutex<Option<DurableSidecarDescriptor>>,
     source_file_catalog: Mutex<Option<DurableSidecarDescriptor>>,
+    source_authority: Mutex<Option<DurableSidecarDescriptor>>,
     source_storage: Mutex<Option<DurableSourceStorage>>,
     lexical_streamed_limit: Mutex<Option<StreamedProjectionLimit>>,
     created_source_blobs: Mutex<BTreeSet<ContentHash>>,
@@ -329,6 +334,15 @@ pub(super) struct RestoredGeneration {
     pub(super) memory_reservation: Option<super::RestoredMemoryReservation>,
 }
 
+pub(super) enum ProgressiveRestoreEvent {
+    Generation(Box<RestoredGeneration>),
+    RepositoryComplete {
+        repository: RepositoryId,
+        published_generation_count: u64,
+        operations: Vec<super::FirstSliceDurableOperation>,
+    },
+}
+
 struct RestorePolicy<'a> {
     maximum_generations: usize,
     excluded: &'a BTreeSet<GenerationId>,
@@ -349,6 +363,8 @@ struct DurableGenerationManifest {
     incremental_state: Option<DurableSidecarDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_file_catalog: Option<DurableSidecarDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_authority: Option<DurableSidecarDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_storage: Option<DurableSourceStorage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1379,6 +1395,7 @@ fn source_storage_layout(
                 version,
                 PACKED_GENERATION_MANIFEST_VERSION
                     | CATALOG_GENERATION_MANIFEST_VERSION
+                    | RAW_CATALOG_GENERATION_MANIFEST_VERSION
                     | GENERATION_MANIFEST_VERSION
             ) && storage.version == LEGACY_SOURCE_STORAGE_VERSION
                 && storage.files.is_none()
@@ -1394,6 +1411,7 @@ fn source_storage_layout(
                 version,
                 PACKED_GENERATION_MANIFEST_VERSION
                     | CATALOG_GENERATION_MANIFEST_VERSION
+                    | RAW_CATALOG_GENERATION_MANIFEST_VERSION
                     | GENERATION_MANIFEST_VERSION
             ) && storage.version == SOURCE_STORAGE_VERSION
                 && storage.files.is_some()
@@ -2170,6 +2188,7 @@ impl DurableCatalog {
             accounted_bytes: AtomicU64::new(0),
             incremental_state: Mutex::new(None),
             source_file_catalog: Mutex::new(None),
+            source_authority: Mutex::new(None),
             source_storage: Mutex::new(None),
             lexical_streamed_limit: Mutex::new(None),
             created_source_blobs: Mutex::new(BTreeSet::new()),
@@ -2723,7 +2742,7 @@ impl DurableCatalog {
             .map_err(|_| FirstSliceError::CatalogCorrupt)?;
         let manifest: DurableGenerationManifest =
             serde_json::from_slice(&manifest).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        let source_layout = source_storage_layout(manifest.version, manifest.source_storage)?;
+        let source_layout = source_authority::manifest_source_layout(&manifest)?;
         PersistedSourceReader::open(&repository, &generation, file.repository, source_layout)?
             .read(file, cancellation)
     }
@@ -2979,16 +2998,41 @@ impl DurableCatalog {
     pub(super) fn restore_progressively(
         &self,
         cancellation: &Cancellation,
-        install: impl FnMut(Vec<RestoredGeneration>) -> Result<(), FirstSliceError>,
+        mut visit: impl FnMut(ProgressiveRestoreEvent) -> Result<(), FirstSliceError>,
     ) -> Result<(), FirstSliceError> {
-        self.restore_each_repository_with_policy(
-            self.maximum_generations_per_repository,
-            &BTreeSet::new(),
-            true,
-            true,
-            cancellation,
-            install,
-        )
+        let excluded = BTreeSet::new();
+        let policy = RestorePolicy {
+            maximum_generations: self.maximum_generations_per_repository,
+            excluded: &excluded,
+            compact: true,
+            repair: true,
+        };
+        check_cancellation(cancellation)?;
+        let repository_names = private_entry_names(&self.repositories)?;
+        if repository_names.len() > self.maximum_repositories {
+            return Err(FirstSliceError::Retention);
+        }
+        for repository_name in repository_names {
+            check_cancellation(cancellation)?;
+            let repository_text = repository_name
+                .to_str()
+                .ok_or(FirstSliceError::CatalogCorrupt)?;
+            let repository_id = RepositoryId::from_str(repository_text)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let repository =
+                PrivateDirectory::open(self.repositories.capability(), &repository_name)
+                    .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+            let repository_path = self.repositories_path.join(&repository_name);
+            self.restore_repository_with_visitor(
+                repository_id,
+                &repository,
+                &repository_path,
+                &policy,
+                cancellation,
+                Some(&mut visit),
+            )?;
+        }
+        check_cancellation(cancellation)
     }
 
     fn restore_with_policy(
@@ -3255,6 +3299,25 @@ impl DurableCatalog {
         policy: &RestorePolicy<'_>,
         cancellation: &Cancellation,
     ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
+        self.restore_repository_with_visitor(
+            repository_id,
+            repository,
+            repository_path,
+            policy,
+            cancellation,
+            None,
+        )
+    }
+
+    fn restore_repository_with_visitor(
+        &self,
+        repository_id: RepositoryId,
+        repository: &PrivateDirectory<'_>,
+        repository_path: &Path,
+        policy: &RestorePolicy<'_>,
+        cancellation: &Cancellation,
+        mut visit: Option<&mut dyn FnMut(ProgressiveRestoreEvent) -> Result<(), FirstSliceError>>,
+    ) -> Result<Vec<RestoredGeneration>, FirstSliceError> {
         let names = private_entry_names(repository)?;
         let mut markers = BTreeMap::<u64, ActivationMarker>::new();
         let mut metadata_names = BTreeMap::<u64, OsString>::new();
@@ -3344,12 +3407,13 @@ impl DurableCatalog {
             .saturating_sub(excluded_retained.len());
 
         let mut restored = Vec::new();
+        let mut restored_receipts = BTreeMap::new();
         restored
             .try_reserve_exact(self.maximum_generations_per_repository)
             .map_err(|_| FirstSliceError::Retention)?;
         let mut corrupted = Vec::new();
         for (activation_sequence, generation) in recency {
-            if restored.len() == maximum_restored {
+            if restored_receipts.len() == maximum_restored {
                 break;
             }
             if policy.excluded.contains(&generation) {
@@ -3372,7 +3436,7 @@ impl DurableCatalog {
                 },
                 cancellation,
             );
-            let restored_generation = match restored_generation {
+            let mut restored_generation = match restored_generation {
                 Ok(restored) => restored,
                 Err(FirstSliceError::CatalogCorrupt) => {
                     corrupted.push((activation_sequence, generation));
@@ -3380,8 +3444,33 @@ impl DurableCatalog {
                 }
                 Err(error) => return Err(error),
             };
-            restored.push(restored_generation);
+            if let Some(metadata) = &metadata {
+                restored_generation.root_path = metadata.root_path.clone();
+                restored_generation.alias = metadata.alias.clone();
+                restored_generation.metadata_sequence = metadata.sequence;
+            }
+            if restored_receipts.is_empty()
+                && let Some(published_generation_count) = published_generation_count
+            {
+                restored_generation.published_generation_count = Some(
+                    restored_generation
+                        .published_generation_count
+                        .unwrap_or(0)
+                        .max(published_generation_count),
+                );
+            }
+            restored_receipts.insert(generation, restored_generation.receipt.clone());
+            if let Some(visit) = visit.as_mut() {
+                // Install this verified owner before admitting another payload.
+                // The cache can then unload unleased bytes without losing identity.
+                visit(ProgressiveRestoreEvent::Generation(Box::new(
+                    restored_generation,
+                )))?;
+            } else {
+                restored.push(restored_generation);
+            }
         }
+        check_cancellation(cancellation)?;
         if policy.repair {
             if !corrupted.is_empty() {
                 mark_storage_accounting_dirty(&self.storage_accounting);
@@ -3399,18 +3488,10 @@ impl DurableCatalog {
                 markers.retain(|_, marker| marker.manifest.generation != generation);
             }
         }
-        let mut retained: BTreeSet<_> = restored
-            .iter()
-            .map(|generation| generation.receipt.generation)
-            .collect();
+        let mut retained: BTreeSet<_> = restored_receipts.keys().copied().collect();
         retained.extend(excluded_retained);
         let retained_marker_names = retained_activation_marker_names(&markers, &retained);
         for restored_generation in &mut restored {
-            if let Some(metadata) = &metadata {
-                restored_generation.root_path = metadata.root_path.clone();
-                restored_generation.alias = metadata.alias.clone();
-                restored_generation.metadata_sequence = metadata.sequence;
-            }
             let generation = restored_generation.receipt.generation;
             restored_generation.operations = markers
                 .values()
@@ -3436,17 +3517,30 @@ impl DurableCatalog {
                 compact_repository_metadata(repository, metadata.sequence)?;
             }
         }
-        if let Some(published_generation_count) = published_generation_count
-            && let Some(latest_valid) = restored
-                .iter_mut()
-                .max_by_key(|generation| generation.activation_sequence)
+        if let Some(visit) = visit
+            && !restored_receipts.is_empty()
         {
-            latest_valid.published_generation_count = Some(
-                latest_valid
-                    .published_generation_count
-                    .unwrap_or(0)
-                    .max(published_generation_count),
-            );
+            let operations = markers
+                .values()
+                .filter(|marker| retained_marker_names.contains(&marker.name))
+                .filter_map(|marker| {
+                    let receipt = restored_receipts.get(&marker.manifest.generation)?;
+                    let operation = FirstSliceOperationContext::from(marker.manifest.operation?);
+                    Some(super::FirstSliceDurableOperation {
+                        operation: operation.operation,
+                        started_unix_ms: operation.started_unix_ms,
+                        provider: operation.provider,
+                        receipt: receipt.clone(),
+                    })
+                })
+                .collect();
+            visit(ProgressiveRestoreEvent::RepositoryComplete {
+                repository: repository_id,
+                published_generation_count: published_generation_count.unwrap_or(
+                    u64::try_from(restored_receipts.len()).map_err(|_| FirstSliceError::Limits)?,
+                ),
+                operations,
+            })?;
         }
         Ok(restored)
     }
@@ -3587,6 +3681,39 @@ impl DurableCatalog {
 }
 
 impl DurablePreparedGeneration {
+    /// Measures later hydration from descriptors already written by this owner.
+    pub(super) fn oracle_restore_memory_bytes(
+        &self,
+        plan: OracleReadMemoryPlan,
+        indexed_files: u64,
+        has_source_catalog: bool,
+    ) -> Result<u64, FirstSliceError> {
+        let incremental = *self
+            .incremental_state
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let catalog = *self
+            .source_file_catalog
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let authority = *self
+            .source_authority
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let storage = *self
+            .source_storage
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        let staging = recovery_sidecar_memory_bytes_from_parts(
+            incremental,
+            catalog,
+            authority,
+            storage,
+            indexed_files,
+        )?;
+        oracle_restore_memory_bytes(plan, has_source_catalog, staging)
+    }
+
     pub(super) fn path(&self) -> &Path {
         &self.staging_path
     }
@@ -4047,6 +4174,13 @@ impl DurablePreparedGeneration {
             .source_file_catalog
             .lock()
             .map_err(|_| FirstSliceError::Catalog)?;
+        let source_authority = *self
+            .source_authority
+            .lock()
+            .map_err(|_| FirstSliceError::Catalog)?;
+        if source_authority.is_none() {
+            return Err(FirstSliceError::CatalogCorrupt);
+        }
         let source_storage = *self
             .source_storage
             .lock()
@@ -4062,6 +4196,7 @@ impl DurablePreparedGeneration {
                 receipt: receipt.clone(),
                 incremental_state,
                 source_file_catalog,
+                source_authority,
                 source_storage,
                 lexical_source_projection: Some(
                     self.lexical_streamed_limit
@@ -5162,7 +5297,7 @@ fn scan_generation_storage(
     if manifest.receipt.repository != repository || manifest.receipt.generation != generation {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let source_blobs = match source_storage_layout(manifest.version, manifest.source_storage)? {
+    let source_blobs = match source_authority::manifest_source_layout(&manifest)? {
         DurableSourceLayout::Inline => BTreeMap::new(),
         DurableSourceLayout::Blobs => generation_source_digests(directory, budget)?,
         DurableSourceLayout::Packed(storage) => {
@@ -5853,7 +5988,7 @@ fn read_generation_bootstrap_identity(
     let Ok(manifest) = serde_json::from_slice::<DurableGenerationManifest>(&bytes) else {
         return Ok(None);
     };
-    let version_is_valid = source_storage_layout(manifest.version, manifest.source_storage).is_ok();
+    let version_is_valid = source_authority::manifest_source_layout(&manifest).is_ok();
     if manifest.receipt.repository != repository_id
         || manifest.receipt.generation != generation
         || !valid_repository_root_path(manifest.root_path.as_deref())
@@ -5867,6 +6002,7 @@ fn read_generation_bootstrap_identity(
         manifest.version,
         PACKED_GENERATION_MANIFEST_VERSION
             | CATALOG_GENERATION_MANIFEST_VERSION
+            | RAW_CATALOG_GENERATION_MANIFEST_VERSION
             | GENERATION_MANIFEST_VERSION
     ) && let Some(root_path) = manifest.root_path.as_deref()
         && !root_path.contains('\u{fffd}')
@@ -6001,7 +6137,7 @@ fn retained_source_blobs(
             .map_err(|_| FirstSliceError::CatalogCorrupt)?;
         let manifest: DurableGenerationManifest =
             serde_json::from_slice(&manifest).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        match source_storage_layout(manifest.version, manifest.source_storage)? {
+        match source_authority::manifest_source_layout(&manifest)? {
             DurableSourceLayout::Inline | DurableSourceLayout::Packed(_) => continue,
             DurableSourceLayout::Blobs => {}
         }
@@ -6162,15 +6298,30 @@ fn compact_activation_markers(repository: &PrivateDirectory<'_>) -> Result<(), F
 fn recovery_sidecar_memory_bytes(
     manifest: &DurableGenerationManifest,
 ) -> Result<u64, FirstSliceError> {
+    recovery_sidecar_memory_bytes_from_parts(
+        manifest.incremental_state,
+        manifest.source_file_catalog,
+        manifest.source_authority,
+        manifest.source_storage,
+        manifest.receipt.indexed_files,
+    )
+}
+
+fn recovery_sidecar_memory_bytes_from_parts(
+    incremental_state: Option<DurableSidecarDescriptor>,
+    source_file_catalog: Option<DurableSidecarDescriptor>,
+    source_authority: Option<DurableSidecarDescriptor>,
+    source_storage: Option<DurableSourceStorage>,
+    indexed_files: u64,
+) -> Result<u64, FirstSliceError> {
     // Incremental state is an optional cache: an invalid descriptor is ignored
     // by its loader, whereas a source-file catalog is part of query authority.
-    let incremental = manifest
-        .incremental_state
+    let incremental = incremental_state
         .filter(|descriptor| {
             descriptor.bytes > 0 && descriptor.bytes <= MAX_INCREMENTAL_STATE_BYTES
         })
         .map_or(0, |descriptor| descriptor.bytes);
-    let source_catalog = match manifest.source_file_catalog {
+    let source_catalog = match source_file_catalog {
         Some(descriptor)
             if descriptor.bytes == 0 || descriptor.bytes > MAX_SOURCE_FILE_CATALOG_BYTES =>
         {
@@ -6179,14 +6330,11 @@ fn recovery_sidecar_memory_bytes(
         Some(descriptor) => descriptor.bytes,
         None => 0,
     };
-    let packed_index = manifest
-        .source_storage
+    let packed_index = source_storage
         .and_then(|storage| storage.index_bytes)
         .unwrap_or(0);
-    let file_entries = if manifest.source_file_catalog.is_some() {
-        manifest
-            .receipt
-            .indexed_files
+    let file_entries = if source_file_catalog.is_some() {
+        indexed_files
             .checked_mul(super::SOURCE_FILE_FALLBACK_ENTRY_MEMORY_BYTES)
             .ok_or(FirstSliceError::Limits)?
     } else {
@@ -6195,7 +6343,8 @@ fn recovery_sidecar_memory_bytes(
     // Include encoded/owned sidecar representations and the existing file-only
     // path/identity charge. Backend allocation limits remain independently active.
     incremental
-        .checked_add(source_catalog)
+        .checked_add(source_authority.map_or(0, |descriptor| descriptor.bytes))
+        .and_then(|bytes| bytes.checked_add(source_catalog))
         .and_then(|bytes| bytes.checked_add(packed_index))
         .and_then(|bytes| bytes.checked_mul(8))
         .and_then(|bytes| bytes.checked_add(file_entries))
@@ -6246,7 +6395,7 @@ fn restore_generation(
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let mut manifest: DurableGenerationManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    let source_layout = source_storage_layout(manifest.version, manifest.source_storage)?;
+    let source_layout = source_authority::manifest_source_layout(&manifest)?;
     if manifest.version < CATALOG_GENERATION_MANIFEST_VERSION
         && manifest.source_file_catalog.is_some()
     {
@@ -6362,6 +6511,12 @@ fn restore_generation(
                 Err(error) => return Err(error),
             }
         };
+    source_authority::validate_for_verified(
+        &generation_directory,
+        &manifest,
+        &verified,
+        cancellation,
+    )?;
     let restored_logical_snapshot =
         restore_logical_snapshot_identity(&generation_directory, verified.snapshot())?;
     let (logical_snapshot, logical_serialized_document_bytes) =
@@ -6406,7 +6561,7 @@ fn restore_generation(
         cancellation,
     )?;
     if indexed_files != manifest.receipt.indexed_files
-        || (manifest.version == GENERATION_MANIFEST_VERSION
+        || (manifest.version >= RAW_CATALOG_GENERATION_MANIFEST_VERSION
             && extracted_files != manifest.receipt.extracted_files)
         || u64::try_from(verified.document().entities.len()).ok() != Some(manifest.receipt.entities)
         || lexical_documents != manifest.receipt.lexical_documents
@@ -6584,18 +6739,30 @@ fn restore_file_only_search(
     partition
         .try_reserve_exact(partition_files)
         .map_err(|_| FirstSliceError::Retention)?;
+    let aggregate = verified
+        .document()
+        .extensions
+        .iter()
+        .find(|extension| extension.namespace == rootlight_ir::AGGREGATE_SOURCE_RECOVERY_NAMESPACE)
+        .map(rootlight_ir::decode_aggregate_source_recovery_envelope)
+        .transpose()
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
     let mut lexical_documents = 0_u64;
     for file_id in file_ids {
         check_cancellation(cancellation)?;
         let file = verified
             .find_file(file_id)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let metadata_only = source_projection.is_some_and(|projection| match projection {
-            DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(limit) => {
-                file.byte_length > limit.snapshot_bytes
-            }
-            _ => false,
-        });
+        let metadata_only = if let Some(cause) = aggregate {
+            file.byte_length > cause.text_snapshot_bytes
+        } else {
+            source_projection.is_some_and(|projection| match projection {
+                DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(limit) => {
+                    file.byte_length > limit.snapshot_bytes
+                }
+                _ => false,
+            })
+        };
         let snapshot = if metadata_only {
             None
         } else {
@@ -7032,6 +7199,37 @@ fn restore_recovery_generation(
     Ok((restored, plan.serialized_document_bytes))
 }
 
+/// Uses the same full-restore envelope for sealed output and later read admission.
+pub(super) fn oracle_restore_memory_bytes(
+    plan: OracleReadMemoryPlan,
+    has_source_catalog: bool,
+    staging_bytes: u64,
+) -> Result<u64, FirstSliceError> {
+    let text_copies = if has_source_catalog { 14 } else { 6 };
+    let index_build_bytes_per_row = u64::try_from(
+        4 * std::mem::size_of::<(rootlight_ids::SymbolId, usize)>()
+            + 2 * std::mem::size_of::<usize>(),
+    )
+    .map_err(|_| FirstSliceError::Limits)?;
+    plan.materialization_bytes()
+        .checked_add(
+            plan.physical_rows()
+                .checked_mul(index_build_bytes_per_row)
+                .ok_or(FirstSliceError::Limits)?,
+        )
+        .and_then(|bytes| bytes.checked_add(plan.stats().text_bytes().checked_mul(text_copies)?))
+        .and_then(|bytes| bytes.checked_add(staging_bytes))
+        .ok_or(FirstSliceError::Limits)
+}
+
+pub(super) fn oracle_restore_memory_limit() -> u64 {
+    #[cfg(test)]
+    if let Some(limit) = restore_capacity_tests::RESTORE_CEILING.with(std::cell::Cell::get) {
+        return limit;
+    }
+    super::generation_memory_ceiling()
+}
+
 fn restore_oracle_generation(
     generation_path: &Path,
     expectation: OracleRestoreExpectation,
@@ -7054,24 +7252,10 @@ fn restore_oracle_generation(
                 // payload maps. Its closed-key registry allowance does not
                 // replace text, posting work, or sidecar charges, and the
                 // resulting logical reservation is not an exact RSS bound.
-                let text_copies = if source_files.is_empty() { 6 } else { 14 };
-                let index_build_bytes_per_row = u64::try_from(
-                    4 * std::mem::size_of::<(rootlight_ids::SymbolId, usize)>()
-                        + 2 * std::mem::size_of::<usize>(),
-                )
-                .map_err(|_| FirstSliceError::Limits)?;
-                let bytes = plan
-                    .materialization_bytes()
-                    .checked_add(
-                        plan.physical_rows()
-                            .checked_mul(index_build_bytes_per_row)
-                            .ok_or(FirstSliceError::Limits)?,
-                    )
-                    .and_then(|bytes| {
-                        bytes.checked_add(plan.stats().text_bytes().checked_mul(text_copies)?)
-                    })
-                    .and_then(|bytes| bytes.checked_add(staging_bytes))
-                    .ok_or(FirstSliceError::Limits)?;
+                let bytes =
+                    oracle_restore_memory_bytes(plan, !source_files.is_empty(), staging_bytes)?;
+                #[cfg(test)]
+                restore_capacity_tests::admit_restore(bytes)?;
                 reservation.resize(bytes, true)?;
             }
             check_cancellation(cancellation)
@@ -7426,6 +7610,14 @@ fn parse_activation_name(name: &str) -> Option<(u64, GenerationId)> {
     let generation = GenerationId::from_str(generation).ok()?;
     Some((sequence, generation))
 }
+
+#[cfg(test)]
+#[path = "durable/source_only_tests.rs"]
+mod source_only_tests;
+
+#[cfg(test)]
+#[path = "durable/restore_capacity_tests.rs"]
+mod restore_capacity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -10494,7 +10686,7 @@ mod tests {
             .expect("manifest decodes");
             assert_eq!(
                 matches!(
-                    source_storage_layout(manifest.version, manifest.source_storage),
+                    source_authority::manifest_source_layout(&manifest),
                     Ok(DurableSourceLayout::Packed(_))
                 ),
                 ordinal == 1
@@ -10529,6 +10721,302 @@ mod tests {
             assert_eq!(
                 snapshot.content(),
                 expected.get(&file.path).expect("expected source")
+            );
+        }
+    }
+
+    #[test]
+    fn synchronous_restore_releases_each_generation_before_restoring_its_predecessor() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        let source_path = fixture.path().join("lib.rs");
+        let cancellation = Cancellation::new();
+        let mut expected = Vec::new();
+        {
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            for value in [1, 2] {
+                let source = format!("pub fn retained_value() -> u32 {{ {value} }}\n");
+                fs::write(&source_path, &source).expect("fixture source writes");
+                let receipt = service
+                    .index_rust_fixture(fixture.path(), &cancellation)
+                    .expect("fixture generation publishes");
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .expect("published generation is loaded");
+                let reference = snapshot.document().files[0]
+                    .evidence
+                    .source
+                    .clone()
+                    .expect("file retains its exact source identity");
+                expected.push((receipt, source, reference));
+            }
+            service
+                .rename_repository(expected[1].0.repository, "Restored history".to_owned())
+                .expect("latest repository metadata publishes");
+        }
+        let repository_directory = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(expected[1].0.repository.to_string());
+        for entry in fs::read_dir(&repository_directory).expect("repository entries read") {
+            let entry = entry.expect("repository entry reads");
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(ACTIVATION_PREFIX)
+            {
+                let path = entry.path().join(ACTIVATION_MANIFEST_FILENAME);
+                let mut marker: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).expect("activation reads"))
+                        .expect("activation decodes");
+                marker["version"] = serde_json::json!(LEGACY_ACTIVATION_MANIFEST_VERSION);
+                marker
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("published_generation_count");
+                marker
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("global_activation_sequence");
+                fs::write(path, serde_json::to_vec(&marker).unwrap())
+                    .expect("legacy activation without publication count writes");
+            }
+        }
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let mut peak_bytes = 0;
+        for (receipt, _, _) in &expected {
+            let directory = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            assert!(!directory.join(RECOVERY_MANIFEST_FILENAME).exists());
+            let manifest: DurableGenerationManifest = serde_json::from_slice(
+                &fs::read(directory.join(MANIFEST_FILENAME)).expect("manifest reads"),
+            )
+            .expect("manifest decodes");
+            let staging_bytes = recovery_sidecar_memory_bytes(&manifest).expect("sidecars account");
+            let oracle = OracleReader::open_in(&directory, &context).expect("sealed oracle opens");
+            let mut measured = None;
+            let result = oracle.read_with_admission(&context, |plan| {
+                measured = Some(plan);
+                Err::<(), ()>(())
+            });
+            assert!(matches!(
+                result,
+                Err(OracleReadAdmissionError::Admission(()))
+            ));
+            let plan = measured.expect("same-transaction census executes before payload reads");
+            let posting_bytes = u64::try_from(
+                4 * std::mem::size_of::<(rootlight_ids::SymbolId, usize)>()
+                    + 2 * std::mem::size_of::<usize>(),
+            )
+            .expect("posting workspace is representable");
+            let peak = plan
+                .materialization_bytes()
+                .checked_add(plan.physical_rows().checked_mul(posting_bytes).unwrap())
+                .and_then(|bytes| bytes.checked_add(plan.stats().text_bytes().checked_mul(6)?))
+                .and_then(|bytes| bytes.checked_add(staging_bytes))
+                .expect("one-generation restore envelope is representable");
+            peak_bytes = peak_bytes.max(peak);
+        }
+        let (mut restored, deferred) =
+            FirstSliceService::open_durable_deferred(2, paths.state_dir())
+                .expect("deferred durable boundary opens");
+        // Reserve competing logical work without allocating a large fixture. One
+        // complete restore fits, but keeping another pending payload does not.
+        let competing = super::super::RestoredMemoryReservation::new(
+            Arc::clone(&restored.generation_cache),
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - peak_bytes,
+            true,
+        )
+        .expect("competing owner reserves the remaining capacity");
+        restored
+            .install_complete_deferred_restore_progressively(&deferred, &cancellation)
+            .expect("each verified generation installs before the next materialization");
+        let active = &expected[1].0;
+        assert_eq!(
+            restored.active_generation_for(active.repository),
+            Some(active.generation)
+        );
+        assert_eq!(
+            restored.published_generation_counts.get(&active.repository),
+            Some(&2)
+        );
+        assert_eq!(
+            restored
+                .repository_aliases
+                .get(&active.repository)
+                .map(String::as_str),
+            Some("Restored history")
+        );
+        {
+            let cache = restored.generation_cache.lock().expect("cache opens");
+            assert!(cache.generations.contains(active.generation));
+            assert!(!cache.generations.is_loaded(active.generation));
+            assert_eq!(cache.reserved_memory_bytes().unwrap(), competing.bytes);
+        }
+        for (receipt, source, reference) in &expected {
+            assert_eq!(restored.receipts.get(&receipt.generation), Some(receipt));
+            let read = restored
+                .source_read(receipt.generation, vec![reference.clone()], &cancellation)
+                .expect("each retained generation reloads its exact historical source");
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].bytes, source.as_bytes());
+            assert_eq!(read.data.chunks[0].reference, *reference);
+            let located = restored
+                .code_locate(
+                    receipt.generation,
+                    "retained_value".to_owned(),
+                    rootlight_query::LocateMode::Exact,
+                    8,
+                    0,
+                    &cancellation,
+                )
+                .expect("each retained generation reloads a queryable definition");
+            assert!(located.data.hits.iter().any(|hit| {
+                hit.identifier == "retained_value"
+                    && hit.source.as_ref().is_some_and(|source| {
+                        source.generation() == receipt.generation
+                            && source.content_hash() == reference.content_hash()
+                    })
+            }));
+        }
+        assert_eq!(
+            restored.active_generation_for(active.repository),
+            Some(active.generation),
+            "predecessor hydration never changes the active identity"
+        );
+        let lease = restored
+            .generation_lease(active.generation, &cancellation)
+            .expect("live query lease pins the exact active payload");
+        assert!(matches!(
+            super::super::RestoredMemoryReservation::new(
+                Arc::clone(&restored.generation_cache),
+                peak_bytes,
+                true,
+            ),
+            Err(FirstSliceError::GenerationMemoryLimit { .. })
+        ));
+        {
+            let cache = restored.generation_cache.lock().expect("cache opens");
+            assert!(cache.generations.is_loaded(active.generation));
+            assert_eq!(cache.reserved_memory_bytes().unwrap(), competing.bytes);
+        }
+        let read = restored
+            .source_read(
+                active.generation,
+                vec![expected[1].2.clone()],
+                &cancellation,
+            )
+            .expect("failed competing admission preserves the leased source");
+        assert_eq!(read.data.chunks[0].bytes, expected[1].1.as_bytes());
+        drop(lease);
+        let retry = super::super::RestoredMemoryReservation::new(
+            Arc::clone(&restored.generation_cache),
+            peak_bytes,
+            true,
+        )
+        .expect("releasing the live lease permits cache admission without removing history");
+        assert!(expected.iter().all(|(receipt, _, _)| {
+            restored.receipts.get(&receipt.generation) == Some(receipt)
+        }));
+        drop(retry);
+        drop(competing);
+        assert_eq!(
+            restored
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reserved_memory_bytes()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn progressive_restore_callback_failure_preserves_unvisited_generations() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .expect("runtime paths are valid");
+        paths.prepare_owner().expect("private paths prepare");
+        let fixture = durable_test_tempdir();
+        let source = fixture.path().join("lib.rs");
+        let (retained, active) = {
+            let cancellation = Cancellation::new();
+            let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)
+                .expect("durable service initializes");
+            fs::write(&source, "pub fn callback_value() -> u32 { 1 }\n")
+                .expect("initial source writes");
+            let retained = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .unwrap();
+            fs::write(&source, "pub fn callback_value() -> u32 { 2 }\n")
+                .expect("updated source writes");
+            let active = service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .unwrap();
+            (retained, active)
+        };
+        let repository = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(active.repository.to_string());
+        let corrupted = repository
+            .join(retained.generation.to_string())
+            .join(MANIFEST_FILENAME);
+        fs::write(&corrupted, b"{").expect("unvisited predecessor is corrupted");
+        let entries_before = fs::read_dir(&repository).unwrap().count();
+        for cancel_callback in [false, true] {
+            let (service, deferred) =
+                FirstSliceService::open_durable_deferred(2, paths.state_dir()).unwrap();
+            let cancellation = Cancellation::new();
+            let mut visited = 0;
+            let result = deferred
+                .durable
+                .restore_progressively(&cancellation, |event| {
+                    let ProgressiveRestoreEvent::Generation(generation) = event else {
+                        panic!("a failed generation callback cannot complete the repository")
+                    };
+                    visited += 1;
+                    assert_eq!(generation.receipt.generation, active.generation);
+                    if cancel_callback {
+                        let _ = cancellation.cancel(CancellationReason::ClientRequest);
+                        Ok(())
+                    } else {
+                        Err(FirstSliceError::Retention)
+                    }
+                });
+            assert_eq!(
+                result,
+                Err(if cancel_callback {
+                    FirstSliceError::Cancelled(CancellationReason::ClientRequest)
+                } else {
+                    FirstSliceError::Retention
+                })
+            );
+            assert_eq!(visited, 1);
+            assert_eq!(fs::read(&corrupted).unwrap(), b"{");
+            assert_eq!(fs::read_dir(&repository).unwrap().count(), entries_before);
+            assert_eq!(
+                fs::read_dir(paths.state_dir().join("first-slice/quarantine"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert_eq!(
+                service
+                    .generation_cache
+                    .lock()
+                    .unwrap()
+                    .reserved_memory_bytes()
+                    .unwrap(),
+                0,
+                "callback failure releases its pending payload owner"
             );
         }
     }
@@ -10582,7 +11070,7 @@ mod tests {
             .expect("manifest decodes");
             assert_eq!(
                 matches!(
-                    source_storage_layout(manifest.version, manifest.source_storage),
+                    source_authority::manifest_source_layout(&manifest),
                     Ok(DurableSourceLayout::Packed(_))
                 ),
                 packed
@@ -10639,7 +11127,7 @@ mod tests {
         )
         .expect("manifest decodes");
         assert!(matches!(
-            source_storage_layout(manifest.version, manifest.source_storage),
+            source_authority::manifest_source_layout(&manifest),
             Ok(DurableSourceLayout::Packed(_))
         ));
         let source_entries = fs::read_dir(generation.join(SOURCES_DIRECTORY))
@@ -11470,6 +11958,61 @@ mod tests {
             .join(DURABLE_DIRECTORY)
             .join(REPOSITORIES_DIRECTORY);
         let repository = repositories.join(first.repository.to_string());
+        let repository_parent =
+            Dir::open_ambient_dir(&repositories, ambient_authority()).expect("repositories open");
+        let private_repository = PrivateDirectory::open(
+            &repository_parent,
+            OsStr::new(&first.repository.to_string()),
+        )
+        .expect("private repository authenticates");
+        let mut operation_markers = BTreeMap::new();
+        for ordinal in 0_u64..=600 {
+            let generation = if ordinal % 3 == 0 {
+                second.generation
+            } else {
+                first.generation
+            };
+            let sequence = 1_000 + ordinal;
+            let name = OsString::from(format!("{ACTIVATION_PREFIX}{sequence:020}-{generation}"));
+            let marker = DurableActivationManifest {
+                version: ACTIVATION_MANIFEST_VERSION,
+                generation,
+                global_activation_sequence: Some(sequence),
+                published_generation_count: Some(2),
+                operation: Some(DurableOperationContextV2 {
+                    operation: rootlight_ids::OperationId::from_bytes(
+                        u128::from(sequence).to_le_bytes(),
+                    ),
+                    started_unix_ms: sequence,
+                }),
+            };
+            let directory = PrivateDirectory::create(private_repository.capability(), &name)
+                .expect("private activation directory creates");
+            let mut file = directory
+                .create_file(OsStr::new(ACTIVATION_MANIFEST_FILENAME))
+                .expect("private activation file creates");
+            file.write_all(&serde_json::to_vec(&marker).unwrap())
+                .expect("activation evidence writes");
+            file.sync_all().expect("activation evidence syncs");
+            operation_markers.insert(
+                sequence,
+                ActivationMarker {
+                    name,
+                    sequence,
+                    manifest: marker,
+                },
+            );
+        }
+        let expected_operation_markers = retained_activation_marker_names(
+            &operation_markers,
+            &BTreeSet::from([first.generation]),
+        );
+        let expected_operations: BTreeSet<_> = operation_markers
+            .values()
+            .filter(|marker| expected_operation_markers.contains(&marker.name))
+            .map(|marker| marker.manifest.operation.unwrap().operation)
+            .collect();
+        assert_eq!(expected_operations.len(), MAX_RESTORED_OPERATIONS);
         fs::write(
             repository
                 .join(second.generation.to_string())
@@ -11491,6 +12034,15 @@ mod tests {
         assert_eq!(
             restored.published_generation_counts.get(&first.repository),
             Some(&2)
+        );
+        assert_eq!(
+            restored
+                .durable_operations
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            expected_operations,
+            "operation retention uses the final valid generation set after quarantine"
         );
         assert!(!repository.join(second.generation.to_string()).exists());
         let quarantine = paths

@@ -1,6 +1,6 @@
 //! Physical Fortran captures preserve direct header and declarator ownership.
-//! Name admission rejects recovered template fragments; explicit CALL syntax
-//! never proves a target, compiler legality, or generated template variants.
+//! Name admission rejects recovered template fragments. A separate complete
+//! native census may certify same-module calls without claiming compiler legality.
 
 use std::ops::Range;
 
@@ -74,7 +74,7 @@ fn declarator_name<'tree>(
     }
 }
 
-fn definition<'tree>(
+pub(super) fn definition<'tree>(
     node: Node<'tree>,
     cancellation: &Cancellation,
 ) -> Result<Option<Node<'tree>>, AdapterError> {
@@ -88,7 +88,7 @@ fn definition<'tree>(
     declarator_name(node, cancellation)
 }
 
-fn ordinary_name(node: Node<'_>, source: &[u8]) -> bool {
+pub(super) fn ordinary_name(node: Node<'_>, source: &[u8]) -> bool {
     if node.is_missing() || node.has_error() {
         return false;
     }
@@ -181,7 +181,10 @@ fn valid_definition(
     Ok(true)
 }
 
-fn template_source(source: &[u8], cancellation: &Cancellation) -> Result<bool, AdapterError> {
+pub(super) fn template_source(
+    source: &[u8],
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
     for (index, pair) in source.windows(2).enumerate() {
         if index.is_multiple_of(1024) {
             cancellation.check()?;
@@ -222,7 +225,7 @@ fn application_name<'tree>(
     Ok(None)
 }
 
-fn terminal_call_name<'tree>(
+pub(super) fn terminal_call_name<'tree>(
     node: Node<'tree>,
     cancellation: &Cancellation,
 ) -> Result<Option<Node<'tree>>, AdapterError> {

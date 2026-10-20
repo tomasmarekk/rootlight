@@ -7,10 +7,11 @@ use super::objective_c;
 #[derive(Default)]
 pub(super) struct Hints {
     pub(super) declaration: bool,
+    pub(super) distinctive_declaration: bool,
     pub(super) script: bool,
 }
 
-pub(super) fn hints(mut source: &[u8]) -> Hints {
+pub(super) fn hints(mut source: &[u8], prefix_truncated: bool) -> Hints {
     source = source.strip_prefix(b"\xef\xbb\xbf").unwrap_or(source);
     let mut result = Hints::default();
     let mut statement_start = true;
@@ -117,16 +118,16 @@ pub(super) fn hints(mut source: &[u8]) -> Hints {
             if statement_start {
                 let separated = tail.first().is_some_and(u8::is_ascii_whitespace);
                 let next = after_header_continuations(tail).first().copied();
-                result.declaration |= separated
-                    && match word {
-                        b"function" => {
-                            next.is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'[')
-                        }
-                        b"classdef" => {
-                            next.is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'(')
-                        }
-                        _ => false,
-                    };
+                let function = (word == b"function" && separated)
+                    .then(|| function_header(tail, prefix_truncated))
+                    .flatten();
+                let class = word == b"classdef"
+                    && separated
+                    && next.is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'(');
+                result.declaration |= function.is_some() || class;
+                // Bare no-input functions also exist in Modelica; only an
+                // output or parameter form supplies independent conflict proof.
+                result.distinctive_declaration |= function == Some(true) || class;
                 result.script |=
                     matches!(word, b"for" | b"parfor") && separated && assignment_follows(tail);
             }
@@ -157,6 +158,116 @@ fn after_header_continuations(mut source: &[u8]) -> &[u8] {
         }
         source = after_line(source);
     }
+}
+
+fn header_space(mut source: &[u8]) -> &[u8] {
+    loop {
+        source = trim_horizontal(source);
+        if !source.starts_with(b"...") {
+            return source;
+        }
+        source = after_line(source);
+    }
+}
+
+fn header_identifier(source: &[u8]) -> Option<&[u8]> {
+    if !source.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let length = source
+        .iter()
+        .take_while(|byte| identifier_byte(**byte))
+        .count();
+    source.get(length..)
+}
+
+fn header_names(mut source: &[u8], close: u8, outputs: bool) -> Option<&[u8]> {
+    source = header_space(source);
+    if source.first() == Some(&close) {
+        return source.get(1..);
+    }
+    loop {
+        let tail = if !outputs && source.starts_with(b"~") {
+            source.get(1..)?
+        } else {
+            header_identifier(source)?
+        };
+        source = header_space(tail);
+        if source.first() == Some(&close) {
+            return source.get(1..);
+        }
+        if let Some(tail) = source.strip_prefix(b",") {
+            source = header_space(tail);
+        } else if !outputs || source.len() == tail.len() {
+            return None;
+        }
+    }
+}
+
+fn after_header_comments(mut source: &[u8]) -> &[u8] {
+    loop {
+        source = source.trim_ascii_start();
+        if source.starts_with(b"%") {
+            source = if line(source).trim_ascii() == b"%{" {
+                after_block_comment(after_line(source))
+            } else {
+                after_line(source)
+            };
+        } else if let Some(comment) = source.strip_prefix(b"//") {
+            source = after_line(comment);
+        } else if let Some(comment) = source.strip_prefix(b"/*") {
+            let Some(end) = comment.windows(2).position(|pair| pair == b"*/") else {
+                return &[];
+            };
+            source = comment.get(end + 2..).unwrap_or_default();
+        } else {
+            return source;
+        }
+    }
+}
+
+// This certifies a bounded declaration header, not the function body.
+// A next-line brace is ambiguous only without a written output assignment;
+// an output-assignment header remains proof before a valid cell expression.
+fn function_header(source: &[u8], prefix_truncated: bool) -> Option<bool> {
+    let mut source = header_space(source);
+    let mut distinctive = false;
+    let mut has_output_assignment = false;
+    if let Some(tail) = source.strip_prefix(b"[") {
+        source = header_space(header_names(tail, b']', true)?);
+        source = header_space(source.strip_prefix(b"=")?);
+        source = header_identifier(source)?;
+        distinctive = true;
+        has_output_assignment = true;
+    } else {
+        source = header_identifier(source)?;
+        let tail = header_space(source);
+        if let Some(tail) = tail.strip_prefix(b"=") {
+            source = header_identifier(header_space(tail))?;
+            distinctive = true;
+            has_output_assignment = true;
+        }
+    }
+    source = header_space(source);
+    if let Some(tail) = source.strip_prefix(b"(") {
+        source = header_names(tail, b')', false)?;
+        distinctive = true;
+    }
+    source = header_space(source);
+    let Some(first) = source.first() else {
+        return (!prefix_truncated).then_some(distinctive);
+    };
+    let body = match first {
+        b'\r' | b'\n' => source,
+        b';' | b',' => source.get(1..)?,
+        b'%' => after_line(source),
+        _ => return None,
+    };
+    let body = after_header_comments(body);
+    if !has_output_assignment && (body.starts_with(b"{") || body.is_empty() && prefix_truncated) {
+        return None;
+    }
+    Some(distinctive)
 }
 
 fn numeric_matrix(mut source: &[u8]) -> bool {
@@ -198,6 +309,10 @@ fn numeric_matrix(mut source: &[u8]) -> bool {
 }
 
 fn multi_output_assignment(source: &[u8]) -> bool {
+    output_assignment(source, 2)
+}
+
+fn output_assignment(source: &[u8], minimum_outputs: usize) -> bool {
     let Some(mut source) = source.strip_prefix(b"[") else {
         return false;
     };
@@ -224,7 +339,7 @@ fn multi_output_assignment(source: &[u8]) -> bool {
             return false;
         };
         let tail = trim_horizontal(tail);
-        return outputs >= 2
+        return outputs >= minimum_outputs
             && tail.strip_prefix(b"=").is_some_and(|rhs| {
                 trim_horizontal(rhs)
                     .first()
@@ -313,3 +428,7 @@ fn after_quoted(mut source: &[u8], delimiter: u8) -> &[u8] {
     }
     &[]
 }
+
+#[cfg(test)]
+#[path = "matlab_header_tests.rs"]
+mod header_tests;

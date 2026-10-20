@@ -34,6 +34,11 @@ use rootlight_ir::{
     FilePathLocator, FilePathLocatorEncoding, MAX_FILE_PATH_LOCATOR_COMPONENTS, SourceRef,
 };
 
+/// Shared passive cause attached to generation-pinned exact source recovery.
+pub use rootlight_ir::{
+    AggregateCapacityResource, AggregateCapacityStage, AggregateSourceRecovery,
+};
+
 pub mod platform;
 mod space;
 mod stream;
@@ -343,6 +348,14 @@ impl RelativePath {
         &self.components[..self.components.len() - 1]
     }
 
+    /// Returns the path value, owned capacities and conservative allocation costs.
+    ///
+    /// `None` means the accounting overflowed; callers must reject admission.
+    #[must_use]
+    pub fn retained_memory_bytes(&self) -> Option<usize> {
+        size_of::<Self>().checked_add(self.retained_owned_bytes()?)
+    }
+
     fn retained_owned_bytes(&self) -> Option<usize> {
         let component_slots = self
             .components
@@ -377,11 +390,12 @@ impl fmt::Debug for RelativePath {
 }
 
 /// Immutable bytes captured from one stable regular file.
+/// Clones share source backing; identity and public byte slices remain immutable.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SourceSnapshot {
     file: FileId,
     path: RelativePath,
-    content: Vec<u8>,
+    content: std::sync::Arc<Vec<u8>>,
     content_hash: ContentHash,
     metadata: SnapshotMetadata,
 }
@@ -425,7 +439,7 @@ impl SourceSnapshot {
         Ok(Self {
             file,
             path,
-            content,
+            content: std::sync::Arc::new(content),
             content_hash,
             metadata: SnapshotMetadata {
                 length,
@@ -472,9 +486,14 @@ impl SourceSnapshot {
     /// The estimate uses live allocation capacities and includes a fixed
     /// allocator allowance for each path or content buffer. Container entries
     /// that own an `Arc` to this snapshot remain the caller's responsibility.
+    /// Shared source backing is conservatively charged in full for each owner.
     #[must_use]
     pub fn retained_memory_bytes(&self) -> Option<usize> {
         let mut bytes = size_of::<Self>().checked_add(self.path.retained_owned_bytes()?)?;
+        bytes = bytes
+            .checked_add(size_of::<Vec<u8>>())?
+            .checked_add(2 * size_of::<usize>())?
+            .checked_add(RETAINED_ALLOCATION_OVERHEAD_BYTES)?;
         bytes = bytes.checked_add(self.content.capacity())?;
         if self.content.capacity() != 0 {
             bytes = bytes.checked_add(RETAINED_ALLOCATION_OVERHEAD_BYTES)?;
@@ -1448,7 +1467,7 @@ impl RepositoryRoot {
         Ok(SourceSnapshot {
             file: self.file_id(path),
             path: path.clone(),
-            content: second.content,
+            content: std::sync::Arc::new(second.content),
             content_hash: second.hash,
             metadata: second.metadata,
         })
@@ -2834,6 +2853,36 @@ mod tests {
             root.read_directory(None, 3, &cancelled),
             Err(VfsError::Cancelled(CancellationReason::ClientRequest))
         ));
+    }
+
+    #[test]
+    fn snapshot_clones_share_exact_immutable_bytes_with_conservative_owner_charges() {
+        let repository = derive_repository(b"shared-immutable-source").id();
+        let path = RelativePath::parse(Path::new("source.rs")).unwrap();
+        let file = derive_file(FileIdentity {
+            repository,
+            path_identity: path.identity_bytes(),
+        })
+        .id();
+        let bytes = b"\xef\xbb\xbf// exact source \xf0\x9f\x98\x80\n".to_vec();
+        let snapshot = SourceSnapshot::from_persisted(
+            repository,
+            path,
+            file,
+            hash_content(&bytes),
+            bytes.clone(),
+        )
+        .unwrap();
+        let retained = snapshot.clone();
+        assert_eq!(snapshot.content().as_ptr(), retained.content().as_ptr());
+        assert_eq!(snapshot, retained);
+        assert!(
+            snapshot.retained_memory_bytes().unwrap()
+                >= bytes.len() + size_of::<Vec<u8>>() + 2 * size_of::<usize>()
+        );
+        drop(snapshot);
+        assert_eq!(retained.content(), bytes);
+        assert!(!retained.metadata().supports_hash_reuse());
     }
 
     #[test]

@@ -34,7 +34,46 @@ const MAX_DEPTH: usize = 128;
 const MEMORY_POLICY: MemoryAdmissionPolicy =
     MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
 
-const CASES: [(&str, &str, &[u8]); 63] = [
+const CASES: [(&str, &str, &[u8]); 90] = [
+    ("written.qs","qsharp",include_bytes!("fixtures/qsharp/Shorthand.qs")),
+    ("written.sml", "standard-ml", include_bytes!("fixtures/standard_ml/deephandle.sml")),
+    ("written.wat", "webassembly", include_bytes!("fixtures/webassembly/sieve.wat")),
+    ("written.mojo", "mojo", include_bytes!("fixtures/mojo/llama2.mojo")),
+    ("written.ring", "ring", include_bytes!("fixtures/ring/htmlfunctions.ring")),
+    ("written.ha", "hare", include_bytes!("fixtures/hare/original-part1.ha")),
+    ("written.hx", "haxe", b"class Written { static function measure() { var value = 1; consume(value); } }"),
+    (
+        "SettingsUiState.qml",
+        "qml",
+        include_bytes!("fixtures/qml/SettingsUiState.qml"),
+    ),
+    (
+        "measurement.mo",
+        "modelica",
+        b"within Neutral;\nfunction measure\n input Real value;\n output Real result;\nalgorithm\n result := value;\nend measure;\n",
+    ),
+    (
+        "measurement.schema.json",
+        "json-schema",
+        br##"{"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{"Measurement":{"type":"object","properties":{"value":{"type":"number"}}}},"properties":{"result":{"$ref":"#/$defs/Measurement"}}}"##,
+    ),
+    ("sample.adb", "ada", b"procedure Sample is begin null; end Sample;\n"),
+    ("written.tf", "hcl", b"written = { nested = 1 }\n"),
+    ("written.d", "d", b"module sample; void measure(int value) {}\n"),
+    ("written.zig", "zig", b"pub fn written() void { var value: u8 = 1; _ = &value; }\n"),
+    ("written.cr", "crystal", b"class Written\n  def value\n    1\n  end\nend\n"),
+    ("written.cue", "cue", b"package sample\nparent: {child: string}\n"),
+    ("written.pony", "pony", b"class Written\n  fun ref value(): U32 => 1\n"),
+    ("written.fish", "fish", b"function measure; echo value; end\n"),
+    ("written.nim", "nim", b"proc measure(value: int): int = value\n"),
+    ("written.clj", "clojure", b"(ns written) (defn measure [value] value)\n"),
+    ("written.rkt", "racket", b"#lang racket/base\n(define (measure value) value)\n"),
+    ("written.vhdl", "vhdl", b"entity Written is port (Clock : in bit); end Written;\n"),
+        ("schema.graphql", "graphql", b"type Query { value: String }\n"),
+    ("sample.ex", "elixir", b"defmodule Sample do\n def value, do: 1\nend\n"),
+    ("schema.proto", "protobuf", b"syntax = \"proto3\"; message Record { string value = 1; }\n"),
+    ("schema.thrift", "thrift", b"struct Record { 1: string value; }\n"),
+    ("schema.capnp", "capnp", b"struct Item { value @0 :Text; }\n"),
     ("written.v", "coq", b"(* marker *)\r\nDefinition written_value : nat := 1.\r\nLemma statement : True. Proof. exact I. Qed.\r\n"),
     ("source.v", "v", b"module written\nstruct Box { value int }\nfn measure(value int) int { return value }\n"),
     ("written.v", "verilog", b"module Written(input wire clk); wire value; endmodule\n"),
@@ -220,7 +259,68 @@ fn deferred_queries_preserve_every_audited_language_and_normalized_ir() {
             .collect()
     );
     for (name, language, source) in CASES {
-        assert_parity(&eager, &deferred, name, language, source);
+        let (parsed, analyzed) = assert_parity(&eager, &deferred, name, language, source);
+        if language == "modelica" {
+            assert_entity(&analyzed, language, "measure");
+            assert_entity(&analyzed, language, "value");
+            assert!(
+                parsed
+                    .facts()
+                    .iter()
+                    .any(|fact| fact.syntax_kind().as_str()
+                        == "modelica.input_parameter.declaration")
+            );
+            assert_written_definition(&parsed, source, b"measure");
+            assert_written_definition(&parsed, source, b"value");
+        } else if language == "json-schema" {
+            for name in ["Measurement", "value", "result"] {
+                assert_entity(&analyzed, language, name);
+                assert_written_definition(&parsed, source, name.as_bytes());
+            }
+            assert!(
+                parsed
+                    .facts()
+                    .iter()
+                    .any(|fact| fact.syntax_kind().as_str() == "json_schema.field.declaration")
+            );
+            let document = analyzed.document();
+            let model = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "Measurement")
+                .unwrap();
+            let field = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "value")
+                .unwrap();
+            let owner = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == "result")
+                .unwrap();
+            for (predicate, subject, object) in [
+                (
+                    rootlight_ir::RelationPredicate::Contains,
+                    model.id,
+                    field.id,
+                ),
+                (
+                    rootlight_ir::RelationPredicate::UsesType,
+                    owner.id,
+                    model.id,
+                ),
+            ] {
+                assert!(
+                    document
+                        .relations
+                        .iter()
+                        .any(|edge| edge.predicate == predicate
+                            && edge.subject == rootlight_ir::RelationEndpoint::Entity(subject)
+                            && edge.object == rootlight_ir::RelationEndpoint::Entity(object))
+                );
+            }
+        }
     }
     let (parsed, analyzed) = assert_parity(
         &eager,
@@ -478,6 +578,20 @@ fn assert_parity(
     let eager_analyzed = analyze(eager, &fixture, language, &budget);
     assert_eq!(analyzed, eager_analyzed, "normalized IR parity for {name}");
     (parsed, analyzed)
+}
+
+fn assert_written_definition(parsed: &ParseOutput, source: &[u8], name: &[u8]) {
+    assert!(
+        parsed.facts().iter().any(|fact| {
+            fact.syntax_kind().as_str().ends_with(".definition")
+                && source.get(
+                    usize::try_from(fact.span().start_byte()).unwrap()
+                        ..usize::try_from(fact.span().end_byte()).unwrap(),
+                ) == Some(name)
+        }),
+        "written definition {:?}",
+        std::str::from_utf8(name).unwrap()
+    );
 }
 
 fn analyze(

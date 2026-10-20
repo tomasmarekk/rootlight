@@ -1,0 +1,9 @@
+{
+  "origin": "https://github.com/TheAlgorithms/Python",
+  "source_path": "scripts/find_git_conflicts.sh",
+  "retained_corpus": "2_Python_Python",
+  "source_sha256": "e1a68c0da0fd10f34fe508acc162751a0c2d2e5118ea69e3d33fc18adeadecc6",
+  "license_path": "LICENSE.md",
+  "license_sha256": "7d6eccf2e488ca8e30752c1ed243fc0322e6d4025e79ab27940314713b45b7a8",
+  "scope": "Exact retained source fixture; never executed as shell commands. Independent formal Read and assignment dependency assertions retain the authored physical spans."
+}

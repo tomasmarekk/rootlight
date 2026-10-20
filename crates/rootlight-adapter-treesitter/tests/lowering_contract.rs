@@ -3997,3 +3997,175 @@ fn deadline() -> Cancellation {
             .expect("test deadline derives"),
     )
 }
+
+#[test]
+fn declaration_association_stops_at_unknown_named_declarations() {
+    use rootlight_ir::{EntityKind, OccurrenceTarget};
+
+    let text = "class Outer { opaque Inner; }\n";
+    let (_directory, snapshot, source) =
+        source_fixture_for(text, "Source.java", b"unknown-declaration-boundary");
+    let outer_name = span_in(text, &source, "Outer", 0);
+    let unknown = span_in(text, &source, "opaque Inner;", 0);
+    let inner_name = span_in(text, &source, "Inner", 0);
+    for through_scope in [false, true] {
+        let mut facts = vec![
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Root,
+                source.span(),
+                0,
+                label("java.file.root"),
+            ),
+            SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                source.span(),
+                1,
+                label("java.class.declaration"),
+            ),
+            SyntaxFact::new(
+                3,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                outer_name,
+                2,
+                label("java.identifier.definition"),
+            ),
+            SyntaxFact::new(
+                4,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                unknown,
+                2,
+                label("java.opaque.declaration"),
+            ),
+        ];
+        if through_scope {
+            facts.push(SyntaxFact::new(
+                5,
+                Some(4),
+                SyntaxFactKind::Scope,
+                unknown,
+                3,
+                label("java.opaque.scope"),
+            ));
+        }
+        facts.push(SyntaxFact::new(
+            6,
+            Some(if through_scope { 5 } else { 4 }),
+            SyntaxFactKind::Occurrence,
+            inner_name,
+            if through_scope { 4 } else { 3 },
+            label("java.identifier.definition"),
+        ));
+        let output = analyze_custom(
+            &snapshot,
+            &source,
+            LanguageId::new("java").unwrap(),
+            &limits(IrLimits::default()),
+            facts,
+        )
+        .expect("unknown declaration retains a gap without poisoning its parent");
+        let document = output.document();
+        assert_eq!(document.entities.len(), 1, "through_scope={through_scope}");
+        let outer = &document.entities[0];
+        assert_eq!(outer.kind, EntityKind::Class);
+        assert_eq!(outer.canonical_name, "Outer");
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Definition)
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].source.span(), outer_name);
+        assert_eq!(definitions[0].source.content_hash(), source.content_hash());
+        assert_eq!(
+            definitions[0].target,
+            OccurrenceTarget::Resolved { symbol: outer.id }
+        );
+        assert!(!document.occurrences.iter().any(
+            |site| site.role == OccurrenceRole::Definition && site.source.span() == inner_name
+        ));
+        let gaps: Vec<_> = document
+            .skipped_regions
+            .iter()
+            .filter(|gap| {
+                gap.detail == "declaration-name-unavailable" && gap.source.span() == unknown
+            })
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].source.repository(), source.repository());
+        assert_eq!(gaps[0].source.generation(), source.generation());
+        assert_eq!(gaps[0].source.content_hash(), source.content_hash());
+    }
+}
+
+#[test]
+fn declaration_association_keeps_lexical_scopes_transparent() {
+    use rootlight_ir::{EntityKind, OccurrenceTarget};
+
+    let text = "class Outer {}\n";
+    let (_directory, snapshot, source) =
+        source_fixture_for(text, "Source.java", b"transparent-definition-scope");
+    let name = span_in(text, &source, "Outer", 0);
+    let output = analyze_custom(
+        &snapshot,
+        &source,
+        LanguageId::new("java").unwrap(),
+        &limits(IrLimits::default()),
+        vec![
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Root,
+                source.span(),
+                0,
+                label("java.file.root"),
+            ),
+            SyntaxFact::new(
+                2,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                source.span(),
+                1,
+                label("java.class.declaration"),
+            ),
+            SyntaxFact::new(
+                3,
+                Some(2),
+                SyntaxFactKind::Scope,
+                name,
+                2,
+                label("java.name_context.scope"),
+            ),
+            SyntaxFact::new(
+                4,
+                Some(3),
+                SyntaxFactKind::Occurrence,
+                name,
+                3,
+                label("java.identifier.definition"),
+            ),
+        ],
+    )
+    .expect("a lexical scope does not pretend to be a named declaration");
+    let document = output.document();
+    assert_eq!(document.entities.len(), 1);
+    assert_eq!(document.entities[0].kind, EntityKind::Class);
+    assert_eq!(document.entities[0].canonical_name, "Outer");
+    let definition = document
+        .occurrences
+        .iter()
+        .find(|site| site.role == OccurrenceRole::Definition)
+        .unwrap();
+    assert_eq!(definition.source.span(), name);
+    assert_eq!(
+        definition.target,
+        OccurrenceTarget::Resolved {
+            symbol: document.entities[0].id
+        }
+    );
+}

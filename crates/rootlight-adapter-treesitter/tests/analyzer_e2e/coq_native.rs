@@ -4,6 +4,573 @@
 use super::*;
 use rootlight_ir::ContainerRef;
 
+fn certificate_output(source: &str) -> AnalysisOutput {
+    let fixture = Fixture::new(COQ, source.as_bytes());
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let result = analyze(
+        &analyzer(&provider, COQ),
+        &request(&fixture.snapshot, &fixture.source, COQ, &limits),
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(result.document(), limits.ir(), &ExtensionSupport::default()).unwrap();
+    assert!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .all(
+                |site| site.source.repository() == fixture.source.repository()
+                    && site.source.generation() == fixture.source.generation()
+                    && site.source.content_hash() == fixture.source.content_hash()
+            )
+    );
+    result
+}
+
+#[test]
+fn coq_parameterized_assertions_preserve_exact_names_and_immediate_formal_owners() {
+    for alias in [
+        "Theorem",
+        "Lemma",
+        "Fact",
+        "Remark",
+        "Corollary",
+        "Proposition",
+        "Property",
+    ] {
+        let source = format!("{alias} written {{A B}} (x y : A) (z : B) : True.\n");
+        let result = certificate_output(&source);
+        let document = result.document();
+        let function = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Function && entity.canonical_name == "written"
+            })
+            .unwrap();
+        named_definition(document, "written", EntityKind::Function);
+        let end = u64::try_from(source.find(": True").unwrap() + 1).unwrap();
+        assert_eq!(
+            function.evidence.source.as_ref().unwrap().span().end_byte(),
+            end
+        );
+        for name in ["x", "y", "z"] {
+            let definition = named_definition(document, name, EntityKind::Parameter);
+            let OccurrenceTarget::Resolved { symbol } = definition.target else {
+                panic!("formal target")
+            };
+            let parameter = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(function.id)));
+            assert!(
+                document
+                    .relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::Contains
+                        && relation.subject == RelationEndpoint::Entity(function.id)
+                        && relation.object == RelationEndpoint::Entity(symbol))
+            );
+            let span = definition.source.span();
+            assert_eq!(
+                &source[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+                name
+            );
+        }
+        for name in ["A", "B"] {
+            assert!(
+                !document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.canonical_name == name)
+            );
+        }
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "coq-written-formal-types-and-term-lifetime-unavailable")
+        );
+    }
+}
+
+#[test]
+fn coq_parameterized_header_barriers_never_publish_a_constant_fallback() {
+    for source in [
+        "Lemma blocked (x x : nat) : True.",
+        "Lemma blocked {x} (x : nat) : True.",
+        "Lemma blocked (x := 0) : True.",
+        "Lemma blocked x : True.",
+        "Module M. Lemma blocked (x : nat) : True.",
+        "Section S. Lemma blocked (x : nat) : True.",
+        "Lemma pending : True. Lemma blocked (x : nat) : True.",
+        "Fail Lemma blocked (x : nat) : True.",
+        "#[local] Lemma blocked (x : nat) : True.",
+    ] {
+        let result = certificate_output(source);
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| matches!(entity.canonical_name.as_str(), "blocked" | "x")),
+            "{source}"
+        );
+        assert!(!result.document().skipped_regions.is_empty());
+    }
+    let source = "Theorem zero : True. Proof. exact I. Qed.\nDefinition constant := 0.\nFixpoint recursive (x : nat) : nat := x.\n";
+    let result = certificate_output(source);
+    for name in ["zero", "constant", "recursive"] {
+        named_definition(result.document(), name, EntityKind::Constant);
+    }
+}
+
+#[test]
+fn coq_notation_pair_preserves_record_constructor_and_field_identity_through_normalization() {
+    let prefix = "Record target (A : Type) := make { field : A }.\n";
+    let source = format!("{prefix}Notation \"! T\" := (target T) (at level 10).\n");
+    let before = certificate_output(prefix);
+    let after = certificate_output(&source);
+    let document = after.document();
+    for (name, kind) in [
+        ("target", EntityKind::Struct),
+        ("make", EntityKind::Constructor),
+        ("field", EntityKind::Field),
+    ] {
+        let old = before
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name && entity.kind == kind)
+            .unwrap();
+        let new = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name && entity.kind == kind)
+            .unwrap();
+        assert_eq!(old.id, new.id, "{name}");
+        assert_eq!(old.container, new.container);
+    }
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "target")
+        .unwrap();
+    let start = u64::try_from(source.rfind("target").unwrap()).unwrap();
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.source.span().start_byte() == start && site.role == OccurrenceRole::Reference
+        })
+        .collect();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(
+        sites[0].target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert!(
+        document
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(sites[0].id)
+                && edge.object == RelationEndpoint::Entity(target.id))
+    );
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(|site| site.source.span().start_byte() == start
+                && site.role == OccurrenceRole::Definition)
+    );
+    let fixture = Fixture::new(COQ, source.as_bytes());
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        provider.as_ref(),
+        &request(&fixture.snapshot, &fixture.source, COQ, &limits).to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let markers: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == "coq.notation_target.signature")
+        .collect();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        markers[0].kind(),
+        rootlight_adapter_sdk::SyntaxFactKind::Signature
+    );
+    assert_eq!(markers[0].span().start_byte(), 0);
+    assert_eq!(markers[0].span().end_byte(), start + 6);
+}
+
+#[test]
+fn coq_unsupported_notation_contexts_retain_unresolved_reference_and_specific_gaps() {
+    for middle in [
+        "Definition target := 1. ",
+        "Import Other. ",
+        "Require Import Other. ",
+        "Export Other. ",
+        "Include Other. ",
+        "Section S. ",
+        "Module M. ",
+        "Set Implicit Arguments. ",
+    ] {
+        let source = format!("Definition target := 0. {middle}Notation \"! T\" := (target T).\n");
+        let result = certificate_output(&source);
+        let start = u64::try_from(source.rfind("target").unwrap()).unwrap();
+        let sites: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() == start && site.role == OccurrenceRole::Reference
+            })
+            .collect();
+        assert_eq!(sites.len(), 1, "{source}");
+        assert!(
+            matches!(sites[0].target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "coq-declaration-time-notation-binding-unavailable")
+        );
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+        );
+    }
+    for pattern in ["target T", "'target' T"] {
+        let source = format!("Definition target := 0. Notation \"{pattern}\" := (target T).\n");
+        let result = certificate_output(&source);
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+        );
+    }
+}
+
+#[test]
+fn coq_notation_artifacts_keep_current_generation_and_exact_native_required_demand() {
+    let source = "Definition target := 0. Notation \"! T\" := (target T).\nLemma written (x : nat) : ∥ x ∥.\n";
+    let fixture = Fixture::new(COQ, source.as_bytes());
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, COQ);
+    let limits = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, COQ, &limits);
+    let (first, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let required = artifact.required_syntax_fact_count(&deadline()).unwrap();
+    assert_eq!(
+        required,
+        provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .unwrap()
+    );
+    let successor = fixture.next_generation();
+    let next = request(&successor.snapshot, &successor.source, COQ, &limits);
+    let reused = analyzer
+        .analyze_from_artifact(
+            &next,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let clean = analyze(&analyzer, &next, &ExtensionSupport::default());
+    assert_eq!(reused.document(), clean.document());
+    assert_eq!(reused.report(), clean.report());
+    assert_eq!(symbol_ids(first.document()), symbol_ids(reused.document()));
+    assert!(
+        reused
+            .document()
+            .occurrences
+            .iter()
+            .all(|site| site.source.generation() == successor.source.generation())
+    );
+    assert!(
+        reused
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+    );
+    let exact_limits = limits_with_syntax_records(required);
+    let exact = request(&successor.snapshot, &successor.source, COQ, &exact_limits);
+    let exact_output = analyze(&analyzer, &exact, &ExtensionSupport::default());
+    assert!(
+        exact_output
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+    );
+    let too_small = limits_with_syntax_records(required - 1);
+    assert!(matches!(
+        analyzer.analyze_and_capture(
+            &request(&successor.snapshot, &successor.source, COQ, &too_small),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline()
+        ),
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn coq_unicode_bom_and_crlf_keep_physical_formals_and_explicit_utf16_binding_gap() {
+    let text = "(* λ😀 *)\r\nRecord résumé (A : Type) := crée { valeur : A }.\r\nNotation \"! T\" := (résumé T).\r\nLemma écrit (paramètre : nat) : True.\r\n";
+    for (encoding, bom) in [
+        ("utf-8", false),
+        ("utf-8", true),
+        ("utf-16le", true),
+        ("utf-16be", true),
+    ] {
+        let text = format!("{}{text}", if bom { "\u{feff}" } else { "" });
+        let encode = |part: &str| -> Vec<u8> {
+            if encoding == "utf-8" {
+                part.as_bytes().to_vec()
+            } else {
+                part.encode_utf16()
+                    .flat_map(|unit| {
+                        if encoding == "utf-16le" {
+                            unit.to_le_bytes()
+                        } else {
+                            unit.to_be_bytes()
+                        }
+                    })
+                    .collect()
+            }
+        };
+        let raw = encode(&text);
+        let fixture = Fixture::new(COQ, &raw);
+        let provider = Arc::new(provider());
+        let budget = limits();
+        let request = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            language(COQ),
+            EncodingId::new(encoding).unwrap(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            build_context(),
+            &budget,
+        )
+        .unwrap()
+        .with_generated_status(false);
+        let result = analyze(
+            &analyzer(&provider, COQ),
+            &request,
+            &ExtensionSupport::default(),
+        );
+        validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+        for (name, kind) in [
+            ("résumé", EntityKind::Struct),
+            ("écrit", EntityKind::Function),
+            ("paramètre", EntityKind::Parameter),
+        ] {
+            let site = named_definition(result.document(), name, kind);
+            let start = encode(&text[..text.find(name).unwrap()]).len();
+            assert_eq!(
+                site.source.span().start_byte(),
+                u64::try_from(start).unwrap()
+            );
+            assert_eq!(
+                site.source.span().end_byte(),
+                u64::try_from(start + encode(name).len()).unwrap()
+            );
+            assert_eq!(site.source.content_hash(), content_hash(&raw));
+        }
+        let use_start =
+            u64::try_from(encode(&text[..text.rfind("résumé").unwrap()]).len()).unwrap();
+        let uses: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() == use_start
+                    && site.role == OccurrenceRole::Reference
+            })
+            .collect();
+        assert_eq!(uses.len(), 1, "{encoding}/{bom}");
+        assert_eq!(
+            matches!(uses[0].target, OccurrenceTarget::Resolved { .. }),
+            encoding == "utf-8"
+        );
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.domain == FactDomain::Relations)
+        );
+    }
+}
+
+#[test]
+fn coq_separately_included_ranges_do_not_claim_a_standalone_prefix_certificate() {
+    let source = "(* omitted *)\nDefinition target := 0. Notation \"! T\" := (target T). Lemma written (x : nat) : True.";
+    let fixture = Fixture::new(COQ, source.as_bytes());
+    let provider = Arc::new(provider());
+    let budget = limits();
+    let begin = u64::try_from(source.find("Definition").unwrap()).unwrap();
+    let request = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(COQ),
+        EncodingId::utf8(),
+        vec![IncludedRange::new(
+            SourceSpan::new(
+                fixture.source.span().file(),
+                begin,
+                u64::try_from(source.len()).unwrap(),
+            )
+            .unwrap(),
+            language(COQ),
+        )],
+        AnalysisTier::TierD,
+        build_context(),
+        &budget,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    let result = analyze(
+        &analyzer(&provider, COQ),
+        &request,
+        &ExtensionSupport::default(),
+    );
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| matches!(entity.canonical_name.as_str(), "written" | "x"))
+    );
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+    );
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "coq-declaration-time-notation-binding-unavailable")
+    );
+}
+
+#[test]
+fn coq_prepared_certificates_reject_changed_context_content_and_cancelled_staging() {
+    let source = "Definition target := 0. Notation \"! T\" := (target T).\n";
+    let fixture = Fixture::new(COQ, source.as_bytes());
+    let (analyzer, parser) = counting_analyzer(COQ, ParseTestBehavior::Native);
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, COQ, &budget);
+    let artifact = analyzer.prepare_artifact(&initial, &deadline()).unwrap();
+    let changed = fixture.rewrite(source.replace(":= 0", ":= 1").as_bytes());
+    let changed_request = request(&changed.snapshot, &changed.source, COQ, &budget);
+    let included = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(COQ),
+        EncodingId::utf8(),
+        vec![IncludedRange::new(fixture.source.span(), language(COQ))],
+        AnalysisTier::TierD,
+        build_context(),
+        &budget,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    for invalid in [&changed_request, &included] {
+        assert!(
+            matches!(analyzer.analyze_prepared_artifact(invalid, &artifact, ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback, &deadline()),
+            Err(AdapterError::ProviderFailed { code }) if code.as_str() == "treesitter-structural-artifact-mismatch")
+        );
+    }
+    let cancelled = deadline();
+    cancelled.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        analyzer.analyze_prepared_artifact(
+            &initial,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancelled
+        ),
+        Err(AdapterError::Cancelled {
+            reason: CancellationReason::ClientRequest
+        })
+    ));
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+    let (after_parse, _) = counting_analyzer(COQ, ParseTestBehavior::CancelAfterParse);
+    assert!(matches!(
+        after_parse.analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline()
+        ),
+        Err(AdapterError::Cancelled {
+            reason: CancellationReason::ClientRequest
+        })
+    ));
+}
+
+#[test]
+fn coq_generated_classification_reuses_parse_and_rebuilds_file_metadata() {
+    let source = "Definition target := 0. Notation \"! T\" := (target T).\n";
+    let fixture = Fixture::new(COQ, source.as_bytes());
+    let (analyzer, parser) = counting_analyzer(COQ, ParseTestBehavior::Native);
+    let budget = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, COQ, &budget);
+    let artifact = analyzer.prepare_artifact(&initial, &deadline()).unwrap();
+    let classified =
+        request(&fixture.snapshot, &fixture.source, COQ, &budget).with_generated_status(true);
+    let replayed = analyzer
+        .analyze_prepared_artifact(
+            &classified,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 1);
+    assert!(replayed.document().files[0].generated);
+    let fresh = analyze(&analyzer, &classified, &ExtensionSupport::default());
+    assert_eq!(replayed.document(), fresh.document());
+    assert_eq!(parser.invocations.load(Ordering::Relaxed), 2);
+}
+
 const COQ: LanguageCase = LanguageCase {
     name: "coq",
     path: "src/written.v",
@@ -1350,4 +1917,93 @@ fn coq_tactic_notation_is_not_a_global_declaration_or_resolved_effect() {
                 .any(|gap| gap.detail == "coq-vernacular-construct-structure-unavailable")
         );
     }
+}
+
+#[test]
+fn coq_written_namespace_competitors_keep_notation_references_unresolved() {
+    for middle in [
+        "Record holder := target { field : nat }.",
+        "Record holder := make { target : nat }.",
+        "Class holder := target { field : nat }.",
+        "Class holder := make { target : nat }.",
+        "Record holder := { field : nat }.",
+        "Class holder := target : nat.",
+        "Record holder `(x : C) := make { field : nat }.",
+        "Record holder := make { field `(x : C) : nat }.",
+        "Definition holder `(x : C) := x.",
+    ] {
+        let source = format!("Definition target := 0. {middle} Notation \"! T\" := (target T).\n");
+        let result = certificate_output(&source);
+        let document = result.document();
+        named_definition(document, "target", EntityKind::Constant);
+        let start = u64::try_from(source.rfind("target").unwrap()).unwrap();
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() == start && site.role == OccurrenceRole::Reference
+            })
+            .collect();
+        assert_eq!(sites.len(), 1, "{source}");
+        assert_eq!(sites[0].source.span().end_byte(), start + 6);
+        assert!(
+            matches!(sites[0].target, OccurrenceTarget::Unresolved { .. }),
+            "{source}"
+        );
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.source.span().start_byte() == start
+                    && site.role == OccurrenceRole::Definition)
+        );
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail == "coq-declaration-time-notation-binding-unavailable"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn coq_malformed_namespace_prefix_cannot_publish_a_notation_certificate() {
+    let source = "Definition target := 0. Record holder := make { field : }. Notation \"! T\" := (target T).\n";
+    let result = certificate_output(source);
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::RefersTo)
+    );
+    assert!(result.document().skipped_regions.iter().any(|gap| matches!(
+        gap.detail.as_str(),
+        "coq-declaration-time-notation-binding-unavailable"
+            | "coq-parser-recovery-structure-unavailable"
+            | "syntax-error-recovery"
+    )));
+    let fixture = Fixture::new(COQ, source.as_bytes());
+    let provider = Arc::new(provider());
+    let limits = limits();
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        provider.as_ref(),
+        &request(&fixture.snapshot, &fixture.source, COQ, &limits).to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(
+        !parsed
+            .facts()
+            .iter()
+            .any(|fact| fact.syntax_kind().as_str() == "coq.notation_target.signature")
+    );
 }

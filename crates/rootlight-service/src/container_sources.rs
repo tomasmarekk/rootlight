@@ -104,6 +104,10 @@ pub(super) fn prepare(
 }
 
 impl PreparedSources {
+    pub(super) fn source_origins(&self) -> &[(FileId, FileId)] {
+        &self.origins
+    }
+
     pub(super) fn analysis_context<'a>(
         &self,
         request: rootlight_adapter_sdk::AnalysisRequest<'a>,

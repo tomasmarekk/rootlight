@@ -6,7 +6,16 @@
 
 #![forbid(unsafe_code)]
 
+mod aggregate_file_preservation;
+mod aggregate_source_recovery;
 pub mod catalog;
+mod fresh_projection_capacity;
+#[cfg(test)]
+#[path = "tests/fresh_projection_capacity.rs"]
+mod fresh_projection_capacity_tests;
+pub use aggregate_source_recovery::{
+    AggregateCapacityFailure, FirstSliceSourceRecovery, FirstSliceTextSearchCoverage,
+};
 #[cfg(test)]
 mod cobol_native_tests;
 mod compressed_chunk;
@@ -35,6 +44,10 @@ mod hdl_admission_contract;
 mod locate_profile;
 #[doc(hidden)]
 pub use locate_profile::{FirstSliceLocateProfile, with_first_slice_locate_profile};
+mod native_source_admission;
+#[cfg(test)]
+#[path = "container_sources/fixture.rs"]
+mod office_fixture;
 pub mod office_package;
 mod optional_extension_metadata;
 #[cfg(test)]
@@ -44,6 +57,7 @@ mod refinement;
 pub mod source_archive;
 mod source_backing;
 mod source_find;
+mod source_generation;
 mod source_owner;
 pub use source_find::FirstSliceSourceFindError;
 pub use source_owner::{
@@ -118,9 +132,10 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, IniParseProvider,
-    MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider, PrologParseProvider, RuntimeTraceImportRequest,
-    ScssParseProvider, TclParseProvider, import_runtime_trace,
+    AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, FluxParseProvider,
+    IniParseProvider, LessParseProvider, MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider,
+    PrologParseProvider, RuntimeTraceImportRequest, SassParseProvider, ScssParseProvider,
+    TclParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
@@ -262,6 +277,7 @@ pub struct FirstSliceAnalysisProfile {
     expired_tracked_new_chunk_bytes: u128,
     tracked_new_chunks_with_strong_owners_at_finish: u64,
     first_irreversible_collector_overflow: Option<AnalysisProfileOverflow>,
+    terminal_file_failure: Option<AnalysisProfileFileFailure>,
     append: AnalysisProfileAppend,
     append_scope: &'static str,
     phases: Vec<AnalysisProfileEvent>,
@@ -296,6 +312,7 @@ impl Default for FirstSliceAnalysisProfile {
             expired_tracked_new_chunk_bytes: 0,
             tracked_new_chunks_with_strong_owners_at_finish: 0,
             first_irreversible_collector_overflow: None,
+            terminal_file_failure: None,
             append: AnalysisProfileAppend::default(),
             append_scope: "inclusive_append_substages_nested_search_and_classification_decoder_times_overlap_decoder_counters_cover_classification_calls_only",
             phases: Vec::new(),
@@ -417,6 +434,150 @@ enum AnalysisProfilePhase {
 enum AnalysisProfileScopeExit {
     ExpressionReturned,
     EarlyReturnOrUnwind,
+}
+
+// Fixed inline labels keep failure observation independent of allocator pressure.
+#[derive(Clone, Copy, Debug)]
+struct AnalysisProfileLabel<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> AnalysisProfileLabel<N> {
+    fn new(value: &str) -> Option<Self> {
+        if value.is_empty()
+            || value.len() > N
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'#')
+            })
+        {
+            return None;
+        }
+        let mut label = Self {
+            bytes: [0; N],
+            len: value.len(),
+        };
+        label.bytes[..value.len()].copy_from_slice(value.as_bytes());
+        Some(label)
+    }
+}
+
+impl<const N: usize> Serialize for AnalysisProfileLabel<N> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let label = self
+            .bytes
+            .get(..self.len)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .ok_or_else(|| serde::ser::Error::custom("invalid profile label"))?;
+        serializer.serialize_str(label)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnalysisProfileInvocation {
+    PreflightSetup,
+    PrepareArtifact,
+    RetainedIdentityCount,
+    FullSourceIdentityCount,
+    IdentityCountAfterPrepareError,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnalysisProfileFailureKind {
+    ProviderFailed,
+    RequestRejected,
+    InvalidReport,
+    SinkRejected,
+    Cancelled,
+    ServiceSetup,
+    OtherAdapter,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnalysisProfileFailureOutcome {
+    Adapter,
+    Cancelled,
+    ResourceLimit,
+    OtherServiceError,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct AnalysisProfileAdapterFailure {
+    kind: AnalysisProfileFailureKind,
+    code: Option<AnalysisProfileLabel<128>>,
+}
+
+impl AnalysisProfileAdapterFailure {
+    fn from_adapter(error: &AdapterError) -> Self {
+        let (kind, code) = match error {
+            AdapterError::ProviderFailed { code } => {
+                (AnalysisProfileFailureKind::ProviderFailed, code.as_str())
+            }
+            AdapterError::RejectedRequest(error) => (
+                AnalysisProfileFailureKind::RequestRejected,
+                profile_request_error_code(error),
+            ),
+            AdapterError::InvalidReport(error) => (
+                AnalysisProfileFailureKind::InvalidReport,
+                profile_report_error_code(error),
+            ),
+            AdapterError::Sink(error) => (
+                AnalysisProfileFailureKind::SinkRejected,
+                profile_sink_error_code(error),
+            ),
+            AdapterError::Cancelled { .. } => (AnalysisProfileFailureKind::Cancelled, "cancelled"),
+            _ => (AnalysisProfileFailureKind::OtherAdapter, "other_adapter"),
+        };
+        Self {
+            kind,
+            code: AnalysisProfileLabel::new(code),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AnalysisProfileFileContext {
+    repository: RepositoryId,
+    file: FileId,
+    content_hash: ContentHash,
+    language: Option<AnalysisProfileLabel<64>>,
+    language_complete: bool,
+}
+
+impl AnalysisProfileFileContext {
+    fn begin(repository: RepositoryId, snapshot: &SourceSnapshot) -> Option<Self> {
+        analysis_profile_enabled().then(|| Self {
+            repository,
+            file: snapshot.file(),
+            content_hash: snapshot.content_hash(),
+            language: None,
+            language_complete: true,
+        })
+    }
+
+    fn with_language(mut self, language: &str) -> Self {
+        self.language = AnalysisProfileLabel::new(language);
+        self.language_complete = self.language.is_some();
+        self
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AnalysisProfileFileFailure {
+    repository: RepositoryId,
+    file: FileId,
+    content_hash: ContentHash,
+    language: Option<AnalysisProfileLabel<64>>,
+    phase: AnalysisProfilePhase,
+    invocation: AnalysisProfileInvocation,
+    failure: AnalysisProfileAdapterFailure,
+    preceding_prepare_failure: Option<AnalysisProfileAdapterFailure>,
+    mapped_outcome: AnalysisProfileFailureOutcome,
+    cancellation_reason: Option<CancellationReason>,
+    details_complete: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -739,6 +900,14 @@ const DURABLE_SOURCE_WRITE_AMPLIFICATION_FACTOR: u64 = 25;
 const GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR: u64 = 48;
 const GENERATION_MEMORY_FIXED_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+fn generation_memory_ceiling() -> u64 {
+    #[cfg(test)]
+    if let Some(limit) = fresh_projection_capacity_tests::ceiling() {
+        return limit;
+    }
+    MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+}
 const MAX_FIRST_SLICE_GIT_CHANGE_PATHS: usize = 1_000;
 const MAX_FIRST_SLICE_GIT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const HARD_MAX_FIRST_SLICE_GENERATIONS: usize = 8_193;
@@ -763,7 +932,7 @@ const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
-const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/9";
+const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/16";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
@@ -775,8 +944,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/271";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/114";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/292";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/123";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/14";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -965,11 +1134,19 @@ fn verified_source_counts(
 ) -> Result<(u64, u64), FirstSliceError> {
     let indexed = u64::try_from(snapshot.file_count()).map_err(|_| FirstSliceError::Limits)?;
     let mut extracted = 0_u64;
-    // IR validation guarantees exactly one whole-container dependency per
-    // extracted file, including nested containers, independently of its path.
+    // Verified generations bind each extraction through a whole-container
+    // mapping or an authenticated aggregate origin, independently of its path.
     for mapping in &snapshot.document().source_mappings {
         check_cancellation(cancellation)?;
         if mapping.kind == SourceMappingKind::ExtractedFromContainer {
+            extracted = extracted.checked_add(1).ok_or(FirstSliceError::Limits)?;
+        }
+    }
+    for envelope in &snapshot.document().extensions {
+        check_cancellation(cancellation)?;
+        if envelope.namespace == rootlight_ir::AGGREGATE_SOURCE_ORIGIN_NAMESPACE {
+            rootlight_ir::decode_aggregate_source_origin_envelope(envelope)
+                .map_err(|_| FirstSliceError::CatalogCorrupt)?;
             extracted = extracted.checked_add(1).ok_or(FirstSliceError::Limits)?;
         }
     }
@@ -3029,6 +3206,8 @@ enum UnsupportedSourceDisposition {
     Encoding,
     AdmissionResourceBounded,
     ParserSizeLimit,
+    AggregateFileCapacity,
+    IntrinsicIdentityWorkLimit { observed: usize, limit: usize },
 }
 
 enum NativeFSharpAdmission {
@@ -3053,6 +3232,11 @@ struct UnsupportedSourceInput {
 struct FileOnlyFallbackPreparation<'root> {
     root: &'root RepositoryRoot,
     manifest: DiscoveryManifest,
+    source_frame: Option<aggregate_source_recovery::PreparedSourceFrame>,
+    recovery_memory: Option<(GenerationMemoryReservation, u64)>,
+    aggregate_cause: Option<rootlight_ir::AggregateSourceRecovery>,
+    durable_restore_capacity: Option<aggregate_source_recovery::DurableRestoreCapacity>,
+    fresh_projection_capacity: Option<fresh_projection_capacity::FreshProjectionCapacity>,
     streamed_sources: Option<Arc<source_owner::CapturedGenerationSources>>,
     file_claims: Vec<FileIdentityClaim>,
     incremental: IncrementalDiscovery,
@@ -3401,6 +3585,35 @@ impl StructuralArtifactCollector {
         Ok(())
     }
 
+    fn discard_file(
+        &mut self,
+        file: FileId,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        check_cancellation(cancellation)?;
+        let Some(index) = self.by_file.remove(&file) else {
+            return Ok(());
+        };
+        let removed = self.entries.remove(index);
+        if let Some(chunk) = &removed.normalized {
+            profile_discarded_chunk(chunk);
+        }
+        self.accounted_bytes = self
+            .accounted_bytes
+            .checked_sub(removed.accounted_bytes()?)
+            .ok_or(FirstSliceError::Retention)?;
+        for retained in self.by_file.values_mut() {
+            check_cancellation(cancellation)?;
+            if *retained > index {
+                *retained -= 1;
+            }
+        }
+        if index < self.next_normalized {
+            self.next_normalized -= 1;
+        }
+        Ok(())
+    }
+
     fn get(&self, file: FileId) -> Option<&StructuralArtifactEntry> {
         self.by_file
             .get(&file)
@@ -3439,6 +3652,14 @@ struct ReusedNormalizedRecords {
 
 impl ReusedNormalizedRecords {
     fn insert_document(&mut self, document: &NormalizedIrDocument) -> Result<(), FirstSliceError> {
+        self.insert_document_with_metadata_origin(document, None)
+    }
+
+    fn insert_document_with_metadata_origin(
+        &mut self,
+        document: &NormalizedIrDocument,
+        original_metadata: Option<&aggregate_file_preservation::RawMetadataWitness>,
+    ) -> Result<(), FirstSliceError> {
         for record in &document.files {
             if self.files.insert(record.id, record.clone()).is_some() {
                 return Err(FirstSliceError::Identity);
@@ -3458,13 +3679,21 @@ impl ReusedNormalizedRecords {
         self.source_mappings
             .extend(document.source_mappings.iter().map(|record| record.id));
         self.coverage_records
-            .extend(document.coverage_records.iter().map(|record| record.id));
+            .extend(document.coverage_records.iter().filter_map(|record| {
+                original_metadata
+                    .is_none_or(|raw| raw.contains(record.id))
+                    .then_some(record.id)
+            }));
         self.skipped_regions
             .extend(document.skipped_regions.iter().map(|record| record.id));
         self.diagnostics
             .extend(document.diagnostics.iter().map(|record| record.id));
         self.extensions
-            .extend(document.extensions.iter().map(|record| record.id));
+            .extend(document.extensions.iter().filter_map(|record| {
+                original_metadata
+                    .is_none_or(|raw| raw.contains(record.id))
+                    .then_some(record.id)
+            }));
         Ok(())
     }
 
@@ -4207,7 +4436,14 @@ impl SourceSnapshotRetention {
         reference_updates
             .try_reserve_exact(admission.retained.len())
             .map_err(|_| FirstSliceError::Retention)?;
+        // This is the sole raw-owner insertion boundary. Query-time selection
+        // relies on strict file order; moves and empty cache shedding preserve it.
+        let mut previous_file = None;
         for snapshot in &admission.retained {
+            if previous_file.is_some_and(|previous| previous >= snapshot.file()) {
+                return Err(FirstSliceError::Retention);
+            }
+            previous_file = Some(snapshot.file());
             let identity = SourceSnapshotIdentity::from(snapshot.as_ref());
             let generation_references = self.shared.get(&identity).map_or(Ok(1), |shared| {
                 shared
@@ -5650,7 +5886,7 @@ impl FirstSliceGenerationCache {
                 shared_bytes: 0,
             },
             observed,
-            limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+            limit: generation_memory_ceiling(),
         })
     }
 
@@ -5662,7 +5898,7 @@ impl FirstSliceGenerationCache {
     ) -> Result<(), FirstSliceError> {
         loop {
             let observed = self.observed_logical_charge_bytes(required_memory_bytes)?;
-            if observed <= MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+            if observed <= generation_memory_ceiling() {
                 return Ok(());
             }
             if !durable_cache {
@@ -5991,6 +6227,21 @@ struct CachedRevisionChangePaths {
 }
 
 trait StructuralPreflight: ParseProvider {
+    fn owns_native_identity_limit(
+        &self,
+        _proof: &rootlight_adapter_treesitter::NativeIdentityWorkLimit,
+    ) -> bool {
+        false
+    }
+
+    fn certify_intrinsic_identity_limit(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeIdentityWorkLimit>, AdapterError> {
+        Ok(None)
+    }
+
     fn probe_fsharp_admission(
         &self,
         _request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6005,6 +6256,12 @@ trait StructuralPreflight: ParseProvider {
         false
     }
 
+    // Only registered built-in source frontends may discard an unverified graph
+    // at an intrinsic fresh projection limit. This grants no identity reuse.
+    fn supports_fresh_source_preservation(&self) -> bool {
+        false
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6013,6 +6270,38 @@ trait StructuralPreflight: ParseProvider {
 }
 
 impl StructuralPreflight for TreeSitterProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn owns_native_identity_limit(
+        &self,
+        proof: &rootlight_adapter_treesitter::NativeIdentityWorkLimit,
+    ) -> bool {
+        proof.was_issued_by(self)
+    }
+
+    fn certify_intrinsic_identity_limit(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeIdentityWorkLimit>, AdapterError> {
+        // Certification repeats the analyzer's existing admitted native path;
+        // it does not strengthen the provider's memory-enforcement capability.
+        let memory_policy = match self.capabilities().memory_enforcement() {
+            rootlight_adapter_sdk::MemoryEnforcement::Unavailable => {
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback
+            }
+            _ => MemoryAdmissionPolicy::RequireHardOrAccounted,
+        };
+        TreeSitterProvider::certify_intrinsic_identity_limit(
+            self,
+            request,
+            memory_policy,
+            cancellation,
+        )
+    }
+
     fn probe_fsharp_admission(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6035,6 +6324,10 @@ impl StructuralPreflight for TreeSitterProvider {
 }
 
 impl StructuralPreflight for AgdaParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6045,6 +6338,10 @@ impl StructuralPreflight for AgdaParseProvider {
 }
 
 impl StructuralPreflight for AwkParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6055,6 +6352,10 @@ impl StructuralPreflight for AwkParseProvider {
 }
 
 impl StructuralPreflight for ErlangParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6065,6 +6366,10 @@ impl StructuralPreflight for ErlangParseProvider {
 }
 
 impl StructuralPreflight for ElmParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6075,6 +6380,10 @@ impl StructuralPreflight for ElmParseProvider {
 }
 
 impl StructuralPreflight for MakeParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6085,6 +6394,10 @@ impl StructuralPreflight for MakeParseProvider {
 }
 
 impl StructuralPreflight for IniParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6095,6 +6408,10 @@ impl StructuralPreflight for IniParseProvider {
 }
 
 impl StructuralPreflight for PrologParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6104,7 +6421,53 @@ impl StructuralPreflight for PrologParseProvider {
     }
 }
 
+impl StructuralPreflight for FluxParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        FluxParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
+impl StructuralPreflight for LessParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        LessParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
+impl StructuralPreflight for SassParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        SassParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for ScssParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6115,6 +6478,10 @@ impl StructuralPreflight for ScssParseProvider {
 }
 
 impl StructuralPreflight for TclParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
     fn required_syntax_fact_count(
         &self,
         request: &rootlight_adapter_sdk::ParseRequest<'_>,
@@ -6136,6 +6503,7 @@ impl StructuralPreflight for TclParseProvider {
 pub struct FirstSliceService {
     config: ConfigSnapshot,
     analysis_limits: AnalysisLimits,
+    generation_budget: GenerationBudget,
     extensions: ExtensionSupport,
     structural_parsers: BTreeMap<String, Arc<dyn StructuralPreflight>>,
     analyzers: BTreeMap<String, TreeSitterAnalyzer>,
@@ -6152,6 +6520,7 @@ pub struct FirstSliceService {
     published_generation_counts: BTreeMap<RepositoryId, u64>,
     active_by_repository: BTreeMap<RepositoryId, GenerationId>,
     generation_cache: Arc<Mutex<FirstSliceGenerationCache>>,
+    source_authorities: Mutex<BTreeMap<GenerationId, Arc<source_generation::SourceLease>>>,
     // Language coverage is immutable generation metadata. Precomputing it at
     // publication keeps catalog reads independent of normalized IR size.
     language_coverage_by_generation: BTreeMap<GenerationId, Vec<LanguageCoverageSummary>>,
@@ -6421,6 +6790,21 @@ impl FirstSliceService {
         Ok(())
     }
 
+    /// Completes the original fully verified deferred restore for graph queries.
+    ///
+    /// Source-only users may delay this operation; legacy source requests and
+    /// semantic queries retain its original validation and admission requirements.
+    /// # Errors
+    /// Preserves complete recovery, identity, smoke, cancellation and memory errors.
+    pub fn restore_deferred_for_queries(
+        &mut self,
+        deferred: &FirstSliceDeferredRestore,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        self.evict_unleased_source_authorities()?;
+        self.install_complete_deferred_restore_progressively(deferred, cancellation)
+    }
+
     fn install_complete_deferred_restore_progressively(
         &mut self,
         deferred: &FirstSliceDeferredRestore,
@@ -6438,9 +6822,51 @@ impl FirstSliceService {
         }
         deferred
             .durable
-            .restore_progressively(cancellation, |generations| {
-                self.install_restored(generations, true, cancellation)
+            .restore_progressively(cancellation, |event| {
+                self.install_progressive_restore_event(event, cancellation)
             })
+    }
+
+    fn install_progressive_restore_event(
+        &mut self,
+        event: durable::ProgressiveRestoreEvent,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        check_cancellation(cancellation)?;
+        match event {
+            durable::ProgressiveRestoreEvent::Generation(generation) => {
+                let activate = !self
+                    .active_by_repository
+                    .contains_key(&generation.receipt.repository);
+                // Every retained generation keeps the query smoke validation;
+                // selecting the newest default is independent of that validation.
+                let prepared = prepare_restored_generations(vec![*generation], true, cancellation)?;
+                self.install_prepared_restored(prepared, activate, cancellation)
+            }
+            durable::ProgressiveRestoreEvent::RepositoryComplete {
+                repository,
+                published_generation_count,
+                operations,
+            } => {
+                for operation in operations {
+                    if operation.receipt.repository != repository
+                        || self.receipts.get(&operation.receipt.generation)
+                            != Some(&operation.receipt)
+                        || self
+                            .durable_operations
+                            .insert(operation.operation, operation)
+                            .is_some()
+                    {
+                        return Err(FirstSliceError::CatalogCorrupt);
+                    }
+                }
+                self.published_generation_counts
+                    .entry(repository)
+                    .and_modify(|current| *current = (*current).max(published_generation_count))
+                    .or_insert(published_generation_count);
+                Ok(())
+            }
+        }
     }
 
     /// Installs fully verified durable state into an otherwise empty service.
@@ -7087,6 +7513,18 @@ impl FirstSliceService {
             PrologParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let flux_parser = Arc::new(
+            FluxParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
+        let less_parser = Arc::new(
+            LessParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
+        let sass_parser = Arc::new(
+            SassParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let scss_parser = Arc::new(
             ScssParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -7112,6 +7550,10 @@ impl FirstSliceService {
                     "tree-sitter-typescript-tsx-{}",
                     descriptor.grammar_version()
                 )
+            } else if descriptor.family() == GrammarFamily::Haxe {
+                format!("tree-sitter-haxe-{}", descriptor.grammar_version())
+            } else if descriptor.family() == GrammarFamily::Qml {
+                format!("tree-sitter-qmljs-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Sql {
                 format!("tree-sitter-sequel-{}", descriptor.grammar_version())
             } else if descriptor.family() == GrammarFamily::Apex {
@@ -7334,6 +7776,71 @@ impl FirstSliceService {
         {
             return Err(FirstSliceError::Adapter);
         }
+        let flux_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&flux_parser) as Arc<dyn ParseProvider>;
+        let flux_analyzer = TreeSitterAnalyzer::new(
+            flux_provider,
+            ProducerIdentity::new("rootlight-first-slice-flux-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("flux").map_err(|_| FirstSliceError::Adapter)?,
+            "flux-native-structural-1",
+            FluxParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("flux".to_owned(), flux_analyzer).is_some()
+            || structural_parsers
+                .insert(
+                    "flux".to_owned(),
+                    flux_parser as Arc<dyn StructuralPreflight>,
+                )
+                .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let less_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&less_parser) as Arc<dyn ParseProvider>;
+        let less_analyzer = TreeSitterAnalyzer::new(
+            less_provider,
+            ProducerIdentity::new("rootlight-first-slice-less-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("less").map_err(|_| FirstSliceError::Adapter)?,
+            "less-native-structural-1",
+            LessParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("less".to_owned(), less_analyzer).is_some()
+            || structural_parsers
+                .insert(
+                    "less".to_owned(),
+                    less_parser as Arc<dyn StructuralPreflight>,
+                )
+                .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let sass_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&sass_parser) as Arc<dyn ParseProvider>;
+        let sass_analyzer = TreeSitterAnalyzer::new(
+            sass_provider,
+            ProducerIdentity::new("rootlight-first-slice-sass-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("sass").map_err(|_| FirstSliceError::Adapter)?,
+            "sass-native-structural-1",
+            SassParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("sass".to_owned(), sass_analyzer).is_some() {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert(
+                "sass".to_owned(),
+                sass_parser as Arc<dyn StructuralPreflight>,
+            )
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
         let scss_provider: Arc<dyn ParseProvider> =
             Arc::clone(&scss_parser) as Arc<dyn ParseProvider>;
         let scss_analyzer = TreeSitterAnalyzer::new(
@@ -7390,6 +7897,7 @@ impl FirstSliceService {
         Ok(Self {
             config,
             analysis_limits,
+            generation_budget: GenerationBudget::default(),
             extensions: ExtensionSupport::default(),
             structural_parsers,
             analyzers,
@@ -7403,6 +7911,7 @@ impl FirstSliceService {
             published_generation_counts: BTreeMap::new(),
             active_by_repository: BTreeMap::new(),
             generation_cache: Arc::new(Mutex::new(generation_cache)),
+            source_authorities: Mutex::new(BTreeMap::new()),
             language_coverage_by_generation: BTreeMap::new(),
             relationship_count_by_generation: BTreeMap::new(),
             fact_count_by_generation: BTreeMap::new(),
@@ -7466,6 +7975,7 @@ impl FirstSliceService {
         cancellation: &Cancellation,
     ) -> Result<source_backing::ServiceGenerationLease, FirstSliceError> {
         check_cancellation(cancellation)?;
+        self.evict_unleased_source_authorities()?;
         {
             let mut cache = self
                 .generation_cache
@@ -7753,7 +8263,14 @@ impl FirstSliceService {
     }
 
     fn provider_set_hash(&self, mode: FirstSliceIndexMode) -> Result<ContentHash, FirstSliceError> {
-        let structural = first_slice_provider_set_hash()?;
+        let policy = aggregate_source_recovery::policy_hash(
+            self.analysis_limits.ir(),
+            self.generation_budget,
+        )?;
+        let structural = hash_static_components(&[
+            first_slice_provider_set_hash()?.as_bytes(),
+            policy.as_bytes(),
+        ])?;
         if mode == FirstSliceIndexMode::Structural {
             return Ok(structural);
         }
@@ -8416,7 +8933,7 @@ impl FirstSliceService {
         if root_identity != admission.root_identity {
             return Err(FirstSliceError::Identity.into());
         }
-        let storage_reservation = StorageReservationGuard {
+        let mut storage_reservation = StorageReservationGuard {
             reservation: match &mut admission.storage_admission {
                 DurableStorageAdmissionState::Reserved(reservation) => reservation.take(),
                 DurableStorageAdmissionState::Deferred => {
@@ -8871,6 +9388,11 @@ impl FirstSliceService {
                 FileOnlyFallbackPreparation {
                     root: &root,
                     manifest,
+                    source_frame: None,
+                    recovery_memory: None,
+                    aggregate_cause: None,
+                    durable_restore_capacity: None,
+                    fresh_projection_capacity: None,
                     streamed_sources,
                     file_claims,
                     incremental,
@@ -8897,543 +9419,770 @@ impl FirstSliceService {
                 &mut observe_planning,
             );
         }
-        enforce_source_input_bounds(
-            &source_preflight,
-            file_claims.len(),
-            self.analysis_limits.ir().max_files,
-            self.source_snapshots.maximum_bytes,
-        )?;
-        ensure_generation_memory_preflight(source_preflight.source_bytes)?;
-        let source_count = source_preflight.supported_file_count;
-        let mut sources = Vec::new();
-        sources
-            .try_reserve_exact(source_count)
-            .map_err(|_| FirstSliceError::Limits)?;
-        let mut retained_sources = Vec::new();
-        retained_sources
-            .try_reserve_exact(file_claims.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        let mut unsupported_sources = Vec::new();
-        unsupported_sources
-            .try_reserve_exact(file_claims.len().saturating_sub(source_count))
-            .map_err(|_| FirstSliceError::Limits)?;
-        let mut source_languages = BTreeMap::new();
-        let mut parser_route_inputs = BTreeMap::new();
-        for (input, claim) in manifest
-            .inputs
-            .iter()
-            .chain(&derived.inputs)
-            .zip(&file_claims)
-        {
-            check_cancellation(cancellation)?;
-            if streamed_sources
-                .as_ref()
-                .is_some_and(|sources| sources.contains(input.file))
+        let recovery_enabled =
+            self.durable.is_some() && representation == DurableGenerationRepresentation::Oracle;
+        let recovery_captured = if recovery_enabled {
+            streamed_sources.clone()
+        } else {
+            None
+        };
+        // Returning from this scope drops partial facts, artifacts and its memory
+        // reservation before complete-source admission can reserve the same ID.
+        let mut durable_restore_failure = None;
+        let mut fresh_projection_failure = None;
+        let structural = (|| -> Result<FirstSliceIndexPreparation, FirstSlicePreparationError<ObserverError>> {
+            let file_claims = &file_claims;
+            let normal_metadata_bytes = if recovery_enabled {
+                aggregate_source_recovery::ordinary_snapshot_metadata_bytes(&discovered_snapshots)?
+            } else { 0 };
+            let mut reserved_memory_bytes = observe_generation_phase!(
+                SourcePreflight,
+                ensure_generation_memory_admission(ensure_generation_memory_preflight(source_preflight.source_bytes)?
+                    .checked_add(normal_metadata_bytes).ok_or(FirstSliceError::Limits)?)
+            )?;
+            let mut memory_reservation = observe_generation_phase!(
+                SourcePreflight,
+                self.reserve_generation_memory(generation, reserved_memory_bytes, PendingGenerationMemory::Reserved)
+            )?;
+            enforce_source_input_bounds(
+                &source_preflight,
+                file_claims.len(),
+                self.analysis_limits.ir().max_files,
+                self.source_snapshots.maximum_bytes,
+            )?;
+            ensure_generation_memory_preflight(source_preflight.source_bytes)?;
+            let source_count = source_preflight.supported_file_count;
+            let mut sources = Vec::new();
+            sources
+                .try_reserve_exact(source_count)
+                .map_err(|_| FirstSliceError::Limits)?;
+            let mut retained_sources = Vec::new();
+            retained_sources
+                .try_reserve_exact(file_claims.len())
+                .map_err(|_| FirstSliceError::Limits)?;
+            let mut unsupported_sources = Vec::new();
+            unsupported_sources
+                .try_reserve_exact(file_claims.len().saturating_sub(source_count))
+                .map_err(|_| FirstSliceError::Limits)?;
+            let mut source_languages = BTreeMap::new();
+            let mut parser_route_inputs = BTreeMap::new();
+            for (input, claim) in manifest
+                .inputs
+                .iter()
+                .chain(&derived.inputs)
+                .zip(file_claims.iter())
             {
-                unsupported_sources.push(UnsupportedSourceInput {
-                    claim: claim.clone(),
-                    encoding: input.encoding.clone(),
-                    language: detected_source_language(input)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    disposition: if input.encoding == "bytes" {
-                        UnsupportedSourceDisposition::Encoding
-                    } else {
-                        UnsupportedSourceDisposition::ParserSizeLimit
-                    },
-                    generated: matches!(input.class, InputClass::Generated),
-                });
-                continue;
-            }
-            let snapshot = discovered_snapshots
-                .remove(&input.file)
-                .ok_or(FirstSliceError::DiscoveryDrift)?;
-            if snapshot.file() != input.file
-                || snapshot.content_hash() != input.content_hash
-                || u64::try_from(snapshot.content().len()).ok() != Some(input.bytes)
-            {
-                return Err(FirstSliceError::DiscoveryDrift.into());
-            }
-            let mut language = supported_source_language(input, &self.analyzers);
-            let admission = if language.is_none() {
-                self.probe_fsharp_source(repository, generation, input, &snapshot, cancellation)?
-            } else {
-                NativeFSharpAdmission::NotAttempted
-            };
-            if matches!(admission, NativeFSharpAdmission::Accepted { .. }) {
-                language = Some("fsharp");
-            }
-            if let Some(route) = prepared_file_parser_route_hash(input, language, &admission)? {
-                parser_route_inputs.insert(input.file, route);
-            }
-            let Some(language) = language else {
+                check_cancellation(cancellation)?;
+                if streamed_sources
+                    .as_ref()
+                    .is_some_and(|sources| sources.contains(input.file))
+                {
+                    unsupported_sources.push(UnsupportedSourceInput {
+                        claim: claim.clone(),
+                        encoding: input.encoding.clone(),
+                        language: detected_source_language(input)
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                        disposition: if input.encoding == "bytes" {
+                            UnsupportedSourceDisposition::Encoding
+                        } else {
+                            UnsupportedSourceDisposition::ParserSizeLimit
+                        },
+                        generated: matches!(input.class, InputClass::Generated),
+                    });
+                    continue;
+                }
+                let snapshot = if recovery_enabled { discovered_snapshots.get(&input.file).cloned() }
+                    else { discovered_snapshots.remove(&input.file) }
+                    .ok_or(FirstSliceError::DiscoveryDrift)?;
+                if snapshot.file() != input.file
+                    || snapshot.content_hash() != input.content_hash
+                    || u64::try_from(snapshot.content().len()).ok() != Some(input.bytes)
+                {
+                    return Err(FirstSliceError::DiscoveryDrift.into());
+                }
+                let mut language = supported_source_language(input, &self.analyzers);
+                let admission = if language.is_none() {
+                    self.probe_fsharp_source(repository, generation, input, &snapshot, cancellation)?
+                } else {
+                    NativeFSharpAdmission::NotAttempted
+                };
+                if matches!(admission, NativeFSharpAdmission::Accepted { .. }) {
+                    language = Some("fsharp");
+                }
+                if let Some(route) = prepared_file_parser_route_hash(input, language, &admission)? {
+                    parser_route_inputs.insert(input.file, route);
+                }
+                let Some(language) = language else {
+                    retained_sources.push(RustSourceInput {
+                        snapshot,
+                        encoding: input.encoding.clone(),
+                        generated: matches!(input.class, InputClass::Generated),
+                        origins: Vec::new(),
+                    });
+                    unsupported_sources.push(UnsupportedSourceInput {
+                        claim: claim.clone(),
+                        encoding: input.encoding.clone(),
+                        language: detected_source_language(input)
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                        // Containers have no direct text route even when their format is known.
+                        disposition: if matches!(admission, NativeFSharpAdmission::ResourceBounded) {
+                            UnsupportedSourceDisposition::AdmissionResourceBounded
+                        } else if matches!(admission, NativeFSharpAdmission::InvalidEncoding)
+                            || input.encoding == "binary"
+                            || source_language_route(input, &self.analyzers).is_some()
+                        {
+                            UnsupportedSourceDisposition::Encoding
+                        } else {
+                            UnsupportedSourceDisposition::Language
+                        },
+                        generated: matches!(input.class, InputClass::Generated),
+                    });
+                    continue;
+                };
                 retained_sources.push(RustSourceInput {
+                    snapshot: snapshot.clone(),
+                    encoding: input.encoding.clone(),
+                    generated: matches!(input.class, InputClass::Generated),
+                    origins: Vec::new(),
+                });
+                if source_languages
+                    .insert(input.file, language.to_owned())
+                    .is_some()
+                {
+                    return Err(FirstSliceError::Identity.into());
+                }
+                // The discovery preflight is a lower bound: a native witness may
+                // admit another source without changing the authenticated manifest.
+                sources
+                    .try_reserve(1)
+                    .map_err(|_| FirstSliceError::Limits)?;
+                sources.push(RustSourceInput {
                     snapshot,
                     encoding: input.encoding.clone(),
                     generated: matches!(input.class, InputClass::Generated),
                     origins: Vec::new(),
                 });
-                unsupported_sources.push(UnsupportedSourceInput {
-                    claim: claim.clone(),
-                    encoding: input.encoding.clone(),
-                    language: detected_source_language(input)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    // Containers have no direct text route even when their format is known.
-                    disposition: if matches!(admission, NativeFSharpAdmission::ResourceBounded) {
-                        UnsupportedSourceDisposition::AdmissionResourceBounded
-                    } else if matches!(admission, NativeFSharpAdmission::InvalidEncoding)
-                        || input.encoding == "binary"
-                        || source_language_route(input, &self.analyzers).is_some()
-                    {
-                        UnsupportedSourceDisposition::Encoding
-                    } else {
-                        UnsupportedSourceDisposition::Language
-                    },
-                    generated: matches!(input.class, InputClass::Generated),
-                });
-                continue;
-            };
-            retained_sources.push(RustSourceInput {
-                snapshot: snapshot.clone(),
-                encoding: input.encoding.clone(),
-                generated: matches!(input.class, InputClass::Generated),
-                origins: Vec::new(),
-            });
-            if source_languages
-                .insert(input.file, language.to_owned())
-                .is_some()
-            {
-                return Err(FirstSliceError::Identity.into());
             }
-            // The discovery preflight is a lower bound: a native witness may
-            // admit another source without changing the authenticated manifest.
-            sources
-                .try_reserve(1)
-                .map_err(|_| FirstSliceError::Limits)?;
-            sources.push(RustSourceInput {
-                snapshot,
-                encoding: input.encoding.clone(),
-                generated: matches!(input.class, InputClass::Generated),
-                origins: Vec::new(),
-            });
-        }
-        attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Snapshot,
-            2,
-            files_examined,
-            bytes_examined,
-            0,
-        ));
-        let mut reserved_memory_bytes = observe_generation_phase!(
-            SourcePreflight,
-            ensure_generation_memory_preflight(source_preflight.source_bytes)
-        )?;
-        let mut memory_reservation = observe_generation_phase!(
-            SourcePreflight,
-            self.reserve_generation_memory(
+            attach_generated_origin_mappings(&mut sources, &source_languages, cancellation)?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Snapshot,
+                2,
+                files_examined,
+                bytes_examined,
+                0,
+            ));
+            let reclaimable_generations = self.inactive_generation_ids();
+            self.source_snapshots.preflight_admission_after_reclaim(
                 generation,
-                reserved_memory_bytes,
-                PendingGenerationMemory::Reserved,
-            )
-        )?;
-        let reclaimable_generations = self.inactive_generation_ids();
-        self.source_snapshots.preflight_admission_after_reclaim(
-            generation,
-            &retained_sources,
-            &reclaimable_generations,
-            if self.durable.is_some() {
-                SourceSnapshotRetentionRequirement::DurableCache
-            } else {
-                SourceSnapshotRetentionRequirement::Required
-            },
-            cancellation,
-        )?;
-        let parent_structural_artifacts = if reuse_policy == FirstSliceReusePolicy::Incremental {
-            active.and_then(|generation| self.structural_artifacts.generation(generation))
-        } else {
-            None
-        };
-        let parent_incremental_inputs = if reuse_policy == FirstSliceReusePolicy::Incremental {
-            active.and_then(|generation| self.incremental_inputs.get(&generation))
-        } else {
-            None
-        };
-        let mut incremental_plan = prepare_incremental_state(
-            FirstSliceIncrementalPlanningContext {
-                repository,
-                has_parent: active.is_some(),
-                reuse_policy,
-                parent: parent_incremental_inputs,
-                parent_artifacts: parent_structural_artifacts,
-                discovery: &incremental,
-                source_files: &source_files,
-                parser_route_inputs: &parser_route_inputs,
-                semantic_inputs: &derived.fingerprints,
-                estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
-                    .map_err(|_| FirstSliceError::Limits)?,
-                estimated_durable_bytes: admission.estimated_disk_bytes,
-            },
-            cancellation,
-        )?;
-        observe_planning(&incremental_plan.planning)
-            .map_err(FirstSlicePreparationError::PlanningObserver)?;
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Analysis,
-            2,
-            files_examined,
-            bytes_examined,
-            0,
-        ));
-        let mut structural_requirements = BTreeMap::new();
-        // Preparation owns its generation-memory reservation; publication
-        // reclaims optional committed caches before enforcing the shared cap.
-        // Temporary parser transfers have their own live generation charge;
-        // the committed cache retains its separate, smaller allowance.
-        let mut structural_entries =
-            StructuralArtifactCollector::new(self.structural_artifacts.maximum_bytes);
-        let mut prepared_artifacts =
-            prepared_artifacts::PreparedArtifacts::new(Arc::clone(&self.generation_cache));
-        let mut preflight_files = 0_u64;
-        let mut preflight_bytes = 0_u64;
-        let mut last_reported_preflight_files = 0_u64;
-        for input in &sources {
-            let profile = AnalysisProfileGuard::begin(
-                AnalysisProfilePhase::Preflight,
-                Some(input.snapshot.file()),
-            );
-            check_cancellation(cancellation)?;
-            let snapshot = &input.snapshot;
-            let language = source_languages
-                .get(&snapshot.file())
-                .ok_or(FirstSliceError::Adapter)?;
-            let parser = self
-                .structural_parsers
-                .get(language)
-                .ok_or(FirstSliceError::Adapter)?;
-            let parse_limits =
-                provider_analysis_limits(&self.analysis_limits, parser.capabilities())?;
-            let artifact_id = parser_artifact_id(snapshot.file());
-            let reusable_entry = incremental_plan
-                .reusable_parser_artifacts
-                .contains(&artifact_id)
-                .then(|| {
-                    parent_structural_artifacts
-                        .and_then(|artifacts| artifacts.get(snapshot.file()))
-                        .filter(|entry| {
-                            entry.id == artifact_id
-                                && entry.artifact.syntax_partition_complete()
-                                && entry
-                                    .artifact
-                                    .is_compatible_with_prepared_limits(&parse_limits)
-                        })
-                })
-                .flatten();
-            let full_request = structural_analysis_request(
-                repository,
-                generation,
-                snapshot,
-                input.generated,
-                language,
-                &input.encoding,
-                &parse_limits,
+                &retained_sources,
+                &reclaimable_generations,
+                if self.durable.is_some() {
+                    SourceSnapshotRetentionRequirement::DurableCache
+                } else {
+                    SourceSnapshotRetentionRequirement::Required
+                },
+                cancellation,
             )?;
-            let request = derived.analysis_context(full_request)?;
-            let (required, complete_records, parsed_source_bytes) = if let Some(entry) =
-                reusable_entry
-            {
-                (
-                    if parser.supports_retained_identity_preflight() {
-                        entry.artifact.required_syntax_fact_count(cancellation)
-                    } else {
-                        parser.required_syntax_fact_count(&request.to_parse_request(), cancellation)
-                    }
-                    .map_err(|error| map_adapter_error(error, cancellation))?,
-                    Some(entry.artifact.syntax_fact_count()),
-                    if parser.supports_retained_identity_preflight() {
-                        0_u64
-                    } else {
-                        u64::try_from(snapshot.content().len())
-                            .map_err(|_| FirstSliceError::Limits)?
-                    },
-                )
+            let parent_structural_artifacts = if reuse_policy == FirstSliceReusePolicy::Incremental {
+                active.and_then(|generation| self.structural_artifacts.generation(generation))
             } else {
-                let analyzer = self
-                    .analyzers
+                None
+            };
+            let parent_incremental_inputs = if reuse_policy == FirstSliceReusePolicy::Incremental {
+                active.and_then(|generation| self.incremental_inputs.get(&generation))
+            } else {
+                None
+            };
+            let mut incremental_plan = prepare_incremental_state(
+                FirstSliceIncrementalPlanningContext {
+                    repository,
+                    has_parent: active.is_some(),
+                    reuse_policy,
+                    parent: parent_incremental_inputs,
+                    parent_artifacts: parent_structural_artifacts,
+                    discovery: &incremental,
+                    source_files: &source_files,
+                    parser_route_inputs: &parser_route_inputs,
+                    semantic_inputs: &derived.fingerprints,
+                    estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
+                        .map_err(|_| FirstSliceError::Limits)?,
+                    estimated_durable_bytes: admission.estimated_disk_bytes,
+                },
+                cancellation,
+            )?;
+            observe_planning(&incremental_plan.planning)
+                .map_err(FirstSlicePreparationError::PlanningObserver)?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Analysis,
+                2,
+                files_examined,
+                bytes_examined,
+                0,
+            ));
+            let mut structural_requirements = BTreeMap::new();
+            let mut native_unavailable = BTreeMap::new();
+            let native_source_only_allowed = derived.native_projects.is_empty()
+                && !file_claims.iter().any(|claim| Path::new(&claim.path).extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("vbp")));
+            // Preparation owns its generation-memory reservation; publication
+            // reclaims optional committed caches before enforcing the shared cap.
+            // Temporary parser transfers have their own live generation charge;
+            // the committed cache retains its separate, smaller allowance.
+            let mut structural_entries =
+                StructuralArtifactCollector::new(self.structural_artifacts.maximum_bytes);
+            let mut prepared_artifacts =
+                prepared_artifacts::PreparedArtifacts::new(Arc::clone(&self.generation_cache));
+            let mut preflight_files = 0_u64;
+            let mut preflight_bytes = 0_u64;
+            let mut last_reported_preflight_files = 0_u64;
+            for input in &sources {
+                let profile = AnalysisProfileGuard::begin(
+                    AnalysisProfilePhase::Preflight,
+                    Some(input.snapshot.file()),
+                );
+                let snapshot = &input.snapshot;
+                let profile_context = AnalysisProfileFileContext::begin(repository, snapshot);
+                check_cancellation(cancellation).map_err(|error| {
+                    profile_preflight_setup_error(error, profile_context, "cancelled_before_preflight")
+                })?;
+                let language = source_languages
+                    .get(&snapshot.file())
+                    .ok_or_else(|| profile_preflight_setup_error(
+                        FirstSliceError::Adapter, profile_context, "missing_source_language"))?;
+                let profile_context = profile_context.map(|context| context.with_language(language));
+                let parser = self
+                    .structural_parsers
+                    .get(language)
+                    .ok_or_else(|| profile_preflight_setup_error(
+                        FirstSliceError::Adapter, profile_context, "missing_structural_parser"))?;
+                let parse_limits =
+                    provider_analysis_limits(&self.analysis_limits, parser.capabilities())
+                        .map_err(|error| profile_preflight_setup_error(error, profile_context, "provider_limits"))?;
+                let artifact_id = parser_artifact_id(snapshot.file());
+                let reusable_entry = incremental_plan
+                    .reusable_parser_artifacts
+                    .contains(&artifact_id)
+                    .then(|| {
+                        parent_structural_artifacts
+                            .and_then(|artifacts| artifacts.get(snapshot.file()))
+                            .filter(|entry| {
+                                entry.id == artifact_id
+                                    && entry.artifact.syntax_partition_complete()
+                                    && entry
+                                        .artifact
+                                        .is_compatible_with_prepared_limits(&parse_limits)
+                            })
+                    })
+                    .flatten();
+                let full_request = structural_analysis_request(
+                    repository,
+                    generation,
+                    snapshot,
+                    input.generated,
+                    language,
+                    &input.encoding,
+                    &parse_limits,
+                ).map_err(|error| profile_preflight_setup_error(error, profile_context, "analysis_request"))?;
+                let request = derived.analysis_context(full_request)
+                    .map_err(|error| profile_preflight_setup_error(error, profile_context, "derived_analysis_context"))?;
+                let (requirement, parsed_source_bytes) = if let Some(entry) =
+                    reusable_entry
+                {
+                    (
+                        Some((if parser.supports_retained_identity_preflight() {
+                            entry.artifact.required_syntax_fact_count(cancellation)
+                        } else {
+                            parser.required_syntax_fact_count(&request.to_parse_request(), cancellation)
+                        }
+                        .map_err(|error| profile_preflight_adapter_error(
+                            error, cancellation, profile_context,
+                            if parser.supports_retained_identity_preflight() {
+                                AnalysisProfileInvocation::RetainedIdentityCount
+                            } else {
+                                AnalysisProfileInvocation::FullSourceIdentityCount
+                            }, None))?,
+                        Some(entry.artifact.syntax_fact_count()))),
+                        if parser.supports_retained_identity_preflight() {
+                            0_u64
+                        } else {
+                            u64::try_from(snapshot.content().len())
+                                .map_err(|_| FirstSliceError::Limits)?
+                        },
+                    )
+                } else {
+                    let analyzer = self
+                        .analyzers
+                        .get(language)
+                        .ok_or_else(|| profile_preflight_setup_error(
+                            FirstSliceError::Adapter, profile_context, "missing_analyzer"))?;
+                    let requirement = match analyzer
+                        .prepare_artifact(&request, cancellation)
+                    {
+                        Ok(artifact) => {
+                            let complete_records = artifact
+                                .syntax_partition_complete()
+                                .then(|| artifact.syntax_fact_count());
+                            let required = if complete_records.is_some()
+                                && parser.supports_retained_identity_preflight()
+                            {
+                                artifact
+                                    .required_syntax_fact_count(cancellation)
+                                    .map_err(|error| profile_preflight_adapter_error(
+                                        error, cancellation, profile_context,
+                                        AnalysisProfileInvocation::RetainedIdentityCount, None))?
+                            } else {
+                                // Frontends may require more than the generic identity
+                                // closure. A sink-clipped prefix can also omit later
+                                // identities. Count full source demand independently.
+                                parser
+                                    .required_syntax_fact_count(
+                                        &request.to_parse_request(),
+                                        cancellation,
+                                    )
+                                    .map_err(|error| profile_preflight_adapter_error(
+                                        error, cancellation, profile_context,
+                                        AnalysisProfileInvocation::FullSourceIdentityCount, None))?
+                            };
+                            let artifact = Arc::new(artifact);
+                            structural_entries.push(
+                                StructuralArtifactEntry {
+                                    id: artifact_id,
+                                    artifact: Arc::clone(&artifact),
+                                    normalized: None,
+                                },
+                                cancellation,
+                            )?;
+                            if structural_entries.get(snapshot.file()).is_none() {
+                                prepared_artifacts.retain(artifact, cancellation)?;
+                            }
+                            Some((required, complete_records))
+                        }
+                        Err(error) if is_invalid_utf8_adapter_failure(&error) => Some((0, Some(0))),
+                        Err(error) => {
+                            let certificate = if native_source_only_allowed {
+                                native_source_admission::certify(
+                                    &self.analysis_limits, mode, analyzer, parser.as_ref(),
+                                    &request.to_parse_request(), &error, cancellation,
+                                ).map_err(|proof_error| profile_preflight_adapter_error(
+                                    proof_error, cancellation, profile_context,
+                                    AnalysisProfileInvocation::IdentityCountAfterPrepareError,
+                                    Some(&error)))?
+                            } else { None };
+                            if let Some(certificate) = certificate {
+                                let enlarged = reserved_memory_bytes
+                                    .checked_add(native_source_admission::certificate_entry_bytes()?)
+                                    .ok_or(FirstSliceError::Limits)?;
+                                memory_reservation.resize(enlarged,
+                                    PendingGenerationMemory::Staged, self.durable.is_some())?;
+                                reserved_memory_bytes = enlarged;
+                                if native_unavailable.insert(snapshot.file(), certificate).is_some() {
+                                    return Err(FirstSliceError::Identity.into());
+                                }
+                                None
+                            } else {
+                            // Identity-only preflight preserves exact mandatory
+                            // overflow reporting when a full parse cannot admit it.
+                            let required = self
+                                .structural_parsers
+                                .get(language)
+                                .ok_or_else(|| profile_preflight_setup_error(
+                                    FirstSliceError::Adapter, profile_context, "missing_structural_parser"))?
+                                .required_syntax_fact_count(&request.to_parse_request(), cancellation)
+                                .map_err(|identity_error| profile_preflight_adapter_error(
+                                    identity_error, cancellation, profile_context,
+                                    AnalysisProfileInvocation::IdentityCountAfterPrepareError, Some(&error)))?;
+                            if required <= self.analysis_limits.syntax_stream().max_records() {
+                                return Err(profile_preflight_adapter_error(
+                                    error, cancellation, profile_context,
+                                    AnalysisProfileInvocation::PrepareArtifact, None).into());
+                            }
+                            Some((required, None))
+                            }
+                        }
+                    };
+                    (
+                        requirement,
+                        u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?,
+                    )
+                };
+                if let Some((required, complete_records)) = requirement {
+                let weight = analysis_partition_weight(snapshot.content().len())?;
+                if structural_requirements
+                    .insert(
+                        snapshot.file(),
+                        StructuralFactRequirement {
+                            weight,
+                            required,
+                            complete_records,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(FirstSliceError::Identity.into());
+                }
+                }
+                preflight_files = preflight_files
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Limits)?;
+                preflight_bytes = preflight_bytes
+                    .checked_add(parsed_source_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                if preflight_files == 1
+                    || preflight_files.saturating_sub(last_reported_preflight_files)
+                        >= DISCOVERY_PROGRESS_INTERVAL_FILES
+                {
+                    last_reported_preflight_files = preflight_files;
+                    observe_progress(FirstSliceIndexProgress::observed(
+                        FirstSliceIndexStage::Analysis,
+                        2,
+                        files_examined
+                            .checked_add(preflight_files)
+                            .ok_or(FirstSliceError::Limits)?,
+                        bytes_examined
+                            .checked_add(preflight_bytes)
+                            .ok_or(FirstSliceError::Limits)?,
+                        0,
+                    ));
+                }
+                profile.finish();
+            }
+            let mut source_analysis_limits = composition_structural_analysis_limits(
+                &self.analysis_limits,
+                &structural_requirements,
+                &source_languages,
+                cancellation,
+            )?;
+            for (file, limits) in &mut source_analysis_limits {
+                check_cancellation(cancellation)?;
+                let language = source_languages.get(file).ok_or(FirstSliceError::Adapter)?;
+                let parser = self
+                    .structural_parsers
                     .get(language)
                     .ok_or(FirstSliceError::Adapter)?;
-                let (required, complete_records) = match analyzer
-                    .prepare_artifact(&request, cancellation)
-                {
-                    Ok(artifact) => {
-                        let complete_records = artifact
-                            .syntax_partition_complete()
-                            .then(|| artifact.syntax_fact_count());
-                        let required = if complete_records.is_some()
-                            && parser.supports_retained_identity_preflight()
-                        {
-                            artifact
-                                .required_syntax_fact_count(cancellation)
-                                .map_err(|error| map_adapter_error(error, cancellation))?
-                        } else {
-                            // Frontends may require more than the generic identity
-                            // closure. A sink-clipped prefix can also omit later
-                            // identities. Count full source demand independently.
-                            parser
-                                .required_syntax_fact_count(
-                                    &request.to_parse_request(),
-                                    cancellation,
-                                )
-                                .map_err(|error| map_adapter_error(error, cancellation))?
-                        };
-                        let artifact = Arc::new(artifact);
-                        structural_entries.push(
-                            StructuralArtifactEntry {
-                                id: artifact_id,
-                                artifact: Arc::clone(&artifact),
-                                normalized: None,
-                            },
-                            cancellation,
-                        )?;
-                        if structural_entries.get(snapshot.file()).is_none() {
-                            prepared_artifacts.retain(artifact, cancellation)?;
-                        }
-                        (required, complete_records)
-                    }
-                    Err(error) if is_invalid_utf8_adapter_failure(&error) => (0, Some(0)),
-                    Err(error) => {
-                        // Identity-only preflight preserves exact mandatory
-                        // overflow reporting when a full parse cannot admit it.
-                        let required = self
-                            .structural_parsers
-                            .get(language)
-                            .ok_or(FirstSliceError::Adapter)?
-                            .required_syntax_fact_count(&request.to_parse_request(), cancellation)
-                            .map_err(|error| map_adapter_error(error, cancellation))?;
-                        if required <= self.analysis_limits.syntax_stream().max_records() {
-                            return Err(map_adapter_error(error, cancellation).into());
-                        }
-                        (required, None)
-                    }
-                };
-                (
-                    required,
-                    complete_records,
-                    u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?,
-                )
-            };
-            let weight = analysis_partition_weight(snapshot.content().len())?;
-            if structural_requirements
-                .insert(
-                    snapshot.file(),
-                    StructuralFactRequirement {
-                        weight,
-                        required,
-                        complete_records,
-                    },
-                )
-                .is_some()
-            {
-                return Err(FirstSliceError::Identity.into());
+                *limits = provider_analysis_limits(limits, parser.capabilities())?;
             }
-            preflight_files = preflight_files
-                .checked_add(1)
-                .ok_or(FirstSliceError::Limits)?;
-            preflight_bytes = preflight_bytes
-                .checked_add(parsed_source_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-            if preflight_files == 1
-                || preflight_files.saturating_sub(last_reported_preflight_files)
-                    >= DISCOVERY_PROGRESS_INTERVAL_FILES
-            {
-                last_reported_preflight_files = preflight_files;
-                observe_progress(FirstSliceIndexProgress::observed(
-                    FirstSliceIndexStage::Analysis,
-                    2,
-                    files_examined
-                        .checked_add(preflight_files)
-                        .ok_or(FirstSliceError::Limits)?,
-                    bytes_examined
-                        .checked_add(preflight_bytes)
-                        .ok_or(FirstSliceError::Limits)?,
-                    0,
-                ));
-            }
-            profile.finish();
-        }
-        let mut source_analysis_limits = composition_structural_analysis_limits(
-            &self.analysis_limits,
-            &structural_requirements,
-            &source_languages,
-            cancellation,
-        )?;
-        for (file, limits) in &mut source_analysis_limits {
-            check_cancellation(cancellation)?;
-            let language = source_languages.get(file).ok_or(FirstSliceError::Adapter)?;
-            let parser = self
-                .structural_parsers
-                .get(language)
-                .ok_or(FirstSliceError::Adapter)?;
-            *limits = provider_analysis_limits(limits, parser.capabilities())?;
-        }
-        #[cfg(test)]
-        syntax_admission_observation::observe(
-            syntax_admission_observation::PreflightInput {
-                repository,
-                generation,
-                retained_sources: &retained_sources,
-                source_languages: &source_languages,
-                requirements: &structural_requirements,
-                partitions: &source_analysis_limits,
-                artifacts: &structural_entries,
-                limits: &self.analysis_limits,
-            },
-            cancellation,
-        )?;
-        let mut document = NormalizedIrDocument::empty(repository, generation);
-        let mut output_admission = observe_generation_phase!(
-            SourcePreflight,
-            generation_admission::GenerationAdmission::new(reserved_memory_bytes)
-        )?;
-        let mut append_state = DocumentAppendState::from_document(&document)?;
-        append_state.optional_metadata = Some(optional_extension_metadata::Cache::default());
-        for input in &unsupported_sources {
-            let disposition = unsupported_source_document(repository, generation, input)?;
-            observe_generation_phase!(
-                DispositionDocument,
-                prepared_artifacts.admit_document(
-                    &mut output_admission,
-                    &disposition,
-                    &mut memory_reservation,
-                    self.durable.is_some(),
-                    cancellation,
-                )
-            )?;
-            append_normalized_document_with_metadata_admission(
-                &mut document,
-                disposition,
-                self.analysis_limits.ir(),
-                &mut append_state,
+            #[cfg(test)]
+            syntax_admission_observation::observe(
+                syntax_admission_observation::PreflightInput {
+                    repository,
+                    generation,
+                    retained_sources: &retained_sources,
+                    source_languages: &source_languages,
+                    requirements: &structural_requirements,
+                    partitions: &source_analysis_limits,
+                    artifacts: &structural_entries,
+                    limits: &self.analysis_limits,
+                },
                 cancellation,
-                Some(&mut |bytes| {
-                    output_admission.admit_known_bytes(
-                        bytes,
+            )?;
+            let ordinary_capacity = recovery_enabled && mode == FirstSliceIndexMode::Structural
+                && derived.inputs.is_empty() && derived.native_projects.is_empty()
+                && !file_claims.iter().any(|claim| claim.path.rsplit_once('.')
+                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp")));
+            let mut file_capacity = if ordinary_capacity {
+                aggregate_file_preservation::Reservation::new(
+                    repository, generation, &sources, &source_languages, &native_unavailable,
+                    self.analysis_limits.ir(), &mut reserved_memory_bytes,
+                    &mut memory_reservation, self.durable.is_some(), cancellation,
+                )?
+            } else { None };
+            let mut document = NormalizedIrDocument::empty(repository, generation);
+            let mut output_admission = observe_generation_phase!(
+                SourcePreflight,
+                generation_admission::GenerationAdmission::new(reserved_memory_bytes)
+            )?;
+            let mut append_state = DocumentAppendState::from_document(&document)?;
+            append_state.optional_metadata = Some(optional_extension_metadata::Cache::default());
+            append_state.aggregate_recovery = recovery_enabled;
+            for input in &unsupported_sources {
+                let disposition = unsupported_source_document(repository, generation, input)?;
+                if let Some(capacity) = &file_capacity {
+                    let prepared = prepare_normalized_document_append(
+                        &document, disposition, self.analysis_limits.ir(), &append_state,
+                        cancellation, Some(&mut |bytes| {
+                            output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                                self.durable.is_some(), cancellation)
+                        }), Some(capacity.remaining()),
+                    )?;
+                    prepared_artifacts.admit_document(&mut output_admission, &prepared.source,
+                        &mut memory_reservation, self.durable.is_some(), cancellation)?;
+                    commit_prepared_document_append(&mut document, prepared, self.analysis_limits.ir(),
+                        &mut append_state, cancellation)?;
+                    continue;
+                }
+                observe_generation_phase!(
+                    DispositionDocument,
+                    prepared_artifacts.admit_document(
+                        &mut output_admission,
+                        &disposition,
                         &mut memory_reservation,
                         self.durable.is_some(),
                         cancellation,
                     )
-                }),
-            )?;
-        }
-        let mut structural_documents = BTreeMap::<String, Vec<NormalizedIrDocument>>::new();
-        let mut streamed_fallback_anchors = BTreeMap::new();
-        let mut parsed_files = 0usize;
-        let mut reused_parser_artifacts = 0usize;
-        let mut reused_parser_artifact_bytes = 0usize;
-        let mut reused_normalized_records = ReusedNormalizedRecords::default();
-        let mut lowered_files = 0usize;
-        let mut analyzed_files = 0_u64;
-        let mut analyzed_bytes = 0_u64;
-        let mut last_reported_analyzed_files = 0_u64;
-        for input in &sources {
-            check_cancellation(cancellation)?;
-            let snapshot = &input.snapshot;
-            let language = source_languages
-                .get(&snapshot.file())
-                .ok_or(FirstSliceError::Adapter)?;
-            let analyzer = self
-                .analyzers
-                .get(language)
-                .ok_or(FirstSliceError::Adapter)?;
-            let analysis_limits = source_analysis_limits
-                .get(&snapshot.file())
-                .ok_or(FirstSliceError::Adapter)?;
-            let artifact_id = parser_artifact_id(snapshot.file());
-            let reusable_entry = incremental_plan
-                .reusable_parser_artifacts
-                .contains(&artifact_id)
-                .then(|| {
-                    parent_structural_artifacts
-                        .and_then(|artifacts| artifacts.get(snapshot.file()))
-                        .filter(|entry| {
-                            entry.id == artifact_id
-                                && entry.artifact.syntax_partition_complete()
-                                && entry
-                                    .artifact
-                                    .is_compatible_with_prepared_limits(analysis_limits)
-                        })
-                })
-                .flatten();
-            let request = structural_analysis_request(
-                repository,
-                generation,
-                snapshot,
-                input.generated,
-                language,
-                &input.encoding,
-                analysis_limits,
-            )?;
-            let request = derived.analysis_context(request)?;
-            let profile = AnalysisProfileGuard::begin(
-                AnalysisProfilePhase::LowerOrRebindAndClone,
-                Some(snapshot.file()),
-            );
-            let (file_document, artifact, normalized, normalized_reused) =
-                if let Some(entry) = reusable_entry {
-                    // Normalized reuse is optional. Any policy, limit, extension,
-                    // or identity rejection returns to the verified lowering path.
-                    let rebound = if let Some(chunk) = &entry.normalized {
-                        let (rebound, peak) = compressed_chunk::with_optional_staging(
-                            &mut output_admission,
+                )?;
+                append_normalized_document_with_metadata_admission(
+                    &mut document,
+                    disposition,
+                    self.analysis_limits.ir(),
+                    &mut append_state,
+                    cancellation,
+                    Some(&mut |bytes| {
+                        output_admission.admit_known_bytes(
+                            bytes,
                             &mut memory_reservation,
-                            chunk.reconstruction_memory_bytes(),
                             self.durable.is_some(),
                             cancellation,
-                            || {
-                                chunk
-                                    .rebind(
-                                        generation,
-                                        self.analysis_limits.ir(),
-                                        &self.extensions,
-                                        cancellation,
-                                    )
-                                    .map(|document| (document, Arc::clone(chunk)))
-                            },
-                            |(_, chunk)| {
-                                u64::try_from(chunk.accounted_bytes())
-                                    .map_err(|_| FirstSliceError::Limits)
+                        )
+                    }),
+                )?;
+            }
+            let mut structural_documents = BTreeMap::<String, Vec<NormalizedIrDocument>>::new();
+            let mut streamed_fallback_anchors = BTreeMap::new();
+            let mut parsed_files = 0usize;
+            let mut reused_parser_artifacts = 0usize;
+            let mut reused_parser_artifact_bytes = 0usize;
+            let mut reused_normalized_records = ReusedNormalizedRecords::default();
+            let mut lowered_files = 0usize;
+            let mut analyzed_files = 0_u64;
+            let mut analyzed_bytes = 0_u64;
+            let mut last_reported_analyzed_files = 0_u64;
+            for input in &sources {
+                check_cancellation(cancellation)?;
+                let snapshot = &input.snapshot;
+                let language = source_languages
+                    .get(&snapshot.file())
+                    .ok_or(FirstSliceError::Adapter)?;
+                if let Some(certificate) = native_unavailable.get(&snapshot.file()) {
+                    let disposition = native_source_admission::source_document(
+                        repository, generation, input, language, certificate, &sources,
+                        self.analysis_limits.ir(), cancellation,
+                    )?;
+                    if let Some(capacity) = &mut file_capacity {
+                        let prepared = capacity.consume_existing_disposition(
+                            &document, &append_state, input, language, disposition,
+                            self.analysis_limits.ir(), cancellation, &mut |bytes| {
+                                output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                                    self.durable.is_some(), cancellation)
                             },
                         )?;
-                        reserved_memory_bytes = reserved_memory_bytes.max(peak);
-                        rebound
-                    } else {
-                        None
-                    };
-                    let (document, artifact, normalized, normalized_reused, parser_reused) =
-                        if let Some((document, normalized)) = rebound {
-                            (
-                                document,
-                                Some(Arc::clone(&entry.artifact)),
-                                Some(normalized),
-                                true,
-                                true,
+                        prepared_artifacts.admit_document(&mut output_admission, &prepared.source,
+                            &mut memory_reservation, self.durable.is_some(), cancellation)?;
+                        commit_prepared_document_append(&mut document, prepared, self.analysis_limits.ir(),
+                            &mut append_state, cancellation)?;
+                        continue;
+                    }
+                    prepared_artifacts.admit_document(
+                        &mut output_admission, &disposition, &mut memory_reservation,
+                        self.durable.is_some(), cancellation,
+                    )?;
+                    append_normalized_document_with_metadata_admission(
+                        &mut document, disposition, self.analysis_limits.ir(),
+                        &mut append_state, cancellation, Some(&mut |bytes| {
+                            output_admission.admit_known_bytes(
+                                bytes, &mut memory_reservation, self.durable.is_some(), cancellation,
                             )
+                        }),
+                    )?;
+                    continue;
+                }
+                let analyzer = self
+                    .analyzers
+                    .get(language)
+                    .ok_or(FirstSliceError::Adapter)?;
+                let analysis_limits = source_analysis_limits
+                    .get(&snapshot.file())
+                    .ok_or(FirstSliceError::Adapter)?;
+                let artifact_id = parser_artifact_id(snapshot.file());
+                let reusable_entry = incremental_plan
+                    .reusable_parser_artifacts
+                    .contains(&artifact_id)
+                    .then(|| {
+                        parent_structural_artifacts
+                            .and_then(|artifacts| artifacts.get(snapshot.file()))
+                            .filter(|entry| {
+                                entry.id == artifact_id
+                                    && entry.artifact.syntax_partition_complete()
+                                    && entry
+                                        .artifact
+                                        .is_compatible_with_prepared_limits(analysis_limits)
+                            })
+                    })
+                    .flatten();
+                let request = structural_analysis_request(
+                    repository,
+                    generation,
+                    snapshot,
+                    input.generated,
+                    language,
+                    &input.encoding,
+                    analysis_limits,
+                )?;
+                let request = derived.analysis_context(request)?;
+                let profile = AnalysisProfileGuard::begin(
+                    AnalysisProfilePhase::LowerOrRebindAndClone,
+                    Some(snapshot.file()),
+                );
+                let (file_document, mut artifact, mut normalized, mut normalized_reused) =
+                    if let Some(entry) = reusable_entry {
+                        // Normalized reuse is optional. Any policy, limit, extension,
+                        // or identity rejection returns to the verified lowering path.
+                        let rebound = if let Some(chunk) = &entry.normalized {
+                            let (rebound, peak) = compressed_chunk::with_optional_staging(
+                                &mut output_admission,
+                                &mut memory_reservation,
+                                chunk.reconstruction_memory_bytes(),
+                                self.durable.is_some(),
+                                cancellation,
+                                || {
+                                    chunk
+                                        .rebind(
+                                            generation,
+                                            self.analysis_limits.ir(),
+                                            &self.extensions,
+                                            cancellation,
+                                        )
+                                        .map(|document| (document, Arc::clone(chunk)))
+                                },
+                                |(_, chunk)| {
+                                    u64::try_from(chunk.accounted_bytes())
+                                        .map_err(|_| FirstSliceError::Limits)
+                                },
+                            )?;
+                            reserved_memory_bytes = reserved_memory_bytes.max(peak);
+                            rebound
                         } else {
-                            match analyzer.analyze_prepared_artifact(
-                            &request,
-                            &entry.artifact,
-                            self.extensions.clone(),
-                            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                            cancellation,
-                        ) {
-                            Ok(output) => (
-                                output.document().clone(),
-                                Some(Arc::clone(&entry.artifact)),
-                                None,
-                                false,
-                                true,
-                            ),
+                            None
+                        };
+                        let (document, artifact, normalized, normalized_reused, parser_reused) =
+                            if let Some((document, normalized)) = rebound {
+                                (
+                                    document,
+                                    Some(Arc::clone(&entry.artifact)),
+                                    Some(normalized),
+                                    true,
+                                    true,
+                                )
+                            } else {
+                                match analyzer.analyze_prepared_artifact(
+                                &request,
+                                &entry.artifact,
+                                self.extensions.clone(),
+                                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                cancellation,
+                            ) {
+                                Ok(output) => (
+                                    output.document().clone(),
+                                    Some(Arc::clone(&entry.artifact)),
+                                    None,
+                                    false,
+                                    true,
+                                ),
+                                Err(error) if is_invalid_utf8_adapter_failure(&error) => (
+                                    analyzer
+                                        .analyze_unsupported_encoding(
+                                            &request,
+                                            self.extensions.clone(),
+                                            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                            cancellation,
+                                        )
+                                        .map_err(|error| map_adapter_error(error, cancellation))?
+                                        .document()
+                                        .clone(),
+                                    None,
+                                    None,
+                                    false,
+                                    false,
+                                ),
+                                Err(error) => {
+                                    return Err(map_adapter_error(error, cancellation).into());
+                                }
+                            }
+                            };
+                        if parser_reused {
+                            reused_parser_artifacts = reused_parser_artifacts
+                                .checked_add(1)
+                                .ok_or(FirstSliceError::Limits)?;
+                            reused_parser_artifact_bytes = reused_parser_artifact_bytes
+                                .checked_add(entry.artifact.accounted_bytes())
+                                .ok_or(FirstSliceError::Limits)?;
+                        }
+                        (document, artifact, normalized, normalized_reused)
+                    } else {
+                        let handoff = prepared_artifacts.take(snapshot.file());
+                        let mut prepared = structural_entries
+                            .get(snapshot.file())
+                            .map(|entry| Arc::clone(&entry.artifact))
+                            .or_else(|| handoff.as_ref().map(|entry| Arc::clone(entry.artifact())))
+                            .filter(|artifact| {
+                                artifact.is_compatible_with_prepared_limits(analysis_limits)
+                            });
+                        if prepared.is_none()
+                            && structural_requirements
+                                .get(&snapshot.file())
+                                .and_then(|requirement| requirement.complete_records)
+                                .is_some_and(|count| {
+                                    count > 0 && count <= analysis_limits.syntax_stream().max_records()
+                                })
+                        {
+                            // Retention pressure may discard preflight work. Query
+                            // again under the original limits, not a smaller raw-
+                            // candidate quota that can lose facts before dedup.
+                            let parser = self
+                                .structural_parsers
+                                .get(language)
+                                .ok_or(FirstSliceError::Adapter)?;
+                            let parse_limits =
+                                provider_analysis_limits(&self.analysis_limits, parser.capabilities())?;
+                            let full_request = structural_analysis_request(
+                                repository,
+                                generation,
+                                snapshot,
+                                input.generated,
+                                language,
+                                &input.encoding,
+                                &parse_limits,
+                            )?;
+                            let full_request = derived.analysis_context(full_request)?;
+                            prepared = Some(Arc::new(
+                                analyzer
+                                    .prepare_artifact(&full_request, cancellation)
+                                    .map_err(|error| map_adapter_error(error, cancellation))?,
+                            ));
+                        }
+                        let analyzed = if let Some(artifact) = prepared {
+                            analyzer
+                                .analyze_prepared_artifact(
+                                    &request,
+                                    &artifact,
+                                    self.extensions.clone(),
+                                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                    cancellation,
+                                )
+                                .map(|output| (output, artifact))
+                        } else {
+                            analyzer
+                                .analyze_and_capture(
+                                    &request,
+                                    self.extensions.clone(),
+                                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                                    cancellation,
+                                )
+                                .map(|(output, artifact)| (output, Arc::new(artifact)))
+                        };
+                        match analyzed {
+                            Ok((output, artifact)) => {
+                                parsed_files =
+                                    parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
+                                let retained = if handoff.is_some() {
+                                    None
+                                } else {
+                                    Some(artifact)
+                                };
+                                (output.document().clone(), retained, None, false)
+                            }
                             Err(error) if is_invalid_utf8_adapter_failure(&error) => (
                                 analyzer
                                     .analyze_unsupported_encoding(
@@ -9448,842 +10197,951 @@ impl FirstSliceService {
                                 None,
                                 None,
                                 false,
-                                false,
                             ),
-                            Err(error) => {
-                                return Err(map_adapter_error(error, cancellation).into());
-                            }
+                            Err(error) => return Err(map_adapter_error(error, cancellation).into()),
                         }
-                        };
-                    if parser_reused {
-                        reused_parser_artifacts = reused_parser_artifacts
-                            .checked_add(1)
-                            .ok_or(FirstSliceError::Limits)?;
-                        reused_parser_artifact_bytes = reused_parser_artifact_bytes
-                            .checked_add(entry.artifact.accounted_bytes())
-                            .ok_or(FirstSliceError::Limits)?;
-                    }
-                    (document, artifact, normalized, normalized_reused)
-                } else {
-                    let handoff = prepared_artifacts.take(snapshot.file());
-                    let mut prepared = structural_entries
-                        .get(snapshot.file())
-                        .map(|entry| Arc::clone(&entry.artifact))
-                        .or_else(|| handoff.as_ref().map(|entry| Arc::clone(entry.artifact())))
-                        .filter(|artifact| {
-                            artifact.is_compatible_with_prepared_limits(analysis_limits)
-                        });
-                    if prepared.is_none()
-                        && structural_requirements
-                            .get(&snapshot.file())
-                            .and_then(|requirement| requirement.complete_records)
-                            .is_some_and(|count| {
-                                count > 0 && count <= analysis_limits.syntax_stream().max_records()
-                            })
-                    {
-                        // Retention pressure may discard preflight work. Query
-                        // again under the original limits, not a smaller raw-
-                        // candidate quota that can lose facts before dedup.
-                        let parser = self
-                            .structural_parsers
-                            .get(language)
-                            .ok_or(FirstSliceError::Adapter)?;
-                        let parse_limits =
-                            provider_analysis_limits(&self.analysis_limits, parser.capabilities())?;
-                        let full_request = structural_analysis_request(
-                            repository,
-                            generation,
-                            snapshot,
-                            input.generated,
-                            language,
-                            &input.encoding,
-                            &parse_limits,
-                        )?;
-                        let full_request = derived.analysis_context(full_request)?;
-                        prepared = Some(Arc::new(
-                            analyzer
-                                .prepare_artifact(&full_request, cancellation)
-                                .map_err(|error| map_adapter_error(error, cancellation))?,
-                        ));
-                    }
-                    let analyzed = if let Some(artifact) = prepared {
-                        analyzer
-                            .analyze_prepared_artifact(
-                                &request,
-                                &artifact,
-                                self.extensions.clone(),
-                                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                                cancellation,
-                            )
-                            .map(|output| (output, artifact))
-                    } else {
-                        analyzer
-                            .analyze_and_capture(
-                                &request,
-                                self.extensions.clone(),
-                                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                                cancellation,
-                            )
-                            .map(|(output, artifact)| (output, Arc::new(artifact)))
                     };
-                    match analyzed {
-                        Ok((output, artifact)) => {
-                            parsed_files =
-                                parsed_files.checked_add(1).ok_or(FirstSliceError::Limits)?;
-                            let retained = if handoff.is_some() {
-                                None
-                            } else {
-                                Some(artifact)
-                            };
-                            (output.document().clone(), retained, None, false)
-                        }
-                        Err(error) if is_invalid_utf8_adapter_failure(&error) => (
-                            analyzer
-                                .analyze_unsupported_encoding(
-                                    &request,
-                                    self.extensions.clone(),
-                                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
-                                    cancellation,
-                                )
-                                .map_err(|error| map_adapter_error(error, cancellation))?
-                                .document()
-                                .clone(),
-                            None,
-                            None,
-                            false,
-                        ),
-                        Err(error) => return Err(map_adapter_error(error, cancellation).into()),
+                profile.finish();
+                let mut original_metadata = if normalized_reused && file_capacity.is_some() {
+                    Some(aggregate_file_preservation::RawMetadataWitness::capture(
+                        &file_document, cancellation, &mut |bytes| {
+                            output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                                self.durable.is_some(), cancellation)
+                        },
+                    )?)
+                } else { None };
+                let (deferred_document, prepared_append) = if let Some(capacity) = &mut file_capacity {
+                    let (prepared, replaced) = capacity.choose(
+                        &document, &append_state, input, language, file_document,
+                        self.analysis_limits.ir(), cancellation, &mut |bytes| {
+                            output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                                self.durable.is_some(), cancellation)
+                        },
+                    )?;
+                    if replaced {
+                        if let Some(chunk) = &normalized { profile_discarded_chunk(chunk); }
+                        normalized = None;
+                        normalized_reused = false;
+                        original_metadata = None;
+                        artifact = None;
+                        structural_entries.discard_file(snapshot.file(), cancellation)?;
+                        drop(prepared_artifacts.take(snapshot.file()));
                     }
-                };
-            profile.finish();
-            let profile = AnalysisProfileGuard::begin(
-                AnalysisProfilePhase::MandatoryDocumentAdmission,
-                Some(snapshot.file()),
-            );
-            let serialized_document_bytes = observe_generation_phase!(
-                FileDocument,
-                prepared_artifacts.admit_document(
-                    &mut output_admission,
-                    &file_document,
-                    &mut memory_reservation,
-                    self.durable.is_some(),
-                    cancellation,
-                )
-            )?;
-            profile.finish();
-            if !normalized_reused {
-                lowered_files = lowered_files
-                    .checked_add(1)
-                    .ok_or(FirstSliceError::Limits)?;
-            } else {
-                reused_normalized_records.insert_document(&file_document)?;
-            }
-            let normalized_supplied = normalized.is_some();
-            let normalized = if normalized.is_some() {
-                normalized
-            } else if let Some(maximum_chunk_bytes) = artifact
-                .as_ref()
-                .map(|artifact| structural_entries.new_normalized_chunk_budget(artifact))
-                .transpose()?
-                .flatten()
-            {
-                let workspace = profile_analysis_phase!(
-                    OptionalWorkspace,
+                    (None, Some(prepared))
+                } else { (Some(file_document), None) };
+                let file_document = prepared_append.as_ref().map(|prepared| &prepared.source)
+                    .or(deferred_document.as_ref()).ok_or(FirstSliceError::Identity)?;
+                let profile = AnalysisProfileGuard::begin(
+                    AnalysisProfilePhase::MandatoryDocumentAdmission,
                     Some(snapshot.file()),
-                    generation_neutral_workspace_bytes(&file_document, || {
-                        cancellation.check().is_ok()
-                    })
                 );
-                match workspace {
-                    Ok(workspace_bytes) => {
-                        let profile = AnalysisProfileGuard::begin(
-                            AnalysisProfilePhase::OptionalChunkConstructionAndAdmission,
-                            Some(snapshot.file()),
-                        );
-                        let (normalized, peak) = compressed_chunk::with_optional_staging(
-                            &mut output_admission,
-                            &mut memory_reservation,
-                            compressed_chunk::staged_memory_bytes(
-                                serialized_document_bytes,
-                                workspace_bytes,
-                            ),
-                            self.durable.is_some(),
-                            cancellation,
-                            || {
-                                compressed_chunk::CompressedNormalizedFileChunk::new(
-                                    &file_document,
-                                    self.analysis_limits.ir(),
-                                    &self.extensions,
-                                    workspace_bytes,
-                                    maximum_chunk_bytes,
-                                    cancellation,
-                                )
-                                .map(Arc::new)
-                            },
-                            |chunk| {
-                                u64::try_from(chunk.accounted_bytes())
-                                    .map_err(|_| FirstSliceError::Limits)
-                            },
-                        )?;
-                        reserved_memory_bytes = reserved_memory_bytes.max(peak);
-                        profile.finish();
-                        normalized
-                    }
-                    Err(_) => {
-                        check_cancellation(cancellation)?;
-                        None
-                    }
-                }
-            } else {
-                check_cancellation(cancellation)?;
-                None
-            };
-            if !normalized_supplied && let Some(chunk) = &normalized {
-                profile_built_chunk(chunk);
-            }
-            if artifact.is_none()
-                && let Some(chunk) = &normalized
-            {
-                profile_discarded_chunk(chunk);
-            }
-            let profile = AnalysisProfileGuard::begin(
-                AnalysisProfilePhase::AppendAndCachePush,
-                Some(snapshot.file()),
-            );
-            if project_adapter_supports_language(language) {
-                let language_documents = structural_documents.entry(language.clone()).or_default();
-                language_documents
-                    .try_reserve(1)
-                    .map_err(|_| FirstSliceError::Limits)?;
-                language_documents.push(file_document);
-            } else {
-                if mode == FirstSliceIndexMode::Deep && self.project_analyzer.is_none() {
-                    let file = file_document
-                        .files
-                        .first()
-                        .ok_or(FirstSliceError::Identity)?
-                        .id;
-                    let provenance = file_document
-                        .provenance
-                        .first()
-                        .ok_or(FirstSliceError::Identity)?
-                        .id;
-                    streamed_fallback_anchors
-                        .entry(language.clone())
-                        .or_insert((file, provenance));
-                }
-                append_normalized_document_with_metadata_admission(
-                    &mut document,
-                    file_document,
-                    self.analysis_limits.ir(),
-                    &mut append_state,
-                    cancellation,
-                    Some(&mut |bytes| {
-                        output_admission.admit_known_bytes(
-                            bytes,
-                            &mut memory_reservation,
-                            self.durable.is_some(),
-                            cancellation,
-                        )
-                    }),
-                )?;
-            }
-            if let Some(artifact) = artifact {
-                structural_entries.push(
-                    StructuralArtifactEntry {
-                        id: artifact_id,
-                        artifact,
-                        normalized,
-                    },
-                    cancellation,
-                )?;
-            }
-            profile.finish();
-            analyzed_files = analyzed_files
-                .checked_add(1)
-                .ok_or(FirstSliceError::Limits)?;
-            analyzed_bytes = analyzed_bytes
-                .checked_add(
-                    u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?,
-                )
-                .ok_or(FirstSliceError::Limits)?;
-            if analyzed_files == 1
-                || analyzed_files.saturating_sub(last_reported_analyzed_files)
-                    >= DISCOVERY_PROGRESS_INTERVAL_FILES
-            {
-                last_reported_analyzed_files = analyzed_files;
-                observe_progress(FirstSliceIndexProgress::observed(
-                    FirstSliceIndexStage::Analysis,
-                    2,
-                    files_examined
-                        .checked_add(preflight_files)
-                        .ok_or(FirstSliceError::Limits)?
-                        .checked_add(analyzed_files)
-                        .ok_or(FirstSliceError::Limits)?,
-                    bytes_examined
-                        .checked_add(preflight_bytes)
-                        .ok_or(FirstSliceError::Limits)?
-                        .checked_add(analyzed_bytes)
-                        .ok_or(FirstSliceError::Limits)?,
-                    0,
-                ));
-            }
-        }
-        let structurally_examined_files = files_examined
-            .checked_add(preflight_files)
-            .ok_or(FirstSliceError::Limits)?
-            .checked_add(analyzed_files)
-            .ok_or(FirstSliceError::Limits)?;
-        let structurally_examined_bytes = bytes_examined
-            .checked_add(preflight_bytes)
-            .ok_or(FirstSliceError::Limits)?
-            .checked_add(analyzed_bytes)
-            .ok_or(FirstSliceError::Limits)?;
-        let (provider_files, provider_bytes) = self.append_best_available_documents(
-            &mut document,
-            structural_documents,
-            streamed_fallback_anchors,
-            &mut append_state,
-            &sources,
-            &retained_sources,
-            &source_languages,
-            mode,
-            representation == DurableGenerationRepresentation::RecoverySnapshot,
-            &mut output_admission,
-            &mut memory_reservation,
-            cancellation,
-            structurally_examined_files,
-            structurally_examined_bytes,
-            &mut observe_progress,
-        )?;
-        if representation == DurableGenerationRepresentation::RecoverySnapshot
-            && let Some(error) = document
-                .diagnostics
-                .iter()
-                .find_map(|diagnostic| project_fallback_error(&diagnostic.code))
-        {
-            // A semantic refinement must decide eligibility before opening
-            // durable staging; otherwise an honest fallback rewrites a complete
-            // structural candidate that can never become active.
-            return Err(error.into());
-        }
-        fsharp_projects::append_project_evidence(
-            &mut document,
-            &retained_sources,
-            self.analysis_limits.ir(),
-            cancellation,
-        )?;
-        let mut semantic_inputs =
-            first_slice_semantic_inputs(&document, &source_files, cancellation)?;
-        semantic_inputs
-            .try_reserve(derived.fingerprints.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        semantic_inputs.extend_from_slice(&derived.fingerprints);
-        let final_incremental_plan = prepare_incremental_state(
-            FirstSliceIncrementalPlanningContext {
-                repository,
-                has_parent: active.is_some(),
-                reuse_policy,
-                parent: parent_incremental_inputs,
-                parent_artifacts: parent_structural_artifacts,
-                discovery: &incremental,
-                source_files: &source_files,
-                parser_route_inputs: &parser_route_inputs,
-                semantic_inputs: &semantic_inputs,
-                estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
-                    .map_err(|_| FirstSliceError::Limits)?,
-                estimated_durable_bytes: admission.estimated_disk_bytes,
-            },
-            cancellation,
-        )?;
-        if final_incremental_plan.reusable_parser_artifacts
-            != incremental_plan.reusable_parser_artifacts
-        {
-            return Err(FirstSliceError::Incremental.into());
-        }
-        incremental_plan = final_incremental_plan;
-        let fully_examined_files = structurally_examined_files
-            .checked_add(provider_files)
-            .ok_or(FirstSliceError::Limits)?;
-        let fully_examined_bytes = structurally_examined_bytes
-            .checked_add(provider_bytes)
-            .ok_or(FirstSliceError::Limits)?;
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Analysis,
-            3,
-            fully_examined_files,
-            fully_examined_bytes,
-            0,
-        ));
-        let oversized_inputs = manifest
-            .coverage
-            .excluded
-            .get("oversized")
-            .copied()
-            .unwrap_or(0);
-        if oversized_inputs > 0 {
-            append_oversized_input_diagnostic(
-                &mut document,
-                oversized_inputs,
-                self.analysis_limits.ir(),
-            )?;
-        }
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Merge,
-            4,
-            fully_examined_files,
-            fully_examined_bytes,
-            0,
-        ));
-        incremental_plan.state.evidence.parsed_files =
-            u64::try_from(parsed_files).map_err(|_| FirstSliceError::Limits)?;
-        incremental_plan.state.evidence.reused_parser_artifacts =
-            u64::try_from(reused_parser_artifacts).map_err(|_| FirstSliceError::Limits)?;
-        incremental_plan.state.evidence.reused_parser_artifact_bytes =
-            u64::try_from(reused_parser_artifact_bytes).map_err(|_| FirstSliceError::Limits)?;
-        incremental_plan.state.evidence.lowered_files =
-            u64::try_from(lowered_files).map_err(|_| FirstSliceError::Limits)?;
-        let structural_artifacts = structural_entries.finish(cancellation)?;
-        let profile = AnalysisProfileGuard::begin(
-            AnalysisProfilePhase::FinalResolutionAndFactAccounting,
-            None,
-        );
-        let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
-        let classic_sources = if !derived.native_projects.is_empty()
-            || document.files.iter().any(|file| {
-                file.path
-                    .rsplit_once('.')
-                    .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp"))
-            }) {
-            retained_sources
-                .iter()
-                .map(|source| {
-                    rootlight_resolve::ClassicProjectSource::new(
-                        source.snapshot.file(),
-                        source.snapshot.content(),
+                let serialized_document_bytes = observe_generation_phase!(
+                    FileDocument,
+                    prepared_artifacts.admit_document(
+                        &mut output_admission,
+                        file_document,
+                        &mut memory_reservation,
+                        self.durable.is_some(),
+                        cancellation,
                     )
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let mut document = apply_bounded_resolution_with_native_projects(
-            document,
-            resolution_limits,
-            ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
-            &classic_sources,
-            &derived.native_projects,
-            cancellation,
-        )?;
-        // Project fallback may discard parser mappings. Container dependencies
-        // are generation facts and must survive every structural fallback.
-        derived.append_evidence(&mut document, self.analysis_limits.ir(), cancellation)?;
-        let normalized_facts = normalized_record_count(&document)?;
-        // Count only rebound records that remain exact after project
-        // composition and resolution; replaced candidates are rebuilt work.
-        let reused_normalized_facts = reused_normalized_records.retained_count(&document)?;
-        let rebuilt_normalized_facts = normalized_facts
-            .checked_sub(reused_normalized_facts)
-            .ok_or(FirstSliceError::Identity)?;
-        incremental_plan.state.evidence.reused_normalized_facts =
-            u64::try_from(reused_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
-        incremental_plan.state.evidence.rebuilt_normalized_facts =
-            u64::try_from(rebuilt_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
-        incremental_plan.state.evidence.normalized_fact_work =
-            normalized_fact_work(&document, &reused_normalized_records, cancellation)?;
-        profile.finish();
-        let profile =
-            AnalysisProfileGuard::begin(AnalysisProfilePhase::FinalProjectionAdmission, None);
-        let mut incremental = incremental_plan.state;
-        let serialized_document_bytes = observe_generation_phase!(
-            FinalProjection,
-            normalized_document_serialized_bytes(&document)
-        )?;
-        let lexical_coverage_bytes = observe_generation_phase!(
-            FinalProjection,
-            source_lexical_coverage_memory_bytes(document.files.len(), &document, cancellation)
-        )?;
-        let memory_bytes = ensure_generation_memory_admission(
-            serialized_document_bytes
-                .checked_add(lexical_coverage_bytes)
-                .ok_or(FirstSliceError::Limits)?,
-        )?;
-        let logical_workspace_bytes =
-            generation_neutral_workspace_bytes(&document, || cancellation.check().is_ok())
-                .map_err(|_| {
-                    current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits)
-                })?;
-        let explain_index_peak_bytes =
-            GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(
-                &document,
-                &GenerationContext::new(cancellation, GenerationBudget::default()),
-            )
-            .map_err(|_| current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits))?;
-        let logical_staged_memory_bytes =
-            logical_projection_staged_memory_bytes(memory_bytes, logical_workspace_bytes)?
-                .checked_add(
-                    u64::try_from(structural_artifacts.accounted_bytes)
-                        .map_err(|_| FirstSliceError::Limits)?,
-                )
-                .and_then(|bytes| bytes.checked_add(explain_index_peak_bytes))
-                .ok_or(FirstSliceError::Limits)?;
-        #[cfg(test)]
-        if let Ok(structural_cache_bytes) = u64::try_from(structural_artifacts.accounted_bytes) {
-            generation_admission_observation::observe_projection_peak(
-                generation_admission_observation::ProjectionPeak {
-                    document_bytes: serialized_document_bytes,
-                    lexical_coverage_bytes,
-                    workspace_bytes: logical_workspace_bytes,
-                    structural_cache_bytes,
-                    explain_index_bytes: explain_index_peak_bytes,
-                    peak_bytes: logical_staged_memory_bytes,
-                },
-            );
-        }
-        // Projection can retain the canonical document while one complete
-        // source record and its rebound buffers coexist with compact graph
-        // workspace and the prepared parser cache. Admit that conservative peak
-        // before allocating the projection buffers.
-        reserved_memory_bytes = reserved_memory_bytes.max(output_admission.reservation_bytes());
-        observe_generation_phase!(
-            FinalProjection,
-            memory_reservation.resize(
-                logical_staged_memory_bytes,
-                PendingGenerationMemory::Staged,
-                self.durable.is_some(),
-            )
-        )?;
-        reserved_memory_bytes = reserved_memory_bytes.max(logical_staged_memory_bytes);
-        let metadata = GenerationMetadata::new(
-            repository,
-            generation,
-            parent,
-            manifest_hash,
-            self.config.hash(),
-            provider_set_hash,
-        )
-        .map_err(|_| FirstSliceError::Identity)?;
-        let context = GenerationContext::new(cancellation, GenerationBudget::default());
-        #[cfg(test)]
-        generation_admission_observation::observe_text_document(
-            &document,
-            &rootlight_storage::SourceFileCatalog::default(),
-            context
-                .budget()
-                .limit(rootlight_storage::GenerationResource::TextBytes),
-            cancellation,
-        );
-        profile.finish();
-        let verified = profile_analysis_phase!(
-            FinalVerification,
-            None,
-            observe_generation_phase!(
-                FinalVerification,
-                IdentityVerifiedGeneration::verify(
-                    metadata,
-                    document,
-                    self.analysis_limits.ir(),
-                    &self.extensions,
-                    &context,
-                )
-                .map_err(|error| map_identity_error(error, cancellation))
-            )
-        )?;
-        let memory_bytes = ensure_generation_memory_admission(
-            memory_bytes
-                .checked_add(verified.snapshot().retained_symbol_explain_index_bytes())
-                .ok_or(FirstSliceError::Limits)?,
-        )?;
-        let normalized_ir_logical = profile_analysis_phase!(
-            GenerationNeutralProjection,
-            None,
-            verified
-                .generation_neutral_digests(&context)
-                .map_err(|error| map_generation_neutral_digest_error(error, cancellation))
-        )?;
-        if self.durable.is_some() {
-            estimated_disk_bytes = self
-                .durable_output_reservation(
-                    source_storage_bytes,
-                    serialized_document_bytes,
-                    representation,
-                )?
-                .max(estimated_disk_bytes);
-            self.resize_durable_storage_reservation(
-                storage_reservation.reservation.as_ref(),
-                estimated_disk_bytes,
-                0,
-            )?;
-        }
-        let (oracle_allocated_bytes, verified, durable, mut written_bytes) = if let Some(durable) =
-            &self.durable
-        {
-            let prepared = durable.begin_generation(repository, generation)?;
-            let source_write = prepared.write_sources_with_streamed(
-                &retained_sources,
-                streamed_sources.as_deref(),
-                cancellation,
-            )?;
-            incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
-            let source_file_catalog_bytes = if verified.snapshot().source_files().is_empty() {
-                0
-            } else {
-                prepared
-                    .write_source_file_catalog(verified.snapshot().source_files(), cancellation)?
-            };
-            let source_written_bytes = source_write
-                .newly_written_bytes
-                .checked_add(source_file_catalog_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-            observe_progress(FirstSliceIndexProgress::observed(
-                FirstSliceIndexStage::Persistence,
-                4,
-                fully_examined_files,
-                fully_examined_bytes,
-                source_written_bytes,
-            ));
-            let (allocated_bytes, verified, generation_written_bytes) = match representation {
-                DurableGenerationRepresentation::Oracle => {
-                    let (oracle, verified) = OracleWriter::create_in(prepared.path())
-                        .map_err(|error| map_catalog_error(&error, cancellation))?
-                        .seal_preserving_verified(verified, &context)
-                        .map_err(|error| map_catalog_error(&error, cancellation))?;
-                    let allocated_bytes = oracle
-                        .allocated_bytes(&context)
-                        .map_err(|error| map_catalog_error(&error, cancellation))?;
-                    prepared.account_external_staging_bytes(allocated_bytes)?;
-                    (allocated_bytes, verified, allocated_bytes)
+                )?;
+                profile.finish();
+                if !normalized_reused {
+                    lowered_files = lowered_files
+                        .checked_add(1)
+                        .ok_or(FirstSliceError::Limits)?;
+                } else {
+                    if let Some(original_metadata) = &original_metadata {
+                        reused_normalized_records.insert_document_with_metadata_origin(
+                            file_document, Some(original_metadata),
+                        )?;
+                    } else {
+                        reused_normalized_records.insert_document(file_document)?;
+                    }
                 }
-                DurableGenerationRepresentation::RecoverySnapshot => {
-                    let recovery_bytes = prepared.write_recovery_snapshot(
-                        verified.snapshot(),
-                        serialized_document_bytes,
+                drop(original_metadata);
+                let normalized_supplied = normalized.is_some();
+                let normalized = if normalized.is_some() {
+                    normalized
+                } else if prepared_append.as_ref().is_none_or(|prepared| prepared.context_free_source)
+                    && let Some(maximum_chunk_bytes) = artifact
+                    .as_ref()
+                    .map(|artifact| structural_entries.new_normalized_chunk_budget(artifact))
+                    .transpose()?
+                    .flatten()
+                {
+                    let workspace = profile_analysis_phase!(
+                        OptionalWorkspace,
+                        Some(snapshot.file()),
+                        generation_neutral_workspace_bytes(file_document, || {
+                            cancellation.check().is_ok()
+                        })
+                    );
+                    match workspace {
+                        Ok(workspace_bytes) => {
+                            let profile = AnalysisProfileGuard::begin(
+                                AnalysisProfilePhase::OptionalChunkConstructionAndAdmission,
+                                Some(snapshot.file()),
+                            );
+                            let (normalized, peak) = compressed_chunk::with_optional_staging(
+                                &mut output_admission,
+                                &mut memory_reservation,
+                                compressed_chunk::staged_memory_bytes(
+                                    serialized_document_bytes,
+                                    workspace_bytes,
+                                ),
+                                self.durable.is_some(),
+                                cancellation,
+                                || {
+                                    compressed_chunk::CompressedNormalizedFileChunk::new(
+                                        file_document,
+                                        self.analysis_limits.ir(),
+                                        &self.extensions,
+                                        workspace_bytes,
+                                        maximum_chunk_bytes,
+                                        cancellation,
+                                    )
+                                    .map(Arc::new)
+                                },
+                                |chunk| {
+                                    u64::try_from(chunk.accounted_bytes())
+                                        .map_err(|_| FirstSliceError::Limits)
+                                },
+                            )?;
+                            reserved_memory_bytes = reserved_memory_bytes.max(peak);
+                            profile.finish();
+                            normalized
+                        }
+                        Err(_) => {
+                            check_cancellation(cancellation)?;
+                            None
+                        }
+                    }
+                } else {
+                    check_cancellation(cancellation)?;
+                    None
+                };
+                if !normalized_supplied && let Some(chunk) = &normalized {
+                    profile_built_chunk(chunk);
+                }
+                if artifact.is_none()
+                    && let Some(chunk) = &normalized
+                {
+                    profile_discarded_chunk(chunk);
+                }
+                let profile = AnalysisProfileGuard::begin(
+                    AnalysisProfilePhase::AppendAndCachePush,
+                    Some(snapshot.file()),
+                );
+                if let Some(prepared) = prepared_append {
+                    commit_prepared_document_append(&mut document, prepared, self.analysis_limits.ir(),
+                        &mut append_state, cancellation)?;
+                } else {
+                let file_document = deferred_document.ok_or(FirstSliceError::Identity)?;
+                if project_adapter_supports_language(language) {
+                    let language_documents = structural_documents.entry(language.clone()).or_default();
+                    language_documents
+                        .try_reserve(1)
+                        .map_err(|_| FirstSliceError::Limits)?;
+                    language_documents.push(file_document);
+                } else {
+                    if mode == FirstSliceIndexMode::Deep && self.project_analyzer.is_none() {
+                        let file = file_document
+                            .files
+                            .first()
+                            .ok_or(FirstSliceError::Identity)?
+                            .id;
+                        let provenance = file_document
+                            .provenance
+                            .first()
+                            .ok_or(FirstSliceError::Identity)?
+                            .id;
+                        streamed_fallback_anchors
+                            .entry(language.clone())
+                            .or_insert((file, provenance));
+                    }
+                    append_normalized_document_with_metadata_admission(
+                        &mut document,
+                        file_document,
+                        self.analysis_limits.ir(),
+                        &mut append_state,
+                        cancellation,
+                        Some(&mut |bytes| {
+                            output_admission.admit_known_bytes(
+                                bytes,
+                                &mut memory_reservation,
+                                self.durable.is_some(),
+                                cancellation,
+                            )
+                        }),
+                    )?;
+                }
+                }
+                if let Some(artifact) = artifact {
+                    structural_entries.push(
+                        StructuralArtifactEntry {
+                            id: artifact_id,
+                            artifact,
+                            normalized,
+                        },
                         cancellation,
                     )?;
-                    (0, verified, recovery_bytes)
                 }
-            };
-            let written_bytes = source_written_bytes
-                .checked_add(generation_written_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-            observe_progress(FirstSliceIndexProgress::observed(
-                FirstSliceIndexStage::Persistence,
-                4,
-                fully_examined_files,
-                fully_examined_bytes,
-                written_bytes,
-            ));
-            (allocated_bytes, verified, Some(prepared), written_bytes)
-        } else {
-            let (oracle, verified) = EphemeralOracleWriter::create()
-                .map_err(|error| map_catalog_error(&error, cancellation))?
-                .seal_and_retain(verified, &context)
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            let allocated_bytes = oracle
-                .allocated_bytes()
-                .map_err(|error| map_catalog_error(&error, cancellation))?;
-            (allocated_bytes, verified, None, 0)
-        };
-        if let Some(durable) = durable.as_ref() {
-            let incremental_bytes = durable.write_incremental_state(&incremental, cancellation)?;
-            written_bytes = written_bytes
-                .checked_add(incremental_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-            observe_progress(FirstSliceIndexProgress::observed(
-                FirstSliceIndexStage::Persistence,
-                4,
-                fully_examined_files,
-                fully_examined_bytes,
-                written_bytes,
-            ));
-        }
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Persistence,
-            5,
-            fully_examined_files,
-            fully_examined_bytes,
-            written_bytes,
-        ));
-        let source_snapshots = retained_sources
-            .iter()
-            .map(|source| &source.snapshot)
-            .collect::<Vec<_>>();
-        let documents = if let Some(captured) = streamed_sources.as_ref() {
-            let mut projection = LexicalProjectionBuilder::with_full_source_terms(
-                verified.snapshot(),
-                BuildBudget::default(),
-                cancellation,
-            )
-            .map_err(|error| map_query_error(error, cancellation))?;
-            let sources = source_snapshots
-                .iter()
-                .map(|snapshot| (snapshot.file(), *snapshot))
-                .collect::<BTreeMap<_, _>>();
-            while let Some(file) = projection.next_source_file() {
-                if captured.contains(file) {
-                    projection.push_source_metadata(file, cancellation)
-                } else {
-                    projection.push_source(
-                        sources.get(&file).ok_or(FirstSliceError::DiscoveryDrift)?,
-                        cancellation,
+                profile.finish();
+                analyzed_files = analyzed_files
+                    .checked_add(1)
+                    .ok_or(FirstSliceError::Limits)?;
+                analyzed_bytes = analyzed_bytes
+                    .checked_add(
+                        u64::try_from(snapshot.content().len()).map_err(|_| FirstSliceError::Limits)?,
                     )
+                    .ok_or(FirstSliceError::Limits)?;
+                if analyzed_files == 1
+                    || analyzed_files.saturating_sub(last_reported_analyzed_files)
+                        >= DISCOVERY_PROGRESS_INTERVAL_FILES
+                {
+                    last_reported_analyzed_files = analyzed_files;
+                    observe_progress(FirstSliceIndexProgress::observed(
+                        FirstSliceIndexStage::Analysis,
+                        2,
+                        files_examined
+                            .checked_add(preflight_files)
+                            .ok_or(FirstSliceError::Limits)?
+                            .checked_add(analyzed_files)
+                            .ok_or(FirstSliceError::Limits)?,
+                        bytes_examined
+                            .checked_add(preflight_bytes)
+                            .ok_or(FirstSliceError::Limits)?
+                            .checked_add(analyzed_bytes)
+                            .ok_or(FirstSliceError::Limits)?,
+                        0,
+                    ));
                 }
-                .map_err(|error| map_query_error(error, cancellation))?;
             }
-            projection.finish(cancellation)
-        } else {
-            project_lexical_documents_with_full_source_terms(
-                verified.snapshot(),
-                &source_snapshots,
+            if let Some(capacity) = &file_capacity { capacity.finish()?; }
+            let structurally_examined_files = files_examined
+                .checked_add(preflight_files)
+                .ok_or(FirstSliceError::Limits)?
+                .checked_add(analyzed_files)
+                .ok_or(FirstSliceError::Limits)?;
+            let structurally_examined_bytes = bytes_examined
+                .checked_add(preflight_bytes)
+                .ok_or(FirstSliceError::Limits)?
+                .checked_add(analyzed_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            let (provider_files, provider_bytes) = self.append_best_available_documents(
+                &mut document,
+                structural_documents,
+                streamed_fallback_anchors,
+                &mut append_state,
+                &sources,
+                &retained_sources,
+                &source_languages,
+                &native_unavailable,
+                mode,
+                representation == DurableGenerationRepresentation::RecoverySnapshot,
+                &mut output_admission,
+                &mut memory_reservation,
+                cancellation,
+                structurally_examined_files,
+                structurally_examined_bytes,
+                &mut observe_progress,
+            )?;
+            if representation == DurableGenerationRepresentation::RecoverySnapshot
+                && let Some(error) = document
+                    .diagnostics
+                    .iter()
+                    .find_map(|diagnostic| project_fallback_error(&diagnostic.code))
+            {
+                // A semantic refinement must decide eligibility before opening
+                // durable staging; otherwise an honest fallback rewrites a complete
+                // structural candidate that can never become active.
+                return Err(error.into());
+            }
+            fsharp_projects::append_project_evidence(
+                &mut document,
+                &retained_sources,
+                self.analysis_limits.ir(),
+                cancellation,
+            )?;
+            let mut semantic_inputs =
+                first_slice_semantic_inputs(&document, &source_files, cancellation)?;
+            semantic_inputs
+                .try_reserve(derived.fingerprints.len())
+                .map_err(|_| FirstSliceError::Limits)?;
+            semantic_inputs.extend_from_slice(&derived.fingerprints);
+            let final_incremental_plan = prepare_incremental_state(
+                FirstSliceIncrementalPlanningContext {
+                    repository,
+                    has_parent: active.is_some(),
+                    reuse_policy,
+                    parent: parent_incremental_inputs,
+                    parent_artifacts: parent_structural_artifacts,
+                    discovery: &incremental,
+                    source_files: &source_files,
+                    parser_route_inputs: &parser_route_inputs,
+                    semantic_inputs: &semantic_inputs,
+                    estimated_facts: u64::try_from(self.analysis_limits.ir().max_total_records)
+                        .map_err(|_| FirstSliceError::Limits)?,
+                    estimated_durable_bytes: admission.estimated_disk_bytes,
+                },
+                cancellation,
+            )?;
+            if final_incremental_plan.reusable_parser_artifacts
+                != incremental_plan.reusable_parser_artifacts
+            {
+                return Err(FirstSliceError::Incremental.into());
+            }
+            incremental_plan = final_incremental_plan;
+            let fully_examined_files = structurally_examined_files
+                .checked_add(provider_files)
+                .ok_or(FirstSliceError::Limits)?;
+            let fully_examined_bytes = structurally_examined_bytes
+                .checked_add(provider_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Analysis,
+                3,
+                fully_examined_files,
+                fully_examined_bytes,
+                0,
+            ));
+            let oversized_inputs = manifest
+                .coverage
+                .excluded
+                .get("oversized")
+                .copied()
+                .unwrap_or(0);
+            if oversized_inputs > 0 {
+                append_oversized_input_diagnostic(
+                    &mut document,
+                    oversized_inputs,
+                    self.analysis_limits.ir(),
+                )?;
+            }
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Merge,
+                4,
+                fully_examined_files,
+                fully_examined_bytes,
+                0,
+            ));
+            incremental_plan.state.evidence.parsed_files =
+                u64::try_from(parsed_files).map_err(|_| FirstSliceError::Limits)?;
+            incremental_plan.state.evidence.reused_parser_artifacts =
+                u64::try_from(reused_parser_artifacts).map_err(|_| FirstSliceError::Limits)?;
+            incremental_plan.state.evidence.reused_parser_artifact_bytes =
+                u64::try_from(reused_parser_artifact_bytes).map_err(|_| FirstSliceError::Limits)?;
+            incremental_plan.state.evidence.lowered_files =
+                u64::try_from(lowered_files).map_err(|_| FirstSliceError::Limits)?;
+            let structural_artifacts = structural_entries.finish(cancellation)?;
+            let profile = AnalysisProfileGuard::begin(
+                AnalysisProfilePhase::FinalResolutionAndFactAccounting,
+                None,
+            );
+            let resolution_limits = resolution_limits_for_occurrences(document.occurrences.len())?;
+            let classic_sources = if !derived.native_projects.is_empty()
+                || document.files.iter().any(|file| {
+                    file.path
+                        .rsplit_once('.')
+                        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp"))
+                }) {
+                retained_sources
+                    .iter()
+                    .map(|source| {
+                        rootlight_resolve::ClassicProjectSource::new(
+                            source.snapshot.file(),
+                            source.snapshot.content(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut document = if native_unavailable.is_empty()
+                && !file_capacity.as_ref().is_some_and(|capacity| capacity.unavailable()) {
+                apply_bounded_resolution_with_native_projects(
+                    document, resolution_limits,
+                    ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
+                    &classic_sources, &derived.native_projects, cancellation,
+                )?
+            } else {
+                // Missing declarations can compete with any cross-file candidate.
+                // Native source-certified facts survive without guessing targets.
+                check_cancellation(cancellation)?;
+                document
+            };
+            // Project fallback may discard parser mappings. Container dependencies
+            // are generation facts and must survive every structural fallback.
+            derived.append_evidence(&mut document, self.analysis_limits.ir(), cancellation)?;
+            let normalized_facts = normalized_record_count(&document)?;
+            // Count only rebound records that remain exact after project
+            // composition and resolution; replaced candidates are rebuilt work.
+            let reused_normalized_facts = reused_normalized_records.retained_count(&document)?;
+            let rebuilt_normalized_facts = normalized_facts
+                .checked_sub(reused_normalized_facts)
+                .ok_or(FirstSliceError::Identity)?;
+            incremental_plan.state.evidence.reused_normalized_facts =
+                u64::try_from(reused_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
+            incremental_plan.state.evidence.rebuilt_normalized_facts =
+                u64::try_from(rebuilt_normalized_facts).map_err(|_| FirstSliceError::Limits)?;
+            incremental_plan.state.evidence.normalized_fact_work =
+                normalized_fact_work(&document, &reused_normalized_records, cancellation)?;
+            profile.finish();
+            let profile =
+                AnalysisProfileGuard::begin(AnalysisProfilePhase::FinalProjectionAdmission, None);
+            let mut incremental = incremental_plan.state;
+            let serialized_document_bytes = observe_generation_phase!(
+                FinalProjection,
+                normalized_document_serialized_bytes(&document)
+            )?;
+            let lexical_coverage_bytes = observe_generation_phase!(
+                FinalProjection,
+                source_lexical_coverage_memory_bytes(document.files.len(), &document, cancellation)
+            )?;
+            #[cfg(test)]
+            fresh_projection_capacity_tests::observe_document_footprint(
+                reserved_memory_bytes.max(output_admission.reservation_bytes()),
+                serialized_document_bytes.checked_add(lexical_coverage_bytes).ok_or(FirstSliceError::Limits)?,
+            );
+            let document_footprint = serialized_document_bytes
+                .checked_add(lexical_coverage_bytes)
+                .ok_or(FirstSliceError::Limits)?;
+            let fresh_source_preservation = recovery_enabled && fresh_projection_capacity::eligible(
+                self, mode, fresh_projection_capacity::Context {
+                    inputs: &manifest.inputs, claims: file_claims, derived: &derived,
+                    languages: &source_languages, sources: &sources,
+                }, cancellation,
+            )?;
+            if fresh_source_preservation
+                && let Some(cause) = fresh_projection_capacity::FreshProjectionCapacity::from_document_footprint(
+                    repository, generation, manifest_hash, document_footprint,
+                )
+            {
+                check_cancellation(cancellation)?;
+                fresh_projection_failure = Some(cause);
+                return Err(cause.error().into());
+            }
+            let memory_bytes = ensure_generation_memory_admission(document_footprint)?;
+            let logical_workspace_bytes =
+                generation_neutral_workspace_bytes(&document, || cancellation.check().is_ok())
+                    .map_err(|_| {
+                        current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits)
+                    })?;
+            let explain_index_peak_bytes =
+                GenerationSnapshot::estimate_symbol_explain_index_memory_bytes(
+                    &document,
+                    &GenerationContext::new(cancellation, GenerationBudget::default()),
+                )
+                .map_err(|_| current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits))?;
+            let logical_staged_memory_bytes =
+                logical_projection_staged_memory_bytes(memory_bytes, logical_workspace_bytes)?
+                    .checked_add(normal_metadata_bytes).ok_or(FirstSliceError::Limits)?
+                    .checked_add(
+                        u64::try_from(structural_artifacts.accounted_bytes)
+                            .map_err(|_| FirstSliceError::Limits)?,
+                    )
+                    .and_then(|bytes| bytes.checked_add(explain_index_peak_bytes))
+                    .ok_or(FirstSliceError::Limits)?;
+            #[cfg(test)]
+            fresh_projection_capacity_tests::observe_projection(
+                reserved_memory_bytes.max(output_admission.reservation_bytes()),
+                logical_staged_memory_bytes,
+            );
+            #[cfg(test)]
+            if let Ok(structural_cache_bytes) = u64::try_from(structural_artifacts.accounted_bytes) {
+                generation_admission_observation::observe_projection_peak(
+                    generation_admission_observation::ProjectionPeak {
+                        document_bytes: serialized_document_bytes,
+                        lexical_coverage_bytes,
+                        workspace_bytes: logical_workspace_bytes,
+                        structural_cache_bytes,
+                        explain_index_bytes: explain_index_peak_bytes,
+                        peak_bytes: logical_staged_memory_bytes,
+                    },
+                );
+            }
+            // Projection can retain the canonical document while one complete
+            // source record and its rebound buffers coexist with compact graph
+            // workspace and the prepared parser cache. Admit that conservative peak
+            // before allocating the projection buffers.
+            reserved_memory_bytes = reserved_memory_bytes.max(output_admission.reservation_bytes());
+            if fresh_source_preservation && let Some(cause) = fresh_projection_capacity::FreshProjectionCapacity::from_actual_peak(
+                repository, generation, manifest_hash, logical_staged_memory_bytes,
+            ) {
+                // The source frame is independently authenticated only after
+                // this scope drops the unverified graph and its reservation.
+                check_cancellation(cancellation)?;
+                fresh_projection_failure = Some(cause);
+                return Err(cause.error().into());
+            }
+            observe_generation_phase!(
+                FinalProjection,
+                memory_reservation.resize(
+                    logical_staged_memory_bytes,
+                    PendingGenerationMemory::Staged,
+                    self.durable.is_some(),
+                )
+            )?;
+            reserved_memory_bytes = reserved_memory_bytes.max(logical_staged_memory_bytes);
+            let metadata = GenerationMetadata::new(
+                repository,
+                generation,
+                parent,
+                manifest_hash,
+                self.config.hash(),
+                provider_set_hash,
+            )
+            .map_err(|_| FirstSliceError::Identity)?;
+            let context = GenerationContext::new(cancellation, self.generation_budget);
+            #[cfg(test)]
+            generation_admission_observation::observe_text_document(
+                &document,
+                &rootlight_storage::SourceFileCatalog::default(),
+                context
+                    .budget()
+                    .limit(rootlight_storage::GenerationResource::TextBytes),
+                cancellation,
+            );
+            profile.finish();
+            let verified = profile_analysis_phase!(
+                FinalVerification,
+                None,
+                observe_generation_phase!(
+                    FinalVerification,
+                    IdentityVerifiedGeneration::verify(
+                        metadata,
+                        document,
+                        self.analysis_limits.ir(),
+                        &self.extensions,
+                        &context,
+                    )
+                    .map_err(|error| {
+                        if let Some(cancelled) = current_cancellation(cancellation) { return cancelled; }
+                        if recovery_enabled
+                            && let Some(cause) = AggregateCapacityFailure::from_generation_text(&error)
+                        { return FirstSliceError::AggregateCapacity(cause); }
+                        map_identity_error(error, cancellation)
+                    })
+                )
+            )?;
+            let memory_bytes = ensure_generation_memory_admission(
+                memory_bytes
+                    .checked_add(verified.snapshot().retained_symbol_explain_index_bytes())
+                    .ok_or(FirstSliceError::Limits)?,
+            )?;
+            let normalized_ir_logical = profile_analysis_phase!(
+                GenerationNeutralProjection,
+                None,
+                verified
+                    .generation_neutral_digests(&context)
+                    .map_err(|error| map_generation_neutral_digest_error(error, cancellation))
+            )?;
+            if self.durable.is_some() {
+                estimated_disk_bytes = self
+                    .durable_output_reservation(
+                        source_storage_bytes,
+                        serialized_document_bytes,
+                        representation,
+                    )?
+                    .max(estimated_disk_bytes);
+                self.resize_durable_storage_reservation(
+                    storage_reservation.reservation.as_ref(),
+                    estimated_disk_bytes,
+                    0,
+                )?;
+            }
+            let (oracle_allocated_bytes, verified, durable, mut written_bytes, oracle_restore_plan) = if let Some(durable) =
+                &self.durable
+            {
+                let prepared = durable.begin_generation(repository, generation)?;
+                let source_write = prepared.write_sources_with_streamed(
+                    &retained_sources,
+                    streamed_sources.as_deref(),
+                    cancellation,
+                )?;
+                incremental.evidence.reused_durable_artifact_bytes = source_write.referenced_bytes;
+                let source_file_catalog_bytes = if verified.snapshot().source_files().is_empty() {
+                    0
+                } else {
+                    prepared
+                        .write_source_file_catalog(verified.snapshot().source_files(), cancellation)?
+                };
+                let source_written_bytes = source_write
+                    .newly_written_bytes
+                    .checked_add(source_file_catalog_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Persistence,
+                    4,
+                    fully_examined_files,
+                    fully_examined_bytes,
+                    source_written_bytes,
+                ));
+                let (allocated_bytes, verified, generation_written_bytes, oracle_restore_plan) = match representation {
+                    DurableGenerationRepresentation::Oracle => {
+                        let (oracle, verified, restore_plan) = OracleWriter::create_in(prepared.path())
+                            .map_err(|error| map_catalog_error(&error, cancellation))?
+                            .seal_preserving_verified_with_read_plan(verified, &context)
+                            .map_err(|error| map_catalog_error(&error, cancellation))?;
+                        let allocated_bytes = oracle
+                            .allocated_bytes(&context)
+                            .map_err(|error| map_catalog_error(&error, cancellation))?;
+                        prepared.account_external_staging_bytes(allocated_bytes)?;
+                        (allocated_bytes, verified, allocated_bytes, Some(restore_plan))
+                    }
+                    DurableGenerationRepresentation::RecoverySnapshot => {
+                        let recovery_bytes = prepared.write_recovery_snapshot(
+                            verified.snapshot(),
+                            serialized_document_bytes,
+                            cancellation,
+                        )?;
+                        (0, verified, recovery_bytes, None)
+                    }
+                };
+                let written_bytes = source_written_bytes
+                    .checked_add(generation_written_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Persistence,
+                    4,
+                    fully_examined_files,
+                    fully_examined_bytes,
+                    written_bytes,
+                ));
+                (allocated_bytes, verified, Some(prepared), written_bytes, oracle_restore_plan)
+            } else {
+                let (oracle, verified) = EphemeralOracleWriter::create()
+                    .map_err(|error| map_catalog_error(&error, cancellation))?
+                    .seal_and_retain(verified, &context)
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                let allocated_bytes = oracle
+                    .allocated_bytes()
+                    .map_err(|error| map_catalog_error(&error, cancellation))?;
+                (allocated_bytes, verified, None, 0, None)
+            };
+            if let Some(durable) = durable.as_ref() {
+                let incremental_bytes = durable.write_incremental_state(&incremental, cancellation)?;
+                written_bytes = written_bytes
+                    .checked_add(incremental_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                observe_progress(FirstSliceIndexProgress::observed(
+                    FirstSliceIndexStage::Persistence,
+                    4,
+                    fully_examined_files,
+                    fully_examined_bytes,
+                    written_bytes,
+                ));
+            }
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Persistence,
+                5,
+                fully_examined_files,
+                fully_examined_bytes,
+                written_bytes,
+            ));
+            let source_snapshots = retained_sources
+                .iter()
+                .map(|source| &source.snapshot)
+                .collect::<Vec<_>>();
+            let documents = if let Some(captured) = streamed_sources.as_ref() {
+                let mut projection = LexicalProjectionBuilder::with_full_source_terms(
+                    verified.snapshot(),
+                    BuildBudget::default(),
+                    cancellation,
+                )
+                .map_err(|error| map_query_error(error, cancellation))?;
+                let sources = source_snapshots
+                    .iter()
+                    .map(|snapshot| (snapshot.file(), *snapshot))
+                    .collect::<BTreeMap<_, _>>();
+                while let Some(file) = projection.next_source_file() {
+                    if captured.contains(file) {
+                        projection.push_source_metadata(file, cancellation)
+                    } else {
+                        projection.push_source(
+                            sources.get(&file).ok_or(FirstSliceError::DiscoveryDrift)?,
+                            cancellation,
+                        )
+                    }
+                    .map_err(|error| map_query_error(error, cancellation))?;
+                }
+                projection.finish(cancellation)
+            } else {
+                project_lexical_documents_with_full_source_terms(
+                    verified.snapshot(),
+                    &source_snapshots,
+                    BuildBudget::default(),
+                    cancellation,
+                )
+            }
+            .map_err(|error| map_query_error(error, cancellation))?;
+            let lexical_documents =
+                u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
+            let logical_snapshot = logical_snapshot_identity(
+                normalized_ir_logical,
+                &documents,
+                &incremental.inputs,
+                cancellation,
+            )?;
+            if let Some(durable) = durable.as_ref() {
+                written_bytes = written_bytes.checked_add(durable.write_source_authority(&verified, cancellation)?).ok_or(FirstSliceError::Limits)?;
+                let logical_snapshot_bytes = durable.write_logical_snapshot_identity(
+                    verified.snapshot(),
+                    &logical_snapshot,
+                    serialized_document_bytes,
+                )?;
+                written_bytes = written_bytes
+                    .checked_add(logical_snapshot_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+            }
+            let search = LexicalIndex::build_ephemeral(
+                generation,
+                documents,
                 BuildBudget::default(),
                 cancellation,
             )
-        }
-        .map_err(|error| map_query_error(error, cancellation))?;
-        let lexical_documents =
-            u64::try_from(documents.len()).map_err(|_| FirstSliceError::Limits)?;
-        let logical_snapshot = logical_snapshot_identity(
-            normalized_ir_logical,
-            &documents,
-            &incremental.inputs,
-            cancellation,
-        )?;
-        if let Some(durable) = durable.as_ref() {
-            let logical_snapshot_bytes = durable.write_logical_snapshot_identity(
-                verified.snapshot(),
-                &logical_snapshot,
-                serialized_document_bytes,
-            )?;
-            written_bytes = written_bytes
-                .checked_add(logical_snapshot_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-        }
-        let search = LexicalIndex::build_ephemeral(
-            generation,
-            documents,
-            BuildBudget::default(),
-            cancellation,
-        )
-        .map_err(|error| map_search_error(error, cancellation))?;
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Search,
-            6,
-            fully_examined_files,
-            fully_examined_bytes,
-            written_bytes,
-        ));
-        let (indexed_files, extracted_files) = verified_source_counts(
-            verified.snapshot(),
-            manifest.coverage.included,
-            cancellation,
-        )?;
-        let entities = u64::try_from(verified.document().entities.len())
-            .map_err(|_| FirstSliceError::Limits)?;
-        let mut receipt = FirstSliceIndexReceipt {
-            repository,
-            generation,
-            parent,
-            discovered_inputs: manifest.coverage.included,
-            visited_entries: manifest.coverage.visited,
-            discovery_complete: manifest.coverage.complete,
-            excluded_inputs: manifest
-                .coverage
-                .excluded
-                .values()
-                .try_fold(0_u64, |total, count| {
-                    total.checked_add(*count).ok_or(FirstSliceError::Limits)
-                })?,
-            oversized_inputs,
-            binary_inputs: manifest
-                .coverage
-                .excluded
-                .get("binary")
-                .copied()
-                .unwrap_or(0),
-            policy_excluded_inputs: manifest
-                .coverage
-                .excluded
-                .iter()
-                .filter(|(reason, _)| !matches!(reason.as_str(), "binary" | "oversized"))
-                .try_fold(0_u64, |total, (_, count)| {
-                    total.checked_add(*count).ok_or(FirstSliceError::Limits)
-                })?,
-            indexed_files,
-            extracted_files,
-            entities,
-            lexical_documents,
-            oracle_allocated_bytes,
-            estimated_disk_bytes,
-            retained_durable_bytes: 0,
-            diagnostics: index_diagnostic_summaries(
-                verified.document(),
-                manifest.coverage.complete,
-                manifest.coverage.truncation,
-            )?,
-            logical_snapshot: Some(logical_snapshot),
-            elapsed_micros: elapsed_micros(started),
-        };
-        let durable = if let Some(durable) = durable {
-            let sealed = durable.finish(
-                repository,
-                root_identity,
-                &display_name,
-                &root_path,
-                &mut receipt,
-            )?;
-            let manifest_written_bytes = sealed.manifest_written_bytes();
-            written_bytes = written_bytes
-                .checked_add(manifest_written_bytes)
-                .ok_or(FirstSliceError::Limits)?;
-            if let (Some(catalog), Some(reservation)) = (
-                self.durable.as_ref(),
-                storage_reservation.reservation.as_ref(),
-            ) {
-                let (_, admitted) = catalog
-                    .finalize_repository_capacity(
-                        reservation,
-                        sealed,
-                        self.durable_final_storage_admission_policy(
-                            estimated_disk_bytes,
-                            DURABLE_PUBLICATION_RESIDUAL_BYTES,
-                            source_storage_bytes,
-                            serialized_document_bytes,
-                        )?,
-                    )?
-                    .map_err(storage_admission_error)?;
-                Some(admitted)
-            } else {
-                return Err(FirstSliceError::Retention.into());
-            }
-        } else {
-            None
-        };
-        check_cancellation(cancellation)?;
-        Ok(FirstSliceIndexPreparation::Pending(
-            PreparedFirstSliceIndex {
-                verified,
-                search,
-                sources: retained_sources,
-                streamed_sources: if self.durable.is_some() {
-                    None
-                } else {
-                    streamed_sources
-                },
-                structural_artifacts,
-                incremental,
-                receipt,
-                root_identity,
-                display_name,
-                root_path,
-                register_repository: existing_repository.is_none(),
-                durable,
+            .map_err(|error| map_search_error(error, cancellation))?;
+            observe_progress(FirstSliceIndexProgress::observed(
+                FirstSliceIndexStage::Search,
+                6,
+                fully_examined_files,
+                fully_examined_bytes,
                 written_bytes,
-                reserved_memory_bytes,
-                memory_bytes,
-                memory_reservation,
-                storage_reservation: storage_reservation.transfer(),
-            },
-        ))
+            ));
+            let (indexed_files, extracted_files) = verified_source_counts(
+                verified.snapshot(),
+                manifest.coverage.included,
+                cancellation,
+            )?;
+            if let (Some(prepared), Some(plan)) = (durable.as_ref(), oracle_restore_plan) {
+                let observed = prepared.oracle_restore_memory_bytes(plan, indexed_files, !verified.snapshot().source_files().is_empty())?;
+                if let Some(cause) = aggregate_source_recovery::DurableRestoreCapacity::from_sealed_plan(observed) {
+                    check_cancellation(cancellation)?;
+                    durable_restore_failure = Some(cause);
+                    return Err(cause.error().into());
+                }
+            }
+            let entities = u64::try_from(verified.document().entities.len())
+                .map_err(|_| FirstSliceError::Limits)?;
+            let mut receipt = FirstSliceIndexReceipt {
+                repository,
+                generation,
+                parent,
+                discovered_inputs: manifest.coverage.included,
+                visited_entries: manifest.coverage.visited,
+                discovery_complete: manifest.coverage.complete,
+                excluded_inputs: manifest
+                    .coverage
+                    .excluded
+                    .values()
+                    .try_fold(0_u64, |total, count| {
+                        total.checked_add(*count).ok_or(FirstSliceError::Limits)
+                    })?,
+                oversized_inputs,
+                binary_inputs: manifest
+                    .coverage
+                    .excluded
+                    .get("binary")
+                    .copied()
+                    .unwrap_or(0),
+                policy_excluded_inputs: manifest
+                    .coverage
+                    .excluded
+                    .iter()
+                    .filter(|(reason, _)| !matches!(reason.as_str(), "binary" | "oversized"))
+                    .try_fold(0_u64, |total, (_, count)| {
+                        total.checked_add(*count).ok_or(FirstSliceError::Limits)
+                    })?,
+                indexed_files,
+                extracted_files,
+                entities,
+                lexical_documents,
+                oracle_allocated_bytes,
+                estimated_disk_bytes,
+                retained_durable_bytes: 0,
+                diagnostics: index_diagnostic_summaries(
+                    verified.document(),
+                    manifest.coverage.complete,
+                    manifest.coverage.truncation,
+                )?,
+                logical_snapshot: Some(logical_snapshot),
+                elapsed_micros: elapsed_micros(started),
+            };
+            let durable = if let Some(durable) = durable {
+                let sealed = durable.finish(
+                    repository,
+                    root_identity,
+                    &display_name,
+                    &root_path,
+                    &mut receipt,
+                )?;
+                let manifest_written_bytes = sealed.manifest_written_bytes();
+                written_bytes = written_bytes
+                    .checked_add(manifest_written_bytes)
+                    .ok_or(FirstSliceError::Limits)?;
+                if let (Some(catalog), Some(reservation)) = (
+                    self.durable.as_ref(),
+                    storage_reservation.reservation.as_ref(),
+                ) {
+                    let (_, admitted) = catalog
+                        .finalize_repository_capacity(
+                            reservation,
+                            sealed,
+                            self.durable_final_storage_admission_policy(
+                                estimated_disk_bytes,
+                                DURABLE_PUBLICATION_RESIDUAL_BYTES,
+                                source_storage_bytes,
+                                serialized_document_bytes,
+                            )?,
+                        )?
+                        .map_err(storage_admission_error)?;
+                    Some(admitted)
+                } else {
+                    return Err(FirstSliceError::Retention.into());
+                }
+            } else {
+                None
+            };
+            check_cancellation(cancellation)?;
+            Ok(FirstSliceIndexPreparation::Pending(
+                PreparedFirstSliceIndex {
+                    verified,
+                    search,
+                    sources: retained_sources,
+                    streamed_sources: if self.durable.is_some() {
+                        None
+                    } else {
+                        streamed_sources
+                    },
+                    structural_artifacts,
+                    incremental,
+                    receipt,
+                    root_identity,
+                    display_name: display_name.clone(),
+                    root_path: root_path.clone(),
+                    register_repository: existing_repository.is_none(),
+                    durable,
+                    written_bytes,
+                    reserved_memory_bytes,
+                    memory_bytes,
+                    memory_reservation,
+                    storage_reservation: storage_reservation.reservation.take(),
+                },
+            ))
+        })();
+        let recovery = match &structural {
+            Err(FirstSlicePreparationError::Service(FirstSliceError::AggregateCapacity(
+                failure,
+            ))) => Some((Some(*failure), None, None)),
+            Err(FirstSlicePreparationError::Service(error)) if derived.inputs.is_empty() => {
+                durable_restore_failure
+                    .filter(|cause| cause.matches(error))
+                    .map(|cause| (None, Some(cause), None))
+                    .or_else(|| {
+                        fresh_projection_failure
+                            .filter(|cause| {
+                                cause.matches(repository, generation, manifest_hash, error)
+                            })
+                            .map(|cause| (None, None, Some(cause)))
+                    })
+            }
+            _ => None,
+        };
+        match recovery {
+            Some((failure, durable_restore_capacity, fresh_projection_capacity))
+                if recovery_enabled =>
+            {
+                check_cancellation(cancellation)?;
+                if durable_restore_capacity.is_some() {
+                    // The discarded sealed stage dirties physical accounting. Drop
+                    // its reservation before a fresh checked scan; never combine
+                    // that scan with this abandoned in-flight byte allowance.
+                    drop(storage_reservation.reservation.take());
+                    storage_reservation.reservation =
+                        self.begin_durable_storage_reservation(repository, estimated_disk_bytes)?;
+                }
+                let frame_memory =
+                    aggregate_source_recovery::PreparedSourceFrame::planned_memory_bytes(
+                        &manifest.inputs,
+                        &derived,
+                        &file_claims,
+                        &discovered_snapshots,
+                        recovery_captured.as_ref(),
+                    )?;
+                let preadmitted = ensure_generation_memory_admission(
+                    frame_memory
+                        .checked_add(source_file_fallback_preflight_memory_bytes(&file_claims)?)
+                        .ok_or(FirstSliceError::Limits)?,
+                )?;
+                let recovery_memory = self.reserve_generation_memory(
+                    generation,
+                    preadmitted,
+                    PendingGenerationMemory::Reserved,
+                )?;
+                let source_frame = aggregate_source_recovery::PreparedSourceFrame::seal(
+                    &manifest.inputs,
+                    &derived,
+                    file_claims,
+                    discovered_snapshots,
+                    recovery_captured,
+                    cancellation,
+                )?;
+                if source_frame.retained_memory_bytes()? > frame_memory {
+                    return Err(FirstSliceError::Retention.into());
+                }
+                drop(derived);
+                let cause = failure
+                    .map(|failure| {
+                        failure.bind(
+                            manifest_hash,
+                            source_frame.inputs.len(),
+                            source_frame.derived_files,
+                            snapshot_file_bytes,
+                        )
+                    })
+                    .transpose()?;
+                let mut manifest = manifest;
+                manifest.inputs = source_frame.inputs.clone();
+                let file_claims = source_frame.claims.clone();
+                let streamed_sources = source_frame.captured.clone();
+                self.prepare_file_only_fallback(
+                    FileOnlyFallbackPreparation {
+                        root: &root,
+                        manifest,
+                        source_frame: Some(source_frame),
+                        recovery_memory: Some((recovery_memory, preadmitted)),
+                        aggregate_cause: cause,
+                        durable_restore_capacity,
+                        fresh_projection_capacity,
+                        streamed_sources,
+                        file_claims,
+                        incremental,
+                        reuse_policy,
+                        repository,
+                        generation,
+                        parent,
+                        manifest_hash,
+                        provider_set_hash,
+                        root_identity,
+                        display_name,
+                        root_path,
+                        register_repository: existing_repository.is_none(),
+                        storage_reservation,
+                        source_bytes: source_storage_bytes,
+                        estimated_disk_bytes,
+                        files_examined,
+                        bytes_examined,
+                        source_file_max_bytes: discovery_limits.max_file_bytes,
+                        started,
+                    },
+                    cancellation,
+                    &mut observe_progress,
+                    &mut observe_planning,
+                )
+            }
+            _ => structural,
+        }
     }
 
     fn probe_fsharp_source(
@@ -10362,6 +11220,11 @@ impl FirstSliceService {
         let FileOnlyFallbackPreparation {
             root,
             manifest,
+            source_frame,
+            recovery_memory,
+            aggregate_cause,
+            durable_restore_capacity,
+            fresh_projection_capacity,
             streamed_sources,
             file_claims,
             incremental,
@@ -10391,12 +11254,31 @@ impl FirstSliceService {
         if source_files.len() != file_claims.len() {
             return Err(FirstSliceError::Identity.into());
         }
-        let mut reserved_memory_bytes = source_file_fallback_preflight_memory_bytes(&file_claims)?;
-        let mut memory_reservation = self.reserve_generation_memory(
-            generation,
-            reserved_memory_bytes,
-            PendingGenerationMemory::Reserved,
+        let transient_source_bytes = source_frame.as_ref().map_or(
+            Ok(0),
+            aggregate_source_recovery::PreparedSourceFrame::retained_memory_bytes,
         )?;
+        let mut reserved_memory_bytes = ensure_generation_memory_admission(
+            source_file_fallback_preflight_memory_bytes(&file_claims)?
+                .checked_add(transient_source_bytes)
+                .ok_or(FirstSliceError::Limits)?,
+        )?;
+        let mut memory_reservation = if let Some((mut reservation, admitted_peak)) = recovery_memory
+        {
+            reservation.resize(
+                reserved_memory_bytes,
+                PendingGenerationMemory::Reserved,
+                self.durable.is_some(),
+            )?;
+            reserved_memory_bytes = reserved_memory_bytes.max(admitted_peak);
+            reservation
+        } else {
+            self.reserve_generation_memory(
+                generation,
+                reserved_memory_bytes,
+                PendingGenerationMemory::Reserved,
+            )?
+        };
         let reclaimable_generations = self.inactive_generation_ids();
         self.source_snapshots.preflight_admission_after_reclaim(
             generation,
@@ -10421,6 +11303,9 @@ impl FirstSliceService {
             FirstSliceFileOnlyInputs {
                 source_files: &source_files,
                 parser_route_inputs: &parser_route_inputs,
+                semantic_inputs: source_frame
+                    .as_ref()
+                    .map_or(&[], |frame| frame.derived_fingerprints.as_slice()),
             },
             SOURCE_FILE_FALLBACK_NORMALIZED_FACTS,
             estimated_disk_bytes,
@@ -10436,19 +11321,54 @@ impl FirstSliceService {
             0,
         ));
 
-        let (document, source_file_catalog) = source_file_fallback_document_and_catalog(
+        let (mut document, source_file_catalog) = source_file_fallback_document_and_catalog(
             repository,
             generation,
             &manifest.inputs,
             file_claims,
             cancellation,
         )?;
+        if let Some(cause) = durable_restore_capacity {
+            if aggregate_cause.is_some()
+                || source_frame
+                    .as_ref()
+                    .is_none_or(|frame| frame.derived_files != 0 || !frame.origins.is_empty())
+            {
+                return Err(FirstSliceError::Identity.into());
+            }
+            cause.annotate(&mut document)?;
+        }
+        if let Some(cause) = fresh_projection_capacity {
+            if aggregate_cause.is_some()
+                || durable_restore_capacity.is_some()
+                || source_frame
+                    .as_ref()
+                    .is_none_or(|frame| frame.derived_files != 0 || !frame.origins.is_empty())
+            {
+                return Err(FirstSliceError::Identity.into());
+            }
+            cause.annotate(&mut document, manifest_hash)?;
+        }
+        if let Some(cause) = aggregate_cause {
+            aggregate_source_recovery::attach_cause_and_origins(
+                &mut document,
+                &source_file_catalog,
+                source_frame.as_ref().ok_or(FirstSliceError::Identity)?,
+                cause,
+                cancellation,
+            )?;
+        }
+        let expected_facts = SOURCE_FILE_FALLBACK_NORMALIZED_FACTS
+            .checked_add(if aggregate_cause.is_some() { 2 } else { 0 })
+            .and_then(|count| {
+                count.checked_add(aggregate_cause.map_or(0, |cause| cause.derived_members))
+            })
+            .ok_or(FirstSliceError::Limits)?;
         let normalized_facts = normalized_record_count(&document)?;
-        if u64::try_from(normalized_facts).ok() != Some(SOURCE_FILE_FALLBACK_NORMALIZED_FACTS) {
+        if u64::try_from(normalized_facts).ok() != Some(expected_facts) {
             return Err(FirstSliceError::Identity.into());
         }
-        incremental_plan.state.evidence.rebuilt_normalized_facts =
-            SOURCE_FILE_FALLBACK_NORMALIZED_FACTS;
+        incremental_plan.state.evidence.rebuilt_normalized_facts = expected_facts;
         incremental_plan.state.evidence.normalized_fact_work =
             normalized_fact_work(&document, &ReusedNormalizedRecords::default(), cancellation)?;
         let mut incremental = incremental_plan.state;
@@ -10468,7 +11388,7 @@ impl FirstSliceService {
             provider_set_hash,
         )
         .map_err(|_| FirstSliceError::Identity)?;
-        let context = GenerationContext::new(cancellation, GenerationBudget::default());
+        let context = GenerationContext::new(cancellation, self.generation_budget);
         let verified = IdentityVerifiedGeneration::verify_with_source_files(
             metadata,
             document,
@@ -10486,12 +11406,17 @@ impl FirstSliceService {
             verified.snapshot(),
             cancellation,
         )?;
+        let staged_memory_bytes = ensure_generation_memory_admission(
+            memory_bytes
+                .checked_add(transient_source_bytes)
+                .ok_or(FirstSliceError::Limits)?,
+        )?;
         memory_reservation.resize(
-            memory_bytes,
+            staged_memory_bytes,
             PendingGenerationMemory::Staged,
             self.durable.is_some(),
         )?;
-        reserved_memory_bytes = reserved_memory_bytes.max(memory_bytes);
+        reserved_memory_bytes = reserved_memory_bytes.max(staged_memory_bytes);
         let source_file_catalog_bytes = verified
             .snapshot()
             .source_files()
@@ -10633,9 +11558,22 @@ impl FirstSliceService {
                 requests.push((relative, capture_limit));
                 batch_end += 1;
             }
-            let snapshots = root
-                .snapshot_batch_with_cancellation(&requests, cancellation)
-                .map_err(|error| map_vfs_error(error, cancellation))?;
+            let snapshots = if let Some(frame) = &source_frame {
+                file_ids[file_offset..batch_end]
+                    .iter()
+                    .map(|file| {
+                        frame
+                            .snapshots
+                            .get(file)
+                            .cloned()
+                            .map(Ok)
+                            .ok_or(FirstSliceError::DiscoveryDrift)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                root.snapshot_batch_with_cancellation(&requests, cancellation)
+                    .map_err(|error| map_vfs_error(error, cancellation))?
+            };
             if snapshots.len() != batch_end - file_offset {
                 return Err(FirstSliceError::DiscoveryDrift.into());
             }
@@ -10669,12 +11607,23 @@ impl FirstSliceService {
                     return Err(FirstSliceError::DiscoveryDrift.into());
                 }
                 source_writer.push(&snapshot)?;
-                let lexical = project_source_document_with_full_terms(
-                    verified.snapshot(),
-                    &snapshot,
-                    budget,
-                    cancellation,
-                )
+                let lexical = if aggregate_cause
+                    .is_some_and(|cause| snapshot_bytes > cause.text_snapshot_bytes)
+                {
+                    rootlight_query::project_source_metadata_document(
+                        verified.snapshot(),
+                        file_id,
+                        budget,
+                        cancellation,
+                    )
+                } else {
+                    project_source_document_with_full_terms(
+                        verified.snapshot(),
+                        &snapshot,
+                        budget,
+                        cancellation,
+                    )
+                }
                 .map_err(|error| map_query_error(error, cancellation))?;
                 logical_builder
                     .push(&LogicalLexicalDocument::from(&lexical))
@@ -10755,9 +11704,9 @@ impl FirstSliceService {
                 .ok_or(FirstSliceError::Limits)?,
             source_written_bytes,
         ));
-        let (oracle, verified) = OracleWriter::create_in(prepared.path())
+        let (oracle, verified, restore_plan) = OracleWriter::create_in(prepared.path())
             .map_err(|error| map_catalog_error(&error, cancellation))?
-            .seal_preserving_verified(verified, &context)
+            .seal_preserving_verified_with_read_plan(verified, &context)
             .map_err(|error| map_catalog_error(&error, cancellation))?;
         let oracle_allocated_bytes = oracle
             .allocated_bytes(&context)
@@ -10765,6 +11714,9 @@ impl FirstSliceService {
         prepared.account_external_staging_bytes(oracle_allocated_bytes)?;
         let mut written_bytes = source_written_bytes
             .checked_add(oracle_allocated_bytes)
+            .ok_or(FirstSliceError::Limits)?;
+        written_bytes = written_bytes
+            .checked_add(prepared.write_source_authority(&verified, cancellation)?)
             .ok_or(FirstSliceError::Limits)?;
         written_bytes = written_bytes
             .checked_add(prepared.write_incremental_state(&incremental, cancellation)?)
@@ -10787,6 +11739,20 @@ impl FirstSliceService {
                 .ok_or(FirstSliceError::Limits)?,
             written_bytes,
         ));
+
+        // A degraded generation must itself pass the identical later restore
+        // envelope. A refusal stays typed; it never recursively degrades again.
+        let restore_bytes = prepared.oracle_restore_memory_bytes(
+            restore_plan,
+            streamed_files,
+            !verified.snapshot().source_files().is_empty(),
+        )?;
+        if let Some(cause) =
+            aggregate_source_recovery::DurableRestoreCapacity::from_sealed_plan(restore_bytes)
+        {
+            check_cancellation(cancellation)?;
+            return Err(cause.error().into());
+        }
 
         let oversized_inputs = manifest
             .coverage
@@ -10824,7 +11790,7 @@ impl FirstSliceService {
                     total.checked_add(*count).ok_or(FirstSliceError::Limits)
                 })?,
             indexed_files: streamed_files,
-            extracted_files: 0,
+            extracted_files: source_frame.as_ref().map_or(0, |frame| frame.derived_files),
             entities: 0,
             lexical_documents: streamed_files,
             oracle_allocated_bytes,
@@ -10869,6 +11835,7 @@ impl FirstSliceService {
             return Err(FirstSliceError::Retention.into());
         };
         check_cancellation(cancellation)?;
+        drop(source_frame);
         Ok(FirstSliceIndexPreparation::Pending(
             PreparedFirstSliceIndex {
                 verified,
@@ -11015,6 +11982,10 @@ impl FirstSliceService {
         sources: &[RustSourceInput],
         configuration_sources: &[RustSourceInput],
         source_languages: &BTreeMap<FileId, String>,
+        native_unavailable: &BTreeMap<
+            FileId,
+            rootlight_adapter_treesitter::NativeIdentityWorkLimit,
+        >,
         mode: FirstSliceIndexMode,
         require_complete_project_analysis: bool,
         output_admission: &mut generation_admission::GenerationAdmission,
@@ -11033,7 +12004,9 @@ impl FirstSliceService {
                 .try_reserve_exact(fallback_documents.len())
                 .map_err(|_| FirstSliceError::Limits)?;
             for source in sources {
-                if source_languages.get(&source.snapshot.file()) != Some(&language) {
+                if native_unavailable.contains_key(&source.snapshot.file())
+                    || source_languages.get(&source.snapshot.file()) != Some(&language)
+                {
                     continue;
                 }
                 inputs.push(FirstSliceProjectInput {
@@ -11248,6 +12221,9 @@ impl FirstSliceService {
                                         });
                                         match append_result {
                                             Ok(()) => continue,
+                                            Err(error @ FirstSliceError::AggregateCapacity(_)) => {
+                                                return Err(error);
+                                            }
                                             Err(error @ FirstSliceError::ResourceLimit { .. })
                                                 if require_complete_project_analysis =>
                                             {
@@ -12360,14 +13336,22 @@ impl FirstSliceService {
         generation: GenerationId,
     ) -> Result<FirstSliceFreshnessStatus, FirstSliceError> {
         let generation = self.resolve_generation(repository, Some(generation))?;
+        let provider_set_hash = self
+            .generation_metadata(generation.generation)?
+            .provider_set_hash();
+        self.freshness_for_context(&generation, provider_set_hash)
+    }
+
+    fn freshness_for_context(
+        &self,
+        generation: &FirstSliceGenerationContext,
+        provider_set_hash: ContentHash,
+    ) -> Result<FirstSliceFreshnessStatus, FirstSliceError> {
         let observed = if generation.active {
             FirstSliceObservedFreshness::CurrentAtLastAuthoritativeScan
         } else {
             FirstSliceObservedFreshness::Superseded
         };
-        let provider_set_hash = self
-            .generation_metadata(generation.generation)?
-            .provider_set_hash();
         let structural_provider_set_hash =
             self.provider_set_hash(FirstSliceIndexMode::Structural)?;
         let deep_provider_set_hash = self
@@ -12375,15 +13359,11 @@ impl FirstSliceService {
             .as_ref()
             .map(|_| self.provider_set_hash(FirstSliceIndexMode::Deep))
             .transpose()?;
-        let used_project_fallback =
-            self.receipts
-                .get(&generation.generation)
-                .is_some_and(|receipt| {
-                    receipt
-                        .diagnostics
-                        .iter()
-                        .any(|diagnostic| is_project_fallback_code(&diagnostic.code))
-                });
+        let used_project_fallback = generation
+            .receipt
+            .diagnostics
+            .iter()
+            .any(|diagnostic| is_project_fallback_code(&diagnostic.code));
         let (semantic, publication, two_stage) = if used_project_fallback {
             (
                 if generation.active {
@@ -14809,6 +15789,34 @@ impl FirstSliceService {
         cancellation: &Cancellation,
     ) -> Result<QueryResponse<SourceReadQueryResult>, FirstSliceError> {
         check_cancellation(cancellation)?;
+        if let Some(lease) = self.source_only_lease(generation, cancellation)?
+            && !references.iter().any(|reference| {
+                lease
+                    .authority
+                    .find_file(reference.span().file())
+                    .is_some_and(|file| {
+                        matches!(file.language.as_str(), "vba" | "visual-basic-classic")
+                    })
+            })
+        {
+            let backing = source_generation::SourceBacking {
+                service: self,
+                lease: &lease,
+            };
+            let source =
+                rootlight_source::SourceService::from_source_authority(&backing, &lease.authority)
+                    .map_err(|error| map_source_error(error, cancellation))?;
+            return rootlight_query::read_source_authority(
+                &lease.authority,
+                &source,
+                references,
+                options,
+                budget.source(),
+                budget.query(),
+                cancellation,
+            )
+            .map_err(|error| map_query_error(error, cancellation));
+        }
         let lease = self.generation_lease(generation, cancellation)?;
         let service = lease
             .query()
@@ -14942,6 +15950,55 @@ impl FirstSliceService {
         references: &[SourceRef],
         cancellation: &Cancellation,
     ) -> Result<Cow<'_, [Arc<SourceSnapshot>]>, FirstSliceError> {
+        if references.len() <= rootlight_source::HARD_MAX_SOURCE_SELECTORS {
+            check_cancellation(cancellation)?;
+            let retained = self
+                .source_snapshots
+                .snapshots(generation)
+                .ok_or(FirstSliceError::Query)?;
+            let mut selected = Vec::new();
+            selected
+                .try_reserve_exact(references.len())
+                .map_err(|_| FirstSliceError::Retention)?;
+            let mut previous = None;
+            loop {
+                check_cancellation(cancellation)?;
+                // At most the authoritative selector cap is scanned. Ascending
+                // misses preserve the old hydration order without a second set.
+                let mut next = None;
+                for reference in references {
+                    check_cancellation(cancellation)?;
+                    let file = reference.span().file();
+                    if previous.is_none_or(|previous| file > previous)
+                        && next.is_none_or(|next| file < next)
+                    {
+                        next = Some(file);
+                    }
+                }
+                let Some(file) = next else {
+                    break;
+                };
+                let source = match retained.binary_search_by_key(&file, |source| source.file()) {
+                    Ok(index) => Arc::clone(retained.get(index).ok_or(FirstSliceError::Query)?),
+                    Err(_) => {
+                        let record = snapshot.find_file(file).ok_or(FirstSliceError::Query)?;
+                        let durable = self.durable.as_ref().ok_or(FirstSliceError::Query)?;
+                        Arc::new(durable.read_source(
+                            record.repository,
+                            generation,
+                            record,
+                            cancellation,
+                        )?)
+                    }
+                };
+                selected.push(source);
+                previous = Some(file);
+            }
+            check_cancellation(cancellation)?;
+            return Ok(Cow::Owned(selected));
+        }
+        // Oversized requests keep their existing hydration and typed-error
+        // precedence. The source/query layer remains the selector-limit authority.
         let retained_snapshots = self
             .source_snapshots
             .snapshots(generation)
@@ -15129,27 +16186,38 @@ impl FirstSliceService {
                 })
                 .reduce(lower_coverage_status)
                 .ok_or(FirstSliceError::CatalogCorrupt)?;
-            let reason = document.diagnostics.iter().find_map(|diagnostic| {
-                if diagnostic
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| source.span().file() != file.id)
-                {
-                    return None;
-                }
-                match diagnostic.code.as_str() {
-                    "unsupported-language" => {
-                        Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+            let reason = document
+                .diagnostics
+                .iter()
+                .find_map(|diagnostic| {
+                    if diagnostic
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| source.span().file() != file.id)
+                    {
+                        return None;
                     }
-                    "unsupported-encoding" => {
-                        Some(FirstSliceSourceCoverageReason::UnsupportedEncoding)
+                    match diagnostic.code.as_str() {
+                        "unsupported-language" => {
+                            Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+                        }
+                        "unsupported-encoding" => {
+                            Some(FirstSliceSourceCoverageReason::UnsupportedEncoding)
+                        }
+                        "language-admission-resource-bounded" | "native-identity-work-limit" => {
+                            Some(FirstSliceSourceCoverageReason::ResourceBounded)
+                        }
+                        _ => None,
                     }
-                    "language-admission-resource-bounded" => {
-                        Some(FirstSliceSourceCoverageReason::ResourceBounded)
-                    }
-                    _ => None,
-                }
-            });
+                })
+                .or_else(|| {
+                    document.skipped_regions.iter().find_map(|gap| {
+                        (gap.source.span().file() == file.id
+                            && gap.reason == SkippedRegionReason::ResourceLimit
+                            && gap.detail.starts_with("aggregate-file-capacity: "))
+                        .then_some(FirstSliceSourceCoverageReason::ResourceBounded)
+                    })
+                });
             (status, reason)
         };
         Ok(FirstSliceSourceCoverage {
@@ -16365,6 +17433,10 @@ pub struct GenerationMemoryBreakdown {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum FirstSliceError {
+    /// Internal pre-persistence proof of genuine combined structural capacity.
+    #[doc(hidden)]
+    #[error("combined structural output exceeded its admitted capacity")]
+    AggregateCapacity(AggregateCapacityFailure),
     /// Effective configuration could not initialize.
     #[error("first-slice configuration is invalid")]
     Configuration,
@@ -16731,6 +17803,7 @@ fn prepare_incremental_state(
 }
 
 struct FirstSliceFileOnlyInputs<'a> {
+    semantic_inputs: &'a [InputFingerprint],
     source_files: &'a BTreeSet<FileId>,
     parser_route_inputs: &'a BTreeMap<FileId, ContentHash>,
 }
@@ -16749,7 +17822,7 @@ fn prepare_file_only_incremental_state(
         discovery,
         inputs.source_files,
         inputs.parser_route_inputs,
-        &[],
+        inputs.semantic_inputs,
         cancellation,
     )?;
     let mut input_counts = BTreeMap::new();
@@ -18071,6 +19144,25 @@ fn source_language_route<'a>(
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    // Static template text can contain a complete host document or reader header.
+    if source_language_from_path(&input.path) == Some("liquid") {
+        return analyzers.contains_key("liquid").then_some("liquid");
+    }
+    if has_haxe_language_conflict(input) || has_qml_shebang_conflict(input) {
+        return None;
+    }
+    if has_json_schema_content_signal(input) {
+        let language = json_schema_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
+    if is_shared_modelica_source(&input.path) {
+        let language = modelica_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
+    if has_racket_reader_signal(input) {
+        let language = racket_reader_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     if is_ambiguous_basic_source(&input.path) {
         let language = shared_classic_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
@@ -18152,6 +19244,65 @@ fn is_ambiguous_c_header(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("h"))
 }
 
+fn has_json_schema_content_signal(input: &ManifestInput) -> bool {
+    input.language_signals.iter().any(|signal| {
+        signal.language == "json-schema" && signal.evidence == LanguageEvidence::Content
+    })
+}
+
+fn json_schema_content_language(input: &ManifestInput) -> Option<&str> {
+    let written = input.language_signals.iter().find(|signal| {
+        signal.language == "json-schema" && signal.evidence == LanguageEvidence::Content
+    })?;
+    (!input.language_signals.iter().any(|signal| {
+        matches!(
+            signal.evidence,
+            LanguageEvidence::Content | LanguageEvidence::Shebang
+        ) && signal.language != written.language
+    }))
+    .then_some(written.language.as_str())
+}
+
+fn has_haxe_language_conflict(input: &ManifestInput) -> bool {
+    rootlight_discovery::extension_language(&input.path) == Some("haxe")
+        && input.language_signals.iter().any(|signal| {
+            matches!(
+                signal.evidence,
+                LanguageEvidence::Shebang | LanguageEvidence::Content
+            ) && signal.language != "haxe"
+        })
+}
+
+fn has_qml_shebang_conflict(input: &ManifestInput) -> bool {
+    rootlight_discovery::extension_language(&input.path) == Some("qml")
+        && input
+            .language_signals
+            .iter()
+            .any(|signal| signal.evidence == LanguageEvidence::Shebang && signal.language != "qml")
+}
+
+fn is_shared_modelica_source(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mo"))
+}
+
+fn modelica_content_language(input: &ManifestInput) -> Option<&str> {
+    let written = input.language_signals.iter().find(|signal| {
+        signal.evidence == LanguageEvidence::Content && signal.language == "modelica"
+    })?;
+    // `.mo` is shared with other formats. Neither its suffix nor the set of
+    // installed analyzers can settle missing or conflicting source evidence.
+    (!input.language_signals.iter().any(|signal| {
+        matches!(
+            signal.evidence,
+            LanguageEvidence::Content | LanguageEvidence::Shebang
+        ) && signal.language != written.language
+    }))
+    .then_some(written.language.as_str())
+}
+
 fn c_header_content_language(input: &ManifestInput) -> Option<&str> {
     if !is_ambiguous_c_header(&input.path) {
         return None;
@@ -18178,6 +19329,22 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if let Some(language) = configured.next() {
         return (!configured.any(|other| other.language != language.language))
             .then_some(language.language.as_str());
+    }
+    // The outer template format precedes content hints; configuration stays first.
+    if source_language_from_path(&input.path) == Some("liquid") {
+        return Some("liquid");
+    }
+    if has_haxe_language_conflict(input) || has_qml_shebang_conflict(input) {
+        return None;
+    }
+    if has_json_schema_content_signal(input) {
+        return json_schema_content_language(input);
+    }
+    if is_shared_modelica_source(&input.path) {
+        return modelica_content_language(input);
+    }
+    if has_racket_reader_signal(input) {
+        return racket_reader_content_language(input);
     }
     if is_ambiguous_basic_source(&input.path) {
         return shared_classic_source_language(input);
@@ -18235,6 +19402,25 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
         }
     }
     None
+}
+
+fn has_racket_reader_signal(input: &ManifestInput) -> bool {
+    input
+        .language_signals
+        .iter()
+        .any(|signal| signal.evidence == LanguageEvidence::Content && signal.language == "racket")
+}
+
+fn racket_reader_content_language(input: &ManifestInput) -> Option<&str> {
+    // A verified reader declaration owns its syntax; keep conflicting evidence
+    // unresolved instead of picking whichever installed parser happens to exist.
+    (!input.language_signals.iter().any(|signal| {
+        matches!(
+            signal.evidence,
+            LanguageEvidence::Content | LanguageEvidence::Shebang
+        ) && signal.language != "racket"
+    }))
+    .then_some("racket")
 }
 
 fn source_language_from_path(path: &str) -> Option<&'static str> {
@@ -18507,6 +19693,16 @@ fn unsupported_source_document(
             "bounded native language admission exhausted its analysis resources and source remains available without a language determination",
             SkippedRegionReason::ResourceLimit,
         ),
+        UnsupportedSourceDisposition::IntrinsicIdentityWorkLimit { .. } => (
+            "native-identity-work-limit",
+            "source remains exact and readable; intrinsic native identity work prevented structural analysis",
+            SkippedRegionReason::ResourceLimit,
+        ),
+        UnsupportedSourceDisposition::AggregateFileCapacity => (
+            "aggregate-file-capacity",
+            "combined structural capacity prevented this file's analysis; exact original source remains available",
+            SkippedRegionReason::ResourceLimit,
+        ),
         UnsupportedSourceDisposition::ParserSizeLimit => (
             "source-parser-snapshot-size-limit",
             "streamed source remains available for exact reads and literal matching but parser memory limits prevent structural analysis and lexical vocabulary projection",
@@ -18577,7 +19773,11 @@ fn unsupported_source_document(
             0,
             0,
         ),
-        (IrFactDomain::Diagnostics, CoverageStatus::Complete, 1, 1, 0),
+        if input.disposition == UnsupportedSourceDisposition::AggregateFileCapacity {
+            (IrFactDomain::Diagnostics, CoverageStatus::Unknown, 0, 0, 0)
+        } else {
+            (IrFactDomain::Diagnostics, CoverageStatus::Complete, 1, 1, 0)
+        },
         (IrFactDomain::Extensions, CoverageStatus::Complete, 1, 1, 0),
     ] {
         let mut coverage = CoverageRecord {
@@ -18617,21 +19817,28 @@ fn unsupported_source_document(
         skipped.id = derive_skipped_region_id(&skipped).map_err(|_| FirstSliceError::Identity)?;
         document.skipped_regions.push(skipped);
     }
-    let mut diagnostic = DiagnosticRecord {
-        id: FactId::from_bytes([0; 20]),
-        repository,
-        generation,
-        code: code.to_owned(),
-        message: message.to_owned(),
-        severity: DiagnosticSeverity::Warning,
-        source: Some(source.clone()),
-        coverage_effect: CoverageStatus::Unknown,
-        provenance: provenance_id,
-        evidence: evidence(),
-    };
-    diagnostic.id =
-        derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
-    document.diagnostics.push(diagnostic);
+    if input.disposition != UnsupportedSourceDisposition::AggregateFileCapacity {
+        let mut diagnostic = DiagnosticRecord {
+            id: FactId::from_bytes([0; 20]),
+            repository,
+            generation,
+            code: code.to_owned(),
+            message: match input.disposition {
+                UnsupportedSourceDisposition::IntrinsicIdentityWorkLimit { observed, limit } => {
+                    format!("{message}; resource Records observed {observed} above {limit}")
+                }
+                _ => message.to_owned(),
+            },
+            severity: DiagnosticSeverity::Warning,
+            source: Some(source.clone()),
+            coverage_effect: CoverageStatus::Unknown,
+            provenance: provenance_id,
+            evidence: evidence(),
+        };
+        diagnostic.id =
+            derive_diagnostic_record_id(&diagnostic).map_err(|_| FirstSliceError::Identity)?;
+        document.diagnostics.push(diagnostic);
+    }
     document.extensions.push(
         new_file_identity_claim_envelope(&input.claim, generation, provenance_id, source)
             .map_err(|_| FirstSliceError::Identity)?,
@@ -18858,7 +20065,13 @@ fn source_file_fallback_record(
         language: detected_source_language(input)
             .unwrap_or("unknown")
             .to_owned(),
-        encoding: input.encoding.clone(),
+        // Discovery classifies containers as binary; the retrieval catalog uses
+        // bytes to preserve their exact content without claiming text support.
+        encoding: if input.encoding == "binary" {
+            "bytes".to_owned()
+        } else {
+            input.encoding.clone()
+        },
         generated: matches!(input.class, InputClass::Generated),
         provenance,
         evidence: FactEvidence {
@@ -19415,7 +20628,7 @@ fn generation_memory_limit(
             shared_bytes: 0,
         },
         observed: retained_bytes.saturating_add(pending_bytes),
-        limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+        limit: generation_memory_ceiling(),
     }
 }
 
@@ -19426,7 +20639,7 @@ fn ensure_generation_memory_preflight(source_bytes: u64) -> Result<u64, FirstSli
         .ok_or(FirstSliceError::Limits)?;
     #[cfg(test)]
     generation_admission_observation::observe_source_floor(observed);
-    if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+    if observed > generation_memory_ceiling() {
         return Err(generation_memory_limit(
             0,
             observed,
@@ -19448,7 +20661,7 @@ fn ensure_generation_memory_admission(
     serialized_document_bytes: u64,
 ) -> Result<u64, FirstSliceError> {
     let observed = serialized_document_bytes;
-    if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+    if observed > generation_memory_ceiling() {
         return Err(generation_memory_limit(
             0,
             observed,
@@ -21097,6 +22310,7 @@ fn append_oversized_input_diagnostic(
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct DocumentAppendState {
+    aggregate_recovery: bool,
     usage: Option<IrDocumentUsage>,
     extension_payload_bytes: usize,
     // None invalidates all extension totals, including the cached byte scalar.
@@ -21115,6 +22329,7 @@ impl DocumentAppendState {
         let (extension_payload_bytes, required_extension_usage) =
             measure_target_extension_usage(&document.extensions, &Cancellation::new())?;
         Ok(Self {
+            aggregate_recovery: false,
             usage: None,
             extension_payload_bytes,
             required_extension_usage: Some(required_extension_usage),
@@ -21197,16 +22412,139 @@ fn append_normalized_document_with_cancellation(
     )
 }
 
+struct PreparedDocumentAppend {
+    source: NormalizedIrDocument,
+    version: NormalizedIrVersion,
+    target_usage: IrDocumentUsage,
+    source_usage: IrDocumentUsage,
+    dropped_target_diagnostic: Option<usize>,
+    extension_plan: OptionalExtensionPlan,
+    profile_file: Option<FileId>,
+    context_free_source: bool,
+}
+
+fn append_optional_planning_limits(
+    limits: &IrLimits,
+    reserved: Option<&IrDocumentUsage>,
+) -> Result<IrLimits, FirstSliceError> {
+    let mut planning = limits.clone();
+    if let Some(reserved) = reserved {
+        planning.max_diagnostics = planning
+            .max_diagnostics
+            .checked_sub(reserved.diagnostics())
+            .ok_or(FirstSliceError::Limits)?;
+        planning.max_skipped_regions = planning
+            .max_skipped_regions
+            .checked_sub(reserved.skipped_regions())
+            .ok_or(FirstSliceError::Limits)?;
+        planning.max_extensions = planning
+            .max_extensions
+            .checked_sub(reserved.extensions())
+            .ok_or(FirstSliceError::Limits)?;
+        planning.max_total_extension_bytes = planning
+            .max_total_extension_bytes
+            .checked_sub(reserved.total_extension_bytes())
+            .ok_or(FirstSliceError::Limits)?;
+    }
+    Ok(planning)
+}
+
+fn append_usage_error(
+    error: IrDocumentUsageError,
+    aggregate_recovery: bool,
+    cancellation: &Cancellation,
+) -> FirstSliceError {
+    if let Some(cancelled) = current_cancellation(cancellation) {
+        return cancelled;
+    }
+    if aggregate_recovery && let Some(cause) = AggregateCapacityFailure::from_combined_usage(&error)
+    {
+        return FirstSliceError::AggregateCapacity(cause);
+    }
+    map_ir_usage_error(error, cancellation)
+}
+
+fn reserved_optional_planning_error(
+    original: FirstSliceError,
+    target: &NormalizedIrDocument,
+    source: &NormalizedIrDocument,
+    reserved: Option<&IrDocumentUsage>,
+    limits: &IrLimits,
+    aggregate_recovery: bool,
+    cancellation: &Cancellation,
+) -> FirstSliceError {
+    // Only a required-extension refusal can arise from the smaller optional
+    // planning room. Measure real required envelopes under generation limits;
+    // no cause is minted from the local limit or a generic numeric error.
+    if !matches!(
+        original,
+        FirstSliceError::ResourceLimit {
+            resource: FirstSliceResource::Extensions | FirstSliceResource::ExtensionBytes,
+            ..
+        }
+    ) {
+        return original;
+    }
+    let Some(reserved) = reserved else {
+        return original;
+    };
+    let combined = target
+        .extensions
+        .iter()
+        .chain(&source.extensions)
+        .filter(|extension| extension.namespace != LEXICAL_EXTENSION_NAMESPACE)
+        .try_fold(IrDocumentUsage::default(), |usage, extension| {
+            check_cancellation(cancellation)?;
+            let required = IrDocumentUsage::measure_extension(extension, limits)
+                .map_err(|error| append_usage_error(error, aggregate_recovery, cancellation))?;
+            usage
+                .checked_add(required, limits)
+                .map_err(|error| append_usage_error(error, aggregate_recovery, cancellation))
+        })
+        .and_then(|usage| {
+            usage
+                .checked_add(reserved.clone(), limits)
+                .map_err(|error| append_usage_error(error, aggregate_recovery, cancellation))
+        });
+
+    match combined {
+        Ok(_) => original,
+        Err(actual) => actual,
+    }
+}
+
 fn append_normalized_document_with_metadata_admission(
     target: &mut NormalizedIrDocument,
-    mut source: NormalizedIrDocument,
+    source: NormalizedIrDocument,
     limits: &IrLimits,
     append_state: &mut DocumentAppendState,
     cancellation: &Cancellation,
     admission: optional_extension_metadata::Admission<'_>,
 ) -> Result<(), FirstSliceError> {
+    let prepared = prepare_normalized_document_append(
+        target,
+        source,
+        limits,
+        append_state,
+        cancellation,
+        admission,
+        None,
+    )?;
+    commit_prepared_document_append(target, prepared, limits, append_state, cancellation)
+}
+
+fn prepare_normalized_document_append(
+    target: &NormalizedIrDocument,
+    mut source: NormalizedIrDocument,
+    limits: &IrLimits,
+    append_state: &DocumentAppendState,
+    cancellation: &Cancellation,
+    admission: optional_extension_metadata::Admission<'_>,
+    reserved: Option<&IrDocumentUsage>,
+) -> Result<PreparedDocumentAppend, FirstSliceError> {
     check_cancellation(cancellation)?;
     let version = merged_document_version(target, &source)?;
+    let planning_limits = append_optional_planning_limits(limits, reserved)?;
     let profile_file = if analysis_profile_enabled() && source.files.len() == 1 {
         source.files.first().map(|file| file.id)
     } else {
@@ -21243,9 +22581,15 @@ fn append_normalized_document_with_metadata_admission(
         AnalysisProfilePhase::AppendGapAndDiagnosticPlanning,
         profile_file,
     );
-    let truncated_skipped_regions = truncate_skipped_regions(target, &mut source, limits)?;
-    let diagnostic_plan =
-        plan_aggregate_diagnostics(target, &mut source, append_state, limits, cancellation)?;
+    let truncated_skipped_regions =
+        truncate_skipped_regions(target, &mut source, &planning_limits)?;
+    let diagnostic_plan = plan_aggregate_diagnostics(
+        target,
+        &mut source,
+        append_state,
+        &planning_limits,
+        cancellation,
+    )?;
     let dropped_target_diagnostic = diagnostic_plan.dropped_target_index;
     if let Some(index) = dropped_target_diagnostic {
         let removed = IrDocumentUsage::measure_diagnostic(&target.diagnostics[index], limits)
@@ -21265,12 +22609,23 @@ fn append_normalized_document_with_metadata_admission(
         append_state,
         diagnostic_plan,
         truncated_skipped_regions,
-        limits,
+        &planning_limits,
         optional_extension_metadata::PlanningContext {
             cancellation,
             admission,
         },
-    )?;
+    )
+    .map_err(|error| {
+        reserved_optional_planning_error(
+            error,
+            target,
+            &source,
+            reserved,
+            limits,
+            append_state.aggregate_recovery,
+            cancellation,
+        )
+    })?;
     for &index in &extension_plan.dropped_target_indices {
         check_cancellation(cancellation)?;
         let removed = IrDocumentUsage::measure_extension(&target.extensions[index], limits)
@@ -21286,10 +22641,67 @@ fn append_normalized_document_with_metadata_admission(
     );
     let source_usage = measure_append_usage(&source, limits, cancellation)?;
     let combined_usage = target_usage
-        .checked_add(source_usage, limits)
-        .map_err(|error| map_ir_usage_error(error, cancellation))?;
+        .clone()
+        .checked_add(source_usage.clone(), limits)
+        .map_err(|error| {
+            if let Some(cancelled) = current_cancellation(cancellation) {
+                return cancelled;
+            }
+            if append_state.aggregate_recovery
+                && let Some(cause) = AggregateCapacityFailure::from_combined_usage(&error)
+            {
+                return FirstSliceError::AggregateCapacity(cause);
+            }
+            map_ir_usage_error(error, cancellation)
+        })?;
+    if let Some(reserved) = reserved {
+        combined_usage
+            .clone()
+            .checked_add(reserved.clone(), limits)
+            .map_err(|error| {
+                append_usage_error(error, append_state.aggregate_recovery, cancellation)
+            })?;
+    }
     profile.finish();
 
+    let context_free_source = extension_plan.next_state.truncated_diagnostics == 0
+        && extension_plan.next_state.truncated_extensions == 0
+        && extension_plan.next_state.truncated_skipped_regions == 0;
+    Ok(PreparedDocumentAppend {
+        source,
+        version,
+        target_usage,
+        source_usage,
+        dropped_target_diagnostic,
+        extension_plan,
+        profile_file,
+        context_free_source,
+    })
+}
+
+fn commit_prepared_document_append(
+    target: &mut NormalizedIrDocument,
+    prepared: PreparedDocumentAppend,
+    limits: &IrLimits,
+    append_state: &mut DocumentAppendState,
+    cancellation: &Cancellation,
+) -> Result<(), FirstSliceError> {
+    check_cancellation(cancellation)?;
+    let PreparedDocumentAppend {
+        source,
+        version,
+        target_usage,
+        source_usage,
+        dropped_target_diagnostic,
+        extension_plan,
+        profile_file,
+        ..
+    } = prepared;
+    let combined_usage = target_usage
+        .checked_add(source_usage, limits)
+        .map_err(|error| {
+            append_usage_error(error, append_state.aggregate_recovery, cancellation)
+        })?;
     // Plans and quota checks leave target facts untouched. Reserve every append
     // before applying removals or coverage patches; commit then cannot fail.
     let profile =
@@ -21360,6 +22772,7 @@ fn append_normalized_document_with_metadata_admission(
         target.diagnostics.remove(index);
     }
     let mut next_append_state = extension_plan.apply(target, &mut append_state.optional_metadata);
+    next_append_state.aggregate_recovery = append_state.aggregate_recovery;
     next_append_state.usage = Some(combined_usage);
 
     let NormalizedIrDocument {
@@ -22344,6 +23757,7 @@ fn plan_optional_extensions_with_metadata_admission(
             total.checked_add(*dropped).ok_or(FirstSliceError::Limits)
         })?;
     let next_state = DocumentAppendState {
+        aggregate_recovery: append_state.aggregate_recovery,
         usage: None,
         optional_metadata: None,
         summary_free_prefix: summary_free_prefix
@@ -23561,6 +24975,167 @@ const fn incremental_resource(resource: rootlight_incremental::ResourceKind) -> 
             FirstSliceResource::IncrementalLogicalBytes
         }
     }
+}
+
+fn profile_request_error_code(error: &RequestError) -> &'static str {
+    match error {
+        RequestError::NativeVbaContext => "native_vba_context",
+        RequestError::Snapshot(error) => match error {
+            rootlight_adapter_sdk::SnapshotError::FileMismatch => "snapshot_file_mismatch",
+            rootlight_adapter_sdk::SnapshotError::ContentHashMismatch => {
+                "snapshot_content_hash_mismatch"
+            }
+            rootlight_adapter_sdk::SnapshotError::NotFullFile => "snapshot_not_full_file",
+            rootlight_adapter_sdk::SnapshotError::LengthOverflow => "snapshot_length_overflow",
+            _ => "other_snapshot",
+        },
+        RequestError::SourceTooLarge { .. } => "source_too_large",
+        RequestError::TooManyIncludedRanges { .. } => "too_many_included_ranges",
+        RequestError::IncludedRangeOutsideSource { .. } => "included_range_outside_source",
+        RequestError::IncludedRangeOrder { .. } => "included_range_order",
+        RequestError::ProjectAnalysisDisabled => "project_analysis_disabled",
+        RequestError::EmptyProject => "empty_project",
+        RequestError::ProjectRepositoryMismatch { .. } => "project_repository_mismatch",
+        RequestError::ProjectGenerationMismatch { .. } => "project_generation_mismatch",
+        RequestError::DuplicateProjectFile { .. } => "duplicate_project_file",
+        RequestError::ProjectPathOrder { .. } => "project_path_order",
+        RequestError::OriginsRequireGeneratedSource { .. } => "origins_require_generated_source",
+        RequestError::GeneratedOriginOutsideSource { .. } => "generated_origin_outside_source",
+        RequestError::GeneratedOriginOrder { .. } => "generated_origin_order",
+        RequestError::GeneratedOriginMismatch { .. } => "generated_origin_mismatch",
+        RequestError::ProjectAccountingOverflow => "project_accounting_overflow",
+        RequestError::ProjectConfigurationDigestMismatch => "project_configuration_digest_mismatch",
+        RequestError::ProjectLimit { .. } => "project_limit",
+        RequestError::UnsupportedLanguage => "unsupported_language",
+        RequestError::UnsupportedEncoding => "unsupported_encoding",
+        RequestError::EmbeddedRangesUnsupported => "embedded_ranges_unsupported",
+        RequestError::UnsupportedTier => "unsupported_tier",
+        RequestError::GeneratedStatusRequired => "generated_status_required",
+        RequestError::DeadlineRequired => "deadline_required",
+        RequestError::CancellationCheckpointsRequired => "cancellation_checkpoints_required",
+        RequestError::MemoryEnforcementUnavailable => "memory_enforcement_unavailable",
+        RequestError::ProviderLimit { .. } => "provider_limit",
+        _ => "other_request",
+    }
+}
+
+fn profile_report_error_code(error: &ReportError) -> &'static str {
+    match error {
+        ReportError::CoverageOutOfBounds { .. } => "coverage_out_of_bounds",
+        ReportError::InvalidCompleteCoverage => "invalid_complete_coverage",
+        ReportError::InvalidDomainCoverage => "invalid_domain_coverage",
+        ReportError::SourceLengthMismatch { .. } => "source_length_mismatch",
+        ReportError::ResourceLimit { .. } => "resource_limit",
+        ReportError::MissingMemoryAccounting => "missing_memory_accounting",
+        ReportError::AnalysisTierMismatch { .. } => "analysis_tier_mismatch",
+        ReportError::ProjectRequestedTierMismatch => "project_requested_tier_mismatch",
+        ReportError::ProjectAnalysisUnitMismatch => "project_analysis_unit_mismatch",
+        ReportError::ProjectBuildTargetMismatch => "project_build_target_mismatch",
+        ReportError::ProjectBuildContextMismatch => "project_build_context_mismatch",
+        ReportError::StreamUsageMismatch => "stream_usage_mismatch",
+        ReportError::EndSequenceMismatch { .. } => "end_sequence_mismatch",
+        _ => "other_report",
+    }
+}
+
+fn profile_sink_error_code(error: &SinkError) -> &'static str {
+    match error {
+        SinkError::DuplicateSequence { .. } => "duplicate_sequence",
+        SinkError::OutOfOrder { .. } => "out_of_order",
+        SinkError::Closed => "closed",
+        SinkError::EmptyBatch => "empty_batch",
+        SinkError::SourceMismatch => "source_mismatch",
+        SinkError::DuplicateSyntaxFact { .. } => "duplicate_syntax_fact",
+        SinkError::BatchLimit { .. } => "batch_limit",
+        SinkError::StreamLimit { .. } => "stream_limit",
+        SinkError::InvalidIr => "invalid_ir",
+        SinkError::AccountingOverflow => "accounting_overflow",
+        SinkError::AllocationFailed => "allocation_failed",
+        _ => "other_sink",
+    }
+}
+
+fn record_preflight_failure(
+    context: Option<AnalysisProfileFileContext>,
+    invocation: AnalysisProfileInvocation,
+    failure: AnalysisProfileAdapterFailure,
+    preceding_prepare_failure: Option<AnalysisProfileAdapterFailure>,
+    outcome: FirstSliceError,
+) {
+    let Some(context) = context else {
+        return;
+    };
+    let details_complete = context.language_complete
+        && failure.code.is_some()
+        && preceding_prepare_failure.is_none_or(|failure| failure.code.is_some());
+    let (mapped_outcome, cancellation_reason) = match outcome {
+        FirstSliceError::Adapter => (AnalysisProfileFailureOutcome::Adapter, None),
+        FirstSliceError::Cancelled(reason) => {
+            (AnalysisProfileFailureOutcome::Cancelled, Some(reason))
+        }
+        FirstSliceError::ResourceLimit { .. } => {
+            (AnalysisProfileFailureOutcome::ResourceLimit, None)
+        }
+        _ => (AnalysisProfileFailureOutcome::OtherServiceError, None),
+    };
+    with_analysis_profile(|profile| {
+        // One returning failure is enough; handled attempts never occupy this slot.
+        if profile.terminal_file_failure.is_none() {
+            profile.terminal_file_failure = Some(AnalysisProfileFileFailure {
+                repository: context.repository,
+                file: context.file,
+                content_hash: context.content_hash,
+                language: context.language,
+                phase: AnalysisProfilePhase::Preflight,
+                invocation,
+                failure,
+                preceding_prepare_failure,
+                mapped_outcome,
+                cancellation_reason,
+                details_complete,
+            });
+        }
+    });
+}
+
+fn profile_preflight_adapter_error(
+    error: AdapterError,
+    cancellation: &Cancellation,
+    context: Option<AnalysisProfileFileContext>,
+    invocation: AnalysisProfileInvocation,
+    preceding: Option<&AdapterError>,
+) -> FirstSliceError {
+    let detail = context.map(|_| {
+        (
+            AnalysisProfileAdapterFailure::from_adapter(&error),
+            preceding.map(AnalysisProfileAdapterFailure::from_adapter),
+        )
+    });
+    let outcome = map_adapter_error(error, cancellation);
+    if let Some((failure, preceding)) = detail {
+        record_preflight_failure(context, invocation, failure, preceding, outcome);
+    }
+    outcome
+}
+
+fn profile_preflight_setup_error(
+    error: FirstSliceError,
+    context: Option<AnalysisProfileFileContext>,
+    code: &'static str,
+) -> FirstSliceError {
+    if context.is_some() {
+        record_preflight_failure(
+            context,
+            AnalysisProfileInvocation::PreflightSetup,
+            AnalysisProfileAdapterFailure {
+                kind: AnalysisProfileFailureKind::ServiceSetup,
+                code: AnalysisProfileLabel::new(code),
+            },
+            None,
+            error,
+        );
+    }
+    error
 }
 
 fn is_invalid_utf8_adapter_failure(error: &AdapterError) -> bool {
@@ -24786,21 +26361,52 @@ fn elapsed_micros(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    mod ada_written_source;
+    mod aggregate_source_recovery;
+    mod apex_calls;
     mod astro_discovery;
+    mod bash_bindings;
     mod c_preprocessor;
     mod cmake;
     mod cmake_patch;
+    mod coq_source;
     mod cpp_preprocessor;
     mod eiffel_text_reopen;
+    mod elm_module_ownership;
     mod encoded_file_fallback;
+    mod flux_source;
     mod gap_retention;
     mod groovy_static_import;
+    mod hare_source;
+    mod haxe_routing_tests;
+    mod haxe_source;
+    mod json_schema_routing_tests;
     mod jsonc;
     mod julia_quoted;
     mod large_sources;
+    mod less_source;
+    mod liquid_source;
+    mod make_recipe_variables;
+    mod modelica_candidates;
+    mod modelica_routing_tests;
+    mod modelica_source;
+    mod native_identity_source_preservation;
     mod office_sources;
     mod prepared_artifacts;
+    mod python_parameter_bindings;
+    mod python_parameters;
+    mod qml_routing_tests;
+    mod racket_reader_routes;
+    mod ring_source;
+    mod sass_source;
+    mod schema_field_types;
+    mod scss_source;
+    mod source_snapshot_selection;
     mod streamed_sources;
+    mod tcl_parameters;
+    mod tsx_source;
+    mod typescript_calls;
+    mod yaml_source_names;
 
     use std::{
         collections::BTreeSet,
@@ -32739,6 +34345,28 @@ mod tests {
                 .provider_set_hash(FirstSliceIndexMode::Deep)
                 .expect("hash derives")
         );
+        for prior in [
+            b"rootlight.first-slice.project-provider/12".as_slice(),
+            b"rootlight.first-slice.project-provider/13",
+            b"rootlight.first-slice.project-provider/14",
+            b"rootlight.first-slice.project-provider/15",
+        ] {
+            let previous = hash_static_components(&[
+                prior,
+                first
+                    .provider_set_hash(FirstSliceIndexMode::Structural)
+                    .expect("hash derives")
+                    .as_bytes(),
+                content_hash(b"project-adapter-one").as_bytes(),
+            ])
+            .expect("previous project recipe derives");
+            assert_ne!(
+                first
+                    .provider_set_hash(FirstSliceIndexMode::Deep)
+                    .expect("hash derives"),
+                previous
+            );
+        }
     }
 
     #[test]
@@ -33078,6 +34706,34 @@ mod tests {
     fn every_audited_grammar_has_a_declared_source_route() {
         let registry = GrammarRegistry::audited().expect("audited grammar registry initializes");
         let mut mapped = [
+            "sample.qs",
+            "sample.sml",
+            "sample.wat",
+            "sample.mojo",
+            "sample.ha",
+            "sample.ring",
+            "sample.hx",
+            "sample.qml",
+            "sample.mo",
+            "sample.tf",
+            "sample.adb",
+            "sample.ads",
+            "sample.ada",
+            "sample.d",
+            "sample.zig",
+            "sample.cr",
+            "sample.cue",
+            "sample.fish",
+            "sample.nim",
+            "sample.pony",
+            "sample.ex",
+            "sample.graphql",
+            "sample.clj",
+            "sample.rkt",
+            "sample.vhdl",
+            "sample.proto",
+            "sample.thrift",
+            "sample.capnp",
             "sample.asm",
             "sample.astro",
             "sample.c",
@@ -33141,6 +34797,37 @@ mod tests {
             fixture.path(),
             &[
                 (
+                    "sample.qs",
+                    "namespace Written { operation Measure(value : Int) : Unit { External(value); } }\n",
+                ),
+                ("sample.sml", "fun measure value = value;\n"),
+                (
+                    "sample.wat",
+                    "(module $written (func $measure (param $value i32) local.get $value))\n",
+                ),
+                ("sample.mojo", "struct Written:\n    var value: Int\n"),
+                ("written.ha", "fn written() void = {};\n"),
+                (
+                    "sample.ring",
+                    "class Written\nfunc measure value { return value }\n",
+                ),
+                (
+                    "sample.hx",
+                    "class Written { function measure(value:Int):Int { return value; } }\n",
+                ),
+                (
+                    "sample.qml",
+                    "import QtQuick 2.0\nItem { id: written; property int value: 1 }\n",
+                ),
+                (
+                    "sample.mo",
+                    "function Written\n input Real value;\n output Real result;\nalgorithm\n result := value;\nend Written;\n",
+                ),
+                (
+                    "sample.schema.json",
+                    "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"written\":{\"type\":\"string\"}}}\n",
+                ),
+                (
                     "measure.m",
                     "function result = measure(value)\nresult = value;\nend\n",
                 ),
@@ -33195,7 +34882,7 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 17);
+        assert_eq!(receipt.indexed_files, 27);
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -33412,6 +35099,145 @@ mod tests {
                     })
             }));
             let reference = file.evidence.source.clone().unwrap();
+            let read = service
+                .source_read(receipt.generation, vec![reference.clone()], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].reference, reference);
+            assert_eq!(read.data.chunks[0].bytes, bytes.as_bytes());
+            mapped.insert(file.language.as_str());
+        }
+        for (path, language, kind, name, bytes, path_language) in [
+            (
+                "sample.qs",
+                "qsharp",
+                EntityKind::Namespace,
+                "Written",
+                "namespace Written { operation Measure(value : Int) : Unit { External(value); } }\n",
+                "qsharp",
+            ),
+            (
+                "sample.sml",
+                "standard-ml",
+                EntityKind::Function,
+                "measure",
+                "fun measure value = value;\n",
+                "standard-ml",
+            ),
+            (
+                "sample.wat",
+                "webassembly",
+                EntityKind::Module,
+                "$written",
+                "(module $written (func $measure (param $value i32) local.get $value))\n",
+                "webassembly",
+            ),
+            (
+                "sample.mojo",
+                "mojo",
+                EntityKind::Struct,
+                "Written",
+                "struct Written:\n    var value: Int\n",
+                "mojo",
+            ),
+            (
+                "written.ha",
+                "hare",
+                EntityKind::Function,
+                "written",
+                "fn written() void = {};\n",
+                "hare",
+            ),
+            (
+                "sample.ring",
+                "ring",
+                EntityKind::Class,
+                "Written",
+                "class Written\nfunc measure value { return value }\n",
+                "ring",
+            ),
+            (
+                "sample.hx",
+                "haxe",
+                EntityKind::Class,
+                "Written",
+                "class Written { function measure(value:Int):Int { return value; } }\n",
+                "haxe",
+            ),
+            (
+                "sample.qml",
+                "qml",
+                EntityKind::Variable,
+                "written",
+                "import QtQuick 2.0\nItem { id: written; property int value: 1 }\n",
+                "qml",
+            ),
+            (
+                "sample.mo",
+                "modelica",
+                EntityKind::Function,
+                "Written",
+                "function Written\n input Real value;\n output Real result;\nalgorithm\n result := value;\nend Written;\n",
+                "modelica",
+            ),
+            (
+                "sample.schema.json",
+                "json-schema",
+                EntityKind::Field,
+                "written",
+                "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"written\":{\"type\":\"string\"}}}\n",
+                "json",
+            ),
+        ] {
+            assert_eq!(source_language_from_path(path), Some(path_language));
+            let file = generation
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            assert_eq!(file.language, language);
+            assert!(
+                generation.document().entities.iter().any(|entity| {
+                    entity.language == language
+                        && entity.kind == kind
+                        && entity.canonical_name == name
+                        && entity.evidence.source.as_ref().is_some_and(|source| {
+                            source.generation() == receipt.generation
+                                && source.span().file() == file.id
+                                && source.content_hash() == content_hash(bytes.as_bytes())
+                        })
+                }),
+                "missing written {language} entity {name}"
+            );
+            let reference = file.evidence.source.clone().unwrap();
+            if language == "hare" {
+                assert_eq!(reference.repository(), receipt.repository);
+                assert_eq!(reference.generation(), receipt.generation);
+                assert_eq!(reference.span().file(), file.id);
+                assert_eq!(reference.content_hash(), file.content_hash);
+                assert_eq!(reference.content_hash(), content_hash(bytes.as_bytes()));
+                assert_eq!(reference.span().start_byte(), 0);
+                assert_eq!(
+                    reference.span().end_byte(),
+                    u64::try_from(bytes.len()).unwrap()
+                );
+                assert!(
+                    generation
+                        .document()
+                        .entities
+                        .iter()
+                        .filter(|entity| entity.language == "hare")
+                        .all(
+                            |entity| entity.evidence.source.as_ref().is_some_and(|source| source
+                                .repository()
+                                == receipt.repository
+                                && source.generation() == receipt.generation
+                                && source.span().file() == file.id
+                                && source.content_hash() == file.content_hash)
+                        )
+                );
+            }
             let read = service
                 .source_read(receipt.generation, vec![reference.clone()], &deadline())
                 .unwrap();
@@ -37337,21 +39163,23 @@ mod tests {
     #[test]
     fn discovery_classification_revision_invalidates_provider_identity() {
         let parser = first_slice_parser_provider_hash().unwrap();
-        let previous = hash_static_components(&[
-            PROVIDER_SET_SEED,
-            parser.as_bytes(),
-            b"1.44",
-            RESOLVER_PROVIDER_VERSION.as_bytes(),
-            RESOLVER_BINARY_SEED,
-            SEARCH_REVISION_SEED,
-            INCREMENTAL_SCHEMA_VERSION.as_bytes(),
-            DERIVED_PLAN_REVISION_SEED,
-            LANGUAGE_DISPOSITION_PROVIDER_SEED,
-            SOURCE_FILE_FALLBACK_PROVIDER_SEED,
-            container_sources::REVISION,
-        ])
-        .unwrap();
-        assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
+        for previous_discovery in [b"1.44", b"1.60", b"1.61", b"1.62", b"1.63"] {
+            let previous = hash_static_components(&[
+                PROVIDER_SET_SEED,
+                parser.as_bytes(),
+                previous_discovery,
+                RESOLVER_PROVIDER_VERSION.as_bytes(),
+                RESOLVER_BINARY_SEED,
+                SEARCH_REVISION_SEED,
+                INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+                DERIVED_PLAN_REVISION_SEED,
+                LANGUAGE_DISPOSITION_PROVIDER_SEED,
+                SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+                container_sources::REVISION,
+            ])
+            .unwrap();
+            assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
+        }
     }
 
     #[test]
@@ -37632,6 +39460,16 @@ mod tests {
                         SkippedRegionReason::ResourceLimit,
                         FirstSliceSourceCoverageReason::ResourceBounded,
                     ),
+                    UnsupportedSourceDisposition::IntrinsicIdentityWorkLimit { .. } => (
+                        "native-identity-work-limit",
+                        SkippedRegionReason::ResourceLimit,
+                        FirstSliceSourceCoverageReason::ResourceBounded,
+                    ),
+                    UnsupportedSourceDisposition::AggregateFileCapacity => (
+                        "aggregate-file-capacity",
+                        SkippedRegionReason::ResourceLimit,
+                        FirstSliceSourceCoverageReason::ResourceBounded,
+                    ),
                     UnsupportedSourceDisposition::ParserSizeLimit => (
                         "source-parser-snapshot-size-limit",
                         SkippedRegionReason::ResourceLimit,
@@ -37800,7 +39638,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_primary_sources_retain_exact_evidence_and_reason() {
+    fn mixed_source_profiles_retain_exact_evidence_and_reason() {
         let fixture = TempDir::new().expect("fixture root exists");
         let sources = [
             (
@@ -37823,7 +39661,6 @@ mod tests {
             ("Algebra.lean", "namespace Algebra\n", "lean"),
             ("actor.pony", "actor Main\n", "pony"),
             ("theme.less", "@accent: blue;\n", "less"),
-            ("theme.sass", "$accent: blue\n", "sass"),
         ];
         for (path, content, _) in sources {
             fs::write(fixture.path().join(path), content).expect("source fixture writes");
@@ -37848,11 +39685,55 @@ mod tests {
                 .expect("source coverage resolves");
             assert_eq!(coverage.language, language);
             assert_eq!(coverage.tier, AnalysisTier::TierD);
-            assert_eq!(coverage.status, CoverageStatus::Unknown);
+            let (expected_status, expected_reason) = if language == "pony" {
+                (CoverageStatus::Bounded, None)
+            } else {
+                (
+                    CoverageStatus::Unknown,
+                    Some(FirstSliceSourceCoverageReason::UnsupportedLanguage),
+                )
+            };
             assert_eq!(
-                coverage.reason,
-                Some(FirstSliceSourceCoverageReason::UnsupportedLanguage)
+                coverage.status, expected_status,
+                "{path}: language={language}, reason={:?}",
+                coverage.reason
             );
+            assert_eq!(coverage.reason, expected_reason, "{path}");
+            if language == "pony" {
+                let declarations: Vec<_> = generation
+                    .document()
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        entity.language == "pony"
+                            && entity.kind == EntityKind::Class
+                            && entity.canonical_name == "Main"
+                            && entity
+                                .evidence
+                                .source
+                                .as_ref()
+                                .is_some_and(|source| source.span().file() == file.id)
+                    })
+                    .collect();
+                assert_eq!(declarations.len(), 1, "native actor declaration");
+                let definitions: Vec<_> = generation
+                    .document()
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && matches!(site.target, rootlight_ir::OccurrenceTarget::Resolved { symbol }
+                                if symbol == declarations[0].id)
+                    })
+                    .collect();
+                assert_eq!(definitions.len(), 1, "one native actor definition");
+                assert_eq!(definitions[0].source.span().start_byte(), 6);
+                assert_eq!(definitions[0].source.span().end_byte(), 10);
+                assert_eq!(
+                    definitions[0].source.content_hash(),
+                    content_hash(content.as_bytes())
+                );
+            }
             let reference = file
                 .evidence
                 .source
@@ -37908,7 +39789,6 @@ mod tests {
             "lean",
             "pony",
             "less",
-            "sass",
         ] {
             assert!(gaps.iter().any(|gap| {
                 gap.reason == FirstSliceCoverageGapReason::Unsupported
@@ -38396,9 +40276,11 @@ mod tests {
                 ("card", EntityKind::Function),
                 ("local", EntityKind::Variable),
                 ("nested", EntityKind::Variable),
+                ("radius", EntityKind::Parameter),
                 ("same", EntityKind::Variable),
                 ("same", EntityKind::Variable),
                 ("scale", EntityKind::Function),
+                ("value", EntityKind::Parameter),
             ]
         );
         let scoped = entities
@@ -40543,6 +42425,12 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/259",
             b"rootlight.first-slice.treesitter-structural/260",
             b"rootlight.first-slice.treesitter-structural/270",
+            b"rootlight.first-slice.treesitter-structural/286",
+            b"rootlight.first-slice.treesitter-structural/287",
+            b"rootlight.first-slice.treesitter-structural/288",
+            b"rootlight.first-slice.treesitter-structural/289",
+            b"rootlight.first-slice.treesitter-structural/290",
+            b"rootlight.first-slice.treesitter-structural/291",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
@@ -40573,6 +42461,11 @@ mod tests {
             b"rootlight.first-slice.resolve/111",
             b"rootlight.first-slice.resolve/112",
             b"rootlight.first-slice.resolve/113",
+            b"rootlight.first-slice.resolve/118",
+            b"rootlight.first-slice.resolve/119",
+            b"rootlight.first-slice.resolve/120",
+            b"rootlight.first-slice.resolve/121",
+            b"rootlight.first-slice.resolve/122",
         ] {
             let previous_resolver = hash_static_components(&[
                 PROVIDER_SET_SEED,
@@ -57025,31 +58918,45 @@ mod tests {
             .expect("deferred durable service opens");
         let mut observed = BTreeSet::new();
         let mut nonempty_batches = 0_usize;
+        let mut visiting_repository = None;
+        let mut completed_repositories = BTreeSet::new();
         deferred
             .durable
-            .restore_progressively(&cancellation, |generations| {
-                if generations.is_empty() {
-                    return Ok(());
+            .restore_progressively(&cancellation, |event| {
+                match event {
+                    durable::ProgressiveRestoreEvent::Generation(generation) => {
+                        let repository = generation.receipt.repository;
+                        if let Some(visiting) = visiting_repository {
+                            assert_eq!(repository, visiting);
+                        } else {
+                            assert!(!completed_repositories.contains(&repository));
+                            assert_eq!(
+                                active.get(&repository),
+                                Some(&generation.receipt.generation)
+                            );
+                            visiting_repository = Some(repository);
+                        }
+                        nonempty_batches = nonempty_batches
+                            .checked_add(1)
+                            .ok_or(FirstSliceError::Limits)?;
+                        assert!(observed.insert(generation.receipt.generation));
+                    }
+                    durable::ProgressiveRestoreEvent::RepositoryComplete {
+                        repository,
+                        published_generation_count,
+                        ..
+                    } => {
+                        assert_eq!(visiting_repository.take(), Some(repository));
+                        assert_eq!(published_generation_count, 2);
+                        assert!(completed_repositories.insert(repository));
+                    }
                 }
-                nonempty_batches = nonempty_batches
-                    .checked_add(1)
-                    .ok_or(FirstSliceError::Limits)?;
-                assert!(generations.len() <= 2);
-                let repository = generations[0].receipt.repository;
-                assert!(
-                    generations
-                        .iter()
-                        .all(|generation| generation.receipt.repository == repository)
-                );
-                observed.extend(
-                    generations
-                        .iter()
-                        .map(|generation| generation.receipt.generation),
-                );
                 Ok(())
             })
-            .expect("durable restore visits one repository-sized batch at a time");
-        assert_eq!(nonempty_batches, repositories.len());
+            .expect("durable restore visits one verified generation at a time");
+        assert_eq!(nonempty_batches, expected.len());
+        assert!(visiting_repository.is_none());
+        assert_eq!(completed_repositories.len(), repositories.len());
         assert_eq!(observed, expected);
 
         let restored = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation)

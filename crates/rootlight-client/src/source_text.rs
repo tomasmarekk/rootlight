@@ -118,6 +118,9 @@ pub struct SourceTextReadResult {
     pub context: QueryContext,
     /// Checked text presentations in request order.
     pub chunks: Vec<SourceTextChunk>,
+    /// Authenticated source-only recovery; absence makes no completeness claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_recovery: Option<SourceReadRecovery>,
     /// Total returned original source bytes.
     pub total_source_bytes: u64,
     /// Total returned UTF-8 presentation bytes.
@@ -549,9 +552,20 @@ pub(super) fn parse_source_text_read_for_minor(
         &execution_completeness,
         false,
     )?;
+    let source_recovery = source_recovery::parse_source_recovery(
+        response.source_recovery,
+        chunks.iter().map(|chunk| chunk.source.file),
+        selected_protocol_minor,
+    )?;
+    source_recovery::validate_recovery_coverage(
+        &source_recovery,
+        &context,
+        chunks.iter().map(|chunk| chunk.tier),
+    )?;
     Ok(SourceTextReadResult {
         context,
         chunks,
+        source_recovery,
         total_source_bytes: response.total_source_bytes,
         total_text_bytes: response.total_text_bytes,
         truncated: response.truncated,
@@ -699,10 +713,21 @@ fn parse_source_text_prefix_read_for_minor(
         &execution_completeness,
         false,
     )?;
+    let source_recovery = source_recovery::parse_source_recovery(
+        response.source_recovery,
+        chunks.iter().map(|chunk| chunk.source.file),
+        selected_protocol_minor,
+    )?;
+    source_recovery::validate_recovery_coverage(
+        &source_recovery,
+        &context,
+        chunks.iter().map(|chunk| chunk.tier),
+    )?;
     Ok(SourceTextPrefixReadResult {
         result: SourceTextReadResult {
             context,
             chunks,
+            source_recovery,
             total_source_bytes: response.total_source_bytes,
             total_text_bytes: response.total_text_bytes,
             truncated: response.truncated,

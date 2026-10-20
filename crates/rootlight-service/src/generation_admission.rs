@@ -10,13 +10,14 @@ use rootlight_ir::NormalizedIrDocument;
 use serde::Serialize;
 
 use crate::{
-    FirstSliceError, FirstSliceResource, GenerationMemoryReservation,
-    MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, PendingGenerationMemory, check_cancellation,
-    generation_memory_limit,
+    FirstSliceError, FirstSliceResource, GenerationMemoryReservation, PendingGenerationMemory,
+    check_cancellation, generation_memory_ceiling, generation_memory_limit,
 };
 
 #[cfg(test)]
-use crate::generation_admission_observation as observation;
+use crate::{
+    MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES, generation_admission_observation as observation,
+};
 
 const SERIALIZATION_CHECKPOINT_BYTES: usize = 64 * 1024;
 
@@ -40,7 +41,7 @@ impl GenerationAdmission {
     pub(super) fn new(source_preflight_bytes: u64) -> Result<Self, FirstSliceError> {
         #[cfg(test)]
         observation::begin_admission(source_preflight_bytes);
-        if source_preflight_bytes > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+        if source_preflight_bytes > generation_memory_ceiling() {
             return Err(generation_memory_limit(
                 0,
                 source_preflight_bytes,
@@ -108,7 +109,7 @@ impl GenerationAdmission {
             .source_preflight_bytes
             .checked_add(charged_bytes)
             .ok_or(FirstSliceError::Limits)?;
-        if reservation_bytes > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+        if reservation_bytes > generation_memory_ceiling() {
             return Err(generation_memory_limit(
                 0,
                 reservation_bytes,
@@ -199,7 +200,7 @@ impl Write for JsonByteCounter<'_> {
             observation::serialization_rejected(Some(bytes), Some(length_bytes));
             return self.fail(FirstSliceError::Limits);
         };
-        if observed > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES {
+        if observed > generation_memory_ceiling() {
             #[cfg(test)]
             observation::serialization_rejected(Some(bytes), Some(length_bytes));
             return self.fail(generation_memory_limit(

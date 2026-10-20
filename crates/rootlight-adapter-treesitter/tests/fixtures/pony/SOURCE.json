@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/oraoto/pony-websocket",
+  "revision": "f725eb13e508bae32ca735dd4fa2f6000c51f6ab",
+  "path": "websocket/simple_server.pony",
+  "bytes": 1292,
+  "sha256": "42bb1c56d5ee79df106e2cd4534df20a12be00df7fb732deb0db902bf2d95e7a",
+  "license": "MIT; PONY-WEBSOCKET-LICENSE",
+  "scope": "Written class and direct member definitions with exact physical containment; runtime dispatch remains unavailable"
+}

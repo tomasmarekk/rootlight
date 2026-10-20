@@ -108,7 +108,7 @@
           ],
           "properties": {
             "detached": {
-              "description": "Requests permission to continue after client disconnect.\n\nWhen `true`, the daemon owns the durable operation independently of the\nrequesting transport. Status and a successfully published generation\nremain recoverable after daemon restart.",
+              "description": "Requests permission to continue after client disconnect.\n\nDefaults to `true` so an admitted operation has no transport-derived work\ndeadline. An explicit `false` retains request lifetime and disconnect\ncancellation. Response waiting remains bounded separately by `wait_ms`.\n\nWhen `true`, the daemon owns the durable operation independently of the\nrequesting transport. Status and a successfully published generation\nremain recoverable after daemon restart.",
               "type": "boolean"
             },
             "mode": {
@@ -33293,7 +33293,7 @@
             "batchEligible": true,
             "batchSharedBudget": false,
             "budget": "per_request",
-            "contractVersion": "1.3",
+            "contractVersion": "1.4",
             "explainSupported": true,
             "fallbackSummary": "bounded source ranges from pinned references as untrusted lossless text with original-byte identity and physical encoding",
             "generation": "selects_generation",
@@ -33651,7 +33651,7 @@
               "type": "string"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.3",
+          "$id": "https://rootlight.local/schema/mcp/source.read/input/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "description": "Strict source read 1.3 input; omitted encoding selects lossless text.",
@@ -33745,6 +33745,175 @@
         "name": "source.read",
         "outputSchema": {
           "$defs": {
+            "AggregateCapacityResource": {
+              "description": "Closed count or byte family in a genuine aggregate capacity observation.",
+              "oneOf": [
+                {
+                  "const": "files",
+                  "description": "Immutable file records.",
+                  "type": "string"
+                },
+                {
+                  "const": "entities",
+                  "description": "Structural entities.",
+                  "type": "string"
+                },
+                {
+                  "const": "occurrences",
+                  "description": "Source occurrences.",
+                  "type": "string"
+                },
+                {
+                  "const": "relations",
+                  "description": "Structural relations.",
+                  "type": "string"
+                },
+                {
+                  "const": "provenance",
+                  "description": "Producer provenance records.",
+                  "type": "string"
+                },
+                {
+                  "const": "source_mappings",
+                  "description": "Source mappings.",
+                  "type": "string"
+                },
+                {
+                  "const": "coverage",
+                  "description": "Analysis coverage records.",
+                  "type": "string"
+                },
+                {
+                  "const": "skipped_regions",
+                  "description": "Explicit skipped regions.",
+                  "type": "string"
+                },
+                {
+                  "const": "diagnostics",
+                  "description": "Diagnostics.",
+                  "type": "string"
+                },
+                {
+                  "const": "extensions",
+                  "description": "Registered extension envelopes.",
+                  "type": "string"
+                },
+                {
+                  "const": "records",
+                  "description": "All top-level records.",
+                  "type": "string"
+                },
+                {
+                  "const": "nested_items",
+                  "description": "All nested evidence items.",
+                  "type": "string"
+                },
+                {
+                  "const": "string_bytes",
+                  "description": "All retained non-payload strings.",
+                  "type": "string"
+                },
+                {
+                  "const": "extension_bytes",
+                  "description": "All extension payload bytes.",
+                  "type": "string"
+                },
+                {
+                  "const": "diagnostic_bytes",
+                  "description": "All diagnostic text bytes.",
+                  "type": "string"
+                },
+                {
+                  "const": "generation_text_bytes",
+                  "description": "Decoded generation text under its durable reader contract.",
+                  "type": "string"
+                },
+                {
+                  "const": "generation_encoded_text_bytes",
+                  "description": "Encoded generation text under its durable reader contract.",
+                  "type": "string"
+                }
+              ]
+            },
+            "AggregateCapacityStage": {
+              "description": "Exact pre-persistence boundary that rejected combined structural output.",
+              "oneOf": [
+                {
+                  "const": "structural_append",
+                  "description": "Individually admitted documents exceeded a combined IR quota.",
+                  "type": "string"
+                },
+                {
+                  "const": "generation_text",
+                  "description": "Complete canonical generation text exceeded its reader/writer contract.",
+                  "type": "string"
+                }
+              ]
+            },
+            "AggregateSourceRecovery": {
+              "additionalProperties": false,
+              "description": "Source-free universal cause bound to every member of the sealed manifest.",
+              "properties": {
+                "derived_members": {
+                  "description": "Exact derived-member count requiring unique authenticated origin envelopes.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "limit": {
+                  "description": "Actual rejected capacity.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "members": {
+                  "description": "Exact number of immutable members, including the normalized anchor.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "observed": {
+                  "description": "Actual combined observation, excluding arithmetic-overflow sentinels.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "resource": {
+                  "$ref": "#/$defs/AggregateCapacityResource",
+                  "description": "Exact aggregate count or byte family."
+                },
+                "source_inventory": {
+                  "$ref": "#/$defs/ContentHash",
+                  "description": "Exact canonical complete original-plus-derived manifest identity."
+                },
+                "stage": {
+                  "$ref": "#/$defs/AggregateCapacityStage",
+                  "description": "Exact pre-persistence rejection boundary."
+                },
+                "text_snapshot_bytes": {
+                  "description": "Captured members above this size retain bytes but only lexical metadata.",
+                  "format": "uint64",
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "source_inventory",
+                "members",
+                "derived_members",
+                "stage",
+                "resource",
+                "observed",
+                "limit",
+                "text_snapshot_bytes"
+              ],
+              "type": "object"
+            },
             "AnalysisTier": {
               "description": "Requested or observed language support tier.",
               "oneOf": [
@@ -34147,7 +34316,7 @@
                   "description": "Source-free error and remediation."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/SourceReadTextVersion",
+                  "$ref": "#/$defs/SourceReadRecoveryVersion",
                   "description": "Exact error contract version."
                 }
               },
@@ -34170,7 +34339,7 @@
                   "description": "Relevant coverage."
                 },
                 "data": {
-                  "$ref": "#/$defs/SourceReadDataV1_3",
+                  "$ref": "#/$defs/SourceReadDataV1_4",
                   "description": "Tool-specific result."
                 },
                 "generation": {
@@ -34186,7 +34355,7 @@
                   "description": "Resolved repository."
                 },
                 "schema_version": {
-                  "$ref": "#/$defs/SourceReadTextVersion",
+                  "$ref": "#/$defs/SourceReadRecoveryVersion",
                   "description": "Exact response contract version."
                 },
                 "truncated": {
@@ -35253,9 +35422,9 @@
               "pattern": "^[a-z0-9 -]+$",
               "type": "string"
             },
-            "SourceReadDataV1_3": {
+            "SourceReadDataV1_4": {
               "additionalProperties": false,
-              "description": "Source read 1.3 data with independent physical and presentation totals.",
+              "description": "Source read 1.4 data with unchanged bytes, controls and conditional assessments.",
               "properties": {
                 "chunks": {
                   "description": "Verified chunks in request order.",
@@ -35292,6 +35461,17 @@
                   ],
                   "description": "Bounded source-free plan when requested."
                 },
+                "source_recovery": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SourceReadRecovery"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Present only for genuine aggregate-capacity source recovery.\nAbsence makes no claim about language support or analysis completeness."
+                },
                 "stale_references": {
                   "description": "Selectors invalid for the pinned source snapshot.",
                   "items": {
@@ -35325,15 +35505,58 @@
               ],
               "type": "object"
             },
-            "SourceReadTextVersion": {
-              "description": "Exact source-text response revision.",
+            "SourceReadRecovery": {
+              "additionalProperties": false,
+              "description": "One immutable generation's aggregate-capacity recovery and returned files.",
+              "properties": {
+                "cause": {
+                  "$ref": "#/$defs/AggregateSourceRecovery",
+                  "description": "Durable source inventory and exact capacity admission witness."
+                },
+                "files": {
+                  "description": "Sorted unique file IDs, exactly the distinct returned chunk-file set.",
+                  "items": {
+                    "$ref": "#/$defs/SourceRecoveryFile"
+                  },
+                  "maxItems": 32,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "cause",
+                "files"
+              ],
+              "type": "object"
+            },
+            "SourceReadRecoveryVersion": {
+              "description": "Exact aggregate-recovery-aware response revision.",
               "oneOf": [
                 {
-                  "const": "1.3",
-                  "description": "Source read contract 1.3.",
+                  "const": "1.4",
+                  "description": "Source read contract 1.4.",
                   "type": "string"
                 }
               ]
+            },
+            "SourceRecoveryFile": {
+              "additionalProperties": false,
+              "description": "One returned file's source-search capture, independent of analysis support.",
+              "properties": {
+                "file": {
+                  "$ref": "#/$defs/FileId",
+                  "description": "Exact generation member identity, including derived source members."
+                },
+                "text_search": {
+                  "$ref": "#/$defs/SourceTextSearchCoverage",
+                  "description": "Searchable capture for this file; it does not claim a full vocabulary."
+                }
+              },
+              "required": [
+                "file",
+                "text_search"
+              ],
+              "type": "object"
             },
             "SourceRef": {
               "additionalProperties": false,
@@ -35523,6 +35746,26 @@
                 }
               ]
             },
+            "SourceTextSearchCoverage": {
+              "description": "Capture available to source-text search for one generation member.",
+              "oneOf": [
+                {
+                  "const": "whole_source_projection",
+                  "description": "The exact complete source projection is available for bounded text search.",
+                  "type": "string"
+                },
+                {
+                  "const": "metadata_only_captured",
+                  "description": "Only captured metadata is searchable; exact source reading is separate.",
+                  "type": "string"
+                },
+                {
+                  "const": "unsupported_encoding",
+                  "description": "The source projection has no supported text encoding.",
+                  "type": "string"
+                }
+              ]
+            },
             "StaleSourceReference": {
               "additionalProperties": false,
               "description": "A source selector that no longer resolves in the pinned snapshot.",
@@ -35625,7 +35868,7 @@
               "type": "object"
             }
           },
-          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.3",
+          "$id": "https://rootlight.local/schema/mcp/source.read/output/1.4",
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "anyOf": [
             {

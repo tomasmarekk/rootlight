@@ -1,0 +1,19 @@
+{
+  "upstream": "https://github.com/PostgREST/postgrest",
+  "revision": "f21949a517cf3b908b2724cabc603a5d6d47b29d",
+  "path": "src/library/PostgREST/Auth/Types.hs",
+  "bytes": 403,
+  "sha256": "a71259e5dcea9833edcfdf90f7fccf46f78d16e3173eb2cad4165e6f53afc339",
+  "upstream_blob": {
+    "bytes": 388,
+    "sha256": "7f2ba6c273ba3113f1521897815324e124a5a9ed08ee6134ba4f1127c6ac4a49"
+  },
+  "physical_checkout_transform": "LF to CRLF only; the fixture retains the exact original corpus checkout bytes",
+  "license": "MIT",
+  "license_path": "LICENSE",
+  "license_upstream_blob": {
+    "bytes": 1075,
+    "sha256": "1729d66741c5844f47962f91838bae897aa23d7e08272f5f012fca576288fafb"
+  },
+  "scope": "Unchanged original physical bytes; finite explicit module ownership regression only"
+}

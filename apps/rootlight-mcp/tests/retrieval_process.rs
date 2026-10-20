@@ -339,7 +339,14 @@ fn assert_encoded_symbol_explain_case(
                 "include_line_numbers": false, "response_profile": "evidence"}),
             "1.3",
         );
-        assert_lossless_process_read(&read, &definition, path, physical_encoding, &selected_text);
+        assert_lossless_process_read(
+            &read,
+            &definition,
+            path,
+            physical_encoding,
+            &selected_text,
+            "1.3",
+        );
         assert!(
             read["result"]["structuredContent"]["data"]["chunks"][0]["content"]
                 .as_str()
@@ -484,6 +491,7 @@ fn lossless_utf16_source_text_crosses_real_process_boundaries() {
                     path,
                     physical_encoding,
                     expected,
+                    if explicit { "1.3" } else { "1.4" },
                 );
             }
             assert_legacy_encoded_process_read(
@@ -506,11 +514,12 @@ fn assert_lossless_process_read(
     path: &str,
     physical_encoding: &str,
     expected: &str,
+    version: &str,
 ) {
     assert_success(response, "source.read");
     assert_eq!(response["result"]["isError"], false);
     let output = &response["result"]["structuredContent"];
-    assert_eq!(output["schema_version"], "1.3");
+    assert_eq!(output["schema_version"], version);
     assert_common_usage(output);
     let physical_bytes = reference.span().end_byte() - reference.span().start_byte();
     assert_eq!(
@@ -553,10 +562,17 @@ fn assert_lossless_process_read(
     assert_eq!(output["data"]["stale_references"], json!([]));
     assert_eq!(output["data"]["elisions"], json!([]));
     assert_eq!(output["truncated"], false);
-    serde_json::from_value::<rootlight_mcp_contract::source_text::SourceReadOutputV1_3>(
-        output.clone(),
-    )
-    .unwrap();
+    if version == "1.3" {
+        serde_json::from_value::<rootlight_mcp_contract::source_text::SourceReadOutputV1_3>(
+            output.clone(),
+        )
+        .unwrap();
+    } else {
+        serde_json::from_value::<rootlight_mcp_contract::source_recovery::SourceReadOutputV1_4>(
+            output.clone(),
+        )
+        .unwrap();
+    }
     let content = response["result"]["content"].as_array().unwrap();
     assert_eq!(content.len(), 1);
     assert_eq!(content[0]["type"], "text");
@@ -759,7 +775,7 @@ fn vba_conditional_activity_crosses_processes_without_losing_source_or_downgradi
                     source,
                     body_expected,
                     &mut inventory,
-                    "1.3",
+                    "1.4",
                 );
                 assert!(
                     chunk["content"]
@@ -788,7 +804,7 @@ fn vba_conditional_activity_crosses_processes_without_losing_source_or_downgradi
                 "context_lines_after": 3, "include_line_numbers": false, "response_profile": profile}),
         );
         let chunk =
-            assert_conditional_process_read(&expanded, source, "unproven", &mut inventory, "1.3");
+            assert_conditional_process_read(&expanded, source, "unproven", &mut inventory, "1.4");
         assert!(
             chunk["start_byte"].as_u64().unwrap()
                 < included_token["span"]["start_byte"].as_u64().unwrap()
@@ -919,7 +935,7 @@ fn assert_conditional_process_read<'response>(
     assert_eq!(output["data"]["chunks"].as_array().unwrap().len(), 1);
     let chunk = &output["data"]["chunks"][0];
     assert_eq!(chunk["path"], "Activity.bas");
-    if version == "1.3" {
+    if matches!(version, "1.3" | "1.4") {
         assert_eq!(chunk["encoding"], "lossless_text");
         assert_eq!(chunk["physical_encoding"], "utf-8");
         assert_eq!(
@@ -4947,7 +4963,7 @@ fn assert_standalone_batch_parity(standalone: &Value, batch: &Value, tool: &str)
     );
     assert!(operation.get("error").is_none());
     if tool == "source.read" {
-        assert_eq!(standalone["schema_version"], "1.3");
+        assert_eq!(standalone["schema_version"], "1.4");
         assert!(operation["data"].get("total_text_bytes").is_none());
         let chunks = standalone["data"]["chunks"].as_array().unwrap();
         let total_text_bytes: usize = chunks

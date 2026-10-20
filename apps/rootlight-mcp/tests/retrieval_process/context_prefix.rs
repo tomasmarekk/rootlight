@@ -216,7 +216,7 @@ fn context_pack_lossless_prefixes_cross_real_process_boundaries() {
                 "include_line_numbers": false, "response_profile": "evidence"}),
             "1.3",
         );
-        assert_lossless_process_read(&read, definition, path, encoding, &body);
+        assert_lossless_process_read(&read, definition, path, encoding, &body, "1.3");
     }
     fixture.finish();
 }

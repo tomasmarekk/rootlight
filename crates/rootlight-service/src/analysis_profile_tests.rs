@@ -12,6 +12,341 @@ fn fixture(source: &str) -> TempDir {
     directory
 }
 
+struct FailingProfileParser {
+    original: Arc<dyn StructuralPreflight>,
+    prepare_error: AdapterError,
+    identity_result: Result<usize, AdapterError>,
+    cancel_during_identity: bool,
+}
+
+impl ParseProvider for FailingProfileParser {
+    fn capabilities(&self) -> &rootlight_adapter_sdk::ParseCapabilities {
+        self.original.capabilities()
+    }
+
+    fn parse(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _sink: &mut dyn rootlight_adapter_sdk::SyntaxFactSink,
+        _cancellation: &Cancellation,
+    ) -> Result<rootlight_adapter_sdk::ParseReport, AdapterError> {
+        Err(self.prepare_error.clone())
+    }
+}
+
+impl StructuralPreflight for FailingProfileParser {
+    fn required_syntax_fact_count(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        if self.cancel_during_identity {
+            cancellation.cancel(CancellationReason::ClientRequest);
+        }
+        self.identity_result.clone()
+    }
+}
+
+fn failing_profile_service(
+    prepare_error: AdapterError,
+    identity_result: Result<usize, AdapterError>,
+    cancel_during_identity: bool,
+) -> FirstSliceService {
+    let mut service = FirstSliceService::new(2).unwrap();
+    let parser = Arc::new(FailingProfileParser {
+        original: Arc::clone(&service.structural_parsers["rust"]),
+        prepare_error,
+        identity_result,
+        cancel_during_identity,
+    });
+    let analyzer = TreeSitterAnalyzer::new_rust_structural(
+        Arc::clone(&parser) as Arc<dyn ParseProvider>,
+        ProducerIdentity::new("profile-failure-provider", "1", content_hash(b"profile")).unwrap(),
+        LanguageId::new("rust").unwrap(),
+        "profile-failure-1",
+        content_hash(b"profile-failure-provider"),
+    )
+    .unwrap();
+    service.analyzers.insert("rust".to_owned(), analyzer);
+    service.structural_parsers.insert("rust".to_owned(), parser);
+    service
+}
+
+fn profile_provider_error(code: &str) -> AdapterError {
+    AdapterError::ProviderFailed {
+        code: rootlight_adapter_sdk::DiagnosticCode::new(code).unwrap(),
+    }
+}
+
+#[test]
+fn preflight_failure_profile_preserves_provider_code_and_physical_identity() {
+    fn require_copy<T: Copy>() {}
+    require_copy::<FirstSliceError>();
+    let source = "// PrivateFailureSourceCanary\npub fn retained() {}\n";
+    let directory = fixture(source);
+    let mut service = failing_profile_service(
+        profile_provider_error("known-provider-failure"),
+        Ok(1),
+        false,
+    );
+    let repository = RepositoryId::from_bytes([37; 16]);
+    let canonical = canonical_repository_root(directory.path(), &Cancellation::new()).unwrap();
+    service
+        .restore_repository_registration(repository_path_hash(&canonical).unwrap(), repository)
+        .unwrap();
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        service.index_rust_fixture(directory.path(), &Cancellation::new())
+    });
+    assert_eq!(result.unwrap_err(), FirstSliceError::Adapter);
+    assert!(service.receipts.is_empty());
+    let encoded = serde_json::to_value(&profile).unwrap();
+    let failure = &encoded["terminal_file_failure"];
+    assert_eq!(failure["failure"]["code"], "known-provider-failure");
+    assert_eq!(failure["failure"]["kind"], "provider_failed");
+    assert_eq!(failure["repository"], repository.to_string());
+    let relative = RelativePath::parse(Path::new("lib.rs")).unwrap();
+    let file = rootlight_ids::derive_file(rootlight_ids::FileIdentity {
+        repository,
+        path_identity: relative.identity_bytes(),
+    })
+    .id();
+    assert_eq!(failure["file"], file.to_string());
+    assert_eq!(
+        failure["content_hash"],
+        content_hash(source.as_bytes()).to_string()
+    );
+    assert_eq!(failure["language"], "rust");
+    assert_eq!(failure["phase"], "preflight");
+    assert_eq!(failure["invocation"], "prepare_artifact");
+    assert!(failure["preceding_prepare_failure"].is_null());
+    let json = encoded.to_string();
+    assert!(!json.contains("PrivateFailureSourceCanary"));
+    assert!(!json.contains("lib.rs"));
+    assert!(!json.contains(&directory.path().display().to_string()));
+    assert!(profile.events_complete && profile.counts_complete);
+}
+
+#[test]
+fn preflight_failure_profile_distinguishes_identity_failure_from_prepare_attempt() {
+    let directory = fixture("pub fn ordinary() {}\n");
+    let mut service = failing_profile_service(
+        profile_provider_error("prepare-failed"),
+        Err(profile_provider_error("identity-failed")),
+        false,
+    );
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        service.index_rust_fixture(directory.path(), &Cancellation::new())
+    });
+    assert_eq!(result.unwrap_err(), FirstSliceError::Adapter);
+    assert!(service.receipts.is_empty());
+    let encoded = serde_json::to_value(profile).unwrap();
+    let failure = &encoded["terminal_file_failure"];
+    assert_eq!(failure["invocation"], "identity_count_after_prepare_error");
+    assert_eq!(failure["failure"]["code"], "identity-failed");
+    assert_eq!(
+        failure["preceding_prepare_failure"]["code"],
+        "prepare-failed"
+    );
+    assert_eq!(failure["mapped_outcome"], "adapter");
+    assert_eq!(failure["details_complete"], true);
+}
+
+#[test]
+fn preflight_failure_profile_preserves_request_report_sink_and_resource_outcomes() {
+    let directory = fixture("pub fn ordinary() {}\n");
+    for (error, kind, code, expected) in [
+        (
+            AdapterError::RejectedRequest(RequestError::Snapshot(
+                rootlight_adapter_sdk::SnapshotError::ContentHashMismatch,
+            )),
+            "request_rejected",
+            "snapshot_content_hash_mismatch",
+            FirstSliceError::Adapter,
+        ),
+        (
+            AdapterError::RejectedRequest(RequestError::UnsupportedEncoding),
+            "request_rejected",
+            "unsupported_encoding",
+            FirstSliceError::Adapter,
+        ),
+        (
+            AdapterError::InvalidReport(ReportError::SourceLengthMismatch {
+                expected: 1,
+                observed: 2,
+            }),
+            "invalid_report",
+            "source_length_mismatch",
+            FirstSliceError::Adapter,
+        ),
+        (
+            AdapterError::Sink(SinkError::SourceMismatch),
+            "sink_rejected",
+            "source_mismatch",
+            FirstSliceError::Adapter,
+        ),
+        (
+            AdapterError::RejectedRequest(RequestError::ProviderLimit {
+                resource: ResourceKind::SyntaxNodes,
+                observed: 19,
+                limit: 10,
+            }),
+            "request_rejected",
+            "provider_limit",
+            FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::SyntaxNodes,
+                observed: 19,
+                limit: 10,
+            },
+        ),
+    ] {
+        let mut service = failing_profile_service(error.clone(), Ok(1), false);
+        assert_eq!(
+            service
+                .index_rust_fixture(directory.path(), &Cancellation::new())
+                .unwrap_err(),
+            expected
+        );
+        let (result, profile) = capture_first_slice_analysis_profile(|| {
+            service.index_rust_fixture(directory.path(), &Cancellation::new())
+        });
+        assert_eq!(result.unwrap_err(), expected);
+        assert!(service.receipts.is_empty());
+        let encoded = serde_json::to_value(profile).unwrap();
+        let failure = &encoded["terminal_file_failure"];
+        assert_eq!(failure["failure"]["kind"], kind);
+        assert_eq!(failure["failure"]["code"], code);
+        assert_eq!(
+            failure["mapped_outcome"],
+            if matches!(expected, FirstSliceError::ResourceLimit { .. }) {
+                "resource_limit"
+            } else {
+                "adapter"
+            }
+        );
+    }
+}
+
+#[test]
+fn preflight_failure_profile_keeps_current_cancellation_authoritative() {
+    let directory = fixture("pub fn ordinary() {}\n");
+    let mut service =
+        failing_profile_service(profile_provider_error("prepare-failed"), Ok(1), true);
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        service.index_rust_fixture(directory.path(), &Cancellation::new())
+    });
+    assert_eq!(
+        result.unwrap_err(),
+        FirstSliceError::Cancelled(CancellationReason::ClientRequest)
+    );
+    assert!(service.receipts.is_empty());
+    let encoded = serde_json::to_value(profile).unwrap();
+    let failure = &encoded["terminal_file_failure"];
+    assert_eq!(failure["failure"]["code"], "prepare-failed");
+    assert_eq!(failure["mapped_outcome"], "cancelled");
+    assert_eq!(failure["cancellation_reason"], "client_request");
+}
+
+#[test]
+fn preflight_failure_profile_does_not_promote_handled_encoding_or_identity_capacity() {
+    let directory = fixture("pub fn retained() {}\n");
+    fs::write(
+        directory.path().join("invalid.rs"),
+        b"pub fn unavailable() {}\xff",
+    )
+    .unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        service.index_rust_fixture(directory.path(), &Cancellation::new())
+    });
+    let receipt = result.unwrap();
+    assert_eq!(receipt.indexed_files, 2);
+    assert!(profile.terminal_file_failure.is_none());
+
+    let directory = fixture("pub fn required() {}\n");
+    let mut service =
+        failing_profile_service(profile_provider_error("prepare-failed"), Ok(1), false);
+    let required = service.analysis_limits.syntax_stream().max_records() + 1;
+    let parser = Arc::new(FailingProfileParser {
+        original: Arc::clone(&service.structural_parsers["rust"]),
+        prepare_error: profile_provider_error("prepare-failed"),
+        identity_result: Ok(required),
+        cancel_during_identity: false,
+    });
+    service.structural_parsers.insert("rust".to_owned(), parser);
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        service.index_rust_fixture(directory.path(), &Cancellation::new())
+    });
+    assert!(matches!(
+        result,
+        Err(FirstSliceError::ResourceLimit {
+            resource: FirstSliceResource::RequiredSyntaxFacts,
+            ..
+        })
+    ));
+    assert!(profile.terminal_file_failure.is_none());
+    assert!(service.receipts.is_empty());
+}
+
+#[test]
+fn preflight_failure_profile_reports_missing_parser_without_fabricating_provider_failure() {
+    let directory = fixture("pub fn ordinary() {}\n");
+    let mut service = FirstSliceService::new(2).unwrap();
+    service.structural_parsers.remove("rust");
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        service.index_rust_fixture(directory.path(), &Cancellation::new())
+    });
+    assert_eq!(result.unwrap_err(), FirstSliceError::Adapter);
+    let encoded = serde_json::to_value(profile).unwrap();
+    let failure = &encoded["terminal_file_failure"];
+    assert_eq!(failure["failure"]["kind"], "service_setup");
+    assert_eq!(failure["failure"]["code"], "missing_structural_parser");
+    assert_eq!(failure["invocation"], "preflight_setup");
+}
+
+#[test]
+fn preflight_failure_profile_labels_are_bounded_without_clipping() {
+    let directory = fixture("pub fn ordinary() {}\n");
+    let code = "p".repeat(128);
+    let mut service = failing_profile_service(profile_provider_error(&code), Ok(1), false);
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        service.index_rust_fixture(directory.path(), &Cancellation::new())
+    });
+    assert_eq!(result.unwrap_err(), FirstSliceError::Adapter);
+    let failure = profile.terminal_file_failure.unwrap();
+    assert_eq!(serde_json::to_value(failure.failure).unwrap()["code"], code);
+    assert!(failure.details_complete);
+    assert!(size_of::<AnalysisProfileFileFailure>() < 1024);
+    let language = "l".repeat(64);
+    assert_eq!(
+        serde_json::to_value(AnalysisProfileLabel::<64>::new(&language)).unwrap(),
+        language
+    );
+    assert!(AnalysisProfileLabel::<64>::new(&"l".repeat(65)).is_none());
+    assert!(AnalysisProfileLabel::<128>::new(&"p".repeat(129)).is_none());
+    assert!(AnalysisProfileLabel::<128>::new("source text\n").is_none());
+    let ((), profile) = capture_first_slice_analysis_profile(|| {
+        record_preflight_failure(
+            Some(AnalysisProfileFileContext {
+                repository: RepositoryId::from_bytes([1; 16]),
+                file: FileId::from_bytes([2; 20]),
+                content_hash: content_hash(b"x"),
+                language: None,
+                language_complete: false,
+            }),
+            AnalysisProfileInvocation::PreflightSetup,
+            AnalysisProfileAdapterFailure {
+                kind: AnalysisProfileFailureKind::ServiceSetup,
+                code: None,
+            },
+            None,
+            FirstSliceError::Adapter,
+        );
+    });
+    let failure = profile.terminal_file_failure.unwrap();
+    assert!(!failure.details_complete);
+    assert!(failure.failure.code.is_none() && failure.language.is_none());
+}
+
 #[test]
 fn locate_profile_preserves_results_errors_and_nested_scopes() {
     let root = fixture("// PhysicalSourceWitness\npub fn carrier() {}\n");

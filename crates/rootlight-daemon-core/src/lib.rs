@@ -1190,10 +1190,11 @@ impl DaemonState {
             .store(pressure.as_u8(), Ordering::Release);
     }
 
-    /// Replaces the bounded source-free inventory reported by the indexing service.
+    /// Replaces the source-free inventory reported by the indexing service.
     ///
-    /// Records beyond the support schema's reviewed limits are deterministically
-    /// omitted from the end of each caller-ordered collection.
+    /// Diagnostic collections retain the support schema's reviewed bounds.
+    /// Language capabilities remain complete; export rejects inventories that exceed
+    /// their separate serialization limit.
     ///
     /// # Errors
     ///
@@ -1225,28 +1226,12 @@ impl DaemonState {
         }
         inventory.adapters = bounded_adapters;
         inventory
-            .languages
-            .truncate(rootlight_observability::MAX_SUPPORT_LANGUAGE_CAPABILITIES);
-        inventory
             .repositories
             .truncate(rootlight_observability::MAX_SUPPORT_REPOSITORIES);
         inventory
             .generations
             .truncate(rootlight_observability::MAX_SUPPORT_GENERATIONS);
-        for language in &mut inventory.languages {
-            language
-                .suffixes
-                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
-            language
-                .aliases
-                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
-            language
-                .detectors
-                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
-            language
-                .analyzers
-                .truncate(rootlight_observability::MAX_SUPPORT_RECORD_LABELS);
-        }
+        // Preserve this trusted installed table; export either validates every row or fails.
         for repository in &mut inventory.repositories {
             repository
                 .languages
@@ -5980,6 +5965,9 @@ fn support_inventory(
             sha256: None,
         }],
         adapters: index.adapters,
+        language_capabilities_total: Some(
+            u64::try_from(index.languages.len()).map_err(|_| ServiceError::InvalidLimits)?,
+        ),
         languages: index.languages,
         repositories: index.repositories,
         repository_capacity: index.repository_capacity,
@@ -6127,7 +6115,7 @@ fn support_terminal_error(
         .next_actions()
         .iter()
         .filter(|action| {
-            schema == SupportBundleSchema::V8
+            matches!(schema, SupportBundleSchema::V8 | SupportBundleSchema::V9)
                 || !matches!(
                     action,
                     NextAction::UpdateConfiguration { .. } | NextAction::DeleteRepository
@@ -6686,6 +6674,7 @@ impl ControlService {
             SupportBundleSchema::V6 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V6,
             SupportBundleSchema::V7 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V7,
             SupportBundleSchema::V8 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
+            SupportBundleSchema::V9 => rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V9,
         };
         let (mut terminal_operations, mut inventory) = if matches!(
             schema,
@@ -6694,6 +6683,7 @@ impl ControlService {
                 | SupportBundleSchema::V6
                 | SupportBundleSchema::V7
                 | SupportBundleSchema::V8
+                | SupportBundleSchema::V9
         ) {
             let terminal_records =
                 match self.journal.recent_terminal(MAX_RECENT_TERMINAL_OPERATIONS) {
@@ -6762,9 +6752,11 @@ impl ControlService {
                 })
                 .flatten();
             inventory.storage.generation_disk_bytes = generation_disk_bytes;
-            if matches!(schema, SupportBundleSchema::V7 | SupportBundleSchema::V8)
-                && inventory.storage.accounting_state
-                    != Some(SupportStorageAccountingState::Unavailable)
+            if matches!(
+                schema,
+                SupportBundleSchema::V7 | SupportBundleSchema::V8 | SupportBundleSchema::V9
+            ) && inventory.storage.accounting_state
+                != Some(SupportStorageAccountingState::Unavailable)
             {
                 inventory.storage.active_generation_bytes =
                     selected_repository.active_generation_bytes;
@@ -6806,18 +6798,27 @@ impl ControlService {
             });
         }
         if let Some(inventory) = inventory.as_mut() {
+            if schema != SupportBundleSchema::V9 {
+                inventory.language_capabilities_total = None;
+            }
             if schema == SupportBundleSchema::V4 {
                 clear_extended_storage_accounting(&mut inventory.storage);
             }
-            if !matches!(schema, SupportBundleSchema::V7 | SupportBundleSchema::V8) {
+            if !matches!(
+                schema,
+                SupportBundleSchema::V7 | SupportBundleSchema::V8 | SupportBundleSchema::V9
+            ) {
                 clear_authoritative_storage_accounting(inventory);
             }
-            if schema != SupportBundleSchema::V8 {
+            if !matches!(schema, SupportBundleSchema::V8 | SupportBundleSchema::V9) {
                 inventory.repository_capacity = None;
             }
             if !matches!(
                 schema,
-                SupportBundleSchema::V6 | SupportBundleSchema::V7 | SupportBundleSchema::V8
+                SupportBundleSchema::V6
+                    | SupportBundleSchema::V7
+                    | SupportBundleSchema::V8
+                    | SupportBundleSchema::V9
             ) {
                 inventory.languages.clear();
             }
@@ -6835,6 +6836,7 @@ impl ControlService {
                 SupportBundleSchema::V6 => ObservabilityProtocolVersion::V1_13,
                 SupportBundleSchema::V7 => ObservabilityProtocolVersion::V1_14,
                 SupportBundleSchema::V8 => ObservabilityProtocolVersion::V1_15,
+                SupportBundleSchema::V9 => ObservabilityProtocolVersion::V1_29,
             },
             operating_system: observability_operating_system(),
             architecture: observability_architecture(),
@@ -6856,6 +6858,15 @@ impl ControlService {
                 })
             }
             Ok(_) => ControlResponse::Error(request_timed_out()),
+            Err(rootlight_observability::SupportBundleError::LanguageInventoryLimit {
+                dimension,
+                actual,
+                limit,
+            }) => ControlResponse::Error(support_language_limit(dimension, actual, limit)),
+            Err(rootlight_observability::SupportBundleError::EntryTooLarge { .. })
+            | Err(rootlight_observability::SupportBundleError::ArchiveTooLarge) => {
+                ControlResponse::Error(support_archive_limit())
+            }
             Err(_) => ControlResponse::Error(internal_error()),
         }
     }
@@ -11616,7 +11627,11 @@ fn request_from_wire(
             }
             let repository = request.repository.map(parse_repository_id).transpose()?;
             Ok(DecodedRequest::Control(ControlRequest::SupportBundle(
-                if selected_protocol_minor >= 15 {
+                if selected_protocol_minor
+                    >= rootlight_protocol::COMPLETE_SUPPORT_LANGUAGE_TABLE_PROTOCOL_MINOR
+                {
+                    SupportBundleSchema::V9
+                } else if selected_protocol_minor >= 15 {
                     SupportBundleSchema::V8
                 } else if selected_protocol_minor >= 14 {
                     SupportBundleSchema::V7
@@ -12298,6 +12313,38 @@ fn client_connection_limit(limit: u32) -> PublicError {
     .next_action(NextAction::Retry)
     .build()
     .unwrap_or_else(|_| unreachable!("closed public error templates are statically bounded"))
+}
+
+fn support_language_limit(dimension: &'static str, actual: usize, limit: usize) -> PublicError {
+    let (Ok(actual), Ok(limit)) = (u64::try_from(actual), u64::try_from(limit)) else {
+        return internal_error();
+    };
+    let key = |value| {
+        DetailKey::parse(value)
+            .unwrap_or_else(|_| unreachable!("closed support detail key is valid"))
+    };
+    let dimension = rootlight_error::SafeLabel::parse(dimension)
+        .unwrap_or_else(|_| unreachable!("closed support dimension is valid"));
+    PublicError::builder(
+        ErrorCode::ResourceExhausted,
+        "complete support language inventory exceeds schema limit",
+    )
+    .detail(key("dimension"), PublicValue::Label(dimension))
+    .detail(key("actual"), PublicValue::Unsigned(actual))
+    .detail(key("limit"), PublicValue::Unsigned(limit))
+    .next_action(NextAction::SelectSupportedVersion)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed support error template is statically bounded"))
+}
+
+fn support_archive_limit() -> PublicError {
+    PublicError::builder(
+        ErrorCode::ResourceExhausted,
+        "complete support archive exceeds byte limit",
+    )
+    .next_action(NextAction::SelectSupportedVersion)
+    .build()
+    .unwrap_or_else(|_| unreachable!("closed support error template is statically bounded"))
 }
 
 fn request_timed_out() -> PublicError {
@@ -14218,7 +14265,7 @@ mod tests {
         };
         assert_eq!(
             capacity.schema_version,
-            rootlight_observability::CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+            rootlight_observability::SUPPORT_BUNDLE_SCHEMA_VERSION_V8
         );
         let mut capacity_archive = zip::ZipArchive::new(std::io::Cursor::new(capacity.archive))
             .expect("capacity support ZIP opens");
@@ -14335,7 +14382,11 @@ mod tests {
             .state()
             .replace_index_support_inventory(expanded)
             .expect("expanded inventory publishes within support bounds");
-        let bounded = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V8, None));
+        let legacy = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V8, None));
+        assert!(
+            matches!(legacy, ControlResponse::Error(error) if error.code() == ErrorCode::ResourceExhausted)
+        );
+        let bounded = service.execute(ControlRequest::SupportBundle(SupportBundleSchema::V9, None));
         let ControlResponse::SupportBundle(bounded) = bounded else {
             panic!("bounded language inventory must produce a support bundle");
         };
@@ -14353,7 +14404,7 @@ mod tests {
             serde_json::from_slice(&bounded_inventory_bytes).expect("bounded inventory decodes");
         assert_eq!(
             bounded_inventory.languages.len(),
-            rootlight_observability::MAX_SUPPORT_LANGUAGE_CAPABILITIES
+            rootlight_observability::MAX_SUPPORT_LANGUAGE_CAPABILITIES + 1
         );
         assert_eq!(bounded_inventory.adapters.len(), 2);
         assert_eq!(bounded_inventory.adapters[1].languages, ["language-032"]);
@@ -14987,9 +15038,9 @@ mod tests {
             .state()
             .index_support_inventory()
             .expect("support inventory remains readable");
-        assert_eq!(retained.languages.len(), maximum);
+        assert_eq!(retained.languages.len(), maximum + 1);
         assert_eq!(retained.languages[0].language, "language-000");
-        assert_eq!(retained.languages[maximum - 1].language, "language-063");
+        assert_eq!(retained.languages[maximum].language, "language-064");
         assert_eq!(retained.adapters.len(), 2);
         assert_eq!(retained.adapters[0].languages.len(), maximum_labels);
         assert_eq!(
@@ -17029,6 +17080,8 @@ mod tests {
             (13, SupportBundleSchema::V6),
             (14, SupportBundleSchema::V7),
             (15, SupportBundleSchema::V8),
+            (28, SupportBundleSchema::V8),
+            (29, SupportBundleSchema::V9),
         ] {
             let decoded = request_from_wire(
                 Some(daemon::request_envelope::Request::SupportBundle(
@@ -20804,6 +20857,7 @@ mod tests {
             maximum_text_bytes_per_chunk: None,
         };
         let response = daemon::SourceReadResponse {
+            source_recovery: None,
             schema_version: Some(schema),
             context: Some(correlation_context(
                 &repository,
@@ -22270,6 +22324,7 @@ mod tests {
                 physical_encoding: None,
             };
         let source_response = daemon::SourceReadResponse {
+            source_recovery: None,
             conditional_activity: Vec::new(),
             schema_version: schema,
             context: Some(correlation_context(&repository, &generation, 2, 6)),

@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/MetaRocq/metarocq",
+  "revision": "e8bb91d391f0b61c7845357c0840e11e80d05bf8",
+  "path": "utils/theories/MRSquash.v",
+  "physical_bytes": 353,
+  "sha256": "e5b82ced833164ec2be65f32269d6dec0df3be87d9beb651d6fa19124cc78297",
+  "scope": "Exact original physical corpus bytes, including retained CRLF; not a claim of the Git blob's checkout-independent byte representation.",
+  "license": {
+    "path": "LICENSE",
+    "bytes": 1312,
+    "sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390"
+  }
+}

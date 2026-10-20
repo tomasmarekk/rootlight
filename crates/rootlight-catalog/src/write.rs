@@ -54,6 +54,12 @@ pub(crate) struct WritePlan<'a> {
     pub(crate) identities: BTreeSet<RegistryIdentity>,
     pub(crate) source_ordinals: Vec<&'a SourceRef>,
     pub(crate) stats: GenerationStats,
+    maximum_payload_bytes: u64,
+}
+
+pub(crate) struct WrittenGeneration {
+    pub(crate) stats: GenerationStats,
+    pub(crate) maximum_payload_bytes: u64,
 }
 
 pub(crate) fn write_generation(
@@ -61,6 +67,14 @@ pub(crate) fn write_generation(
     generation: &GenerationSnapshot,
     context: &GenerationContext<'_>,
 ) -> Result<GenerationStats, CatalogError> {
+    write_generation_with_metadata(connection, generation, context).map(|written| written.stats)
+}
+
+pub(crate) fn write_generation_with_metadata(
+    connection: &mut Connection,
+    generation: &GenerationSnapshot,
+    context: &GenerationContext<'_>,
+) -> Result<WrittenGeneration, CatalogError> {
     let plan = measure(generation, context)?;
     context.check().map_err(CatalogError::control)?;
     let transaction = connection
@@ -115,7 +129,10 @@ pub(crate) fn write_generation(
     transaction.commit().map_err(CatalogError::sqlite)?;
     // Both seal paths validate the committed database before exposing a reader;
     // repeating quick_check here scans every page twice.
-    Ok(plan.stats)
+    Ok(WrittenGeneration {
+        stats: plan.stats,
+        maximum_payload_bytes: plan.maximum_payload_bytes,
+    })
 }
 
 pub(crate) fn measure<'a>(
@@ -146,6 +163,7 @@ pub(crate) fn measure<'a>(
     let mut identities = BTreeSet::new();
     let mut child_rows = 0_u64;
     let mut text_bytes = 0_u64;
+    let mut maximum_payload_bytes = 0_u64;
 
     insert_measured_identity(
         &mut identities,
@@ -161,6 +179,7 @@ pub(crate) fn measure<'a>(
             add_text(&mut text_bytes, locator.encoding().as_str(), context)?;
             let components = serialize_json_text(locator.components(), context)?;
             add_text(&mut text_bytes, &components, context)?;
+            maximum_payload_bytes = maximum_payload_bytes.max(usize_to_u64(components.len())?);
         }
         add_text(&mut text_bytes, &file.language, context)?;
         add_text(&mut text_bytes, &file.encoding, context)?;
@@ -239,7 +258,8 @@ pub(crate) fn measure<'a>(
         collect_source(&mapping.from, &mut sources, context)?;
         collect_source(&mapping.to, &mut sources, context)?;
         collect_opaque_evidence_source(&mapping.evidence, &mut sources, context)?;
-        add_serialized_text(&mut text_bytes, mapping, context)?;
+        maximum_payload_bytes =
+            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, mapping, context)?);
     }
     for coverage in &document.coverage_records {
         context.check().map_err(CatalogError::control)?;
@@ -255,7 +275,8 @@ pub(crate) fn measure<'a>(
         insert_measured_identity(&mut identities, RegistryIdentity::Fact(region.id), context)?;
         collect_source(&region.source, &mut sources, context)?;
         collect_opaque_evidence_source(&region.evidence, &mut sources, context)?;
-        add_serialized_text(&mut text_bytes, region, context)?;
+        maximum_payload_bytes =
+            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, region, context)?);
     }
     for diagnostic in &document.diagnostics {
         context.check().map_err(CatalogError::control)?;
@@ -268,7 +289,8 @@ pub(crate) fn measure<'a>(
             collect_source(source, &mut sources, context)?;
         }
         collect_opaque_evidence_source(&diagnostic.evidence, &mut sources, context)?;
-        add_serialized_text(&mut text_bytes, diagnostic, context)?;
+        maximum_payload_bytes =
+            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, diagnostic, context)?);
     }
     for extension in &document.extensions {
         context.check().map_err(CatalogError::control)?;
@@ -278,7 +300,8 @@ pub(crate) fn measure<'a>(
             context,
         )?;
         collect_opaque_evidence_source(&extension.evidence, &mut sources, context)?;
-        add_serialized_text(&mut text_bytes, extension, context)?;
+        maximum_payload_bytes =
+            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, extension, context)?);
     }
 
     if sources.len() != source_capacity {
@@ -347,6 +370,7 @@ pub(crate) fn measure<'a>(
         identities,
         source_ordinals: sources,
         stats,
+        maximum_payload_bytes,
     })
 }
 
@@ -563,11 +587,14 @@ fn add_serialized_text(
     bytes: &mut u64,
     value: &impl serde::Serialize,
     context: &GenerationContext<'_>,
-) -> Result<(), CatalogError> {
-    let mut writer = CheckedJsonWriter::for_encoded_text(io::sink(), *bytes, context)?;
+) -> Result<u64, CatalogError> {
+    let before = *bytes;
+    let mut writer = CheckedJsonWriter::for_encoded_text(io::sink(), before, context)?;
     serialize_json(&mut writer, value)?;
     *bytes = writer.total_bytes();
-    Ok(())
+    bytes
+        .checked_sub(before)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))
 }
 
 fn insert_header(

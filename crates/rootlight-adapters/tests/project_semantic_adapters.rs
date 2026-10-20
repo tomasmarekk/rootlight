@@ -41,8 +41,12 @@ use tempfile::{TempDir, tempdir_in};
 
 #[path = "project_semantic_adapters/dart.rs"]
 mod dart;
+#[path = "project_semantic_adapters/declaration_boundaries.rs"]
+mod declaration_boundaries;
 #[path = "project_semantic_adapters/escaped_names.rs"]
 mod escaped_names;
+#[path = "project_semantic_adapters/formal_context.rs"]
+mod formal_context;
 #[path = "project_semantic_adapters/infer_bindings.rs"]
 mod infer_bindings;
 #[path = "project_semantic_adapters/inheritance.rs"]
@@ -4398,4 +4402,143 @@ fn deadline() -> Cancellation {
             .checked_add(Duration::from_secs(30))
             .expect("deadline derives"),
     )
+}
+
+#[test]
+fn python_body_only_edits_preserve_actual_native_and_project_formal_identity() {
+    let mut before_after = Vec::new();
+    for source in [
+        "def owned(value: int):\n    return value\n",
+        "def owned(value: int):\n    return 2 * value\n",
+    ] {
+        let fixture =
+            ProjectFixture::new(["written.py"], [source], SemanticProjectLanguage::Python);
+        assert_real_parser_symbol_identity(
+            &fixture,
+            "python",
+            &[
+                (EntityKind::Function, "owned"),
+                (EntityKind::Parameter, "value"),
+            ],
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let mut identity: Vec<_> = output
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| matches!(entity.kind, EntityKind::Function | EntityKind::Parameter))
+            .map(|entity| (entity.kind, entity.canonical_name.clone(), entity.id))
+            .collect();
+        identity.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(identity.len(), 2);
+        before_after.push(identity);
+    }
+    assert_eq!(before_after[0], before_after[1]);
+}
+
+#[test]
+fn native_python_function_limitation_reaches_project_exact_source_and_relation_coverage() {
+    let text = "def owned(value: int):\n    return value\n";
+    let fixture = ProjectFixture::new(["written.py"], [text], SemanticProjectLanguage::Python);
+    let limits = real_parser_limits();
+    let provider = Arc::new(real_parser());
+    let analyzer = TreeSitterAnalyzer::new(
+        provider,
+        producer_identity(),
+        LanguageId::new("python").unwrap(),
+        "python",
+        content_hash(b"real-parser-binary"),
+    )
+    .unwrap();
+    let request = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshots[0], &fixture.sources[0]).unwrap(),
+        LanguageId::new("python").unwrap(),
+        EncodingId::utf8(),
+        Vec::new(),
+        AnalysisTier::TierD,
+        fixture.build_context,
+        &limits,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    let native = execute_analysis(
+        &analyzer,
+        &request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let reason = "python-function-binding-proof-is-limited-to-the-ordinary-formal-read-subset";
+    let native_gaps: Vec<_> = native
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.domain == FactDomain::Relations && gap.detail == reason)
+        .collect();
+    assert_eq!(
+        native_gaps.len(),
+        1,
+        "native context is the real source-backed prerequisite"
+    );
+    let project = analyze_with_real_parser(&fixture);
+    let gaps: Vec<_> = project
+        .document()
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.domain == FactDomain::Relations && gap.detail == reason)
+        .collect();
+    assert_eq!(
+        gaps.len(),
+        1,
+        "project analysis must preserve the native function limitation"
+    );
+    assert_eq!(gaps[0].source, native_gaps[0].source);
+    assert_eq!(gaps[0].reason, native_gaps[0].reason);
+    assert_eq!(gaps[0].source.repository(), fixture.sources[0].repository());
+    assert_eq!(gaps[0].source.generation(), fixture.sources[0].generation());
+    assert_eq!(gaps[0].source.content_hash(), content_hash(text.as_bytes()));
+    assert_eq!(gaps[0].source.span().start_byte(), 0);
+    assert_eq!(
+        gaps[0].source.span().end_byte(),
+        text.trim_end_matches('\n').len() as u64
+    );
+    let coverage: Vec<_> = project
+        .document()
+        .coverage_records
+        .iter()
+        .filter(|record| {
+            record.domain == FactDomain::Relations
+                && record.scope
+                    == rootlight_ir::CoverageScope::File(fixture.sources[0].span().file())
+        })
+        .collect();
+    assert_eq!(coverage.len(), 1);
+    assert_ne!(coverage[0].status, CoverageStatus::Complete);
+    assert!(coverage[0].skipped > 0);
+}
+
+#[test]
+fn python_function_context_gap_does_not_relabel_other_native_languages() {
+    let fixture = ProjectFixture::new(
+        ["written.js"],
+        ["function owned(value) { return value; }\n"],
+        SemanticProjectLanguage::JavaScript,
+    );
+    let project = analyze_with_real_parser(&fixture);
+    assert!(
+        project
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "owned")
+    );
+    assert!(
+        !project
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail
+                == "python-function-binding-proof-is-limited-to-the-ordinary-formal-read-subset")
+    );
 }

@@ -1969,7 +1969,7 @@ mod tests {
         let entry = capability_for(McpTool::SourceFind);
         assert_eq!(McpTool::SourceFind as usize, 19);
         assert_eq!(McpTool::QueryBatch as usize, 18);
-        assert_eq!(entry.contract_version, "1.0");
+        assert_eq!(entry.contract_version, "1.1");
         assert_eq!(entry.status, CapabilityStatus::FallbackLimited);
         assert_eq!(entry.pagination, PaginationSemantics::AuthenticatedCursor);
         assert_eq!(entry.generation, GenerationSemantics::SelectsGeneration);

@@ -8,6 +8,7 @@ use std::{fmt, future::Future, io, pin::Pin, sync::Arc};
 use rootlight_agent::policy::BudgetLimits;
 use rootlight_json_schema::{self as jsonschema, Validator};
 use rootlight_mcp_contract::source_find::{SourceFindInput, SourceFindOutput};
+use rootlight_mcp_contract::source_recovery::SourceReadOutputV1_4;
 use rootlight_mcp_contract::source_text::{
     SourceChunkV1_3, SourceReadInputV1_3, SourceReadOutputV1_3, SourceTextEncodingRequest,
 };
@@ -393,7 +394,10 @@ where
             Err(()) => return internal_tool_error("tool input budget invariant failed"),
         };
         if contract.tool == VerticalTool::SourceRead
-            && selected_version == ContractSelection::Current
+            && matches!(
+                selected_version,
+                ContractSelection::Current | ContractSelection::PreRecovery
+            )
         {
             let arguments = arguments_value
                 .as_object_mut()
@@ -630,6 +634,8 @@ struct ToolContract {
     fifth_legacy_input_validator: Option<Validator>,
     initial_input_validator: Option<Validator>,
     output_validator: Validator,
+    pre_recovery_input_validator: Option<Validator>,
+    pre_recovery_output_validator: Option<Validator>,
     pre_activity_output_validator: Option<Validator>,
     pre_label_output_validator: Option<Validator>,
     recent_output_validator: Option<Validator>,
@@ -645,6 +651,7 @@ struct ToolContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContractSelection {
     Current,
+    PreRecovery,
     PreActivity,
     PreLabel,
     Recent,
@@ -662,6 +669,12 @@ impl ContractSelection {
         match requested {
             None => Some(Self::Current),
             Some(requested) if requested == contract.tool.contract_version() => Some(Self::Current),
+            Some(requested)
+                if contract.tool.pre_recovery_contract_version() == Some(requested)
+                    && contract.pre_recovery_output_validator.is_some() =>
+            {
+                Some(Self::PreRecovery)
+            }
             Some(requested)
                 if contract.tool.pre_activity_contract_version() == Some(requested)
                     && contract.pre_activity_output_validator.is_some() =>
@@ -729,6 +742,9 @@ impl ContractSelection {
     const fn schema_version(self, tool: VerticalTool) -> &'static str {
         match self {
             Self::Current => tool.contract_version(),
+            Self::PreRecovery => tool
+                .pre_recovery_contract_version()
+                .expect("pre-recovery selection requires a retained version"),
             Self::PreActivity => tool
                 .pre_activity_contract_version()
                 .expect("pre-activity selection requires a retained version"),
@@ -1182,14 +1198,17 @@ fn validate_contract_input(
             |error| MaterializedInputError::Public(Box::new(error)),
         ));
     }
-    let decoded =
-        if contract.tool == VerticalTool::SourceRead && selection == ContractSelection::Current {
-            SourceReadInputV1_3::deserialize(arguments)
-                .map(TypedInput::SourceReadCurrent)
-                .map_err(|_| ())
-        } else {
-            decode_typed_input(contract.tool, arguments)
-        };
+    let decoded = if contract.tool == VerticalTool::SourceRead
+        && matches!(
+            selection,
+            ContractSelection::Current | ContractSelection::PreRecovery
+        ) {
+        SourceReadInputV1_3::deserialize(arguments)
+            .map(TypedInput::SourceReadCurrent)
+            .map_err(|_| ())
+    } else {
+        decode_typed_input(contract.tool, arguments)
+    };
     let typed_input = decoded.map_err(|()| {
         classify_typed_decode_error(contract.tool, arguments).map_or(
             MaterializedInputError::Invalid {
@@ -1293,6 +1312,25 @@ impl ToolContract {
                 direction: "input",
                 detail: source.to_string(),
             })?;
+        let pre_recovery_input_validator =
+            tool.pre_recovery_input_schema_json()
+                .map(|schema| {
+                    let schema = parse_object_schema(tool, "pre-recovery input", schema).map_err(
+                        |source| ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "pre-recovery input",
+                            source,
+                        },
+                    )?;
+                    jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                        ToolRegistryError::CompileSchema {
+                            tool,
+                            direction: "pre-recovery input",
+                            detail: source.to_string(),
+                        }
+                    })
+                })
+                .transpose()?;
         let pre_label_input_validator = tool
             .pre_label_input_schema_json()
             .map(|schema| {
@@ -1475,6 +1513,25 @@ impl ToolContract {
                 direction: "output",
                 detail: source.to_string(),
             })?;
+        let pre_recovery_output_validator =
+            tool.pre_recovery_output_schema_json()
+                .map(|schema| {
+                    let schema = parse_object_schema(tool, "pre-recovery output", schema).map_err(
+                        |source| ToolRegistryError::ParseSchema {
+                            tool,
+                            direction: "pre-recovery output",
+                            source,
+                        },
+                    )?;
+                    jsonschema::draft202012::new(&Value::Object(schema)).map_err(|source| {
+                        ToolRegistryError::CompileSchema {
+                            tool,
+                            direction: "pre-recovery output",
+                            detail: source.to_string(),
+                        }
+                    })
+                })
+                .transpose()?;
         let pre_label_output_validator =
             tool.pre_label_output_schema_json()
                 .map(|schema| {
@@ -1678,6 +1735,8 @@ impl ToolContract {
             fifth_legacy_input_validator,
             initial_input_validator,
             output_validator,
+            pre_recovery_input_validator,
+            pre_recovery_output_validator,
             pre_activity_output_validator,
             pre_label_output_validator,
             recent_output_validator,
@@ -1694,6 +1753,10 @@ impl ToolContract {
     fn output_validator(&self, selection: ContractSelection) -> &Validator {
         match selection {
             ContractSelection::Current => &self.output_validator,
+            ContractSelection::PreRecovery => self
+                .pre_recovery_output_validator
+                .as_ref()
+                .expect("pre-recovery selection requires a compiled schema"),
             ContractSelection::PreActivity => self
                 .pre_activity_output_validator
                 .as_ref()
@@ -1740,6 +1803,10 @@ impl ToolContract {
     fn input_validator(&self, selection: ContractSelection) -> &Validator {
         match selection {
             ContractSelection::Current => &self.input_validator,
+            ContractSelection::PreRecovery => self
+                .pre_recovery_input_validator
+                .as_ref()
+                .expect("pre-recovery selection requires a compiled schema"),
             ContractSelection::PreActivity => &self.input_validator,
             ContractSelection::PreLabel => self
                 .pre_label_input_validator
@@ -2512,6 +2579,9 @@ fn typed_selected_output_is_valid(
 ) -> bool {
     match selection {
         ContractSelection::Current => typed_output_is_valid(tool, input, output),
+        ContractSelection::PreRecovery => {
+            tool == VerticalTool::SourceRead && source_read_text_output_is_valid(input, output)
+        }
         ContractSelection::PreActivity => match tool {
             VerticalTool::CodeLocate => CodeLocateOutputV1_9::deserialize(output).is_ok(),
             VerticalTool::SourceRead => {
@@ -2682,7 +2752,7 @@ fn source_read_output_invariants_are_valid(
 }
 
 fn source_read_current_output_is_valid(input: &TypedInput, output: &Value) -> bool {
-    let Ok(output) = SourceReadOutputV1_3::deserialize(output) else {
+    let Ok(output) = SourceReadOutputV1_4::deserialize(output) else {
         return false;
     };
     let EntityToolResponse::Success(output) = output else {
@@ -2723,7 +2793,12 @@ fn source_read_current_output_is_valid(input: &TypedInput, output: &Value) -> bo
     let metadata_only = output.truncated
         && output.data.stale_references.is_empty()
         && output.data.elisions.is_empty();
-    output.trust == TrustClassification::UntrustedRepositoryData
+    (output.data.source_recovery.is_none()
+        || (output.coverage.status == rootlight_ir::CoverageStatus::Unknown
+            && output.coverage.languages.iter().all(|language|
+                language.tier == rootlight_mcp_contract::vertical::AnalysisTier::D
+                && language.status == rootlight_ir::CoverageStatus::Unknown)))
+        && output.trust == TrustClassification::UntrustedRepositoryData
         && output.usage.source_bytes == u64::from(output.data.total_source_bytes)
         && maximum.is_none_or(|maximum| output.data.total_source_bytes <= maximum)
         && match controls.repository { RepositorySelector::ById(selector) => selector.repository_id == repository, _ => true }
@@ -2737,6 +2812,20 @@ fn source_read_current_output_is_valid(input: &TypedInput, output: &Value) -> bo
         })
         && (!metadata_only || output.data.conditional_activity.iter().any(|assessment| assessment.reason.0 == Some(rootlight_mcp_contract::conditional_activity::ConditionalActivityReason::ScanIncomplete)))
         && conditional_output_is_valid(&output.data.conditional_activity, repository, generation, &output.warnings, output.truncated, &output.completeness, output.next_cursor.0.is_some())
+}
+
+// The immutable 1.3 vocabulary is checked before sharing unchanged input/source
+// invariants with 1.4. No recovery field can cross this historical boundary.
+fn source_read_text_output_is_valid(input: &TypedInput, output: &Value) -> bool {
+    if SourceReadOutputV1_3::deserialize(output).is_err() {
+        return false;
+    }
+    let mut current = output.clone();
+    let Some(root) = current.as_object_mut() else {
+        return false;
+    };
+    root.insert("schema_version".into(), Value::String("1.4".into()));
+    source_read_current_output_is_valid(input, &current)
 }
 
 fn source_read_fields_are_valid(
@@ -2977,7 +3066,11 @@ fn retained_entity_contract_error(contract: &ToolContract) -> Result<PublicError
         .map_err(|_| ToolResultError::Serialize)?;
     PublicError::builder(
         ErrorCode::ProtocolMismatch,
-        "tool result requires the current entity contract",
+        if contract.tool == VerticalTool::SourceRead {
+            "tool contract version is unsupported"
+        } else {
+            "tool result requires the current entity contract"
+        },
     )
     .detail(
         DetailKey::parse("supported_version").map_err(|_| ToolResultError::Serialize)?,
@@ -2993,6 +3086,14 @@ fn requires_entity_contract(
     selection: ContractSelection,
     output: &Value,
 ) -> bool {
+    if tool == VerticalTool::SourceRead
+        && selection != ContractSelection::Current
+        && output
+            .pointer("/data/source_recovery")
+            .is_some_and(|recovery| !recovery.is_null())
+    {
+        return true;
+    }
     if (tool == VerticalTool::CodeLocate && selection != ContractSelection::Current
         || tool == VerticalTool::SourceRead
             && matches!(selection.schema_version(tool), "1.0" | "1.1"))
@@ -3010,7 +3111,10 @@ fn requires_entity_contract(
     };
     if !matches!(
         selection,
-        ContractSelection::Current | ContractSelection::PreActivity | ContractSelection::PreLabel
+        ContractSelection::Current
+            | ContractSelection::PreRecovery
+            | ContractSelection::PreActivity
+            | ContractSelection::PreLabel
     ) && origin_path.is_some_and(|path| {
         output
             .pointer(path)
@@ -3227,7 +3331,7 @@ fn typed_error_output_is_valid(tool: VerticalTool, output: &Value) -> bool {
         VerticalTool::HistoryCompare => HistoryCompareOutputV1_6::deserialize(output).is_ok(),
         VerticalTool::PlanChange => PlanChangeOutputV1_1::deserialize(output).is_ok(),
         VerticalTool::ContextPack => ContextPackOutputV1_1::deserialize(output).is_ok(),
-        VerticalTool::SourceRead => SourceReadOutputV1_3::deserialize(output).is_ok(),
+        VerticalTool::SourceRead => SourceReadOutputV1_4::deserialize(output).is_ok(),
     }
 }
 
@@ -3238,6 +3342,9 @@ fn typed_selected_error_output_is_valid(
 ) -> bool {
     match selection {
         ContractSelection::Current => typed_error_output_is_valid(tool, output),
+        ContractSelection::PreRecovery => {
+            tool == VerticalTool::SourceRead && SourceReadOutputV1_3::deserialize(output).is_ok()
+        }
         ContractSelection::PreActivity => match tool {
             VerticalTool::CodeLocate => CodeLocateOutputV1_9::deserialize(output).is_ok(),
             VerticalTool::SourceRead => SourceReadOutputV1_1::deserialize(output).is_ok(),
@@ -3344,6 +3451,26 @@ fn select_output_version(
     selection: ContractSelection,
     mut output: Value,
 ) -> Result<Value, ()> {
+    if selection == ContractSelection::PreRecovery {
+        if tool != VerticalTool::SourceRead
+            || output
+                .pointer("/data/source_recovery")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(());
+        }
+        let mut current = select_output_version(tool, ContractSelection::Current, output)?;
+        current
+            .as_object_mut()
+            .ok_or(())?
+            .insert("schema_version".into(), Value::String("1.3".into()));
+        current
+            .get_mut("data")
+            .and_then(Value::as_object_mut)
+            .ok_or(())?
+            .remove("source_recovery");
+        return Ok(current);
+    }
     if selection == ContractSelection::Current {
         if tool == VerticalTool::SourceRead {
             let data = output
@@ -3390,6 +3517,13 @@ fn select_output_version(
         .and_then(Value::as_object_mut)
         .ok_or(())?;
     if tool == VerticalTool::SourceRead {
+        if data
+            .get("source_recovery")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(());
+        }
+        data.remove("source_recovery");
         data.remove("total_text_bytes");
         if data
             .get("chunks")
@@ -3435,6 +3569,7 @@ fn select_output_version(
                 data.remove("semantic_operation_id");
             }
             ContractSelection::Current
+            | ContractSelection::PreRecovery
             | ContractSelection::PreActivity
             | ContractSelection::PreLabel
             | ContractSelection::Recent
@@ -3452,6 +3587,7 @@ fn select_output_version(
                 data.remove("retained_durable_bytes");
             }
             ContractSelection::Current
+            | ContractSelection::PreRecovery
             | ContractSelection::PreActivity
             | ContractSelection::PreLabel
             | ContractSelection::Recent
@@ -3518,6 +3654,7 @@ fn select_output_version(
                 }
             }
             ContractSelection::Current
+            | ContractSelection::PreRecovery
             | ContractSelection::PreActivity
             | ContractSelection::PreLabel
             | ContractSelection::Recent => return Err(()),
@@ -4200,7 +4337,7 @@ mod tests {
             );
             assert_eq!(result["isError"], false);
             let output = &result["structuredContent"];
-            assert_eq!(output["schema_version"], "1.3");
+            assert_eq!(output["schema_version"], "1.4");
             assert_eq!(output["data"]["total_source_bytes"], 14);
             assert_eq!(output["data"]["total_text_bytes"], 12);
             assert_eq!(
@@ -6305,7 +6442,7 @@ mod tests {
                         "1.10",
                     ]
                 } else {
-                    &["1.0", "1.1", "1.2", "1.3"]
+                    &["1.0", "1.1", "1.2", "1.3", "1.4"]
                 };
                 for version in versions {
                     let result = success(router.handle(
@@ -6316,6 +6453,7 @@ mod tests {
                     ).await);
                     let rejected = extracted
                         && *version != tool.contract_version()
+                        && Some(*version) != tool.pre_recovery_contract_version()
                         && Some(*version) != tool.pre_activity_contract_version()
                         && Some(*version) != tool.pre_label_contract_version();
                     assert_eq!(
@@ -6331,14 +6469,15 @@ mod tests {
                         let mut expected = output.clone();
                         expected.insert("schema_version".to_owned(), json!(version));
                         if *version != tool.contract_version()
-                            && !(tool == VerticalTool::SourceRead && *version == "1.2")
+                            && !(tool == VerticalTool::SourceRead
+                                && matches!(*version, "1.2" | "1.3"))
                         {
                             expected["data"]
                                 .as_object_mut()
                                 .unwrap()
                                 .remove("conditional_activity");
                         }
-                        if tool == VerticalTool::SourceRead && *version == "1.3" {
+                        if tool == VerticalTool::SourceRead && matches!(*version, "1.3" | "1.4") {
                             let total_text_bytes: usize = expected["data"]["chunks"]
                                 .as_array()
                                 .unwrap()
@@ -6957,6 +7096,10 @@ mod tests {
         for tool in VerticalTool::ALL {
             for (selection, schema) in [
                 (ContractSelection::Current, Some(tool.output_schema_json())),
+                (
+                    ContractSelection::PreRecovery,
+                    tool.pre_recovery_output_schema_json(),
+                ),
                 (
                     ContractSelection::PreActivity,
                     tool.pre_activity_output_schema_json(),
@@ -8470,7 +8613,7 @@ mod tests {
             result["structuredContent"]["error"]["code"],
             "RESOURCE_EXHAUSTED"
         );
-        serde_json::from_value::<SourceReadOutputV1_3>(result["structuredContent"].clone())
+        serde_json::from_value::<SourceReadOutputV1_4>(result["structuredContent"].clone())
             .expect("resource error uses the source.read output contract");
         assert!(serialized_json_fits(&result, MAX_TOOL_RESULT_BYTES));
         let mirror: Value = serde_json::from_str(
@@ -9133,5 +9276,161 @@ mod tests {
             )
             .expect("advertised context controls pass capability preflight");
         }
+    }
+    fn aggregate_recovery_fixture() -> Map<String, Value> {
+        let mut output = retained_output("source.read");
+        output["coverage"]["status"] = json!(rootlight_ir::CoverageStatus::Unknown);
+        for language in output["coverage"]["languages"].as_array_mut().unwrap() {
+            language["tier"] = json!(rootlight_mcp_contract::vertical::AnalysisTier::D);
+            language["status"] = json!(rootlight_ir::CoverageStatus::Unknown);
+        }
+        let file = output["data"]["chunks"][0]["source_ref"]["span"]["file"].clone();
+        output["data"]["source_recovery"] = json!({
+            "cause": rootlight_ir::AggregateSourceRecovery {
+                source_inventory: rootlight_ids::ContentHash::from_bytes([9; 32]),
+                members: 10, derived_members: 1,
+                stage: rootlight_ir::AggregateCapacityStage::StructuralAppend,
+                resource: rootlight_ir::AggregateCapacityResource::Entities,
+                observed: 11, limit: 10, text_snapshot_bytes: 8192,
+            },
+            "files": [{"file": file, "text_search": "whole_source_projection"}],
+        });
+        output
+    }
+
+    #[tokio::test]
+    async fn aggregate_source_recovery_requires_current_contract_without_losing_bytes() {
+        let output = aggregate_recovery_fixture();
+        let source_content = output["data"]["chunks"][0]["content"].clone();
+        let router = ToolRouter::new(
+            StaticExecutor { result: Ok(output) },
+            ExposureProfile::Developer,
+        )
+        .unwrap();
+        for version in ["1.4", "1.3", "1.2", "1.1", "1.0"] {
+            let mut input = retained_input("source.read");
+            input["encoding"] = json!("utf8_lossless_when_valid");
+            let result = success(
+                router
+                    .handle(
+                        request(
+                            "tools/call",
+                            json!({
+                                "name": "source.read", "arguments": input,
+                                "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): version},
+                            }),
+                        ),
+                        cancellation(),
+                    )
+                    .await,
+            );
+            assert_eq!(result["structuredContent"]["schema_version"], version);
+            if version == "1.4" {
+                assert_eq!(result["isError"], false);
+                assert_eq!(
+                    result["structuredContent"]["data"]["chunks"][0]["content"],
+                    source_content
+                );
+                let checked: SourceReadOutputV1_4 =
+                    serde_json::from_value(result["structuredContent"].clone()).unwrap();
+                let EntityToolResponse::Success(checked) = checked else {
+                    panic!("source success");
+                };
+                assert!(checked.data.source_recovery.is_some());
+            } else {
+                assert_eq!(result["isError"], true);
+                let error: AnyErrorResponse =
+                    serde_json::from_value(result["structuredContent"].clone()).unwrap();
+                assert_eq!(error.error.code(), ErrorCode::ProtocolMismatch);
+                assert_eq!(
+                    error.error.next_actions(),
+                    &[NextAction::SelectSupportedVersion]
+                );
+                assert_eq!(
+                    error
+                        .error
+                        .details()
+                        .get(&DetailKey::parse("supported_version").unwrap()),
+                    Some(&PublicValue::Label(SafeLabel::parse("1.4").unwrap()))
+                );
+                assert!(result["structuredContent"].get("data").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_source_recovery_cost_is_charged_before_publication() {
+        let router = ToolRouter::new(
+            StaticExecutor {
+                result: Ok(aggregate_recovery_fixture()),
+            },
+            ExposureProfile::Developer,
+        )
+        .unwrap();
+        let mut input = retained_input("source.read");
+        input["encoding"] = json!("utf8_lossless_when_valid");
+        let result = success(
+            router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({"name": "source.read", "arguments": input.clone()}),
+                    ),
+                    cancellation(),
+                )
+                .await,
+        );
+        assert_eq!(result["isError"], false);
+        let mut independent = result["structuredContent"].clone();
+        independently_recount_usage(&mut independent);
+        assert_eq!(result["structuredContent"]["usage"], independent["usage"]);
+        let tokens = result["structuredContent"]["usage"]["estimated_tokens"]
+            .as_u64()
+            .unwrap();
+        assert!(tokens > 1 && tokens <= u64::from(u16::MAX));
+        input.insert("budget".into(), json!({"max_tokens": tokens - 1}));
+        let rejected = success(
+            router
+                .handle(
+                    request(
+                        "tools/call",
+                        json!({"name": "source.read", "arguments": input}),
+                    ),
+                    cancellation(),
+                )
+                .await,
+        );
+        assert_eq!(rejected["isError"], true);
+        assert_eq!(
+            rejected["structuredContent"]["error"]["code"],
+            "RESOURCE_EXHAUSTED"
+        );
+        assert!(rejected["structuredContent"].get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_recovery_is_not_attributed_to_an_old_contract() {
+        let mut output = aggregate_recovery_fixture();
+        output["data"]["source_recovery"]["files"] = json!([]);
+        let router = ToolRouter::new(
+            StaticExecutor { result: Ok(output) },
+            ExposureProfile::Developer,
+        )
+        .unwrap();
+        let mut input = retained_input("source.read");
+        input["encoding"] = json!("utf8_lossless_when_valid");
+        let response = router
+            .handle(
+                request(
+                    "tools/call",
+                    json!({
+                        "name": "source.read", "arguments": input,
+                        "_meta": {(TOOL_CONTRACT_VERSION_META_KEY): "1.3"},
+                    }),
+                ),
+                cancellation(),
+            )
+            .await;
+        assert!(matches!(response, HandlerResponse::Error { .. }));
     }
 }

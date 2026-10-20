@@ -136,7 +136,7 @@ const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 24] = [
     ("1.26", "protobuf/1.26/rootlight.desc"),
     ("1.27", "protobuf/1.27/rootlight.desc"),
 ];
-const SCHEMA_PROVENANCE_INPUTS: [&str; 31] = [
+const SCHEMA_PROVENANCE_INPUTS: [&str; 33] = [
     "Cargo.lock",
     "crates/rootlight-config/src/lib.rs",
     "crates/rootlight-error/src/lib.rs",
@@ -144,6 +144,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 31] = [
     "crates/rootlight-ir/src/lexical.rs",
     "crates/rootlight-ir/src/source_projection.rs",
     "crates/rootlight-ir/src/lib.rs",
+    "crates/rootlight-ir/src/aggregate_source_recovery.rs",
     "crates/rootlight-ir/src/normalized.rs",
     "crates/rootlight-ir/src/validation.rs",
     "crates/rootlight-mcp-contract/src/lib.rs",
@@ -154,6 +155,7 @@ const SCHEMA_PROVENANCE_INPUTS: [&str; 31] = [
     "crates/rootlight-mcp-contract/src/repository.rs",
     "crates/rootlight-mcp-contract/src/source_entity.rs",
     "crates/rootlight-mcp-contract/src/source_text.rs",
+    "crates/rootlight-mcp-contract/src/source_recovery.rs",
     "crates/rootlight-mcp-contract/src/source_find.rs",
     "crates/rootlight-mcp-contract/src/pagination.rs",
     "crates/rootlight-mcp-contract/src/vertical.rs",
@@ -1331,6 +1333,18 @@ fn generate_json_schemas(workspace_root: &Path, staged_root: &Path) -> Result<()
     write_mcp_tool_schema::<SourceReadOutput>(&schema_root, "source.read", "output")?;
     write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.1")?;
     write_mcp_tool_schema_version::<SourceReadInput>(&schema_root, "source.read", "input", "1.2")?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_text::SourceReadInputV1_3>(
+        &schema_root,
+        "source.read",
+        "input",
+        "1.4",
+    )?;
+    write_mcp_tool_schema_version::<rootlight_mcp_contract::source_recovery::SourceReadOutputV1_4>(
+        &schema_root,
+        "source.read",
+        "output",
+        "1.4",
+    )?;
     write_mcp_tool_schema_version::<rootlight_mcp_contract::source_text::SourceReadInputV1_3>(
         &schema_root,
         "source.read",
@@ -3340,6 +3354,8 @@ fn expected_artifact_paths() -> Vec<String> {
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.2.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.3.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-input-1.4.schema.json"),
+        format!("{SCHEMA_ROOT}/json/mcp-source-read-output-1.4.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-find-input-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-find-output-1.0.schema.json"),
         format!("{SCHEMA_ROOT}/json/mcp-source-find-input-1.1.schema.json"),

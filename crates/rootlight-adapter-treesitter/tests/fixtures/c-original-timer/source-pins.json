@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/libuv/libuv",
+  "revision": "a6d06ba716b6facdf00e29306aa5013d51e070d4",
+  "original_files": {
+    "src/timer.c": {
+      "bytes": 5393,
+      "sha256": "d68b09e6808d68a0dae71224edbe410ea6e630135bbb57a4f110ea51efb2ad8b"
+    },
+    "LICENSE": {
+      "bytes": 1098,
+      "sha256": "7aab26dd7e0e6661accc1fd9fc19410e01b466aa0ac36ea668b2013152a8ca23"
+    }
+  },
+  "finite_obligations_source": {
+    "path": "development-docs/maintenance-20261016/all-language-source-obligations-checked-v2.json",
+    "bytes": 1296683,
+    "sha256": "0d1f9a4891f67f24a81eadab6caa5175de61b8f9716a07e37bb3c2535e6b62ea",
+    "json_pointer": "/8_C_libuv"
+  },
+  "retained_bytes_unmodified": true,
+  "includes_or_preprocessor_evaluation_claimed": false
+}

@@ -1,0 +1,19 @@
+{
+  "upstream": "https://github.com/rtfeldman/elm-spa-example",
+  "revision": "cb32acd73c3d346d0064e7923049867d8ce67193",
+  "license": "MIT",
+  "files": [
+    {
+      "file": "Asset.elm",
+      "upstream_path": "src/Asset.elm",
+      "bytes": 764,
+      "sha256": "ad8a532b3644f4d4da34702bb8cad4671b556a39a6a369c9e2c7151439c18203"
+    },
+    {
+      "file": "LICENSE",
+      "upstream_path": "LICENSE",
+      "bytes": 1115,
+      "sha256": "f472ef874c04ad2a1eeebdcd22cec6e27be2377a78e30e942f45ba17ca624204"
+    }
+  ]
+}

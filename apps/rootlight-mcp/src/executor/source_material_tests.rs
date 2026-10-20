@@ -9,6 +9,44 @@ use rootlight_agent::context_evidence::{
 };
 use rootlight_mcp_contract::context::SourcePolicy;
 
+#[tokio::test]
+async fn aggregate_recovery_context_refusal_preserves_work_and_strict_byte_validation() {
+    let candidate = candidate_id().await;
+    for corrupt_total in [false, true] {
+        let mut response = fixture(client::SourceTextEncoding::Utf8, 11, 1024, true);
+        response.result.context.tier = client::AnalysisTier::TierD;
+        response.result.context.coverage_status = client::CoverageStatus::Unknown;
+        response.result.chunks[0].tier = client::AnalysisTier::TierD;
+        let reference = response.result.chunks[0].source.clone();
+        response.result.source_recovery = Some(aggregate_client_recovery(reference.file()));
+        let expected_usage = first_stage_known_work(&[&response.result.context]);
+        if corrupt_total {
+            response.result.total_source_bytes += 1;
+        }
+        let harness = harness(vec![Ok(response)], None);
+        let error = materialize_adapter(
+            &harness,
+            request(std::slice::from_ref(&reference), &candidate, true, 1024),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            if corrupt_total {
+                ContextEvidencePortErrorKind::InvalidResponse
+            } else {
+                ContextEvidencePortErrorKind::Unsupported
+            }
+        );
+        assert_eq!(error.usage, expected_usage);
+        assert!(error.usage.source_bytes > 0);
+        assert!(matches!(
+            harness.only_call(),
+            ObservedCall::SourceReadLosslessPrefix { .. }
+        ));
+    }
+}
+
 pub(super) fn prefix_legacy_fixture(
     legacy: SourceReadPortResponse,
     request: &SourceReadPortRequest,
@@ -42,6 +80,7 @@ pub(super) fn prefix_legacy_fixture(
         .collect::<Result<Vec<_>, _>>()?;
     prefix_text_fixture(
         client::SourceTextReadResult {
+            source_recovery: legacy.result.source_recovery,
             context: legacy.result.context,
             chunks,
             total_source_bytes: legacy.result.total_source_bytes,
@@ -308,6 +347,7 @@ fn fixture(
     context.usage.rows = 17;
     client::SourceTextPrefixReadResult {
         result: client::SourceTextReadResult {
+            source_recovery: None,
             context,
             chunks: vec![client::SourceTextChunk {
                 extracted_from: None,

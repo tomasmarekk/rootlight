@@ -61,13 +61,34 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 42] = [
+const DISTRIBUTION_LICENSES: [&str; 63] = [
+    "tree-sitter-hare-1.0.0-LICENSE",
+    "tree-sitter-ring-1.1.1-LICENSE",
+    "flux-source-parser-0.1.0-LICENSE",
+    "tree-sitter-modelica-0.0.1-LICENSE",
+    "tree-sitter-d-0.8.2-LICENSE.txt",
+    "tree-sitter-ada-0.9.1-LICENSE.txt",
+    "tree-sitter-hcl-1.2.0-LICENSE",
+    "tree-sitter-zig-1.1.2-LICENSE",
+    "tree-sitter-crystal-0.0.1-LICENSE",
+    "tree-sitter-cue-0.2.0-LICENSE",
+    "tree-sitter-pony-0.0.3-LICENSE",
+    "tree-sitter-fish-3.7.0-LICENSE",
+    "tree-sitter-nim-0.6.2-LICENSE",
+    "tree-sitter-graphql-0.0.1-LICENSE",
+    "tree-sitter-elixir-0.3.5-LICENSE",
+    "tree-sitter-proto-0.0.1-LICENSE",
+    "tree-sitter-thrift-0.5.0-LICENSE",
+    "tree-sitter-capnp-1.5.0-LICENSE",
     "tree-sitter-rocq-0.2.0-LICENSE-DECLARATIONS.json",
     "tree-sitter-rocq-0.2.0-MIT-REFERENCE.txt",
     "tree-sitter-rocq-0.2.0-SPDX-MIT-REFERENCE.json",
     "tree-sitter-rocq-0.2.0-SOURCE-ORIGIN.json",
     "tree-sitter-rocq-0.2.0-LOCAL-SOURCE.md",
     "tree-sitter-eiffel-1.0.0-LICENSE",
+    "tree-sitter-clojure-0.0.8-COPYING",
+    "tree-sitter-racket-0.25.0-LICENSE",
+    "tree-sitter-vhdl-2.0.3-LICENSE",
     "tree-sitter-systemverilog-0.4.1-LICENSE",
     "tree-sitter-v-0.0.6-LICENSE",
     "tree-sitter-cmake-0.7.5-LICENSE",
@@ -599,6 +620,29 @@ struct ArchiveBuild<'a> {
 fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
     // Read retained vendor notices directly instead of maintaining a second copy.
     match filename {
+        "tree-sitter-hare-1.0.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-hare-1.0.0/LICENSE")
+        }
+        "tree-sitter-ring-1.1.1-LICENSE" => {
+            workspace.join("third_party/tree-sitter-ring-1.1.1/LICENSE")
+        }
+        "flux-source-parser-0.1.0-LICENSE" => workspace
+            .join("source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/LICENSE"),
+        "tree-sitter-graphql-0.0.1-LICENSE" => {
+            workspace.join("third_party/tree-sitter-graphql-0.0.1/LICENSE")
+        }
+        "tree-sitter-proto-0.0.1-LICENSE" => {
+            workspace.join("third_party/tree-sitter-proto-0.0.1/LICENSE")
+        }
+        "tree-sitter-thrift-0.5.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-thrift-0.5.0/LICENSE")
+        }
+        "tree-sitter-elixir-0.3.5-LICENSE" => {
+            workspace.join("third_party/tree-sitter-elixir-0.3.5/LICENSE")
+        }
+        "tree-sitter-capnp-1.5.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-capnp-1.5.0/LICENSE")
+        }
         "tree-sitter-rocq-0.2.0-LICENSE-DECLARATIONS.json" => {
             workspace.join("third_party/tree-sitter-rocq-0.2.0/upstream/license-declarations.json")
         }
@@ -2414,10 +2458,118 @@ mod tests {
         let workspace = workspace_root().expect("workspace root");
         for (filename, source, expected_bytes, expected_sha256) in [
             (
+                "tree-sitter-graphql-0.0.1-LICENSE",
+                "third_party/tree-sitter-graphql-0.0.1/LICENSE",
+                1064,
+                "7bd2788c7154b102cf03eeb335faba32d897fb82f252b28663c16c76738aaba5",
+            ),
+            (
+                "tree-sitter-elixir-0.3.5-LICENSE",
+                "third_party/tree-sitter-elixir-0.3.5/LICENSE",
+                10173,
+                "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+            ),
+            (
+                "tree-sitter-thrift-0.5.0-LICENSE",
+                "third_party/tree-sitter-thrift-0.5.0/LICENSE",
+                1147,
+                "f0a0f84bedde3f160f9db0337715a534ca8f1fb5f19726d743dadfde44bb08c8",
+            ),
+            (
+                "tree-sitter-proto-0.0.1-LICENSE",
+                "third_party/tree-sitter-proto-0.0.1/LICENSE",
+                1075,
+                "8c04a7e702d454741b3fd014c51ca1912bdd6facc648d94c46cbcec4d8102610",
+            ),
+            (
+                "tree-sitter-capnp-1.5.0-LICENSE",
+                "third_party/tree-sitter-capnp-1.5.0/LICENSE",
+                1101,
+                "099c44248f8cf353123211318680e93465587c005a4b3730ce8cb5334de043d6",
+            ),
+            (
                 "tree-sitter-v-0.0.6-LICENSE",
                 "adapters/licenses/tree-sitter-v-0.0.6-LICENSE",
                 1132,
                 "abfabe98680cd5bef27c8ca64549b2f45df38f028509fe6f9eca7a52a5af72f6",
+            ),
+            (
+                "tree-sitter-hcl-1.2.0-LICENSE",
+                "adapters/licenses/tree-sitter-hcl-1.2.0-LICENSE",
+                11357,
+                "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+            ),
+            (
+                "tree-sitter-ada-0.9.1-LICENSE.txt",
+                "adapters/licenses/tree-sitter-ada-0.9.1-LICENSE.txt",
+                1071,
+                "ad8425038de519f8c4e3e9339feebf99dfad8a6002dcf79227d91402780a32cc",
+            ),
+            (
+                "tree-sitter-d-0.8.2-LICENSE.txt",
+                "adapters/licenses/tree-sitter-d-0.8.2-LICENSE.txt",
+                1040,
+                "ecf206b1a27e8e4ea07f1e1529cb111b4be5ce8420bd27b8269981d9c0c389f8",
+            ),
+            (
+                "tree-sitter-modelica-0.0.1-LICENSE",
+                "adapters/licenses/tree-sitter-modelica-0.0.1-LICENSE",
+                1078,
+                "99c797f83ed253378889ac2552322bc44ebbd56b0f98be1143c42a6fbd34fa1c",
+            ),
+            (
+                "tree-sitter-zig-1.1.2-LICENSE",
+                "adapters/licenses/tree-sitter-zig-1.1.2-LICENSE",
+                1101,
+                "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727",
+            ),
+            (
+                "tree-sitter-crystal-0.0.1-LICENSE",
+                "adapters/licenses/tree-sitter-crystal-0.0.1-LICENSE",
+                1072,
+                "d1e5e5f807a9e842c16a0b392d7dcc5542f9ed9163533fa7d9798f7289fa8547",
+            ),
+            (
+                "tree-sitter-cue-0.2.0-LICENSE",
+                "adapters/licenses/tree-sitter-cue-0.2.0-LICENSE",
+                1146,
+                "b8f5cf03ad4cbe616b948981f8cff6795a3aa2cfe7d91600d6e0d2ce9951f0c9",
+            ),
+            (
+                "tree-sitter-pony-0.0.3-LICENSE",
+                "adapters/licenses/tree-sitter-pony-0.0.3-LICENSE",
+                1139,
+                "e8d649c1f03766310c675dc46e9733748ca1a9eedbc5196f3247196eddcbc31f",
+            ),
+            (
+                "tree-sitter-fish-3.7.0-LICENSE",
+                "adapters/licenses/tree-sitter-fish-3.7.0-LICENSE",
+                1211,
+                "6b0382b16279f26ff69014300541967a356a666eb0b91b422f6862f6b7dad17e",
+            ),
+            (
+                "tree-sitter-nim-0.6.2-LICENSE",
+                "adapters/licenses/tree-sitter-nim-0.6.2-LICENSE",
+                24990,
+                "7e1a0ca600111afe6cd7dfc50d8ff9e6851b0fe5fe3a35c703ebda61b047ae74",
+            ),
+            (
+                "tree-sitter-clojure-0.0.8-COPYING",
+                "adapters/licenses/tree-sitter-clojure-0.0.8-COPYING",
+                7048,
+                "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+            ),
+            (
+                "tree-sitter-racket-0.25.0-LICENSE",
+                "adapters/licenses/tree-sitter-racket-0.25.0-LICENSE",
+                1062,
+                "cc35bd4a973bf6067558e88b56d9a369e02c36e240b2b537aef8f751b7808fd7",
+            ),
+            (
+                "tree-sitter-vhdl-2.0.3-LICENSE",
+                "adapters/licenses/tree-sitter-vhdl-2.0.3-LICENSE",
+                1077,
+                "a9323218abe9aabd3429b76634470b40c3be012600e1f96bd16ca254724fa954",
             ),
             (
                 "tree-sitter-systemverilog-0.4.1-LICENSE",

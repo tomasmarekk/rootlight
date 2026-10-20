@@ -168,13 +168,21 @@ fn assert_unqualified(result: &AnalysisOutput) {
         assert_eq!(relation.object, RelationEndpoint::Entity(symbol));
         assert_eq!(relation.evidence.source.as_ref(), Some(&occurrence.source));
     }
-    assert!(
-        result
-            .document()
-            .occurrences
-            .iter()
-            .all(|occurrence| occurrence.role != OccurrenceRole::CallSite)
-    );
+    for site in result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::CallSite)
+    {
+        assert_eq!(site.syntax_kind, "apex.unproven_call.call");
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.evidence.source.as_ref().is_some_and(|reference| {
+                reference.span().start_byte() <= site.source.span().start_byte()
+                    && site.source.span().end_byte() <= reference.span().end_byte()
+            })
+        }));
+    }
     for occurrence in result
         .document()
         .occurrences
@@ -270,7 +278,7 @@ fn lexical_uses(result: &AnalysisOutput) -> Vec<&rootlight_ir::OccurrenceRecord>
 
 #[test]
 fn apex_formal_value_uses_bind_only_their_exact_callable() {
-    let source = "// λ preserves original UTF-8 offsets.\r\npublic class BindBox {\r\n\
+    let source = "// Î» preserves original UTF-8 offsets.\r\npublic class BindBox {\r\n\
         private Integer Value;\r\n\
         public BindBox(Integer Seed) { Value = Seed; }\r\n\
         public Integer First(Integer Value) {\r\n\
@@ -411,7 +419,7 @@ fn apex_query_names_and_constructor_property_names_are_not_formal_value_uses() {
 
 #[test]
 fn apex_formal_binding_is_exact_spelling_and_does_not_guess_unicode_case_folding() {
-    for (formal, use_name) in [("Value", "value"), ("Ämount", "Ämount")] {
+    for (formal, use_name) in [("Value", "value"), ("Ã„mount", "Ã„mount")] {
         let source = format!(
             "public class NameBox {{ public Integer Read(Integer {formal}) {{ return {use_name}; }} }}"
         );
@@ -1241,5 +1249,241 @@ fn apex_overlapping_same_name_local_scopes_and_case_aliases_stay_unresolved() {
         } else {
             assert!(resolved.is_empty());
         }
+    }
+}
+
+// Public-analyzer call contracts for the existing apex_native module helpers.
+// Written private bindings and virtual candidate sites have distinct guarantees.
+
+fn written_apex_call<'a>(
+    result: &'a AnalysisOutput,
+    source: &str,
+    invocation: &str,
+    name: &str,
+    enclosing: SymbolId,
+) -> &'a rootlight_ir::OccurrenceRecord {
+    let caller_start = source.find("public void run").unwrap();
+    let start = caller_start + source[caller_start..].find(invocation).unwrap();
+    let end = start + invocation.len();
+    let name_start = start + invocation.find(name).unwrap();
+    let name_end = name_start + name.len();
+    let sites: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::CallSite
+                && site.enclosing == Some(enclosing)
+                && [(start, end), (name_start, name_end)]
+                    .into_iter()
+                    .any(|(a, b)| {
+                        site.source.span().start_byte() == u64::try_from(a).unwrap()
+                            && site.source.span().end_byte() == u64::try_from(b).unwrap()
+                    })
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "missing genuine call-site for {invocation}");
+    let site = sites[0];
+    assert_eq!(site.source.content_hash(), content_hash(source.as_bytes()));
+    assert_eq!(site.source.generation(), result.document().generation);
+    assert_eq!(site.source.repository(), result.document().repository);
+    site
+}
+
+#[test]
+fn apex_private_zero_argument_calls_bind_exactly_to_their_written_class() {
+    for receiver in ["", "this."] {
+        let source = format!(
+            "public virtual class Handler {{ public void run() {{ if (!{receiver}validateRun()) return; {receiver}addToLoopCount(); }} private Boolean validateRun() {{ return true; }} private void addToLoopCount() {{}} }}"
+        );
+        let result = output(&source);
+        let caller = named(&result, "run", EntityKind::Method);
+        for name in ["validateRun", "addToLoopCount"] {
+            let target = named(&result, name, EntityKind::Method);
+            assert_definition(&result, &source, target);
+            let site = written_apex_call(
+                &result,
+                &source,
+                &format!("{receiver}{name}()"),
+                name,
+                caller.id,
+            );
+            assert_eq!(
+                site.target,
+                OccurrenceTarget::Resolved { symbol: target.id }
+            );
+            let edges: Vec<_> = result
+                .document()
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::Calls
+                        && edge.subject == RelationEndpoint::Entity(caller.id)
+                        && edge.object == RelationEndpoint::Entity(target.id)
+                })
+                .collect();
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+            let mut proof = [
+                rootlight_ir::FactRef::Entity(caller.id),
+                rootlight_ir::FactRef::Fact(site.id),
+                rootlight_ir::FactRef::Entity(target.id),
+            ];
+            proof.sort_unstable();
+            assert_eq!(edges[0].evidence.derivation, proof);
+            assert_eq!(
+                edges[0].id,
+                rootlight_ir::derive_relation_record_id(edges[0]).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn apex_virtual_this_call_keeps_static_declaration_and_bounded_runtime_candidate() {
+    let source = "public virtual class Handler { public void run() { this.beforeInsert(); } protected virtual void beforeInsert() {} }";
+    let result = output(source);
+    let caller = named(&result, "run", EntityKind::Method);
+    let target = named(&result, "beforeInsert", EntityKind::Method);
+    let site = written_apex_call(
+        &result,
+        source,
+        "this.beforeInsert()",
+        "beforeInsert",
+        caller.id,
+    );
+    let OccurrenceTarget::Candidates {
+        symbols,
+        total_count,
+        completeness,
+    } = &site.target
+    else {
+        panic!(
+            "virtual call must retain a bounded written target, never a resolved runtime implementation"
+        )
+    };
+    assert!(symbols.contains(&target.id));
+    assert!(*total_count >= u64::try_from(symbols.len()).unwrap());
+    assert_ne!(*completeness, CoverageStatus::Complete);
+    let edges: Vec<_> = result
+        .document()
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.predicate == RelationPredicate::DispatchCandidate
+                && edge.subject == RelationEndpoint::Occurrence(site.id)
+                && edge.object == RelationEndpoint::Entity(target.id)
+        })
+        .collect();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+    let mut proof = [
+        rootlight_ir::FactRef::Fact(site.id),
+        rootlight_ir::FactRef::Entity(target.id),
+    ];
+    proof.sort_unstable();
+    assert_eq!(edges[0].evidence.derivation, proof);
+    assert_eq!(
+        edges[0].id,
+        rootlight_ir::derive_relation_record_id(edges[0]).unwrap()
+    );
+    let static_calls: Vec<_> = result
+        .document()
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Entity(caller.id)
+                && edge.object == RelationEndpoint::Entity(target.id)
+                && edge.evidence.source.as_ref() == Some(&site.source)
+        })
+        .collect();
+    assert_eq!(static_calls.len(), 1);
+    let mut static_proof = [
+        rootlight_ir::FactRef::Entity(caller.id),
+        rootlight_ir::FactRef::Fact(site.id),
+        rootlight_ir::FactRef::Entity(target.id),
+    ];
+    static_proof.sort_unstable();
+    assert_eq!(static_calls[0].evidence.derivation, static_proof);
+    assert_eq!(
+        static_calls[0].id,
+        rootlight_ir::derive_relation_record_id(static_calls[0]).unwrap()
+    );
+    assert!(
+        result.document().skipped_regions.iter().any(|gap| {
+            matches!(gap.domain, FactDomain::Occurrences | FactDomain::Relations)
+                && gap.evidence.source.as_ref().is_some_and(|reference| {
+                    reference.span().start_byte() <= site.source.span().start_byte()
+                        && site.source.span().end_byte() <= reference.span().end_byte()
+                })
+        }),
+        "runtime receiver and unknown project subclasses remain unqualified"
+    );
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
+fn apex_virtual_static_selection_does_not_resolve_runtime_overrides_or_unknown_receivers() {
+    let source = "public class Fixture { public virtual class Base { public void run() { this.beforeInsert(); } protected virtual void beforeInsert() {} } public class Child extends Base { public override void beforeInsert() {} } }";
+    let result = output(source);
+    let caller = named(&result, "run", EntityKind::Method);
+    let site = written_apex_call(
+        &result,
+        source,
+        "this.beforeInsert()",
+        "beforeInsert",
+        caller.id,
+    );
+    assert!(!matches!(site.target, OccurrenceTarget::Resolved { .. }));
+    let OccurrenceTarget::Candidates { symbols, .. } = &site.target else {
+        panic!("runtime dispatch must remain bounded")
+    };
+    assert_eq!(symbols.len(), 1);
+    let static_calls: Vec<_> = result
+        .document()
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && [
+                    RelationEndpoint::Entity(caller.id),
+                    RelationEndpoint::Occurrence(site.id),
+                ]
+                .contains(&edge.subject)
+        })
+        .collect();
+    assert_eq!(static_calls.len(), 1);
+    assert_eq!(static_calls[0].object, RelationEndpoint::Entity(symbols[0]));
+    assert_eq!(static_calls[0].evidence.source.as_ref(), Some(&site.source));
+    // The original two-file project's known override candidate is a separate
+    // required service regression; this negative does not claim that join exists.
+    for source in [
+        "public class Handler { private void target() {} public void run(External other) { other.target(); } }",
+        "public class Handler { private void target(Integer x) {} private void target(String x) {} public void run() { target(null); } }",
+        "public class Handler { private void target() {} private void TARGET() {} public void run() { target(); } }",
+    ] {
+        let result = output(source);
+        let caller = named(&result, "run", EntityKind::Method);
+        let invocation = if source.contains("other.target") {
+            "other.target()"
+        } else if source.contains("target(null)") {
+            "target(null)"
+        } else {
+            "target()"
+        };
+        let site = written_apex_call(&result, source, invocation, "target", caller.id);
+        assert!(!matches!(site.target, OccurrenceTarget::Resolved { .. }));
+        assert!(!result.document().relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && [
+                    RelationEndpoint::Entity(caller.id),
+                    RelationEndpoint::Occurrence(site.id),
+                ]
+                .contains(&edge.subject)
+        }));
     }
 }

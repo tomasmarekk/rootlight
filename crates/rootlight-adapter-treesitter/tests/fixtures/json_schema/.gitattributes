@@ -1,0 +1,3 @@
+# Preserve original physical offsets across Windows checkouts.
+# Source obligation witnesses refer to the exact upstream bytes.
+test-schema.json -text

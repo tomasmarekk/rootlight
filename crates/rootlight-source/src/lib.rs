@@ -8,7 +8,9 @@
 
 #![forbid(unsafe_code)]
 
+mod authority;
 pub mod compound;
+mod generation_view;
 mod literal_find;
 mod literal_search;
 mod lossless_text;
@@ -26,6 +28,7 @@ pub mod vba_source;
 pub mod vba_text;
 pub mod zip;
 
+pub use authority::{SourceAuthorityError, VerifiedSourceAuthority};
 pub use literal_find::{
     SourceFindBudget, SourceFindCursor, SourceFindError, SourceFindFile, SourceFindResult,
     SourceFindStop,
@@ -361,7 +364,7 @@ impl std::fmt::Debug for SourceReadResult {
 /// authenticates bounded visits through a generation-owned source capability.
 pub struct SourceService<'a> {
     backing: SourceBacking<'a>,
-    generation: &'a GenerationSnapshot,
+    generation: generation_view::GenerationView<'a>,
 }
 
 impl<'a> SourceService<'a> {
@@ -380,7 +383,7 @@ impl<'a> SourceService<'a> {
         }
         Ok(Self {
             backing: SourceBacking::Live(root),
-            generation,
+            generation: generation_view::GenerationView::Full(generation),
         })
     }
 
@@ -406,7 +409,7 @@ impl<'a> SourceService<'a> {
         }
         Ok(Self {
             backing: SourceBacking::Retained(snapshots),
-            generation,
+            generation: generation_view::GenerationView::Full(generation),
         })
     }
 
@@ -429,7 +432,28 @@ impl<'a> SourceService<'a> {
         }
         Ok(Self {
             backing: SourceBacking::Verified(backing),
-            generation,
+            generation: generation_view::GenerationView::Full(generation),
+        })
+    }
+
+    /// Binds a verified source-only generation without a semantic graph.
+    ///
+    /// The caller retains the immutable authority and private backing lease.
+    /// # Errors
+    /// Rejects a backing from another repository or generation.
+    pub fn from_source_authority(
+        backing: &'a dyn VerifiedSourceBacking,
+        authority: &'a VerifiedSourceAuthority,
+    ) -> Result<Self, SourceError> {
+        if backing.repository() != authority.metadata().repository() {
+            return Err(SourceError::RepositoryMismatch);
+        }
+        if backing.generation() != authority.metadata().generation() {
+            return Err(SourceError::GenerationMismatch);
+        }
+        Ok(Self {
+            backing: SourceBacking::Verified(backing),
+            generation: generation_view::GenerationView::Source(authority),
         })
     }
 
@@ -824,14 +848,40 @@ impl<'a> SourceService<'a> {
             push_preallocated(&mut file_slots, file_slot, control)?;
         }
 
-        // The validated generation guarantees unique, whole-file extraction
-        // ownership. Scan once per request, retaining only selected origins.
-        for mapping in &self.generation.document().source_mappings {
-            control.check()?;
-            if mapping.kind == SourceMappingKind::ExtractedFromContainer {
+        match &self.generation {
+            generation_view::GenerationView::Source(authority) => {
                 for file in &mut files {
-                    if file.file == mapping.from.span().file() {
-                        file.extracted_from = Some(mapping.to.clone());
+                    control.check()?;
+                    file.extracted_from = authority.origin(file.file).cloned();
+                }
+            }
+            generation_view::GenerationView::Full(snapshot) => {
+                // Keep one whole-origin scan per request on the existing graph route.
+                for mapping in &snapshot.document().source_mappings {
+                    control.check()?;
+                    if mapping.kind == SourceMappingKind::ExtractedFromContainer {
+                        for file in &mut files {
+                            if file.file == mapping.from.span().file()
+                                && file.extracted_from.replace(mapping.to.clone()).is_some()
+                            {
+                                return Err(SourceError::StaleSource);
+                            }
+                        }
+                    }
+                }
+                for extension in &snapshot.document().extensions {
+                    control.check()?;
+                    if extension.namespace == rootlight_ir::AGGREGATE_SOURCE_ORIGIN_NAMESPACE {
+                        let (derived, container) =
+                            rootlight_ir::decode_aggregate_source_origin_envelope(extension)
+                                .map_err(|_| SourceError::StaleSource)?;
+                        for file in &mut files {
+                            if derived.span().file() == file.file
+                                && file.extracted_from.replace(container.clone()).is_some()
+                            {
+                                return Err(SourceError::StaleSource);
+                            }
+                        }
                     }
                 }
             }

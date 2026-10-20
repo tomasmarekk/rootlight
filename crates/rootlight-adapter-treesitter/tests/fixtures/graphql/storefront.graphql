@@ -1,0 +1,77 @@
+"""
+The executable schema for the GraphQL 200 Blindspot Lab.
+
+The deliberate nullability boundaries are the model:
+
+- inventory and loyalty are nullable leaves, so resolver errors preserve the
+  rest of storefront;
+- recommendations is non-null, so its resolver error nulls storefront;
+- storefront itself is nullable, so viewer data survives that bubble.
+"""
+schema {
+  query: Query
+}
+
+type Query {
+  """
+  A root field independent from the storefront resolver tree. It demonstrates
+  why the top-level data entry can remain non-null after a deep failure.
+  """
+  viewer: Viewer!
+
+  """
+  The checkout surface under test. It is intentionally nullable so a non-null
+  child failure stops here instead of erasing the entire response.
+  """
+  storefront(session: ID!): Storefront
+}
+
+type Viewer {
+  id: ID!
+  name: String!
+}
+
+type Storefront {
+  id: ID!
+  hero: Hero!
+  cart: Cart!
+
+  """
+  Nullable service boundary: an execution error yields inventory: null.
+  """
+  inventory: Inventory
+
+  """
+  Non-null service boundary: an execution error bubbles to storefront: null.
+  """
+  recommendations: [Product!]!
+
+  """
+  Another nullable boundary for comparing the shape of partial responses.
+  """
+  loyalty: Loyalty
+}
+
+type Hero {
+  title: String!
+}
+
+type Cart {
+  itemCount: Int!
+  subtotalCents: Int!
+}
+
+type Inventory {
+  status: String!
+  available: Int!
+}
+
+type Product {
+  sku: ID!
+  name: String!
+}
+
+type Loyalty {
+  tier: String!
+  points: Int!
+}

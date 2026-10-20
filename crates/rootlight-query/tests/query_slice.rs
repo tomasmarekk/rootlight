@@ -3534,6 +3534,280 @@ fn signature_batch_query_limits_and_cancellation_do_not_publish_partial_headers(
     ));
 }
 
+fn occurrence_relation_explain_snapshot() -> (GenerationSnapshot, SymbolId, SymbolId, FactId) {
+    let base = fixture_snapshot();
+    let mut document = base.document().clone();
+    let caller = document.entities[0].id;
+    let mut target = document.entities[0].clone();
+    target.id = SymbolId::from_bytes([198; 20]);
+    target.canonical_name = "callee".to_owned();
+    target.display_name = "callee".to_owned();
+    target.qualified_name = "crate::callee".to_owned();
+    let callee = target.id;
+    document.entities.push(target);
+    let occurrence_template = document.occurrences[0].clone();
+    let relation_template = document.relations[0].clone();
+    document.occurrences.clear();
+    document.relations.clear();
+    document.extensions.clear();
+    document.coverage_records.clear();
+    let mut sites = Vec::new();
+    for index in 0..5_u8 {
+        let mut occurrence = occurrence_template.clone();
+        occurrence.id = derive_fact("rootlight.query-test.explain-call-site/v1", &[index]).id();
+        occurrence.role = OccurrenceRole::CallSite;
+        occurrence.enclosing = (index != 3).then_some(caller);
+        occurrence.target = OccurrenceTarget::Resolved { symbol: callee };
+        occurrence.confidence = Confidence::new(850).unwrap();
+        occurrence.source = SourceRef::new(
+            document.repository,
+            document.generation,
+            SourceSpan::new(
+                occurrence.file,
+                u64::from(index) * 2,
+                u64::from(index) * 2 + 1,
+            )
+            .unwrap(),
+            occurrence.source.content_hash(),
+            None,
+        );
+        occurrence.evidence.source = Some(occurrence.source.clone());
+        sites.push(occurrence.id);
+        document.occurrences.push(occurrence);
+    }
+    let missing_owner = derive_fact("rootlight.query-test.explain-call-relation/v1", &[4]).id();
+    for (index, subject, predicate, object, source_index) in [
+        (
+            0,
+            RelationEndpoint::Occurrence(sites[0]),
+            RelationPredicate::Calls,
+            RelationEndpoint::Entity(callee),
+            0,
+        ),
+        (
+            1,
+            RelationEndpoint::Occurrence(sites[1]),
+            RelationPredicate::Calls,
+            RelationEndpoint::Entity(callee),
+            1,
+        ),
+        (
+            2,
+            RelationEndpoint::Entity(caller),
+            RelationPredicate::Calls,
+            RelationEndpoint::Entity(callee),
+            0,
+        ),
+        (
+            3,
+            RelationEndpoint::Occurrence(sites[2]),
+            RelationPredicate::DispatchCandidate,
+            RelationEndpoint::Entity(callee),
+            2,
+        ),
+        (
+            4,
+            RelationEndpoint::Occurrence(sites[3]),
+            RelationPredicate::Calls,
+            RelationEndpoint::Entity(callee),
+            3,
+        ),
+        (
+            5,
+            RelationEndpoint::Occurrence(sites[4]),
+            RelationPredicate::Calls,
+            RelationEndpoint::Entity(caller),
+            4,
+        ),
+        (
+            6,
+            RelationEndpoint::Entity(callee),
+            RelationPredicate::RefersTo,
+            RelationEndpoint::Occurrence(sites[0]),
+            0,
+        ),
+    ] {
+        let mut relation = relation_template.clone();
+        relation.id = derive_fact("rootlight.query-test.explain-call-relation/v1", &[index]).id();
+        relation.subject = subject;
+        relation.predicate = predicate;
+        relation.object = object;
+        relation.confidence = Confidence::new(850).unwrap();
+        relation.evidence.source = Some(document.occurrences[source_index].source.clone());
+        document.relations.push(relation);
+    }
+    (
+        GenerationSnapshot::new(
+            base.metadata(),
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap(),
+        caller,
+        callee,
+        missing_owner,
+    )
+}
+
+#[test]
+fn symbol_explain_preserves_occurrence_owned_relations_and_call_sites() {
+    let (snapshot, caller, callee, missing_owner) = occurrence_relation_explain_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    let caller_result = service
+        .plan_symbol_explain(caller, QueryBudget::new())
+        .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+        .unwrap();
+    let expected = snapshot
+        .document()
+        .relations
+        .iter()
+        .filter(|relation| relation.id != missing_owner)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(caller_result.data.relations, expected);
+    assert_eq!(caller_result.data.relation_endpoints.len(), expected.len());
+    for (relation, endpoints) in caller_result
+        .data
+        .relations
+        .iter()
+        .zip(&caller_result.data.relation_endpoints)
+    {
+        assert_eq!(endpoints.relation, relation.id);
+        if relation.predicate == RelationPredicate::RefersTo {
+            assert_eq!(
+                (endpoints.subject, endpoints.object),
+                (Some(callee), Some(caller))
+            );
+        } else {
+            assert_eq!(endpoints.subject, Some(caller));
+            let object = match relation.object {
+                RelationEndpoint::Entity(symbol) => Some(symbol),
+                _ => unreachable!(),
+            };
+            assert_eq!(endpoints.object, object);
+        }
+    }
+    assert!(!caller_result.data.truncated);
+    let occurrence_calls = caller_result
+        .data
+        .relations
+        .iter()
+        .filter(|relation| {
+            relation.predicate == RelationPredicate::Calls
+                && matches!(relation.subject, RelationEndpoint::Occurrence(_))
+                && relation.object == RelationEndpoint::Entity(callee)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(occurrence_calls.len(), 2);
+    assert_ne!(occurrence_calls[0].subject, occurrence_calls[1].subject);
+    assert_ne!(
+        occurrence_calls[0].evidence.source,
+        occurrence_calls[1].evidence.source
+    );
+    assert!(
+        caller_result
+            .data
+            .relations
+            .iter()
+            .all(|relation| relation.confidence.get() == 850)
+    );
+    assert_eq!(
+        caller_result
+            .data
+            .relations
+            .iter()
+            .filter(|relation| relation.predicate == RelationPredicate::DispatchCandidate)
+            .count(),
+        1
+    );
+    assert_exact_response_accounting(&caller_result);
+    let callee_result = service
+        .plan_symbol_explain(callee, QueryBudget::new())
+        .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+        .unwrap();
+    assert_eq!(callee_result.data.relations.len(), 6);
+    assert!(
+        callee_result
+            .data
+            .relations
+            .iter()
+            .any(|relation| relation.id == missing_owner)
+    );
+    let missing = callee_result
+        .data
+        .relation_endpoints
+        .iter()
+        .find(|endpoints| endpoints.relation == missing_owner)
+        .unwrap();
+    assert_eq!((missing.subject, missing.object), (None, Some(callee)));
+    assert_exact_response_accounting(&callee_result);
+}
+
+#[test]
+fn symbol_explain_endpoint_projection_respects_resources_and_cancellation() {
+    let (snapshot, caller, _, _) = occurrence_relation_explain_snapshot();
+    let search = fixture_search(&snapshot);
+    let service = QueryService::new(&snapshot, &search).unwrap();
+    let complete = service
+        .plan_symbol_explain(caller, QueryBudget::new())
+        .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+        .unwrap();
+    // The first returned edge is an occurrence-to-entity self edge. Its row
+    // limit must include the lookup even though both endpoints project alike.
+    assert!(matches!(
+        complete.data.relations[0].subject,
+        RelationEndpoint::Occurrence(_)
+    ));
+    assert_eq!(complete.data.relation_endpoints[0].subject, Some(caller));
+    assert_eq!(complete.data.relation_endpoints[0].object, Some(caller));
+    for (budget, resource) in [
+        (QueryBudget::new().with_max_rows(3), QueryResource::Rows),
+        (
+            QueryBudget::new().with_max_results(3),
+            QueryResource::Results,
+        ),
+        (
+            QueryBudget::new().with_max_memory_bytes(complete.usage.memory_bytes - 1),
+            QueryResource::MemoryBytes,
+        ),
+        (QueryBudget::new().with_max_edges(1), QueryResource::Edges),
+    ] {
+        let result = service
+            .plan_symbol_explain(caller, budget)
+            .and_then(|plan| service.execute_symbol_explain(&plan, &Cancellation::new()))
+            .unwrap();
+        assert!(result.data.truncated);
+        assert_eq!(result.data.limiting_resources, vec![resource]);
+        assert_eq!(
+            result.data.relations.len(),
+            result.data.relation_endpoints.len()
+        );
+        for (relation, endpoints) in result
+            .data
+            .relations
+            .iter()
+            .zip(&result.data.relation_endpoints)
+        {
+            assert_eq!(relation.id, endpoints.relation);
+        }
+        assert!(result.usage.rows <= budget.max_rows());
+        assert!(result.usage.results <= budget.max_results());
+        assert!(result.usage.memory_bytes <= budget.max_memory_bytes());
+        assert_exact_response_accounting(&result);
+    }
+    let cancellation = Cancellation::new();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    let plan = service
+        .plan_symbol_explain(caller, QueryBudget::new())
+        .unwrap();
+    assert!(matches!(
+        service.execute_symbol_explain(&plan, &cancellation),
+        Err(QueryError::Cancelled(CancellationReason::ClientRequest))
+    ));
+}
+
 fn explain_posting_snapshot(unrelated_count: u8) -> (GenerationSnapshot, SymbolId) {
     let (base, symbol) = signature_snapshot(&["fn fixture()"]);
     let mut document = base.document().clone();
@@ -3826,9 +4100,14 @@ fn assert_signature_physical_budget(
             assert_eq!(result.usage.source_bytes, physical_bytes);
             assert!(!result.data.truncated);
             assert_eq!(
+                result.data.relations.len(),
+                result.data.relation_endpoints.len()
+            );
+            assert_eq!(
                 result.usage.results,
                 u64::try_from(
                     3 + result.data.relations.len()
+                        + result.data.relation_endpoints.len()
                         + result.data.occurrences.len()
                         + result.data.coverage.len(),
                 )

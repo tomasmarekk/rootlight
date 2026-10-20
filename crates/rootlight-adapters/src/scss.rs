@@ -4,6 +4,8 @@
 //! Named mixin includes, simple selector extensions, and quoted module loads
 //! retain source evidence; their targets and value uses remain bounded.
 
+use crate::source_projection;
+
 use rootlight_adapter_sdk::{
     AdapterError, CoverageReport, DescriptorError, DiagnosticCode, DomainCoverage, EncodingId,
     LanguageId, MemoryEnforcement, ParseCapabilities, ParseProvider, ParseReport, ParseRequest,
@@ -28,7 +30,7 @@ impl ScssParseProvider {
         content_hash(include_bytes!("scss.rs"))
     }
 
-    /// Creates a parser with the caller's source and syntax-node ceilings.
+    /// Creates a bounded UTF-8 and BOM-backed UTF-16 SCSS scanner.
     ///
     /// # Errors
     /// Returns [`DescriptorError`] when a ceiling is zero.
@@ -39,7 +41,11 @@ impl ScssParseProvider {
         let language = LanguageId::new("scss").expect("fixed SCSS language label");
         let capabilities = ParseCapabilities::new(
             vec![language],
-            vec![EncodingId::utf8()],
+            vec![
+                EncodingId::utf8(),
+                EncodingId::new("utf-16le").expect("fixed UTF-16LE label"),
+                EncodingId::new("utf-16be").expect("fixed UTF-16BE label"),
+            ],
             max_source_bytes,
             max_syntax_nodes,
             128,
@@ -62,8 +68,9 @@ impl ScssParseProvider {
         request: &ParseRequest<'_>,
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
+        let view = self.source_view(request, cancellation)?;
         let declarations = scan_source(
-            request.source().bytes(),
+            view.text().as_bytes(),
             request
                 .limits()
                 .max_syntax_nodes()
@@ -78,13 +85,37 @@ impl ScssParseProvider {
         {
             return Err(failure("scss-syntax-depth-limit"));
         }
-        syntax_fact_count(
-            declarations.declarations.len(),
-            declarations.scopes.len(),
-            declarations.calls.len(),
-            declarations.imports.len(),
-            declarations.extends.len(),
-        )
+        declarations.fact_count()
+    }
+
+    fn source_view<'a>(
+        &self,
+        request: &'a ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<source_projection::View<'a>, AdapterError> {
+        cancellation.check()?;
+        if request.language().as_str() != "scss"
+            || !matches!(
+                request.encoding().as_str(),
+                "utf-8" | "utf-16le" | "utf-16be"
+            )
+            || !request.included_ranges().is_empty()
+        {
+            return Err(failure("scss-source-context-unsupported"));
+        }
+        let view = source_projection::View::new(
+            request.source().bytes(),
+            request.encoding().as_str(),
+            self.capabilities
+                .max_source_bytes()
+                .min(request.limits().max_source_bytes()),
+            request.limits().max_reported_memory_bytes(),
+            cancellation,
+        )?;
+        if view.text().contains('\0') {
+            return Err(failure("scss-invalid-source-nul"));
+        }
+        Ok(view)
     }
 }
 
@@ -100,8 +131,9 @@ impl ParseProvider for ScssParseProvider {
         cancellation: &Cancellation,
     ) -> Result<ParseReport, AdapterError> {
         let source = request.source();
+        let view = self.source_view(request, cancellation)?;
         let declarations = scan_source(
-            source.bytes(),
+            view.text().as_bytes(),
             request
                 .limits()
                 .max_syntax_nodes()
@@ -117,13 +149,7 @@ impl ParseProvider for ScssParseProvider {
         {
             return Err(failure("scss-syntax-depth-limit"));
         }
-        let fact_count = syntax_fact_count(
-            declarations.declarations.len(),
-            declarations.scopes.len(),
-            declarations.calls.len(),
-            declarations.imports.len(),
-            declarations.extends.len(),
-        )?;
+        let fact_count = declarations.fact_count()?;
         let file = source.source_ref().span().file();
         let mut facts = Vec::new();
         facts
@@ -133,7 +159,7 @@ impl ParseProvider for ScssParseProvider {
             1,
             None,
             SyntaxFactKind::Root,
-            source.source_ref().span(),
+            source_span(file, 0, view.text().len())?,
             0,
             label("scss.source_file"),
         ));
@@ -203,7 +229,56 @@ impl ParseProvider for ScssParseProvider {
                 label("scss.block.scope"),
             ));
         }
-        let first_call_id = scope_id(declarations.scopes.len())?;
+        let first_parameter_id = scope_id(declarations.scopes.len())?;
+        for (index, parameter) in declarations.parameters.iter().enumerate() {
+            cancellation.check()?;
+            let local_id = first_parameter_id
+                .checked_add(
+                    u64::try_from(index)
+                        .ok()
+                        .and_then(|index| index.checked_mul(3))
+                        .ok_or_else(|| failure("scss-syntax-node-limit"))?,
+                )
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+            let parent = u64::try_from(parameter.owner)
+                .ok()
+                .and_then(|owner| owner.checked_mul(3))
+                .and_then(|owner| owner.checked_add(2))
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+            let name = source_span(file, parameter.name_start, parameter.name_end)?;
+            facts.push(SyntaxFact::new(
+                local_id,
+                Some(parent),
+                SyntaxFactKind::Declaration,
+                source_span(file, parameter.start, parameter.end)?,
+                parameter.depth,
+                label("scss.parameter.declaration"),
+            ));
+            facts.push(SyntaxFact::new(
+                local_id + 1,
+                Some(local_id),
+                SyntaxFactKind::Signature,
+                name,
+                parameter.depth + 1,
+                label("scss.name.signature"),
+            ));
+            facts.push(SyntaxFact::new(
+                local_id + 2,
+                Some(local_id),
+                SyntaxFactKind::Occurrence,
+                name,
+                parameter.depth + 1,
+                label("scss.identifier.definition"),
+            ));
+        }
+        let first_call_id = first_parameter_id
+            .checked_add(
+                u64::try_from(declarations.parameters.len())
+                    .ok()
+                    .and_then(|count| count.checked_mul(3))
+                    .ok_or_else(|| failure("scss-syntax-node-limit"))?,
+            )
+            .ok_or_else(|| failure("scss-syntax-node-limit"))?;
         for (index, call) in declarations.calls.iter().enumerate() {
             cancellation.check()?;
             let parent = call.scope.map(scope_id).transpose()?.unwrap_or(1);
@@ -261,6 +336,69 @@ impl ParseProvider for ScssParseProvider {
                 label("scss.extend.reference"),
             ));
         }
+        let mut next = first_extend_id
+            .checked_add(
+                u64::try_from(declarations.extends.len())
+                    .map_err(|_| failure("scss-syntax-node-limit"))?,
+            )
+            .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+        for proof in &declarations.proofs {
+            cancellation.check()?;
+            // The certificate spans an earlier target and its later call;
+            // the file root contains it, while the call scope proves the caller.
+            facts.push(SyntaxFact::new(
+                next,
+                Some(1),
+                SyntaxFactKind::Signature,
+                source_span(
+                    file,
+                    declarations.declarations[proof.target].start,
+                    declarations.calls[proof.call].name_end,
+                )?,
+                declarations.declarations[proof.owner].depth,
+                label("scss.mixin_target.signature"),
+            ));
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+        }
+        for gap in &declarations.parameter_gaps {
+            cancellation.check()?;
+            let declaration = declarations.declarations[gap.owner];
+            let parent = u64::try_from(gap.owner)
+                .ok()
+                .and_then(|owner| owner.checked_mul(3))
+                .and_then(|owner| owner.checked_add(2))
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+            facts.push(SyntaxFact::new(
+                next,
+                Some(parent),
+                SyntaxFactKind::Signature,
+                source_span(file, declaration.name_end, gap.end)?,
+                declaration.depth + 1,
+                label("scss.parameter_list_unavailable.signature"),
+            ));
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?;
+        }
+        debug_assert_eq!(facts.len(), fact_count);
+        for fact in &mut facts {
+            cancellation.check()?;
+            let start = usize::try_from(fact.span().start_byte())
+                .map_err(|_| failure("scss-source-offset-limit"))?;
+            let end = usize::try_from(fact.span().end_byte())
+                .map_err(|_| failure("scss-source-offset-limit"))?;
+            let physical = source_span(file, view.physical(start)?, view.physical(end)?)?;
+            *fact = SyntaxFact::new(
+                fact.local_id(),
+                fact.parent(),
+                fact.kind(),
+                physical,
+                fact.depth(),
+                fact.syntax_kind().clone(),
+            );
+        }
         facts.sort_by_key(|fact| (fact.span().start_byte(), fact.depth()));
         for batch in facts.chunks(32) {
             cancellation.check()?;
@@ -276,6 +414,11 @@ impl ParseProvider for ScssParseProvider {
         }
         let usage = sink.staged_usage();
         let source_bytes = source.bytes().len();
+        let entity_count = declarations
+            .declarations
+            .len()
+            .checked_add(declarations.parameters.len())
+            .ok_or_else(|| failure("scss-syntax-node-limit"))?;
         let coverage = CoverageReport::new(
             AnalysisTier::TierD,
             CoverageStatus::Bounded,
@@ -287,8 +430,8 @@ impl ParseProvider for ScssParseProvider {
                 DomainCoverage::new(
                     FactDomain::Entities,
                     CoverageStatus::Bounded,
-                    declarations.declarations.len(),
-                    declarations.declarations.len(),
+                    entity_count,
+                    entity_count,
                     0,
                 )?,
             ],
@@ -418,9 +561,31 @@ struct ScanResult {
     calls: Vec<MixinCall>,
     imports: Vec<QuotedImport>,
     extends: Vec<SelectorExtend>,
+    parameters: Vec<Parameter>,
+    proofs: Vec<MixinProof>,
+    parameter_gaps: Vec<ParameterGap>,
 }
 
 impl ScanResult {
+    fn fact_count(&self) -> Result<usize, AdapterError> {
+        syntax_fact_count(
+            self.declarations.len(),
+            self.scopes.len(),
+            self.calls.len(),
+            self.imports.len(),
+            self.extends.len(),
+        )?
+        .checked_add(
+            self.parameters
+                .len()
+                .checked_mul(3)
+                .ok_or_else(|| failure("scss-syntax-node-limit"))?,
+        )
+        .and_then(|count| count.checked_add(self.proofs.len()))
+        .and_then(|count| count.checked_add(self.parameter_gaps.len()))
+        .ok_or_else(|| failure("scss-syntax-node-limit"))
+    }
+
     fn maximum_depth(&self) -> usize {
         self.declarations
             .iter()
@@ -429,6 +594,17 @@ impl ScanResult {
             .chain(self.calls.iter().map(|call| call.depth))
             .chain(self.imports.iter().map(|import| import.depth))
             .chain(self.extends.iter().map(|extend| extend.depth))
+            .chain(self.parameters.iter().map(|parameter| parameter.depth + 1))
+            .chain(
+                self.proofs
+                    .iter()
+                    .map(|proof| self.declarations[proof.owner].depth + 1),
+            )
+            .chain(
+                self.parameter_gaps
+                    .iter()
+                    .map(|gap| self.declarations[gap.owner].depth + 1),
+            )
             .max()
             .unwrap_or(0)
     }
@@ -470,6 +646,9 @@ fn scan_source(
     let mut statement_start = true;
     let mut statement_offset = None;
     for (index, &byte) in masked.iter().enumerate() {
+        if index < 3 && source.starts_with(&[0xef, 0xbb, 0xbf]) {
+            continue;
+        }
         if index.is_multiple_of(CHECK_INTERVAL) {
             cancellation.check()?;
         }
@@ -683,13 +862,18 @@ fn scan_source(
         }
     }
     cancellation.check()?;
-    Ok(ScanResult {
+    let mut result = ScanResult {
         declarations,
         scopes,
         calls,
         imports,
         extends,
-    })
+        parameters: Vec::new(),
+        proofs: Vec::new(),
+        parameter_gaps: Vec::new(),
+    };
+    enrich_mixins(source, &masked, &mut result, max_syntax_nodes, cancellation)?;
+    Ok(result)
 }
 
 fn style_rule_header(
@@ -1240,6 +1424,503 @@ fn failure(value: &str) -> AdapterError {
     }
 }
 
+// Source-owned SCSS enrichment uses the existing scanner's balanced declarations.
+// Certificates cover only earlier, unique file mixins and direct empty includes;
+// compiler evaluation and imported or conditional namespaces remain unavailable.
+
+#[derive(Clone, Copy, Debug)]
+struct Parameter {
+    owner: usize,
+    start: usize,
+    end: usize,
+    name_start: usize,
+    name_end: usize,
+    depth: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MixinProof {
+    owner: usize,
+    target: usize,
+    call: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ParameterGap {
+    owner: usize,
+    end: usize,
+}
+
+struct MixinWork<'a> {
+    remaining: usize,
+    cancellation: &'a Cancellation,
+}
+
+impl MixinWork<'_> {
+    fn visit(&mut self) -> Result<(), AdapterError> {
+        self.cancellation.check()?;
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or_else(|| failure("scss-mixin-proof-work-limit"))?;
+        Ok(())
+    }
+
+    fn whitespace(&mut self, source: &[u8], mut cursor: usize) -> Result<usize, AdapterError> {
+        while source.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            self.visit()?;
+            cursor += 1;
+        }
+        Ok(cursor)
+    }
+
+    fn name_end(&mut self, source: &[u8], start: usize) -> Result<Option<usize>, AdapterError> {
+        self.visit()?;
+        if !source
+            .get(start)
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'-'))
+        {
+            return Ok(None);
+        }
+        if source.get(start) == Some(&b'-')
+            && !source
+                .get(start + 1)
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            return Ok(None);
+        }
+        let mut end = start + 1;
+        while source
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            self.visit()?;
+            end += 1;
+        }
+        Ok(Some(end))
+    }
+}
+
+fn same_mixin_name(
+    left: &[u8],
+    right: &[u8],
+    work: &mut MixinWork<'_>,
+) -> Result<bool, AdapterError> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (&left, &right) in left.iter().zip(right) {
+        work.visit()?;
+        if left != right && !(matches!(left, b'-' | b'_') && matches!(right, b'-' | b'_')) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn complete_lexical_input(source: &[u8], work: &mut MixinWork<'_>) -> Result<bool, AdapterError> {
+    let mut cursor = 0;
+    while cursor < source.len() {
+        work.visit()?;
+        let line = source.get(cursor..cursor + 2) == Some(b"//");
+        let block = source.get(cursor..cursor + 2) == Some(b"/*");
+        if line || block {
+            cursor += 2;
+            let mut closed = line;
+            while cursor < source.len() {
+                work.visit()?;
+                if line && source[cursor] == b'\n' {
+                    break;
+                }
+                if block && source.get(cursor..cursor + 2) == Some(b"*/") {
+                    cursor += 2;
+                    closed = true;
+                    break;
+                }
+                cursor += 1;
+            }
+            if !closed {
+                return Ok(false);
+            }
+        } else if matches!(source[cursor], b'\'' | b'"') {
+            let quote = source[cursor];
+            cursor += 1;
+            let mut closed = false;
+            while cursor < source.len() {
+                work.visit()?;
+                if source[cursor] == b'\\' {
+                    cursor = cursor.saturating_add(2);
+                } else {
+                    let byte = source[cursor];
+                    cursor += 1;
+                    if byte == quote {
+                        closed = true;
+                        break;
+                    }
+                }
+            }
+            if !closed || cursor > source.len() {
+                return Ok(false);
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    Ok(true)
+}
+
+fn complete_mixin_environment(
+    source: &[u8],
+    masked: &[u8],
+    declarations: &[Declaration],
+    work: &mut MixinWork<'_>,
+) -> Result<bool, AdapterError> {
+    if !complete_lexical_input(source, work)? {
+        return Ok(false);
+    }
+    let mut braces = 0_usize;
+    let mut parentheses = 0_usize;
+    let mut brackets = 0_usize;
+    let mut delimiters = [0_u8; 128];
+    let mut depth = 0_usize;
+    for (index, &byte) in masked.iter().enumerate() {
+        work.visit()?;
+        if matches!(byte, b'{' | b'(' | b'[') {
+            let Some(slot) = delimiters.get_mut(depth) else {
+                return Ok(false);
+            };
+            *slot = byte;
+            depth += 1;
+        } else if matches!(byte, b'}' | b')' | b']') {
+            let Some(parent) = depth.checked_sub(1) else {
+                return Ok(false);
+            };
+            let expected = match byte {
+                b'}' => b'{',
+                b')' => b'(',
+                _ => b'[',
+            };
+            if delimiters[parent] != expected {
+                return Ok(false);
+            }
+            depth = parent;
+        }
+        match byte {
+            b'{' => {
+                if masked.get(index.wrapping_sub(1)) == Some(&b'#') {
+                    return Ok(false);
+                }
+                braces += 1;
+            }
+            b'}' => {
+                let Some(next) = braces.checked_sub(1) else {
+                    return Ok(false);
+                };
+                braces = next;
+            }
+            b'(' => parentheses += 1,
+            b')' => {
+                let Some(next) = parentheses.checked_sub(1) else {
+                    return Ok(false);
+                };
+                parentheses = next;
+            }
+            b'[' => brackets += 1,
+            b']' => {
+                let Some(next) = brackets.checked_sub(1) else {
+                    return Ok(false);
+                };
+                brackets = next;
+            }
+            b'@' => {
+                let Some(end) = work.name_end(masked, index + 1)? else {
+                    return Ok(false);
+                };
+                let keyword = &masked[index + 1..end];
+                match keyword {
+                    b"mixin" => {
+                        let mut matches = 0;
+                        for declaration in declarations {
+                            work.visit()?;
+                            if declaration.start == index
+                                && declaration.kind == DeclarationKind::Mixin
+                                && declaration.scope.is_none()
+                            {
+                                matches += 1;
+                            }
+                        }
+                        if matches != 1 {
+                            return Ok(false);
+                        }
+                    }
+                    b"function" | b"include" | b"extend" | b"if" | b"else" | b"return"
+                    | b"media" | b"supports" | b"keyframes" | b"-webkit-keyframes" | b"debug"
+                    | b"warn" | b"error" | b"for" | b"each" | b"while" => {}
+                    _ => return Ok(false),
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(braces == 0 && parentheses == 0 && brackets == 0)
+}
+
+fn simple_parameters(
+    source: &[u8],
+    masked: &[u8],
+    owner: usize,
+    declaration: Declaration,
+    maximum_parameters: usize,
+    work: &mut MixinWork<'_>,
+) -> Result<Option<Vec<Parameter>>, AdapterError> {
+    let Some(opening) = declaration.opening else {
+        return Ok(None);
+    };
+    let mut cursor = work.whitespace(masked, declaration.name_end)?;
+    if cursor == opening {
+        return Ok(Some(Vec::new()));
+    }
+    if masked.get(cursor) != Some(&b'(') {
+        return Ok(None);
+    }
+    cursor += 1;
+    let mut parameters: Vec<Parameter> = Vec::new();
+    loop {
+        work.visit()?;
+        cursor = work.whitespace(masked, cursor)?;
+        if masked.get(cursor) == Some(&b')') {
+            return Ok((work.whitespace(masked, cursor + 1)? == opening).then_some(parameters));
+        }
+        let start = cursor;
+        if masked.get(cursor) != Some(&b'$') {
+            return Ok(None);
+        }
+        let name_start = cursor + 1;
+        let Some(name_end) = work.name_end(masked, name_start)? else {
+            return Ok(None);
+        };
+        if source[name_start..name_end] != masked[name_start..name_end] {
+            return Ok(None);
+        }
+        for previous in &parameters {
+            work.visit()?;
+            if same_mixin_name(
+                &source[previous.name_start..previous.name_end],
+                &source[name_start..name_end],
+                work,
+            )? {
+                return Ok(None);
+            }
+        }
+        cursor = work.whitespace(masked, name_end)?;
+        if masked.get(cursor) == Some(&b':') {
+            cursor += 1;
+            let value_start = work.whitespace(masked, cursor)?;
+            cursor = value_start;
+            while cursor < opening && !matches!(masked[cursor], b',' | b')') {
+                work.visit()?;
+                cursor += 1;
+            }
+            let value = source.get(value_start..cursor).unwrap_or_default();
+            let value = value.trim_ascii();
+            let mut number = value.first().is_some_and(u8::is_ascii_digit)
+                && value.last().is_some_and(u8::is_ascii_digit);
+            let mut dots = 0;
+            for &byte in value {
+                work.visit()?;
+                dots += usize::from(byte == b'.');
+                number &= byte.is_ascii_digit() || byte == b'.';
+            }
+            if !matches!(value, b"true" | b"false" | b"null") && !(number && dots <= 1) {
+                return Ok(None);
+            }
+        }
+        let end = cursor;
+        if parameters.len() >= maximum_parameters {
+            return Err(failure("scss-syntax-node-limit"));
+        }
+        parameters
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        parameters.push(Parameter {
+            owner,
+            start,
+            end,
+            name_start,
+            name_end,
+            depth: declaration.depth + 1,
+        });
+        match masked.get(cursor) {
+            Some(b',') => cursor += 1,
+            Some(b')') => {}
+            _ => return Ok(None),
+        }
+    }
+}
+
+fn empty_include(
+    masked: &[u8],
+    call: MixinCall,
+    work: &mut MixinWork<'_>,
+) -> Result<bool, AdapterError> {
+    let mut cursor = work.whitespace(masked, call.name_end)?;
+    if masked.get(cursor) == Some(&b'(') {
+        cursor += 1;
+        while masked.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            work.visit()?;
+            cursor += 1;
+        }
+        if masked.get(cursor) != Some(&b')') {
+            return Ok(false);
+        }
+        cursor = work.whitespace(masked, cursor + 1)?;
+    }
+    Ok(masked.get(cursor) == Some(&b';'))
+}
+
+fn enrich_mixins(
+    source: &[u8],
+    masked: &[u8],
+    result: &mut ScanResult,
+    max_syntax_nodes: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    let mut work = MixinWork {
+        remaining: max_syntax_nodes
+            .min(2_097_152)
+            .checked_mul(128)
+            .ok_or_else(|| failure("scss-mixin-proof-work-limit"))?,
+        cancellation,
+    };
+    let lexical = complete_lexical_input(source, &mut work)?;
+    for (owner, &declaration) in result.declarations.iter().enumerate() {
+        work.visit()?;
+        if !matches!(
+            declaration.kind,
+            DeclarationKind::Mixin | DeclarationKind::Function
+        ) {
+            continue;
+        }
+        let available_parameters = max_syntax_nodes.saturating_sub(result.fact_count()?) / 3;
+        match lexical
+            .then(|| {
+                simple_parameters(
+                    source,
+                    masked,
+                    owner,
+                    declaration,
+                    available_parameters,
+                    &mut work,
+                )
+            })
+            .transpose()?
+            .flatten()
+        {
+            Some(parameters) => {
+                result
+                    .parameters
+                    .try_reserve(parameters.len())
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                result.parameters.extend(parameters);
+            }
+            None => {
+                result
+                    .parameter_gaps
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                result.parameter_gaps.push(ParameterGap {
+                    owner,
+                    end: declaration.opening.unwrap_or(declaration.end),
+                });
+            }
+        }
+        if result.fact_count()? > max_syntax_nodes {
+            return Err(failure("scss-syntax-node-limit"));
+        }
+    }
+    if !complete_mixin_environment(source, masked, &result.declarations, &mut work)? {
+        return Ok(());
+    }
+    for (call_index, &call) in result.calls.iter().enumerate() {
+        work.visit()?;
+        if work.name_end(masked, call.name_start)? != Some(call.name_end)
+            || !empty_include(masked, call, &mut work)?
+        {
+            continue;
+        }
+        let Some(scope) = call.scope.and_then(|index| result.scopes.get(index)) else {
+            continue;
+        };
+        let Some(owner) = scope.owner else { continue };
+        let caller = result.declarations[owner];
+        if scope.parent.is_some()
+            || caller.scope.is_some()
+            || caller.kind != DeclarationKind::Mixin
+            || caller.opening != Some(scope.start)
+            || caller.end != scope.end
+        {
+            continue;
+        }
+        let mut target = None;
+        let mut candidates = 0;
+        let mut owners = 0;
+        for (index, declaration) in result.declarations.iter().enumerate() {
+            work.visit()?;
+            if declaration.kind != DeclarationKind::Mixin {
+                continue;
+            }
+            if same_mixin_name(
+                &source[declaration.name_start..declaration.name_end],
+                &source[caller.name_start..caller.name_end],
+                &mut work,
+            )? {
+                owners += 1;
+            }
+            if same_mixin_name(
+                &source[declaration.name_start..declaration.name_end],
+                &source[call.name_start..call.name_end],
+                &mut work,
+            )? {
+                candidates += 1;
+                target = Some(index);
+            }
+        }
+        let Some(target) = target.filter(|_| candidates == 1 && owners == 1) else {
+            continue;
+        };
+        let target_declaration = result.declarations[target];
+        let mut unsupported_header = false;
+        for parameter in &result.parameters {
+            work.visit()?;
+            unsupported_header |= parameter.owner == target;
+        }
+        for gap in &result.parameter_gaps {
+            work.visit()?;
+            unsupported_header |= gap.owner == target || gap.owner == owner;
+        }
+        if target_declaration.scope.is_some()
+            || target_declaration.end > caller.start
+            || unsupported_header
+        {
+            continue;
+        }
+        result
+            .proofs
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        result.proofs.push(MixinProof {
+            owner,
+            target,
+            call: call_index,
+        });
+        if result.fact_count()? > max_syntax_nodes {
+            return Err(failure("scss-syntax-node-limit"));
+        }
+    }
+    cancellation.check()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1474,5 +2155,68 @@ mod tests {
             [&b"pulse"[..], &b"fade"[..]]
         );
         assert_eq!(names(DeclarationKind::StyleRule), [&b".actual"[..]]);
+    }
+}
+
+#[cfg(test)]
+mod mixin_proof_tests {
+    use super::*;
+    use rootlight_cancel::CancellationReason;
+
+    #[test]
+    fn original_formal_owner_and_two_call_witnesses_are_source_bound() {
+        let raw = include_bytes!(
+            "../../rootlight-service/src/tests/fixtures/scss/original-rounded-corners-mixin.scss"
+        );
+        let scan = scan_source(raw, 16_384, &Cancellation::new()).unwrap();
+        let formals: Vec<_> = scan
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.name_start == 1280)
+            .collect();
+        assert_eq!(formals.len(), 1);
+        assert_eq!(&raw[formals[0].name_start..formals[0].name_end], b"isDark");
+        let owner = scan.declarations[formals[0].owner];
+        assert_eq!(&raw[owner.name_start..owner.name_end], b"rounded-corners");
+        assert_eq!(scan.proofs.len(), 2);
+        for proof in &scan.proofs {
+            let call = scan.calls[proof.call];
+            assert!(matches!(call.name_start, 1402 | 1768));
+            let target = scan.declarations[proof.target];
+            assert_eq!((target.name_start, target.name_end), (945, 964));
+            assert!(target.end < scan.declarations[proof.owner].start);
+        }
+        assert!(scan.fact_count().unwrap() > 1);
+        assert!(scan.parameter_gaps.is_empty());
+    }
+
+    #[test]
+    fn comparison_work_stops_inside_equal_name_prefixes() {
+        let cancellation = Cancellation::new();
+        let mut work = MixinWork {
+            remaining: 3,
+            cancellation: &cancellation,
+        };
+        assert!(
+            matches!(same_mixin_name(b"long_mixin", b"long-mixin", &mut work),
+            Err(AdapterError::ProviderFailed { code }) if code.as_str() == "scss-mixin-proof-work-limit")
+        );
+    }
+
+    #[test]
+    fn proof_work_observes_cancellation_after_prior_successful_work() {
+        let cancellation = Cancellation::new();
+        let mut work = MixinWork {
+            remaining: 32,
+            cancellation: &cancellation,
+        };
+        assert!(same_mixin_name(b"same", b"same", &mut work).unwrap());
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            work.visit(),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
     }
 }

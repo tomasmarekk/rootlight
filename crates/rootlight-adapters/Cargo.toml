@@ -8,11 +8,12 @@ license.workspace = true
 publish = false
 
 [dependencies]
+flux-source-parser = { path = "../../source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser", version = "=0.1.0" }
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
-rootlight-vfs = { path = "../rootlight-vfs" }
+raffia = { path = "../../source-inputs/producers/raffia-0.13.0/raffia", version = "=0.13.0", default-features = false }
 protobuf.workspace = true
 scip.workspace = true
 serde.workspace = true
@@ -21,6 +22,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 rootlight-adapter-treesitter = { path = "../rootlight-adapter-treesitter" }
+rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 
 [lints]

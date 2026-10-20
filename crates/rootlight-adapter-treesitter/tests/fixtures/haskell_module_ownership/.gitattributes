@@ -1,0 +1,3 @@
+# Preserve original physical source and license bytes for span verification.
+Types.hs -text whitespace=cr-at-eol
+LICENSE -text whitespace=cr-at-eol

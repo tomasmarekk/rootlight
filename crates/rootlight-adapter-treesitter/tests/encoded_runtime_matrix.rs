@@ -34,7 +34,142 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 63] = [
+const CASES: [LanguageCase; 90] = [
+    LanguageCase {
+        name: "written.qs",
+        language: "qsharp",
+        source: "// marker λ😀\r\nnamespace Written { operation Measure(value : Int) : Unit { External(value); } }\r\n",
+    },
+    LanguageCase {
+        name: "written.sml",
+        language: "standard-ml",
+        source: "(* marker λ😀 *)\r\nfun measure value = value;\r\n",
+    },
+    LanguageCase {
+        name: "written.wat",
+        language: "webassembly",
+        source: "(; marker λ😀 ;)\r\n(module $written (func $measure (param $value i32) local.get $value))\r\n",
+    },
+    LanguageCase {
+        name: "written.mojo",
+        language: "mojo",
+        source: "# marker λ😀\r\nstruct Written:\r\n    var value: Int\r\n",
+    },
+    LanguageCase {
+        name: "written.ring",
+        language: "ring",
+        source: "# marker λ😀\r\nclass Written\r\nfunc measure value { consume(value) }\r\n",
+    },
+    LanguageCase {
+        name: "written.ha",
+        language: "hare",
+        source: "// marker λ😀\r\nfn target() void = {};\r\nfn caller() void = { target(); };\r\n",
+    },
+    LanguageCase {
+        name: "written.hx",
+        language: "haxe",
+        source: "// marker λ😀\r\nclass Written { static function measure() { var value = 1; consume(value); } }\r\n",
+    },
+    LanguageCase {
+        name: "measurement.qml",
+        language: "qml",
+        source: "// marker λ😀\r\nimport QtQuick\r\nItem { id: root; property int value: 1; function measure() { return value; } }\r\n",
+    },
+    LanguageCase {
+        name: "measurement.mo",
+        language: "modelica",
+        source: "// marker λ😀\r\nwithin Neutral;\r\nfunction measure\r\n input Real value;\r\n output Real result;\r\nalgorithm\r\n result := value;\r\nend measure;\r\n",
+    },
+    LanguageCase {
+        name: "measurement.schema.json",
+        language: "json-schema",
+        source: r##"{"$schema":"https://json-schema.org/draft/2020-12/schema","description":"marker λ😀","$defs":{"Measurement":{"type":"object","properties":{"value":{"type":"number"}}}},"properties":{"result":{"$ref":"#/$defs/Measurement"}}}"##,
+    },
+    LanguageCase {
+        name: "sample.adb",
+        language: "ada",
+        source: "-- marker \u{03bb}\u{1f600}\r\nprocedure Sample is begin null; end Sample;\r\n",
+    },
+    LanguageCase {
+        name: "source.tf",
+        language: "hcl",
+        source: "# marker \u{03bb}\u{1f600}\r\nwritten = { nested = 1 }\r\n",
+    },
+    LanguageCase {
+        name: "source.d",
+        language: "d",
+        source: "// marker \u{03bb}\u{1f600}\r\nmodule sample; void measure(int value) {}\r\n",
+    },
+    LanguageCase {
+        name: "source.zig",
+        language: "zig",
+        source: "// marker \u{03bb}\u{1f600}\r\npub fn written() void { var value: u8 = 1; _ = &value; }\r\n",
+    },
+    LanguageCase {
+        name: "source.cr",
+        language: "crystal",
+        source: "# marker \u{03bb}\u{1f600}\r\nclass Written\r\n  def value\r\n    1\r\n  end\r\nend\r\n",
+    },
+    LanguageCase {
+        name: "source.cue",
+        language: "cue",
+        source: "// marker \u{03bb}\u{1f600}\r\npackage sample\r\nparent: {child: string}\r\n",
+    },
+    LanguageCase {
+        name: "source.pony",
+        language: "pony",
+        source: "// marker \u{03bb}\u{1f600}\r\nclass Written\r\n  fun ref value(): U32 => 1\r\n",
+    },
+    LanguageCase {
+        name: "source.fish",
+        language: "fish",
+        source: "# marker \u{03bb}\u{1f600}\r\nfunction measure\r\n echo value\r\nend\r\n",
+    },
+    LanguageCase {
+        name: "source.nim",
+        language: "nim",
+        source: "# marker \u{03bb}\u{1f600}\r\nproc measure(value: int): int = value\r\n",
+    },
+    LanguageCase {
+        name: "written.clj",
+        language: "clojure",
+        source: "; marker λ😀\r\n(ns written) (defn measure [value] value)\r\n",
+    },
+    LanguageCase {
+        name: "written.rkt",
+        language: "racket",
+        source: "#lang racket/base\n; marker λ😀\r\n(define (measure value) value)\r\n",
+    },
+    LanguageCase {
+        name: "written.vhdl",
+        language: "vhdl",
+        source: "-- marker λ😀\r\nentity Written is port (Clock : in bit); end Written;\r\n",
+    },
+    LanguageCase {
+        name: "schema.graphql",
+        language: "graphql",
+        source: "type Query { value: String }\n",
+    },
+    LanguageCase {
+        language: "elixir",
+        name: "sample.ex",
+        source: "defmodule Sample do\n def value, do: 1\nend\n",
+    },
+    LanguageCase {
+        name: "schema.proto",
+        language: "protobuf",
+        source: "// marker λ🙂\r\nsyntax = \"proto3\"; message Record { string value = 1; }\r\n",
+    },
+    LanguageCase {
+        name: "schema.thrift",
+        language: "thrift",
+        source: "// λ🙂\r\nstruct Record { 1: string value; }\r\n",
+    },
+    LanguageCase {
+        name: "schema.capnp",
+        language: "capnp",
+        source: "# marker λ😀\r\nstruct Item { value @0 :Text; }\r\n",
+    },
     LanguageCase {
         name: "written.v",
         language: "coq",
@@ -385,6 +520,26 @@ fn every_audited_language_preserves_projected_captures_and_original_encoded_evid
         let control_output = parse(&provider, &control, &budget, case.language, "utf-8");
         assert_raw_report(&control_output, &control, case.language);
         assert_no_encoding_or_limit_diagnostics(&control_output, case.language);
+        if matches!(case.language, "modelica" | "json-schema") {
+            let names: &[&str] = if case.language == "modelica" {
+                &["measure", "value"]
+            } else {
+                &["Measurement", "value", "result"]
+            };
+            for name in names {
+                assert!(
+                    control_output.facts().iter().any(|fact| {
+                        fact.syntax_kind().as_str().ends_with(".definition")
+                            && text.as_bytes().get(
+                                usize::try_from(fact.span().start_byte()).unwrap()
+                                    ..usize::try_from(fact.span().end_byte()).unwrap(),
+                            ) == Some(name.as_bytes())
+                    }),
+                    "{} written definition {name}",
+                    case.language
+                );
+            }
+        }
         assert_eq!(provider.stats().checked_out_parsers, 0);
 
         for encoding in ENCODINGS {

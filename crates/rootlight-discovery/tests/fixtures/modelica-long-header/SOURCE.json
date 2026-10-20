@@ -1,0 +1,7 @@
+{
+  "origin": "https://github.com/thermocycle/Thermocycle-library",
+  "source_path": "ThermoCycle/Components/Units/HeatExchangers/MB_HX/Components/Condenser/Incompressible/Unit/CondDwInc.mo",
+  "source_sha256": "e4e390fdc9f6902248b2e221faee3247cb4d818e3b73e4221636c9ad356be3ba",
+  "license_path": "LICENSE",
+  "license_sha256": "93445e861f4cbfe3ad8006276924bb2db48afc0465c67492c536d78c585c8312"
+}

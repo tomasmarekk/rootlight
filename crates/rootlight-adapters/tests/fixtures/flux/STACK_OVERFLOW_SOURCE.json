@@ -1,0 +1,12 @@
+{
+  "upstream": "https://github.com/influxdata/flux",
+  "revision": "9eb12f7f4702875e79189789cf9b3ac560499c11",
+  "path": "libflux/flux-core/src/parser/tests/stack_overflow.flux",
+  "fixture": {
+    "bytes": 7717,
+    "sha256": "ea9efad2401ca5185c51b4aebbd6f4317292b7c85f3f531495e82d75baa26fa9"
+  },
+  "license": "STACK_OVERFLOW_LICENSE",
+  "license_sha256": "f511b57090a77d51d24614a6a217b9d6c574010d075e4652fcbb6de2a35991c4",
+  "scope": "Unchanged original bytes. Fixture names and paths never select production behavior."
+}

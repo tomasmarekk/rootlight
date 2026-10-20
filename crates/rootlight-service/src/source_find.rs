@@ -32,6 +32,8 @@ impl FirstSliceService {
     ///
     /// Match spans and continuation coverage come from verified source bytes.
     /// No lexical projection, query plan, or inferred total is constructed.
+    /// Explicit source deadlines include generation and backing preparation;
+    /// the implicit snapshot duration applies only to source work itself.
     ///
     /// # Errors
     /// Returns source identity, generation, cancellation, or resource failures.
@@ -42,7 +44,7 @@ impl FirstSliceService {
         file: FileId,
         query: &str,
         cursor: Option<SourceFindCursor>,
-        mut budget: SourceFindBudget,
+        budget: SourceFindBudget,
         cancellation: &Cancellation,
     ) -> Result<SourceFindResult, FirstSliceSourceFindError> {
         let started = Instant::now();
@@ -53,6 +55,19 @@ impl FirstSliceService {
         }
         if query.len() > budget.matcher.max_query_bytes {
             return Err(SourceFindError::Literal(LiteralSearchError::QueryLimit).into());
+        }
+        if let Some(lease) = self.source_only_lease(generation, cancellation)? {
+            let backing = crate::source_generation::SourceBacking {
+                service: self,
+                lease: &lease,
+            };
+            let source =
+                rootlight_source::SourceService::from_source_authority(&backing, &lease.authority)
+                    .map_err(|error| crate::map_source_error(error, cancellation))?;
+            let budget = budget_after_literal_preparation(budget, true, started.elapsed())?;
+            return source
+                .find_literal(file, query, cursor, budget, cancellation)
+                .map_err(FirstSliceSourceFindError::Find);
         }
         let lease = self.generation_lease(generation, cancellation)?;
         let snapshot = lease.generation();
@@ -74,28 +89,38 @@ impl FirstSliceService {
             return Err(SourceFindError::Source(SourceError::SnapshotBudgetExceeded).into());
         }
         check_cancellation(cancellation)?;
-        if source.uses_verified_backing() {
-            budget.source.max_verification_duration = budget
-                .source
-                .max_verification_duration
-                .map(|maximum| remaining_literal_duration(maximum, started.elapsed()))
-                .transpose()?;
-        } else {
-            budget.source.max_duration =
-                remaining_literal_duration(budget.source.max_duration, started.elapsed())?;
-        }
+        let budget = budget_after_literal_preparation(
+            budget,
+            source.uses_verified_backing(),
+            started.elapsed(),
+        )?;
         source
             .find_literal(file.id, query, cursor, budget, cancellation)
             .map_err(FirstSliceSourceFindError::Find)
     }
 }
 
+fn budget_after_literal_preparation(
+    mut budget: SourceFindBudget,
+    verified_backing: bool,
+    elapsed: Duration,
+) -> Result<SourceFindBudget, SourceFindError> {
+    if let Some(maximum) = budget.source.max_verification_duration {
+        let remaining = remaining_literal_duration(maximum, elapsed)?;
+        budget.source.max_verification_duration = Some(remaining);
+        if !verified_backing {
+            budget.source.max_duration = budget.source.max_duration.min(remaining);
+        }
+    }
+    Ok(budget)
+}
+
 fn remaining_literal_duration(
     maximum: Duration,
     elapsed: Duration,
 ) -> Result<Duration, SourceFindError> {
-    // Resolving either source backing belongs to the same source operation.
-    // Starting a fresh timer here would escape the caller's source deadline.
+    // An explicit caller deadline includes both source backings' preparation.
+    // The legacy snapshot default is not a deadline for cold generation restore.
     maximum
         .checked_sub(elapsed)
         .filter(|remaining| !remaining.is_zero())

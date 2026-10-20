@@ -1,6 +1,7 @@
 //! First-party structural parser for static Makefile declarations.
 //! It preserves authored byte spans for variables, targets, and static prerequisites.
-//! Expansion, recipes, directives, and continued headers remain bounded gaps.
+//! Literal recipe variable uses retain their target owner and exact name span.
+//! Expansion, shell execution, directives, and continued headers remain bounded gaps.
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DescriptorError, DiagnosticCode,
@@ -157,6 +158,19 @@ impl ParseProvider for MakeParseProvider {
                     .checked_add(1)
                     .ok_or_else(|| failure("make-syntax-node-limit"))?;
             }
+            for reference in &declaration.recipe_variables {
+                facts.push(SyntaxFact::new(
+                    next_id,
+                    Some(declaration_id),
+                    SyntaxFactKind::Occurrence,
+                    source_span(file, reference.start, reference.end)?,
+                    2,
+                    label("make.variable.reference"),
+                ));
+                next_id = next_id
+                    .checked_add(1)
+                    .ok_or_else(|| failure("make-syntax-node-limit"))?;
+            }
         }
         for batch in facts.chunks(32) {
             cancellation.check()?;
@@ -213,7 +227,7 @@ impl ParseProvider for MakeParseProvider {
         let reference_count: usize = parsed
             .declarations
             .iter()
-            .map(|declaration| declaration.prerequisites.len())
+            .map(|declaration| declaration.prerequisites.len() + declaration.recipe_variables.len())
             .sum();
         let coverage = CoverageReport::new(
             AnalysisTier::TierD,
@@ -321,6 +335,7 @@ struct Declaration {
     name_end: usize,
     line_end: usize,
     prerequisites: Vec<Reference>,
+    recipe_variables: Vec<Reference>,
 }
 
 struct ParsedSource {
@@ -329,6 +344,7 @@ struct ParsedSource {
     fact_count: usize,
     gaps: Vec<Gap>,
     last_gap_end: usize,
+    recipe_owner: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -404,6 +420,7 @@ fn scan_source(
         fact_count: 1,
         gaps: Vec::new(),
         last_gap_end: 0,
+        recipe_owner: None,
     };
     let mut line_start = 0;
     let mut continued = false;
@@ -420,6 +437,7 @@ fn scan_source(
                 &mut define_depth,
                 &mut parsed,
                 max_syntax_nodes,
+                cancellation,
             )?;
             line_start = index + 1;
         }
@@ -432,6 +450,7 @@ fn scan_source(
             &mut define_depth,
             &mut parsed,
             max_syntax_nodes,
+            cancellation,
         )?;
     }
     cancellation.check()?;
@@ -445,6 +464,7 @@ fn scan_line(
     define_depth: &mut usize,
     parsed: &mut ParsedSource,
     max_syntax_nodes: usize,
+    cancellation: &Cancellation,
 ) -> Result<(), AdapterError> {
     let raw_line_end = offset
         .checked_add(line.len())
@@ -459,6 +479,7 @@ fn scan_line(
         return Ok(());
     }
     if *define_depth > 0 {
+        parsed.recipe_owner = None;
         record_gap(parsed, offset, raw_line_end, GapKind::DefineBlock);
         if trimmed == b"endef" {
             *define_depth -= 1;
@@ -470,13 +491,35 @@ fn scan_line(
         return Ok(());
     }
     if previous_continued || *continued {
+        parsed.recipe_owner = None;
         record_gap(parsed, offset, raw_line_end, GapKind::ContinuedHeader);
         return Ok(());
     }
     if line.first() == Some(&b'\t') {
         record_gap(parsed, offset, raw_line_end, GapKind::Recipe);
+        if let Some(owner) = parsed.recipe_owner {
+            let references = recipe_variable_references(
+                line,
+                offset,
+                max_syntax_nodes.saturating_sub(parsed.fact_count),
+                cancellation,
+            )?;
+            parsed.fact_count = parsed
+                .fact_count
+                .checked_add(references.len())
+                .filter(|count| *count <= max_syntax_nodes)
+                .ok_or_else(|| failure("make-syntax-node-limit"))?;
+            let declaration = &mut parsed.declarations[owner];
+            declaration
+                .recipe_variables
+                .try_reserve_exact(references.len())
+                .map_err(|_| SinkError::AllocationFailed)?;
+            declaration.recipe_variables.extend(references);
+            declaration.line_end = raw_line_end;
+        }
         return Ok(());
     }
+    parsed.recipe_owner = None;
     if trimmed.starts_with(b"define ") || trimmed.starts_with(b"define\t") {
         *define_depth = 1;
         record_gap(parsed, offset, raw_line_end, GapKind::DefineBlock);
@@ -498,6 +541,7 @@ fn scan_line(
                 name_end: start + name_end,
                 line_end,
                 prerequisites: Vec::new(),
+                recipe_variables: Vec::new(),
             },
             max_syntax_nodes,
         )?;
@@ -605,9 +649,21 @@ fn scan_line(
                         name_end,
                         line_end,
                         prerequisites: references,
+                        recipe_variables: Vec::new(),
                     },
                     max_syntax_nodes,
                 )?;
+            }
+            if single_target && variable_name(prerequisite_text.trim_ascii_start()).is_none() {
+                parsed.recipe_owner = Some(parsed.declarations.len() - 1);
+            }
+            if prerequisite_end < prerequisite_text.len() {
+                record_gap(
+                    parsed,
+                    start + prerequisite_start + prerequisite_end,
+                    line_end,
+                    GapKind::Recipe,
+                );
             }
             if !single_target && !prerequisites.tokens.is_empty() {
                 record_gap(
@@ -643,7 +699,7 @@ fn push_declaration(
 ) -> Result<(), AdapterError> {
     let next_count = parsed
         .fact_count
-        .checked_add(2 + declaration.prerequisites.len())
+        .checked_add(2 + declaration.prerequisites.len() + declaration.recipe_variables.len())
         .filter(|count| *count <= max_syntax_nodes)
         .ok_or_else(|| failure("make-syntax-node-limit"))?;
     debug_assert!(next_count > 1);
@@ -654,6 +710,77 @@ fn push_declaration(
     parsed.declarations.push(declaration);
     parsed.fact_count = next_count;
     Ok(())
+}
+
+// A written reference is independent of the recipe's shell or expanded value.
+// Unsupported/computed expansions remain inside the retained whole-recipe gap.
+fn recipe_variable_references(
+    line: &[u8],
+    offset: usize,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<Vec<Reference>, AdapterError> {
+    let mut references = Vec::new();
+    let mut index = 0;
+    while index < line.len() {
+        if index % CHECK_INTERVAL == 0 {
+            cancellation.check()?;
+        }
+        if line[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        if line.get(index + 1) == Some(&b'$') {
+            index += 2;
+            continue;
+        }
+        if !matches!(line.get(index + 1), Some(b'(' | b'{')) {
+            index += 1;
+            continue;
+        }
+        let start = index + 2;
+        let closing = if line[index + 1] == b'(' { b')' } else { b'}' };
+        let mut end = start;
+        let mut depth = 1_usize;
+        while end < line.len() {
+            if end % CHECK_INTERVAL == 0 {
+                cancellation.check()?;
+            }
+            match line[end] {
+                b'(' | b'{' => {
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or_else(|| failure("make-expansion-depth-limit"))?
+                }
+                b')' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if end == line.len() {
+            break;
+        }
+        if line[end] == closing && valid_static_name(&line[start..end]) {
+            if references.len() >= maximum {
+                return Err(failure("make-syntax-node-limit"));
+            }
+            references
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            references.push(Reference {
+                start: offset + start,
+                end: offset + end,
+            });
+        }
+        index = end + 1;
+    }
+    cancellation.check()?;
+    Ok(references)
 }
 
 fn variable_name(line: &[u8]) -> Option<(usize, usize)> {
@@ -950,6 +1077,64 @@ mod tests {
             assert!(kind.code().len() <= MAX_GAP_CODE_BYTES);
         }
         assert!("make-gap-diagnostic-limit".len() <= MAX_GAP_CODE_BYTES);
+    }
+
+    #[test]
+    fn literal_recipe_variables_retain_exact_owner_spans_and_gap() {
+        let source = b"FRONTEND := frontend\nbuild: static $(STAMP)\n\tnpm --prefix $(FRONTEND) run ${FRONTEND}\nnext:\n\t@echo $$(FRONTEND) $(PREFIX_$(KEY)) $(shell echo BAD)\n";
+        let parsed = scan_source(source, 32, &Cancellation::new()).unwrap();
+        let target = &parsed.declarations[1];
+        let references: Vec<_> = target
+            .recipe_variables
+            .iter()
+            .map(|site| &source[site.start..site.end])
+            .collect();
+        assert_eq!(references, [b"FRONTEND".as_slice(), b"FRONTEND"]);
+        assert_eq!(&source[target.name_start..target.name_end], b"build");
+        assert_eq!(source[target.line_end], b'\n');
+        assert!(parsed.declarations[2].recipe_variables.is_empty());
+        assert!(
+            parsed
+                .gaps
+                .iter()
+                .any(|gap| gap.kind.code() == "make-recipe-not-analyzed")
+        );
+        assert_eq!(syntax_fact_count(&parsed), 10);
+        assert!(scan_source(source, 9, &Cancellation::new()).is_err());
+    }
+
+    #[test]
+    fn ambiguous_dynamic_and_target_specific_headers_cannot_own_recipe_uses() {
+        for source in [
+            b"APP := app\nfirst second:\n\t@echo $(APP)\n".as_slice(),
+            b"APP := app\n$(TARGET):\n\t@echo $(APP)\n",
+            b"APP := app\nfirst: APP := override\n\t@echo $(APP)\n",
+            b"APP := app\nfirst: \\\n continued\n\t@echo $(APP)\n",
+        ] {
+            let parsed = scan_source(source, 32, &Cancellation::new()).unwrap();
+            assert!(
+                parsed
+                    .declarations
+                    .iter()
+                    .all(|row| row.recipe_variables.is_empty())
+            );
+            assert!(parsed.skipped_regions > 0);
+        }
+    }
+
+    #[test]
+    fn literal_recipe_scan_observes_cancellation_and_exact_quota() {
+        let cancellation = Cancellation::new();
+        let line = b"\t@echo $(FIRST) ${SECOND}";
+        assert_eq!(
+            recipe_variable_references(line, 0, 2, &cancellation)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(recipe_variable_references(line, 0, 1, &cancellation).is_err());
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(recipe_variable_references(line, 0, 2, &cancellation).is_err());
     }
 
     #[test]

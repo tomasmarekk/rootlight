@@ -10,6 +10,9 @@ use tree_sitter::Node;
 
 use super::{QueryCandidate, StructuralRole, native_depth, query_failure};
 
+#[path = "apex_calls.rs"]
+mod calls;
+
 #[derive(Clone)]
 struct OwnerProof {
     extent: Range<usize>,
@@ -40,6 +43,7 @@ struct BindingProof {
 pub(super) struct CaptureCache {
     owners: HashMap<usize, Option<OwnerProof>>,
     formals: HashMap<usize, Option<FormalProof>>,
+    calls: HashMap<usize, Option<calls::CallKind>>,
     maximum_entries: usize,
     remaining_body_nodes: usize,
     exhausted: bool,
@@ -51,6 +55,7 @@ impl CaptureCache {
         Self {
             owners: HashMap::new(),
             formals: HashMap::new(),
+            calls: HashMap::new(),
             maximum_entries,
             remaining_body_nodes: maximum_body_nodes,
             exhausted: false,
@@ -60,6 +65,13 @@ impl CaptureCache {
     /// Reports a bound that the caller must propagate as a capture limit.
     pub(super) const fn exhausted(&self) -> bool {
         self.exhausted
+    }
+
+    fn entries(&self) -> usize {
+        self.owners
+            .len()
+            .saturating_add(self.formals.len())
+            .saturating_add(self.calls.len())
     }
 
     fn owner(
@@ -72,7 +84,7 @@ impl CaptureCache {
         if let Some(proof) = self.owners.get(&node.id()) {
             return Ok(proof.clone());
         }
-        if self.owners.len().saturating_add(self.formals.len()) >= self.maximum_entries {
+        if self.entries() >= self.maximum_entries {
             self.exhausted = true;
             return Ok(None);
         }
@@ -184,14 +196,12 @@ impl CaptureCache {
             ancestor = parent.parent();
         };
         if !self.formals.contains_key(&owner.id()) {
-            if self.owners.len().saturating_add(self.formals.len()) >= self.maximum_entries {
+            if self.entries() >= self.maximum_entries {
                 self.exhausted = true;
                 return Ok(None);
             }
             let proof = self.formal_proof(owner, source, cancellation)?;
-            if self.exhausted
-                || self.owners.len().saturating_add(self.formals.len()) >= self.maximum_entries
-            {
+            if self.exhausted || self.entries() >= self.maximum_entries {
                 self.exhausted = true;
                 return Ok(None);
             }
@@ -815,6 +825,12 @@ pub(super) fn retain_capture(
         return Ok(owner_kind(node) && cache.owner(node, source, cancellation)?.is_some());
     }
     if role == StructuralRole::Reference {
+        if let Some(invocation) = node.parent().filter(|parent| {
+            parent.kind() == "method_invocation" && field(*parent, "name") == Some(node)
+        }) && calls::classify(invocation, source, cancellation, cache)?.is_some()
+        {
+            return Ok(false);
+        }
         return Ok(written_name(node, source) && !nonlexical_identifier(node, cancellation)?);
     }
     Ok(clean(node, source))
@@ -832,15 +848,28 @@ pub(super) fn candidate(
     cache: &mut CaptureCache,
 ) -> Result<QueryCandidate, AdapterError> {
     cancellation.check()?;
-    if matches!(
-        role,
-        StructuralRole::Call | StructuralRole::CallName | StructuralRole::ScopedCall
-    ) {
+    if matches!(role, StructuralRole::ScopedCall) {
         return Err(query_failure("query-apex-unproven-call"));
     }
     let mut depth_node = node;
     let mut range = node.byte_range();
-    let syntax = if node.kind() == "parser_output" {
+    let syntax = if role == StructuralRole::Call {
+        match calls::classify(node, source, cancellation, cache)? {
+            Some(calls::CallKind::Private) => "apex.private_instance_call",
+            Some(calls::CallKind::Virtual) => "apex.virtual_instance_call",
+            None => "apex.unproven_call",
+        }
+    } else if role == StructuralRole::CallName {
+        let Some(invocation) = node.parent().filter(|parent| {
+            parent.kind() == "method_invocation" && field(*parent, "name") == Some(node)
+        }) else {
+            return Err(query_failure("query-apex-call-name"));
+        };
+        if !clean(invocation, source) || !written_name(node, source) {
+            return Err(query_failure("query-apex-call-name"));
+        }
+        "apex.method_name"
+    } else if node.kind() == "parser_output" {
         range = 0..source.len();
         "apex.file"
     } else if role == StructuralRole::Expression {
@@ -874,7 +903,11 @@ pub(super) fn candidate(
                 {
                     "apex.shared_local_header"
                 }
-                "method_invocation" => "apex.application",
+                "method_invocation" => match calls::classify(node, source, cancellation, cache)? {
+                    Some(calls::CallKind::Private) => "apex.private_application",
+                    Some(calls::CallKind::Virtual) => "apex.virtual_application",
+                    None => "apex.application",
+                },
                 "field_access" => "apex.member_access",
                 "annotation" => "apex.annotation_semantics",
                 _ => "apex.body_semantics",

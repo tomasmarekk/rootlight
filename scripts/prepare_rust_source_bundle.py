@@ -40,7 +40,8 @@ from verify_local_npm_sources import (
 )
 
 
-LOCK_PATHS = ("Cargo.lock", "tests/native-grammars/Cargo.lock", "fuzz/Cargo.lock")
+LOCK_PATHS = ("Cargo.lock", "tests/native-grammars/Cargo.lock", "fuzz/Cargo.lock",
+              "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.lock")
 MANIFEST_PATH = "rust-source-bundle.json"
 VENDOR_PATH = "source-inputs/cargo"
 ARCHIVES_PATH = "source-inputs/crates"

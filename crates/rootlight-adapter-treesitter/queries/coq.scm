@@ -2,6 +2,8 @@
 [(source_file) (ERROR)] @root @module
 (source_file) @signature
 (ident_decl) @declaration @definition @signature
+(binder (ident) @declaration @definition)
+(notation_declaration) @signature
 [(inductive_definition) (constructor) (module_command) (module_type_command)] @declaration @definition @signature
 [(reference) (ident) (dotted_qualid)] @reference
 (comment) @comment

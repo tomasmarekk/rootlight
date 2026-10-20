@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/arthelokyo/astrowind",
+  "revision": "62e877519fd27f0c8aba73db18d59d334910fadc",
+  "source_path": "src/components/blog/Grid.astro",
+  "fixture_path": "Grid.astro",
+  "bytes": 319,
+  "sha256": "ba0617d5c690a6968d6216bdfec9b5f30f7968a0064f45deefafaf5240233af9",
+  "license": {
+    "upstream_path": "LICENSE.md",
+    "retained_path": "ASTROWIND-LICENSE.md",
+    "bytes": 1086,
+    "sha256": "2a104fdd82685c8a6f8e74e434e592808ae32bbbda3d81044f4fe5380a0db088"
+  },
+  "source_scope": "Complete original physical bytes; no reformatting or reduced reproducer."
+}

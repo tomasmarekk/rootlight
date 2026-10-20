@@ -653,3 +653,285 @@ fn sql_tsql_unclosed_branch_cannot_publish_its_recovered_child_declarations() {
         CoverageStatus::Complete
     );
 }
+
+#[test]
+fn sql_full_original_command_execute_preserves_header_formals_and_exact_ownership() {
+    const ORIGINAL: &str = include_str!("../fixtures/tsql_full_original/CommandExecute.sql");
+    assert_eq!(ORIGINAL.len(), 12_267);
+    assert_eq!(&ORIGINAL.as_bytes()[295..317], b"[dbo].[CommandExecute]");
+    assert_eq!(&ORIGINAL.as_bytes()[321..337], b"@DatabaseContext");
+    assert_eq!(&ORIGINAL.as_bytes()[354..362], b"@Command");
+    let result = output(ORIGINAL);
+    let document = result.document();
+    assert_eq!(document.files.len(), 1);
+    assert_eq!(document.files[0].byte_length, 12_267);
+    assert_eq!(
+        document.files[0].content_hash,
+        content_hash(ORIGINAL.as_bytes())
+    );
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    let declared = |name: &str, kind: EntityKind, start: u64, end: u64| {
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1, "exact original {name} {start}..{end}");
+        let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+            panic!("authored Definition must resolve to its own entity");
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(entity.canonical_name, name);
+        assert_eq!(entity.kind, kind);
+        assert_eq!(entity.language, "sql");
+        assert_eq!(
+            definitions[0].source.content_hash(),
+            content_hash(ORIGINAL.as_bytes())
+        );
+        assert_eq!(definitions[0].source.repository(), document.repository);
+        assert_eq!(definitions[0].source.generation(), document.generation);
+        symbol
+    };
+    let procedure = declared("[dbo].[CommandExecute]", EntityKind::Function, 295, 317);
+    let context = declared("@DatabaseContext", EntityKind::Parameter, 321, 337);
+    let command = declared("@Command", EntityKind::Parameter, 354, 362);
+    for symbol in [context, command] {
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(
+            entity.container,
+            Some(rootlight_ir::ContainerRef::Entity(procedure))
+        );
+    }
+    let edges: Vec<_> = document
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.predicate == RelationPredicate::Contains
+                && edge.subject == RelationEndpoint::Entity(procedure)
+                && edge.object == RelationEndpoint::Entity(command)
+        })
+        .collect();
+    assert_eq!(edges.len(), 1);
+    let source = edges[0].evidence.source.as_ref().unwrap();
+    assert_eq!(source.content_hash(), content_hash(ORIGINAL.as_bytes()));
+    assert_eq!(source.repository(), document.repository);
+    assert_eq!(source.generation(), document.generation);
+    assert_eq!(source.span().file(), document.files[0].id);
+    assert!(source.span().start_byte() <= 354 && source.span().end_byte() >= 362);
+    assert!(
+        !document.occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.source.span().start_byte() == 242
+                && site.source.span().end_byte() == 264
+        }),
+        "quoted dynamic CREATE is not a declaration"
+    );
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.domain == FactDomain::Relations)
+    );
+}
+
+#[test]
+fn sql_recovered_original_body_keeps_only_clean_header_definitions_and_exact_gaps() {
+    const ORIGINAL: &str = include_str!("../fixtures/tsql_full_original/CommandExecute.sql");
+    let result = output(ORIGINAL);
+    let document = result.document();
+    let owner = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "[dbo].[CommandExecute]")
+        .unwrap();
+    let source = owner.evidence.source.as_ref().unwrap();
+    assert_eq!(source.span().start_byte(), 279);
+    assert_eq!(
+        source.span().end_byte(),
+        961,
+        "only the independently clean header is a declaration extent"
+    );
+    for name in ["@DatabaseContext", "@Command"] {
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(parameter.kind, EntityKind::Parameter);
+        assert_eq!(
+            parameter.container,
+            Some(rootlight_ir::ContainerRef::Entity(owner.id))
+        );
+    }
+    assert!(
+        !document
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Variable),
+        "recovered body locals remain withheld"
+    );
+    let gaps: Vec<_> = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "sql-recovered-routine-body-analysis-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 3);
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        let gap = gaps.iter().find(|gap| gap.domain == domain).unwrap();
+        assert_eq!(gap.source.span().start_byte(), 965);
+        assert_eq!(gap.source.span().end_byte(), 10_780);
+        assert_eq!(gap.source.content_hash(), content_hash(ORIGINAL.as_bytes()));
+        assert_eq!(gap.source.repository(), document.repository);
+        assert_eq!(gap.source.generation(), document.generation);
+        assert_eq!(
+            gap.reason,
+            rootlight_ir::SkippedRegionReason::UnsupportedConstruct
+        );
+    }
+    assert!(
+        !document.diagnostics.is_empty(),
+        "native syntax recovery is not suppressed"
+    );
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+}
+
+#[test]
+fn sql_recovered_clean_header_does_not_steal_a_complete_sibling_or_missing_as() {
+    const ORIGINAL: &str = include_str!("../fixtures/tsql_full_original/CommandExecute.sql");
+    let source = format!(
+        "{ORIGINAL}\nCREATE PROC [work].[Sibling] @Kept int AS BEGIN DECLARE @Owned int; SELECT @Kept; END;\n"
+    );
+    let result = output(&source);
+    let document = result.document();
+    let recovered = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "[dbo].[CommandExecute]")
+        .unwrap();
+    let sibling = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "[work].[Sibling]")
+        .unwrap();
+    assert_ne!(recovered.id, sibling.id);
+    for name in ["@Kept", "@Owned"] {
+        let child = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(
+            child.container,
+            Some(rootlight_ir::ContainerRef::Entity(sibling.id))
+        );
+        assert!(
+            child.evidence.source.as_ref().unwrap().span().start_byte() >= ORIGINAL.len() as u64
+        );
+    }
+    for source in [
+        "CREATE PROC [work].[MissingAs] @Input int BEGIN RAISERROR('x',10,1); END;",
+        "CREATE PROC [work].[NoBody] @Input int AS",
+        "CREATE PROC [work].[BadType] @Input AS BEGIN RAISERROR('x',10,1); END;",
+    ] {
+        let result = output(source);
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| matches!(entity.kind, EntityKind::Function | EntityKind::Parameter)),
+            "incomplete native header/as/body cannot invent an identity"
+        );
+    }
+}
+
+#[test]
+fn sql_recovered_header_metadata_preserves_required_capture_quota_and_cancellation() {
+    const ORIGINAL: &str = include_str!("../fixtures/tsql_full_original/CommandExecute.sql");
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, SQL);
+    let fixture = Fixture::new(SQL, ORIGINAL.as_bytes());
+    let full_limits = limits();
+    let initial = request(&fixture.snapshot, &fixture.source, SQL, &full_limits);
+    let (_, artifact) = analyzer
+        .analyze_and_capture(
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let required = artifact.required_syntax_fact_count(&deadline()).unwrap();
+    assert!(required > 1);
+    assert_eq!(
+        required,
+        provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .unwrap()
+    );
+    let exact_limits = limits_with_syntax_records(required);
+    let exact = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, SQL, &exact_limits),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(
+        exact
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "sql-recovered-routine-body-analysis-unavailable")
+            .count(),
+        3,
+        "required metadata survives with no optional capture room"
+    );
+    let too_small = limits_with_syntax_records(required - 1);
+    assert!(matches!(
+        execute_analysis(
+            &analyzer,
+            &request(&fixture.snapshot, &fixture.source, SQL, &too_small),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline()
+        ),
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            observed,
+            limit,
+        })) if observed == required && limit == required - 1
+    ));
+    let cancel = Cancellation::new();
+    assert!(cancel.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+    assert!(matches!(
+        execute_analysis(
+            &analyzer,
+            &initial,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancel
+        ),
+        Err(AdapterError::Cancelled { .. })
+    ));
+}

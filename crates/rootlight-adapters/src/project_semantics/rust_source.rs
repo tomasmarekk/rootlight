@@ -1,13 +1,14 @@
 //! Text access for physical Rust project syntax facts.
-//! UTF-16 decoding reuses the validated VFS view; only captured endpoints are
+//! UTF-16 decoding reuses the shared validated view; only captured endpoints are
 //! projected, while committed source references keep original encoded bytes.
 
 use std::{borrow::Cow, mem::size_of};
 
-use rootlight_adapter_sdk::{AdapterError, AnalysisLimits, ResourceKind, SinkError, SyntaxFact};
+use rootlight_adapter_sdk::{
+    AdapterError, AnalysisLimits, ResourceKind, SinkError, SourceText, SyntaxFact,
+};
 use rootlight_cancel::Cancellation;
 use rootlight_ir::SourceSpan;
-use rootlight_vfs::SourceText;
 
 pub(super) struct RustSourceText<'a> {
     text: Cow<'a, str>,

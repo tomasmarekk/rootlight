@@ -116,6 +116,9 @@ mod source_metadata_quote_tests;
 #[path = "source_find_tests.rs"]
 mod source_find_tests;
 
+#[path = "projection_budget_tests.rs"]
+mod projection_budget_tests;
+
 type CodeLocateOutput = ToolResponse<ReadEnvelope<CodeLocateData>>;
 type SourceReadOutput = ToolResponse<ReadEnvelope<SourceReadData>>;
 
@@ -155,6 +158,7 @@ enum FakeOutcome {
     CodeLocateSequence(Arc<Mutex<VecDeque<Result<CodeLocatePortResponse, ClientPortError>>>>),
     PendingCodeLocate,
     SymbolExplain(Result<SymbolExplainPortResponse, ClientPortError>),
+    MeasuredSymbolExplain(SymbolExplainPortResponse),
     SymbolExplainPerRequest(Result<SymbolExplainPortResponse, ClientPortError>),
     SourceRead(Result<SourceReadPortResponse, ClientPortError>),
     SourceFindSequence(Arc<Mutex<VecDeque<Result<client::SourceFindResult, ClientPortError>>>>),
@@ -654,11 +658,23 @@ impl FirstSliceClientPort for FakePort {
         _cancellation: RequestCancellation,
     ) -> ClientPortFuture<SymbolExplainPortResponse> {
         let requested_symbols = request.symbols().to_vec();
+        let effective_budget = options.effective_budget().map(|budget| budget.limits());
         self.record(ObservedCall::SymbolExplain(ObservedAnalyticCall::new(
             request, options,
         )));
         let outcome = match &self.outcome {
             FakeOutcome::SymbolExplain(outcome) => outcome.clone(),
+            FakeOutcome::MeasuredSymbolExplain(response) => {
+                let bytes = u64::try_from(serde_json::to_vec(&response.result).unwrap().len())
+                    .expect("bounded fixture size fits u64");
+                if effective_budget.is_some_and(|budget| bytes > budget.estimated_tokens) {
+                    Err(ClientPortError::Public(Box::new(authoritative_error(
+                        MappedDomainFailure::budget_exceeded(),
+                    ))))
+                } else {
+                    Ok(response.clone())
+                }
+            }
             FakeOutcome::ContextPendingExplanation {
                 started, dropped, ..
             } => {
@@ -765,6 +781,7 @@ impl FirstSliceClientPort for FakePort {
             }
             Ok(SourceReadLosslessPortResponse::new(
                 client::SourceTextReadResult {
+                    source_recovery: legacy.result.source_recovery,
                     context: legacy.result.context,
                     chunks,
                     total_source_bytes: legacy.result.total_source_bytes,
@@ -3909,6 +3926,7 @@ fn lossless_source_mapping_keeps_physical_refs_and_independent_unicode_totals() 
     ] {
         let response = SourceReadLosslessPortResponse::new(
             client::SourceTextReadResult {
+                source_recovery: None,
                 context: context(1, 12),
                 chunks: vec![client::SourceTextChunk {
                     extracted_from: None,
@@ -3974,6 +3992,7 @@ fn source_read_response(source: client::SourceReference) -> SourceReadPortRespon
     assert_eq!(source.byte_range(), 4..12);
     SourceReadPortResponse::new(
         client::SourceRead {
+            source_recovery: None,
             conditional_activity: Vec::new(),
             context: context(1, 8),
             chunks: vec![ClientSourceChunk {
@@ -4131,6 +4150,35 @@ async fn maps_repository_index_without_replacing_stable_identities() {
 }
 
 #[test]
+fn repository_index_defaults_to_durable_work_with_independent_response_waiting() {
+    for (detached, wait_ms, expected) in [
+        (None, None, true),
+        (None, Some(0), true),
+        (None, Some(30_000), true),
+        (Some(true), None, true),
+        (Some(false), None, false),
+        (Some(false), Some(30_000), false),
+    ] {
+        let mut arguments = json!({"root": "C:/fixture"});
+        if let Some(detached) = detached {
+            arguments["detached"] = json!(detached);
+        }
+        if let Some(wait_ms) = wait_ms {
+            arguments["wait_ms"] = json!(wait_ms);
+        }
+        let request = normalize_repository_index(
+            decode_arguments(arguments),
+            &normalization_error(),
+            &normalization_error(),
+        )
+        .expect("index lifetime and response waiting normalize independently");
+        assert_eq!(request.detached(), expected);
+        assert_eq!(request.wait_ms(), wait_ms);
+        assert_eq!(request.mode(), IndexMode::Auto);
+    }
+}
+
+#[test]
 fn repository_detached_contract_matches_runtime_normalization() {
     let schema: Value = serde_json::from_str(VerticalTool::RepoIndex.input_schema_json())
         .expect("repository-index schema is valid JSON");
@@ -4140,6 +4188,8 @@ fn repository_detached_contract_matches_runtime_normalization() {
         .expect("detached schema documentation is present");
     assert!(description.contains("durable operation"));
     assert!(description.contains("recoverable after daemon restart"));
+    assert!(description.contains("Defaults to `true`"));
+    assert!(description.contains("explicit `false`"));
 
     let capability = capability_for(McpTool::RepoIndex);
     assert_eq!(
@@ -7721,6 +7771,7 @@ fn first_stage_source_fixture(
     explanation.result.context.usage.results = 1;
     let source = SourceReadLosslessPortResponse::new(
         client::SourceTextReadResult {
+            source_recovery: None,
             context: context(1, 10),
             chunks: vec![client::SourceTextChunk {
                 extracted_from: None,
@@ -11932,6 +11983,7 @@ async fn maps_expanded_source_range_as_the_returned_verified_reference() {
     let requested = source_reference(5, 10, 2, 2);
     let response = SourceReadPortResponse::new(
         client::SourceRead {
+            source_recovery: None,
             conditional_activity: Vec::new(),
             context: context(1, 15),
             chunks: vec![ClientSourceChunk {
@@ -12120,6 +12172,7 @@ async fn maps_exact_binary_source_as_canonical_base64_without_line_metadata() {
     let requested = source_reference(4, 6, 2, 2);
     let response = SourceReadPortResponse::new(
         client::SourceRead {
+            source_recovery: None,
             conditional_activity: Vec::new(),
             context: context(1, 2),
             chunks: vec![ClientSourceChunk {
@@ -15971,7 +16024,7 @@ fn default_equivalent_cases() -> Vec<DefaultEquivalentCase> {
         (
             VerticalTool::RepoIndex,
             json!({"root": "C:/fixture"}),
-            &[("detached", json!(false))][..],
+            &[("detached", json!(true))][..],
         ),
         (
             VerticalTool::RepoStatus,
@@ -17021,4 +17074,97 @@ async fn accepted_effect_query_batch_failure_policy_changes_scheduling() {
         panic!("batch identity resolution is the first daemon call");
     };
     assert_eq!(identity.repository(), alternate_repository());
+}
+
+fn aggregate_client_recovery(file: FileId) -> client::SourceReadRecovery {
+    client::SourceReadRecovery {
+        cause: rootlight_ir::AggregateSourceRecovery {
+            source_inventory: ContentHash::from_bytes([9; 32]),
+            members: 10,
+            derived_members: 1,
+            stage: rootlight_ir::AggregateCapacityStage::StructuralAppend,
+            resource: rootlight_ir::AggregateCapacityResource::Entities,
+            observed: 11,
+            limit: 10,
+            text_snapshot_bytes: 8192,
+        },
+        files: vec![client::SourceRecoveryFile {
+            file,
+            text_search: client::SourceTextSearchCoverage::WholeSourceProjection,
+        }],
+    }
+}
+
+#[test]
+fn aggregate_recovery_analysis_claims_stay_unknown_and_tier_d() {
+    let recovery = aggregate_client_recovery(FileId::from_bytes([5; 20]));
+    let mut value = context(1, 0);
+    value.tier = client::AnalysisTier::TierD;
+    value.coverage_status = client::CoverageStatus::Unknown;
+    assert!(
+        source_recovery::validate_analysis(
+            Some(&recovery),
+            &value,
+            [client::AnalysisTier::TierD].into_iter()
+        )
+        .is_ok()
+    );
+    for mutation in 0..3 {
+        let mut invalid = value.clone();
+        let mut tier = client::AnalysisTier::TierD;
+        match mutation {
+            0 => invalid.tier = client::AnalysisTier::TierC,
+            1 => invalid.coverage_status = client::CoverageStatus::Complete,
+            _ => tier = client::AnalysisTier::TierC,
+        }
+        assert!(
+            source_recovery::validate_analysis(Some(&recovery), &invalid, [tier].into_iter())
+                .is_err()
+        );
+    }
+    let ordinary = context(1, 0);
+    assert!(
+        source_recovery::validate_analysis(None, &ordinary, [ordinary.tier].into_iter()).is_ok()
+    );
+}
+
+#[test]
+fn aggregate_recovery_attachment_checks_the_actual_mapped_chunk_files() {
+    let source = source_reference(4, 12, 2, 2);
+    let source_ref = client_source_ref(&source).unwrap();
+    let mut output = Map::from_iter([(
+        "data".into(),
+        serde_json::json!({
+            "chunks": [{"source_ref": source_ref, "content": "xxxxxxxx"}],
+        }),
+    )]);
+    let original_chunk = output["data"]["chunks"].clone();
+    source_recovery::attach(&mut output, Some(aggregate_client_recovery(source.file()))).unwrap();
+    assert_eq!(output["data"]["chunks"], original_chunk);
+    assert!(output["data"].get("source_recovery").is_some());
+    let mut invalid = aggregate_client_recovery(FileId::from_bytes([8; 20]));
+    assert!(source_recovery::attach(&mut output, Some(invalid.clone())).is_err());
+    invalid.files = vec![
+        client::SourceRecoveryFile {
+            file: source.file(),
+            text_search: client::SourceTextSearchCoverage::MetadataOnlyCaptured,
+        };
+        2
+    ];
+    assert!(source_recovery::attach(&mut output, Some(invalid)).is_err());
+}
+
+#[test]
+fn aggregate_recovery_retained_batch_error_selects_standalone_version() {
+    let error = source_recovery::retained_contract_error();
+    let error = error.public_error().unwrap();
+    assert_eq!(error.code(), ErrorCode::ProtocolMismatch);
+    assert_eq!(error.message(), "tool contract version is unsupported");
+    assert_eq!(error.next_actions(), &[NextAction::SelectSupportedVersion]);
+    assert_eq!(
+        error
+            .details()
+            .get(&DetailKey::parse("supported_version").unwrap()),
+        Some(&PublicValue::Label(SafeLabel::parse("1.4").unwrap()))
+    );
 }

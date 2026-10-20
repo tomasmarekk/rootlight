@@ -9,6 +9,7 @@
  (constructor_declaration) (method_declaration) (formal_parameter)
  (field_declaration) (local_variable_declaration) (block) (constructor_body)
  (method_invocation) (field_access) (annotation)] @expression
+(method_invocation name: (identifier) @call_name) @call
 (identifier) @reference
 [(line_comment) (block_comment)] @comment
 ((block_comment) @documentation

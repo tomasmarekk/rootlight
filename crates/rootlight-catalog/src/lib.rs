@@ -233,6 +233,30 @@ impl OracleWriter {
         Ok((reader, generation))
     }
 
+    /// Seals while returning the exact logical read plan measured by this write.
+    ///
+    /// Payload maxima reuse the existing serialization pass; no extra database
+    /// census or materializing readback is performed. A future reopen still
+    /// validates its own same-transaction plan and all persisted identities.
+    ///
+    /// # Errors
+    /// Returns the same failures as [`Self::seal_preserving_verified`].
+    pub fn seal_preserving_verified_with_read_plan(
+        self,
+        generation: IdentityVerifiedGeneration,
+        context: &GenerationContext<'_>,
+    ) -> Result<
+        (
+            OracleReader,
+            IdentityVerifiedGeneration,
+            OracleReadMemoryPlan,
+        ),
+        CatalogError,
+    > {
+        let (reader, plan) = self.seal_snapshot_with_read_plan(generation.snapshot(), context)?;
+        Ok((reader, generation, plan))
+    }
+
     #[cfg(test)]
     pub(crate) fn seal_unverified_for_test(
         self,
@@ -251,18 +275,32 @@ impl OracleWriter {
         generation: &GenerationSnapshot,
         context: &GenerationContext<'_>,
     ) -> Result<OracleReader, CatalogError> {
+        self.seal_snapshot_with_read_plan(generation, context)
+            .map(|(reader, _)| reader)
+    }
+
+    fn seal_snapshot_with_read_plan(
+        self,
+        generation: &GenerationSnapshot,
+        context: &GenerationContext<'_>,
+    ) -> Result<(OracleReader, OracleReadMemoryPlan), CatalogError> {
         let Self {
             mut connection,
             path,
         } = self;
         schema::install_generation_cancellation(&connection, context)?;
-        let stats = write::write_generation(&mut connection, generation, context)?;
+        let written = write::write_generation_with_metadata(&mut connection, generation, context)?;
         drop(connection);
         let reader = OracleReader::open_path(path, context)?;
-        if reader.stats != stats {
+        if reader.stats != written.stats {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
-        Ok(reader)
+        let plan = read::oracle_read_memory_plan(
+            generation.metadata().contract_version(),
+            written.stats,
+            written.maximum_payload_bytes,
+        )?;
+        Ok((reader, plan))
     }
 }
 

@@ -122,7 +122,7 @@ impl VerticalTool {
     pub const fn contract_version(self) -> &'static str {
         match self {
             Self::CodeLocate => crate::source_entity::LOCATE_VERSION,
-            Self::SourceRead => crate::source_text::SOURCE_READ_TEXT_VERSION,
+            Self::SourceRead => crate::source_recovery::SOURCE_READ_RECOVERY_VERSION,
             Self::SourceFind => crate::source_find::SOURCE_FIND_VERSION,
             Self::QueryAdvanced => crate::source_entity::QUERY_VERSION,
             Self::SymbolExplain => crate::source_entity::EXPLAIN_VERSION,
@@ -139,6 +139,37 @@ impl VerticalTool {
             | Self::PlanChange
             | Self::ContextPack => crate::MCP_ANALYSIS_SCHEMA_VERSION,
             _ => crate::MCP_SCHEMA_VERSION,
+        }
+    }
+
+    /// Source-text revision retained before aggregate-capacity recovery metadata.
+    #[must_use]
+    pub const fn pre_recovery_contract_version(self) -> Option<&'static str> {
+        match self {
+            Self::SourceRead => Some("1.3"),
+            _ => None,
+        }
+    }
+
+    /// Immutable 1.3 source-text input controls.
+    #[must_use]
+    pub const fn pre_recovery_input_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::SourceRead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-source-read-input-1.3.schema.json"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Immutable 1.3 source-text output vocabulary.
+    #[must_use]
+    pub const fn pre_recovery_output_schema_json(self) -> Option<&'static str> {
+        match self {
+            Self::SourceRead => Some(include_str!(
+                "../../../schemas/generated/json/mcp-source-read-output-1.3.schema.json"
+            )),
+            _ => None,
         }
     }
 
@@ -219,7 +250,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-input-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-input-1.3.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-input-1.4.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-input-1.7.schema.json"
@@ -286,7 +317,7 @@ impl VerticalTool {
                 "../../../schemas/generated/json/mcp-context-pack-output-1.1.schema.json"
             ),
             Self::SourceRead => include_str!(
-                "../../../schemas/generated/json/mcp-source-read-output-1.3.schema.json"
+                "../../../schemas/generated/json/mcp-source-read-output-1.4.schema.json"
             ),
             Self::QueryAdvanced => include_str!(
                 "../../../schemas/generated/json/mcp-query-advanced-output-1.7.schema.json"
@@ -1434,6 +1465,10 @@ pub struct RepoIndexInput {
     #[schemars(range(min = 0, max = 30_000))]
     pub wait_ms: Option<u32>,
     /// Requests permission to continue after client disconnect.
+    ///
+    /// Defaults to `true` so an admitted operation has no transport-derived work
+    /// deadline. An explicit `false` retains request lifetime and disconnect
+    /// cancellation. Response waiting remains bounded separately by `wait_ms`.
     ///
     /// When `true`, the daemon owns the durable operation independently of the
     /// requesting transport. Status and a successfully published generation
@@ -4946,11 +4981,12 @@ mod tests {
         assert_eq!(tool.fifth_legacy_contract_version(), Some("1.1"));
         assert_eq!(tool.initial_contract_version(), Some("1.0"));
         let tool = VerticalTool::SourceRead;
-        assert_eq!(tool.contract_version(), "1.3");
+        assert_eq!(tool.contract_version(), "1.4");
         assert_eq!(tool.pre_label_contract_version(), Some("1.2"));
         assert_eq!(tool.pre_activity_contract_version(), Some("1.1"));
         assert_eq!(tool.previous_contract_version(), Some("1.0"));
         assert_eq!(tool.legacy_contract_version(), None);
+        assert_eq!(VerticalTool::SourceFind.contract_version(), "1.1");
         let tool = VerticalTool::SymbolExplain;
         assert_eq!(tool.contract_version(), "1.9");
         assert_eq!(tool.pre_label_contract_version(), Some("1.8"));
@@ -4981,6 +5017,7 @@ mod tests {
                     | VerticalTool::ContextPack
                     | VerticalTool::CodeLocate
                     | VerticalTool::SourceRead
+                    | VerticalTool::SourceFind
                     | VerticalTool::QueryAdvanced
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);

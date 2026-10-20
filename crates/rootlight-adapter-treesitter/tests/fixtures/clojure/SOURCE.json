@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/LightTable/LightTable",
+  "path": "src/lt/util/kahn.cljs",
+  "bytes": 1520,
+  "sha256": "d18555b1f1a6c901e7b3220cfb175d0270fcdcb302e98811ccf91e3da33631b9",
+  "license": "MIT",
+  "license_file": "LICENSE"
+}

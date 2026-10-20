@@ -1,0 +1,3 @@
+*.flux -text
+original-stack_overflow.flux -text whitespace=cr-at-eol
+STACK_OVERFLOW_LICENSE -text whitespace=cr-at-eol

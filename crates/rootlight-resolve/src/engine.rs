@@ -253,7 +253,13 @@ impl ResolutionEngine {
                 && occurrence.syntax_kind == "r.call.call";
             let rejection = if entity.language != language {
                 Some(RejectionReason::LanguageMismatch)
-            } else if !parameter_call && !kind_supports_role(entity.kind, occurrence.role) {
+            } else if (matches!(entity.language.as_str(), "typescript" | "javascript")
+                && matches!(
+                    entity.kind,
+                    EntityKind::MarkupElement | EntityKind::MarkupAttribute
+                ))
+                || (!parameter_call && !kind_supports_role(entity.kind, occurrence.role))
+            {
                 Some(RejectionReason::TargetKindMismatch)
             } else if entity.language == "typescript" && entity.kind == EntityKind::TypeParameter {
                 // Native generic scopes, including anonymous type signatures,
@@ -1440,6 +1446,83 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    // A refused native formal join cannot be repaired by matching another name.
+    if matches!(
+        occurrence.syntax_kind.as_str(),
+        "python.parameter_body.reference"
+            | "astro.template_binding_read.reference"
+            | "java.setter_parameter.reference"
+            | "go.composite_formal_value.reference"
+            | "go.call_formal.reference"
+            | "go.unproven_call_formal.reference"
+            | "c.formal_value.reference"
+            | "c.unproven_formal_value.reference"
+    ) && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Written component/tag names do not prove lexical or runtime bindings.
+    if (occurrence.syntax_kind.starts_with("typescript.jsx_")
+        || occurrence.syntax_kind.starts_with("javascript.jsx_"))
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // JSON Schema targets require exact dialect, resource and pointer proof.
+    // A matching terminal name cannot recover a missing source-owned binding.
+    if occurrence.syntax_kind.starts_with("json_schema.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    if occurrence.syntax_kind.starts_with("qsharp.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Native SML/WAT bindings require their own exact source proof.
+    if (occurrence.syntax_kind.starts_with("sml.") || occurrence.syntax_kind.starts_with("wat."))
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Written Mojo identities do not establish field or method bindings.
+    if occurrence.syntax_kind.starts_with("mojo.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Haxe local argument proof cannot be repaired with spelling scores.
+    if occurrence.syntax_kind.starts_with("haxe.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Native QML id/component proof cannot be repaired with spelling scores.
+    if occurrence.syntax_kind.starts_with("qml.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Hare file-local native proof cannot be reconstructed from spelling.
+    if occurrence.syntax_kind.starts_with("hare.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Ring's native first-effect proof cannot be reconstructed from spelling.
+    if occurrence.syntax_kind.starts_with("ring.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    // Native Modelica input ownership rejects shadowed and unproved reads.
+    // Spelling scores cannot recover those bindings or justify candidates.
+    if occurrence.syntax_kind.starts_with("modelica.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     // Rust paths, value/type namespaces and dispatch require language-owned
     // proof. Preserve written uncertainty, including producer-owned candidates,
     // instead of substituting an unrelated same-name item.
@@ -1512,6 +1595,16 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
+    if occurrence.syntax_kind.starts_with("prolog.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
+    if occurrence.syntax_kind == "scheme.direct_file_call.reference"
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     // Scheme lexical environments, reader state and macro expansion need
     // language-owned proof; matching source spelling cannot establish a target.
     if occurrence.syntax_kind.starts_with("scheme.")
@@ -1541,6 +1634,11 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
         || occurrence.syntax_kind.starts_with("wgsl."))
         && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
     {
+        return false;
+    }
+    // A written virtual base remains a possible target, even when it is the
+    // only retained candidate. Generic scores cannot close the receiver universe.
+    if occurrence.syntax_kind == "apex.virtual_instance_call.call" {
         return false;
     }
     // Apex member/overload/platform targets require language-owned proof;
@@ -1629,6 +1727,15 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     }
     // SCSS mixins, selectors, and module URLs require Sass-owned visibility
     // and selector semantics. A same-spelling symbol is not binding evidence.
+    if occurrence.syntax_kind.starts_with("flux.") {
+        return false;
+    }
+    if occurrence.syntax_kind.starts_with("less.") {
+        return false;
+    }
+    if occurrence.syntax_kind.starts_with("sass.") {
+        return false;
+    }
     if occurrence.syntax_kind.starts_with("scss.") {
         return false;
     }
@@ -1805,6 +1912,754 @@ mod source_owned_target_tests {
     use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
 
     use super::*;
+
+    #[test]
+    fn json_schema_pointer_barriers_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::TypeUse,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "json_schema.local_ref.reference",
+            "json_schema.unresolved_ref.reference",
+            "json_schema.unsupported_resource_ref.reference",
+        ] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn prolog_direct_goals_require_language_owned_proof() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::CallSite,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in ["prolog.direct_goal.reference", "prolog.unknown.reference"] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn qsharp_unproved_occurrences_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        {
+            let syntax = "qsharp.unresolved_name.reference";
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn sml_unproved_occurrences_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        {
+            let syntax = "sml.unresolved_name.reference";
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn wat_unproved_occurrences_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        {
+            let syntax = "wat.unresolved_name.reference";
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn mojo_unproved_references_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        {
+            let syntax = "mojo.unresolved_name.reference";
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn haxe_native_local_read_barriers_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Read,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "haxe.unresolved_read.reference",
+            "haxe.local_read.reference",
+        ] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn flux_native_local_read_barriers_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Read,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "flux.unresolved_read.reference",
+            "flux.parameter_read.reference",
+        ] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            // Already resolved sites bypass generic selection before this
+            // predicate; Flux never permits spelling-based re-resolution.
+            assert!(
+                !resolvable_occurrence(&site),
+                "already resolved Flux targets must not be rescored: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn qml_native_receiver_barriers_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::CallSite,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "qml.unresolved.call",
+            "qml.unavailable_name.call",
+            "qml.unique_id_method.call",
+        ] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn ring_native_formal_barriers_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Read,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "ring.unresolved_read.reference",
+            "ring.parameter_read.reference",
+        ] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn hare_native_call_barriers_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::CallSite,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "hare.unresolved_call.reference",
+            "hare.direct_file_function.reference",
+        ] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn modelica_native_binding_barriers_do_not_admit_spelling_candidates() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"x");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Read,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: String::new(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for syntax in [
+            "modelica.unresolved_read.reference",
+            "modelica.unresolved_reference.reference",
+            "modelica.input_read.reference",
+        ] {
+            site.syntax_kind = syntax.to_owned();
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site), "{syntax}");
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(
+                resolvable_occurrence(&site),
+                "native proof survives: {syntax}"
+            );
+        }
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution is unchanged"
+        );
+    }
+
+    #[test]
+    fn apex_virtual_singleton_stays_bounded_even_at_maximum_confidence() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"this.beforeInsert()");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 19).unwrap(),
+            hash,
+            None,
+        );
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::CallSite,
+            enclosing: Some(SymbolId::from_bytes([5; 20])),
+            target: OccurrenceTarget::Candidates {
+                symbols: vec![SymbolId::from_bytes([6; 20])],
+                total_count: 1,
+                completeness: CoverageStatus::Bounded,
+            },
+            syntactic_text_hash: hash,
+            syntax_kind: "apex.virtual_instance_call.call".to_owned(),
+            provenance: FactId::from_bytes([7; 20]),
+            confidence: Confidence::new(1000).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.syntax_kind = "apex.private_instance_call.call".to_owned();
+        site.target = OccurrenceTarget::Resolved {
+            symbol: SymbolId::from_bytes([6; 20]),
+        };
+        assert!(
+            resolvable_occurrence(&site),
+            "independent private proof is preserved"
+        );
+    }
 
     #[test]
     fn unproven_language_references_cannot_acquire_spelling_only_targets() {
@@ -2033,5 +2888,387 @@ mod source_owned_target_tests {
         }
         occurrence.role = OccurrenceRole::Definition;
         assert!(!resolvable_occurrence(&occurrence));
+    }
+}
+
+#[cfg(test)]
+mod python_parameter_source_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn only_native_certified_python_formal_targets_survive_the_new_label_fence() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"a");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "python.parameter_body.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Resolved { symbol };
+        assert!(resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic Python remains unchanged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod java_setter_parameter_source_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn only_native_certified_java_setter_formal_targets_survive_the_new_label_fence() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"a");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "java.setter_parameter.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Resolved { symbol };
+        assert!(resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        site.syntax_kind = "java.identifier.reference".to_owned();
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic Java remains unchanged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod go_composite_formal_source_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn only_native_certified_go_composite_formal_targets_survive_the_new_label_fence() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"a");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "go.composite_formal_value.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Resolved { symbol };
+        assert!(resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        site.syntax_kind = "go.identifier.reference".to_owned();
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic Go remains unchanged"
+        );
+    }
+    #[test]
+    fn native_call_argument_labels_refuse_generic_candidates_until_source_owned() {
+        for label in [
+            "go.call_formal.reference",
+            "go.unproven_call_formal.reference",
+        ] {
+            let repository = RepositoryId::from_bytes([1; 16]);
+            let generation = GenerationId::from_bytes([2; 20]);
+            let file = FileId::from_bytes([3; 20]);
+            let hash = content_hash(b"a");
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 1).unwrap(),
+                hash,
+                None,
+            );
+            let symbol = SymbolId::from_bytes([6; 20]);
+            let mut site = OccurrenceRecord {
+                id: FactId::from_bytes([4; 20]),
+                repository,
+                generation,
+                file,
+                source: source.clone(),
+                role: OccurrenceRole::Reference,
+                enclosing: None,
+                target: OccurrenceTarget::Unresolved { text_hash: hash },
+                syntactic_text_hash: hash,
+                syntax_kind: label.to_owned(),
+                provenance: FactId::from_bytes([5; 20]),
+                confidence: Confidence::new(0).unwrap(),
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            site.syntax_kind = "go.identifier.reference".to_owned();
+            assert!(
+                resolvable_occurrence(&site),
+                "unrelated generic Go remains unchanged"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod scheme_direct_call_proof_tests {
+    use super::*;
+    use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId, content_hash};
+    use rootlight_ir::{Confidence, FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn scheme_direct_calls_need_native_proof_before_name_scoring() {
+        let hash = content_hash(b"target");
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 6).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::CallSite,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "scheme.direct_file_call.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(1000).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Resolved { symbol };
+        assert!(resolvable_occurrence(&site));
+        site.syntax_kind = "python.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(resolvable_occurrence(&site));
+    }
+}
+
+#[cfg(test)]
+mod astro_template_proof_fence_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn rejected_native_astro_template_targets_never_enter_generic_spelling_selection() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"posts");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 5).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "astro.template_binding_read.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Resolved { symbol };
+        assert!(resolvable_occurrence(&site));
+        site.syntax_kind = "typescript.identifier.reference".to_owned();
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        assert!(resolvable_occurrence(&site));
+    }
+}
+
+#[cfg(test)]
+mod mojo_self_member_source_tests {
+    use super::*;
+    use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId, content_hash};
+    use rootlight_ir::{Confidence, CoverageStatus, FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn unproved_self_member_labels_cannot_borrow_generic_name_candidates() {
+        for (label, role) in [
+            ("mojo.self_field_read.reference", OccurrenceRole::Read),
+            ("mojo.self_method_call.call", OccurrenceRole::CallSite),
+        ] {
+            let repository = RepositoryId::from_bytes([1; 16]);
+            let generation = GenerationId::from_bytes([2; 20]);
+            let file = FileId::from_bytes([3; 20]);
+            let hash = content_hash(b"data");
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 4).unwrap(),
+                hash,
+                None,
+            );
+            let symbol = SymbolId::from_bytes([6; 20]);
+            let mut site = OccurrenceRecord {
+                id: FactId::from_bytes([4; 20]),
+                repository,
+                generation,
+                file,
+                source: source.clone(),
+                role,
+                enclosing: None,
+                target: OccurrenceTarget::Unresolved { text_hash: hash },
+                syntactic_text_hash: hash,
+                syntax_kind: label.into(),
+                provenance: FactId::from_bytes([5; 20]),
+                confidence: Confidence::new(0).unwrap(),
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(resolvable_occurrence(&site));
+        }
     }
 }

@@ -5,6 +5,7 @@
 //! `changed_ranges` performs eager native work before Rust iterator checkpoints;
 //! hard preemption and native-allocation isolation remain responsibilities of the isolated adapter supervisor.
 
+mod astro_reads;
 mod c_preprocessor;
 mod cmake_command_template;
 mod cmake_header;
@@ -13,6 +14,7 @@ mod embedded;
 mod expression;
 mod fortran;
 mod fsharp_admission;
+mod identity_work;
 mod jsonc;
 mod markdown;
 mod perl;
@@ -54,12 +56,16 @@ fn cmake_patch_input(
     Ok(plan)
 }
 pub use fsharp_admission::{FSharpAdmissionKind, FSharpAdmissionWitness};
+pub use identity_work::NativeIdentityWorkLimit;
 pub(crate) use jsonc::JSONC_PARSE_INPUT_POLICY;
+
+mod native_input;
 
 #[cfg(test)]
 mod native_context_tests;
 
 use std::{
+    cell::Cell,
     collections::VecDeque,
     ops::ControlFlow,
     sync::{
@@ -348,8 +354,16 @@ impl TreeSitterProvider {
             memory_policy,
             cancellation,
             |sink, cancellation| {
-                self.parse_with_previous_raw(request, previous, edits, settings, sink, cancellation)
-                    .map(RawParseWithPrevious::into_transaction_parts)
+                self.parse_with_previous_raw(
+                    request,
+                    previous,
+                    edits,
+                    settings,
+                    sink,
+                    cancellation,
+                    None,
+                )
+                .map(RawParseWithPrevious::into_transaction_parts)
             },
         )?;
         let previous = match continuation.pending {
@@ -371,7 +385,7 @@ impl TreeSitterProvider {
     }
 
     /// Performs provider work inside an SDK-owned admitted transaction.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn parse_with_previous_raw(
         &self,
         request: &ParseRequest<'_>,
@@ -380,6 +394,7 @@ impl TreeSitterProvider {
         settings: ParserSettings,
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
+        identity_limit: Option<&mut Option<crate::query_pack::IntrinsicIdentityMatchLimit>>,
     ) -> Result<RawParseWithPrevious, AdapterError> {
         let source = self.native_source_view(request, cancellation)?;
         let PreparedParse {
@@ -402,6 +417,7 @@ impl TreeSitterProvider {
                 &mut traversal,
                 sink,
                 cancellation,
+                identity_limit,
             )?
         } else {
             emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
@@ -952,39 +968,50 @@ impl TreeSitterProvider {
             .and_then(|context| context.expression_envelope);
         let mut callback_failure = None;
         let mut native_progress = NativeParseProgress::default();
-        let mut progress = |state: &tree_sitter::ParseState| match cancellation.check() {
-            Ok(()) => {
-                let native_failure =
-                    native_progress.record(state.current_byte_offset(), parse_work_limit);
-                let shared_exhausted = context.as_mut().is_some_and(|context| {
-                    context.remaining_progress_checks =
-                        context.remaining_progress_checks.saturating_sub(1);
-                    context.remaining_progress_checks == 0
-                });
-                callback_failure = if shared_exhausted {
-                    Some(parse_work_limit.failure_code)
-                } else {
-                    native_failure
-                };
-                if callback_failure.is_some() {
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                }
+        let input_control = native_input::Control::new(
+            parse_work_limit.max_total_progress_checks,
+            parse_work_limit.failure_code,
+            cancellation,
+        );
+        let shared_progress = Cell::new(
+            context
+                .as_ref()
+                .map(|context| context.remaining_progress_checks),
+        );
+        let mut progress = |state: &tree_sitter::ParseState| {
+            if !input_control.checkpoint(&shared_progress) {
+                return ControlFlow::Break(());
             }
-            Err(_) => {
-                callback_cancelled = true;
-                ControlFlow::Break(())
+            match cancellation.check() {
+                Ok(()) => {
+                    let native_failure =
+                        native_progress.record(state.current_byte_offset(), parse_work_limit);
+                    callback_failure = native_failure;
+                    if callback_failure.is_some() {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                }
+                Err(_) => {
+                    callback_cancelled = true;
+                    ControlFlow::Break(())
+                }
             }
         };
         let chunk_bytes = settings.input_chunk_bytes();
         let mut input = |offset: usize, _point: Point| {
+            if !input_control.checkpoint(&shared_progress) {
+                return b"".as_slice();
+            }
             if virtual_line_ending && offset == source_bytes.len() {
                 // The grammar requires a statement delimiter at EOF. This byte
                 // is parser-only; query spans are clamped to the real snapshot.
                 return b"\n".as_slice();
             }
-            let end = offset.saturating_add(chunk_bytes).min(source_bytes.len());
+            let Some(end) = input_control.end(source_bytes, offset, chunk_bytes) else {
+                return b"".as_slice();
+            };
             envelope.map_or_else(
                 || source_bytes.get(offset..end).unwrap_or_default(),
                 |envelope| envelope.chunk(source_bytes, offset, end),
@@ -992,6 +1019,16 @@ impl TreeSitterProvider {
         };
         let options = ParseOptions::new().progress_callback(&mut progress);
         let tree = parser.parse_with_options(&mut input, old_tree, Some(options));
+        if let Some(context) = context.as_mut() {
+            context.remaining_progress_checks = shared_progress.get().unwrap_or(0);
+        }
+        if let Some(error) = input_control.error() {
+            // The native parser may return a recovery tree after the stop EOF.
+            // Its typed input failure wins before any tree or cache is accepted.
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
         if callback_cancelled {
             parser.reset();
             cancellation.check()?;
@@ -1016,6 +1053,7 @@ impl TreeSitterProvider {
         traversal: &mut TraversalReport,
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
+        identity_limit: Option<&mut Option<crate::query_pack::IntrinsicIdentityMatchLimit>>,
     ) -> Result<ExtractionReport, AdapterError> {
         cancellation.check()?;
         let budget = sink.remaining_budget();
@@ -1025,14 +1063,25 @@ impl TreeSitterProvider {
             request.source().path().as_str(),
             cancellation,
         )?;
-        let mut extraction = pack.extract(
-            family,
-            tree,
-            source.as_bytes(),
-            request.limits().max_syntax_nodes(),
-            max_facts,
-            cancellation,
-        )?;
+        let mut extraction = match identity_limit {
+            Some(identity_limit) => pack.extract_with_identity_limit(
+                family,
+                tree,
+                source.as_bytes(),
+                request.limits().max_syntax_nodes(),
+                max_facts,
+                cancellation,
+                Some(identity_limit),
+            ),
+            None => pack.extract(
+                family,
+                tree,
+                source.as_bytes(),
+                request.limits().max_syntax_nodes(),
+                max_facts,
+                cancellation,
+            ),
+        }?;
         apply_native_vba_module_kind(&mut extraction.candidates, request, cancellation)?;
         let embedded_limits = self.extract_embedded(
             tree,
@@ -1241,6 +1290,7 @@ impl ParseProvider for TreeSitterProvider {
             self.config.default_settings(),
             sink,
             cancellation,
+            None,
         )
         .map(|output| output.report)
     }
@@ -2829,21 +2879,24 @@ fn assign_fact_parents(
             cancellation.check()?;
         }
         let mut inspected = 0usize;
-        while active.last().is_some_and(|&parent| {
-            !span_contains(
-                drafts[parent].start,
-                drafts[parent].end,
-                drafts[index].start,
-                drafts[index].end,
-            )
-        }) {
-            if inspected.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
-                cancellation.check()?;
+        // Cross-region metadata must not close the native container stack.
+        if drafts[index].role.container_rank().is_some() {
+            while active.last().is_some_and(|&parent| {
+                !span_contains(
+                    drafts[parent].start,
+                    drafts[parent].end,
+                    drafts[index].start,
+                    drafts[index].end,
+                )
+            }) {
+                if inspected.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
+                    cancellation.check()?;
+                }
+                active.pop();
+                inspected = inspected
+                    .checked_add(1)
+                    .ok_or_else(|| provider_failure("query-parent-accounting"))?;
             }
-            active.pop();
-            inspected = inspected
-                .checked_add(1)
-                .ok_or_else(|| provider_failure("query-parent-accounting"))?;
         }
         let mut parent = None;
         for candidate in active.iter().rev().copied() {
@@ -4020,8 +4073,8 @@ mod tests {
         .unwrap();
         let provider = TreeSitterProvider::with_query_packs(config, registry).unwrap();
         assert_eq!(registry.initialized_count(), 0);
-        assert_eq!(provider.registry.descriptors().len(), 63);
-        assert_eq!(provider.capabilities.languages().len(), 63);
+        assert_eq!(provider.registry.descriptors().len(), 84);
+        assert_eq!(provider.capabilities.languages().len(), 84);
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
         let debug = format!("{provider:?}");
@@ -5107,5 +5160,139 @@ mod tests {
         parser
             .parse(source, None)
             .expect("test parser has a language")
+    }
+}
+
+#[cfg(test)]
+mod haxe_native_input_qualification;
+
+#[cfg(test)]
+mod ring_native_input_qualification;
+
+#[cfg(test)]
+mod crossing_metadata_parent_tests {
+    use super::*;
+
+    fn draft(start: usize, end: usize, role: StructuralRole, native_depth: usize) -> FactDraft {
+        FactDraft {
+            start,
+            end,
+            role,
+            syntax_kind: SyntaxKindLabel::new(&format!("native.written.{}", role.label())).unwrap(),
+            parent: None,
+            depth: 0,
+            native_depth,
+        }
+    }
+
+    fn crossing_drafts() -> Vec<FactDraft> {
+        vec![
+            draft(0, 319, StructuralRole::Root, 0),
+            draft(0, 319, StructuralRole::Module, 0),
+            draft(3, 184, StructuralRole::Module, 0),
+            draft(161, 166, StructuralRole::Declaration, 3),
+            draft(161, 166, StructuralRole::Definition, 3),
+            draft(161, 272, StructuralRole::Signature, 0),
+        ]
+    }
+
+    #[test]
+    fn crossing_signature_keeps_native_child_module_declaration_and_definition_owners() {
+        let mut drafts = crossing_drafts();
+        assign_fact_parents(&mut drafts, &Cancellation::new()).unwrap();
+        assert_eq!(drafts[2].parent, Some(1));
+        assert_eq!(
+            drafts[5].parent,
+            Some(1),
+            "cross-region metadata belongs to the common host"
+        );
+        assert_eq!(
+            drafts[3].parent,
+            Some(2),
+            "metadata must not close the native child module"
+        );
+        assert_eq!(
+            drafts[4].parent,
+            Some(3),
+            "the Definition keeps its own Declaration"
+        );
+        assert_eq!(drafts[3].depth, 3);
+        assert_eq!(drafts[4].depth, 4);
+    }
+
+    #[test]
+    fn ordinary_scope_advancement_and_expired_noncontainer_parent_search_remain_exact() {
+        let mut drafts = vec![
+            draft(0, 100, StructuralRole::Root, 0),
+            draft(0, 100, StructuralRole::Module, 0),
+            draft(10, 30, StructuralRole::Scope, 1),
+            draft(12, 18, StructuralRole::Declaration, 2),
+            draft(12, 15, StructuralRole::Definition, 3),
+            draft(13, 14, StructuralRole::Signature, 4),
+            draft(32, 34, StructuralRole::Reference, 1),
+            draft(50, 70, StructuralRole::Scope, 1),
+            draft(55, 60, StructuralRole::Declaration, 2),
+            draft(55, 58, StructuralRole::Definition, 3),
+            draft(80, 84, StructuralRole::Reference, 1),
+        ];
+        assign_fact_parents(&mut drafts, &Cancellation::new()).unwrap();
+        assert_eq!(
+            drafts.iter().map(|fact| fact.parent).collect::<Vec<_>>(),
+            vec![
+                None,
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(3),
+                Some(1),
+                Some(1),
+                Some(7),
+                Some(8),
+                Some(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn equal_boundary_duplicate_and_empty_metadata_keep_source_owner_rules() {
+        for end in [0, 319] {
+            let mut drafts = vec![
+                draft(0, end, StructuralRole::Root, 0),
+                draft(0, end, StructuralRole::Module, 0),
+                draft(0, end, StructuralRole::Signature, 0),
+                draft(0, end, StructuralRole::Signature, 0),
+            ];
+            assign_fact_parents(&mut drafts, &Cancellation::new()).unwrap();
+            assert_eq!(
+                drafts.iter().map(|fact| fact.parent).collect::<Vec<_>>(),
+                vec![None, Some(0), Some(1), Some(1)]
+            );
+        }
+        let mut drafts = crossing_drafts();
+        drafts.push(draft(161, 272, StructuralRole::Signature, 0));
+        drafts.push(draft(161, 161, StructuralRole::Signature, 0));
+        assign_fact_parents(&mut drafts, &Cancellation::new()).unwrap();
+        assert_eq!(drafts[3].parent, Some(2));
+        assert_eq!(drafts[4].parent, Some(3));
+        assert_eq!(drafts[5].parent, Some(1));
+        assert_eq!(drafts[6].parent, Some(1));
+        assert_eq!(drafts[7].parent, Some(3));
+    }
+
+    #[test]
+    fn cancelled_parent_assignment_refuses_before_draft_state_changes() {
+        let mut drafts = crossing_drafts();
+        let cancel = Cancellation::new();
+        cancel.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            assign_fact_parents(&mut drafts, &cancel),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        assert!(
+            drafts
+                .iter()
+                .all(|fact| fact.parent.is_none() && fact.depth == 0)
+        );
     }
 }

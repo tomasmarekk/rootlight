@@ -3979,3 +3979,353 @@ fn source_ref(
         None,
     )
 }
+
+#[path = "scope_resolution/jsx_markup.rs"]
+mod jsx_markup;
+
+#[test]
+fn flux_native_targets_and_unproved_reads_survive_all_resolution_paths() {
+    let source = "written = (value) => value\n";
+    let declaration = source.find("value").unwrap();
+    let reference = source.rfind("value").unwrap();
+    assert_ne!(declaration, reference);
+    for syntax in [
+        "flux.unresolved_read.reference",
+        "flux.parameter_read.reference",
+    ] {
+        for state in 0..3 {
+            let mut fixture = Fixture::new();
+            fixture.content_hash = content_hash(source.as_bytes());
+            let full = source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                0,
+                u64::try_from(source.len()).unwrap(),
+            );
+            let file = &mut fixture.document.files[0];
+            file.language = "flux".to_owned();
+            file.path = "written.flux".to_owned();
+            file.content_hash = fixture.content_hash;
+            file.byte_length = u64::try_from(source.len()).unwrap();
+            file.evidence.source = Some(full.clone());
+            let provenance = &mut fixture.document.provenance[0];
+            provenance.language = "flux".to_owned();
+            provenance.input_sources = vec![full.clone()];
+            provenance.evidence_sources = vec![full.clone()];
+            let owner = fixture.add_entity(
+                10,
+                "written",
+                fixture.primary_file,
+                EntityKind::Function,
+                None,
+            );
+            let target = fixture.add_entity(
+                11,
+                "value",
+                fixture.primary_file,
+                EntityKind::Parameter,
+                Some(owner),
+            );
+            fixture.document.entities[0].language = "flux".to_owned();
+            fixture.document.entities[0].evidence.source = Some(full);
+            fixture.document.entities[1].language = "flux".to_owned();
+            fixture.document.entities[1].evidence.source = Some(source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                u64::try_from(declaration).unwrap(),
+                u64::try_from(declaration + "value".len()).unwrap(),
+            ));
+            fixture.add_occurrence(
+                20,
+                "value",
+                fixture.primary_file,
+                OccurrenceRole::Read,
+                Some(owner),
+            );
+            let site = &mut fixture.document.occurrences[0];
+            site.syntax_kind = syntax.to_owned();
+            site.source = source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                u64::try_from(reference).unwrap(),
+                u64::try_from(reference + "value".len()).unwrap(),
+            );
+            site.evidence.source = Some(site.source.clone());
+            site.target = match state {
+                0 => OccurrenceTarget::Unresolved {
+                    text_hash: content_hash(b"value"),
+                },
+                1 => OccurrenceTarget::Candidates {
+                    symbols: vec![target],
+                    total_count: 1,
+                    completeness: CoverageStatus::Complete,
+                },
+                _ => OccurrenceTarget::Resolved { symbol: target },
+            };
+            site.confidence = Confidence::new(850).unwrap();
+            site.evidence.derivation = vec![FactRef::Entity(owner), FactRef::Entity(target)];
+            fixture.validate();
+            let expected = fixture.document.clone();
+            let context = ResolverFactContext::new(fixture.content_hash);
+            let cancellation = Cancellation::new();
+            let engine = ResolutionEngine::default();
+            let estimate = engine
+                .estimate_work(&fixture.document, &cancellation)
+                .unwrap();
+            assert_eq!(estimate.required, 0, "{syntax}:state{state}");
+            let applied = engine
+                .apply(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            assert!(applied.batch.decisions.is_empty(), "{syntax}:state{state}");
+            assert_eq!(applied.document, expected, "{syntax}:state{state}");
+            let streamed = engine
+                .apply_document(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            assert_eq!(streamed, expected, "{syntax}:state{state}");
+            let (bounded, bounded_estimate) = engine
+                .apply_document_bounded(fixture.document, context, &cancellation)
+                .unwrap();
+            assert_eq!(bounded_estimate, estimate);
+            assert_eq!(bounded, expected, "{syntax}:state{state}");
+        }
+    }
+}
+
+#[test]
+fn hare_native_calls_and_unproved_sites_survive_all_resolution_paths() {
+    let source = "fn target() void = {}; fn caller() void = { target(); };\n";
+    let declaration = source.find("target").unwrap();
+    let reference = source.rfind("target").unwrap();
+    let caller_start = source.find("fn caller").unwrap();
+    let target_end = source.find(';').unwrap() + 1;
+    assert_eq!(&source[declaration..declaration + 6], "target");
+    assert_eq!(&source[reference..reference + 6], "target");
+    assert!(declaration < caller_start && caller_start < reference);
+    for syntax in [
+        "hare.unresolved_call.reference",
+        "hare.direct_file_function.reference",
+    ] {
+        for state in 0..3 {
+            let mut fixture = Fixture::new();
+            fixture.content_hash = content_hash(source.as_bytes());
+            let full = source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                0,
+                u64::try_from(source.len()).unwrap(),
+            );
+            let file = &mut fixture.document.files[0];
+            file.language = "hare".to_owned();
+            file.path = "written.ha".to_owned();
+            file.content_hash = fixture.content_hash;
+            file.byte_length = u64::try_from(source.len()).unwrap();
+            file.evidence.source = Some(full.clone());
+            let provenance = &mut fixture.document.provenance[0];
+            provenance.language = "hare".to_owned();
+            provenance.input_sources = vec![full.clone()];
+            provenance.evidence_sources = vec![full.clone()];
+            let module = fixture.add_entity(
+                9,
+                "written.ha",
+                fixture.primary_file,
+                EntityKind::Module,
+                None,
+            );
+            let owner = fixture.add_entity(
+                10,
+                "caller",
+                fixture.primary_file,
+                EntityKind::Function,
+                Some(module),
+            );
+            let target = fixture.add_entity(
+                11,
+                "target",
+                fixture.primary_file,
+                EntityKind::Function,
+                Some(module),
+            );
+            for entity in &mut fixture.document.entities {
+                entity.language = "hare".to_owned();
+            }
+            fixture.document.entities[0].evidence.source = Some(full);
+            fixture.document.entities[1].evidence.source = Some(source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                u64::try_from(caller_start).unwrap(),
+                u64::try_from(source.len()).unwrap(),
+            ));
+            fixture.document.entities[2].evidence.source = Some(source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                0,
+                u64::try_from(target_end).unwrap(),
+            ));
+            fixture.add_occurrence(
+                20,
+                "target",
+                fixture.primary_file,
+                OccurrenceRole::CallSite,
+                Some(owner),
+            );
+            let site = &mut fixture.document.occurrences[0];
+            site.syntax_kind = syntax.to_owned();
+            site.source = source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                u64::try_from(reference).unwrap(),
+                u64::try_from(reference + "target".len()).unwrap(),
+            );
+            site.evidence.source = Some(site.source.clone());
+            site.target = match state {
+                0 => OccurrenceTarget::Unresolved {
+                    text_hash: content_hash(b"target"),
+                },
+                1 => OccurrenceTarget::Candidates {
+                    symbols: vec![target],
+                    total_count: 1,
+                    completeness: CoverageStatus::Complete,
+                },
+                _ => OccurrenceTarget::Resolved { symbol: target },
+            };
+            site.confidence = Confidence::new(850).unwrap();
+            if state == 2 {
+                let mut proofs = vec![
+                    FactRef::Entity(owner),
+                    FactRef::Fact(site.id),
+                    FactRef::Entity(target),
+                ];
+                proofs.sort_unstable();
+                let mut relation = RelationRecord {
+                    id: FactId::from_bytes([21; 20]),
+                    repository: fixture.document.repository,
+                    generation: fixture.document.generation,
+                    subject: RelationEndpoint::Entity(owner),
+                    predicate: RelationPredicate::Calls,
+                    object: RelationEndpoint::Entity(target),
+                    confidence: site.confidence,
+                    evidence_kind: EvidenceKind::Syntax,
+                    provenance: fixture.provenance,
+                    evidence: FactEvidence {
+                        source: Some(site.source.clone()),
+                        derivation: proofs,
+                    },
+                };
+                relation.id = rootlight_ir::derive_relation_record_id(&relation).unwrap();
+                fixture.document.relations.push(relation);
+            }
+            fixture.validate();
+            let expected = fixture.document.clone();
+            let context = ResolverFactContext::new(fixture.content_hash);
+            let cancellation = Cancellation::new();
+            let engine = ResolutionEngine::default();
+            let estimate = engine
+                .estimate_work(&fixture.document, &cancellation)
+                .unwrap();
+            assert_eq!(estimate.required, 0, "{syntax}:state{state}");
+            let applied = engine
+                .apply(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            assert!(applied.batch.decisions.is_empty(), "{syntax}:state{state}");
+            assert_eq!(applied.document, expected, "{syntax}:state{state}");
+            let streamed = engine
+                .apply_document(fixture.document.clone(), context, &cancellation)
+                .unwrap();
+            assert_eq!(streamed, expected, "{syntax}:state{state}");
+            let (bounded, bounded_estimate) = engine
+                .apply_document_bounded(fixture.document, context, &cancellation)
+                .unwrap();
+            assert_eq!(bounded_estimate, estimate);
+            assert_eq!(bounded, expected, "{syntax}:state{state}");
+        }
+    }
+}
+
+#[test]
+fn c_formal_certificates_cannot_be_repaired_by_generic_resolution() {
+    for syntax in [
+        "c.formal_value.reference",
+        "c.unproven_formal_value.reference",
+    ] {
+        let role = OccurrenceRole::Reference;
+        let kind = EntityKind::Parameter;
+        for cross_file in [false, true] {
+            for state in 0..3 {
+                let mut fixture = Fixture::new();
+                let file = if cross_file {
+                    fixture.add_file(2, "src/other.c")
+                } else {
+                    fixture.primary_file
+                };
+                let symbol = fixture.add_entity(10, "target", file, kind, None);
+                fixture.add_occurrence(20, "target", fixture.primary_file, role, None);
+                for record in &mut fixture.document.files {
+                    record.language = "c".to_owned();
+                }
+                fixture.document.provenance[0].language = "c".to_owned();
+                fixture.document.entities[0].language = "c".to_owned();
+                fixture.document.entities[0].qualified_name = "target".to_owned();
+                let occurrence = &mut fixture.document.occurrences[0];
+                occurrence.syntax_kind = syntax.to_owned();
+                occurrence.target = match state {
+                    0 => OccurrenceTarget::Unresolved {
+                        text_hash: content_hash(b"target"),
+                    },
+                    1 => OccurrenceTarget::Candidates {
+                        symbols: vec![symbol],
+                        total_count: 1,
+                        completeness: CoverageStatus::Complete,
+                    },
+                    _ => OccurrenceTarget::Resolved { symbol },
+                };
+                let original = occurrence.clone();
+                fixture.validate();
+                let engine = ResolutionEngine::default();
+                let cancellation = Cancellation::new();
+                let estimate = engine
+                    .estimate_work(&fixture.document, &cancellation)
+                    .unwrap();
+                assert_eq!(
+                    estimate.required, 0,
+                    "{syntax}: cross_file={cross_file}, state={state}"
+                );
+                assert!(
+                    engine
+                        .resolve(&fixture.document, &cancellation)
+                        .unwrap()
+                        .decisions
+                        .is_empty()
+                );
+                let context = ResolverFactContext::new(fixture.content_hash);
+                let applied = engine
+                    .apply(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let streamed = engine
+                    .apply_document(fixture.document.clone(), context, &cancellation)
+                    .unwrap();
+                let (bounded, bounded_estimate) = engine
+                    .apply_document_bounded(fixture.document, context, &cancellation)
+                    .unwrap();
+                assert_eq!(bounded_estimate, estimate);
+                assert_eq!(bounded, streamed);
+                assert_eq!(streamed, applied.document);
+                assert_eq!(bounded.occurrences, [original]);
+                assert!(bounded.relations.is_empty());
+            }
+        }
+    }
+}

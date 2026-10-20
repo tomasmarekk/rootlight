@@ -1767,6 +1767,54 @@ pub struct FirstSliceSourceChunk {
     #[allow(missing_docs)]
     pub physical_encoding: ::core::option::Option<i32>,
 }
+/// Exact generation-wide membership and observed aggregate capacity rejection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AggregateSourceRecoveryCause {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub source_inventory: ::core::option::Option<super::super::common::v1::ContentHash>,
+    #[prost(uint64, tag = "2")]
+    #[allow(missing_docs)]
+    pub members: u64,
+    #[prost(enumeration = "AggregateSourceRecoveryStage", tag = "3")]
+    #[allow(missing_docs)]
+    pub stage: i32,
+    #[prost(enumeration = "AggregateSourceRecoveryResource", tag = "4")]
+    #[allow(missing_docs)]
+    pub resource: i32,
+    #[prost(uint64, tag = "5")]
+    #[allow(missing_docs)]
+    pub observed: u64,
+    #[prost(uint64, tag = "6")]
+    #[allow(missing_docs)]
+    pub limit: u64,
+    #[prost(uint64, tag = "7")]
+    #[allow(missing_docs)]
+    pub text_snapshot_bytes: u64,
+    #[prost(uint64, tag = "8")]
+    #[allow(missing_docs)]
+    pub derived_members: u64,
+}
+/// One returned file's text-search capture, independent of source availability.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SourceRecoveryFile {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub file: ::core::option::Option<super::super::common::v1::FileId>,
+    #[prost(enumeration = "SourceRecoveryTextSearch", tag = "2")]
+    #[allow(missing_docs)]
+    pub text_search: i32,
+}
+/// Files are sorted, distinct, and exactly cover the returned source-chunk file set.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceReadRecovery {
+    #[prost(message, optional, tag = "1")]
+    #[allow(missing_docs)]
+    pub cause: ::core::option::Option<AggregateSourceRecoveryCause>,
+    #[prost(message, repeated, tag = "2")]
+    #[allow(missing_docs)]
+    pub files: ::prost::alloc::vec::Vec<SourceRecoveryFile>,
+}
 /// Returns exact verified source chunks.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SourceReadResponse {
@@ -1801,6 +1849,10 @@ pub struct SourceReadResponse {
     #[prost(bool, optional, tag = "9")]
     #[allow(missing_docs)]
     pub prefix_truncated: ::core::option::Option<bool>,
+    /// Negotiated at protocol 1.30; absence does not assert complete analysis.
+    #[prost(message, optional, tag = "10")]
+    #[allow(missing_docs)]
+    pub source_recovery: ::core::option::Option<SourceReadRecovery>,
 }
 /// Quotes resident metadata only; source bodies and freshness are not inspected.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -5437,6 +5489,205 @@ impl SourcePhysicalEncoding {
             "SOURCE_PHYSICAL_ENCODING_UTF8" => Some(Self::Utf8),
             "SOURCE_PHYSICAL_ENCODING_UTF16_LE" => Some(Self::Utf16Le),
             "SOURCE_PHYSICAL_ENCODING_UTF16_BE" => Some(Self::Utf16Be),
+            _ => None,
+        }
+    }
+}
+/// One generation-wide cause; member coverage is separate from source availability.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AggregateSourceRecoveryStage {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    StructuralAppend = 1,
+    #[allow(missing_docs)]
+    GenerationText = 2,
+}
+impl AggregateSourceRecoveryStage {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "AGGREGATE_SOURCE_RECOVERY_STAGE_UNSPECIFIED",
+            Self::StructuralAppend => "AGGREGATE_SOURCE_RECOVERY_STAGE_STRUCTURAL_APPEND",
+            Self::GenerationText => "AGGREGATE_SOURCE_RECOVERY_STAGE_GENERATION_TEXT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AGGREGATE_SOURCE_RECOVERY_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
+            "AGGREGATE_SOURCE_RECOVERY_STAGE_STRUCTURAL_APPEND" => {
+                Some(Self::StructuralAppend)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_STAGE_GENERATION_TEXT" => {
+                Some(Self::GenerationText)
+            }
+            _ => None,
+        }
+    }
+}
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AggregateSourceRecoveryResource {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    #[allow(missing_docs)]
+    Files = 1,
+    #[allow(missing_docs)]
+    Entities = 2,
+    #[allow(missing_docs)]
+    Occurrences = 3,
+    #[allow(missing_docs)]
+    Relations = 4,
+    #[allow(missing_docs)]
+    Provenance = 5,
+    #[allow(missing_docs)]
+    SourceMappings = 6,
+    #[allow(missing_docs)]
+    Coverage = 7,
+    #[allow(missing_docs)]
+    SkippedRegions = 8,
+    #[allow(missing_docs)]
+    Diagnostics = 9,
+    #[allow(missing_docs)]
+    Extensions = 10,
+    #[allow(missing_docs)]
+    Records = 11,
+    #[allow(missing_docs)]
+    NestedItems = 12,
+    #[allow(missing_docs)]
+    StringBytes = 13,
+    #[allow(missing_docs)]
+    ExtensionBytes = 14,
+    #[allow(missing_docs)]
+    DiagnosticBytes = 15,
+    #[allow(missing_docs)]
+    GenerationTextBytes = 16,
+    #[allow(missing_docs)]
+    GenerationEncodedTextBytes = 17,
+}
+impl AggregateSourceRecoveryResource {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_UNSPECIFIED",
+            Self::Files => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_FILES",
+            Self::Entities => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_ENTITIES",
+            Self::Occurrences => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_OCCURRENCES",
+            Self::Relations => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_RELATIONS",
+            Self::Provenance => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_PROVENANCE",
+            Self::SourceMappings => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_SOURCE_MAPPINGS",
+            Self::Coverage => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_COVERAGE",
+            Self::SkippedRegions => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_SKIPPED_REGIONS",
+            Self::Diagnostics => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_DIAGNOSTICS",
+            Self::Extensions => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_EXTENSIONS",
+            Self::Records => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_RECORDS",
+            Self::NestedItems => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_NESTED_ITEMS",
+            Self::StringBytes => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_STRING_BYTES",
+            Self::ExtensionBytes => "AGGREGATE_SOURCE_RECOVERY_RESOURCE_EXTENSION_BYTES",
+            Self::DiagnosticBytes => {
+                "AGGREGATE_SOURCE_RECOVERY_RESOURCE_DIAGNOSTIC_BYTES"
+            }
+            Self::GenerationTextBytes => {
+                "AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_TEXT_BYTES"
+            }
+            Self::GenerationEncodedTextBytes => {
+                "AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_ENCODED_TEXT_BYTES"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_UNSPECIFIED" => Some(Self::Unspecified),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_FILES" => Some(Self::Files),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_ENTITIES" => Some(Self::Entities),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_OCCURRENCES" => Some(Self::Occurrences),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_RELATIONS" => Some(Self::Relations),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_PROVENANCE" => Some(Self::Provenance),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_SOURCE_MAPPINGS" => {
+                Some(Self::SourceMappings)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_COVERAGE" => Some(Self::Coverage),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_SKIPPED_REGIONS" => {
+                Some(Self::SkippedRegions)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_DIAGNOSTICS" => Some(Self::Diagnostics),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_EXTENSIONS" => Some(Self::Extensions),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_RECORDS" => Some(Self::Records),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_NESTED_ITEMS" => Some(Self::NestedItems),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_STRING_BYTES" => Some(Self::StringBytes),
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_EXTENSION_BYTES" => {
+                Some(Self::ExtensionBytes)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_DIAGNOSTIC_BYTES" => {
+                Some(Self::DiagnosticBytes)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_TEXT_BYTES" => {
+                Some(Self::GenerationTextBytes)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_ENCODED_TEXT_BYTES" => {
+                Some(Self::GenerationEncodedTextBytes)
+            }
+            _ => None,
+        }
+    }
+}
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SourceRecoveryTextSearch {
+    #[allow(missing_docs)]
+    Unspecified = 0,
+    /// All source bytes participated in lexical projection; vocabulary omissions remain separate.
+    #[allow(missing_docs)]
+    WholeSourceProjection = 1,
+    #[allow(missing_docs)]
+    MetadataOnlyCaptured = 2,
+    #[allow(missing_docs)]
+    UnsupportedEncoding = 3,
+}
+impl SourceRecoveryTextSearch {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SOURCE_RECOVERY_TEXT_SEARCH_UNSPECIFIED",
+            Self::WholeSourceProjection => {
+                "SOURCE_RECOVERY_TEXT_SEARCH_WHOLE_SOURCE_PROJECTION"
+            }
+            Self::MetadataOnlyCaptured => {
+                "SOURCE_RECOVERY_TEXT_SEARCH_METADATA_ONLY_CAPTURED"
+            }
+            Self::UnsupportedEncoding => {
+                "SOURCE_RECOVERY_TEXT_SEARCH_UNSUPPORTED_ENCODING"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SOURCE_RECOVERY_TEXT_SEARCH_UNSPECIFIED" => Some(Self::Unspecified),
+            "SOURCE_RECOVERY_TEXT_SEARCH_WHOLE_SOURCE_PROJECTION" => {
+                Some(Self::WholeSourceProjection)
+            }
+            "SOURCE_RECOVERY_TEXT_SEARCH_METADATA_ONLY_CAPTURED" => {
+                Some(Self::MetadataOnlyCaptured)
+            }
+            "SOURCE_RECOVERY_TEXT_SEARCH_UNSUPPORTED_ENCODING" => {
+                Some(Self::UnsupportedEncoding)
+            }
             _ => None,
         }
     }

@@ -218,6 +218,12 @@ fn ir_record_metrics(record: &IrRecord, limits: &IrLimits) -> Result<IrBatchMetr
             meter.raw.files = 1;
             meter.evidence(&record.evidence)?;
             meter.string(&record.path)?;
+            if let Some(locator) = &record.path_locator {
+                meter.nested(locator.components().len())?;
+                for component in locator.components() {
+                    meter.string(component)?;
+                }
+            }
             meter.string(&record.language)?;
             meter.string(&record.encoding)?;
         }

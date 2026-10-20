@@ -56,3 +56,13 @@
 )
 
 [(interpreted_string_literal) (raw_string_literal)] @string
+
+; Repeated native name fields remain separate input-formal entities.
+(parameter_declaration name: (identifier) @declaration @definition)
+(variadic_parameter_declaration name: (identifier) @declaration @definition)
+
+; Required scope evidence keeps the bounded formal-read proof explicit.
+[(function_declaration) (method_declaration)] @signature
+
+; The paired identity capture retains only native-certified direct formal arguments.
+(identifier) @reference @signature

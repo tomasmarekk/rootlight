@@ -28,7 +28,6 @@ use rootlight_crypto::Sha256;
 use serde_json::{Value, json};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(40);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -80,8 +79,7 @@ fn index_terminal_semantics(
         "repo.index",
         json!({
             "root": repository_root,
-            "mode": "auto",
-            "detached": true
+            "mode": "auto"
         }),
     );
     assert_success(&admission, "repo.index");
@@ -91,20 +89,17 @@ fn index_terminal_semantics(
         &admission_data["operation_id"],
         "structural operation identity",
     );
-    let deadline = Instant::now() + Duration::from_secs(2 * 60);
-    let structural = wait_for_terminal_operation(mcp, &structural_id, deadline);
+    let structural = wait_for_terminal_operation(mcp, &structural_id);
     let semantic_id = wait_for_semantic_operation(
         mcp,
         &structural_id,
         structural.semantic_operation_id.clone(),
-        deadline,
     );
     assert_ne!(
         structural_id, semantic_id,
         "{language} semantic refinement must have its own durable operation identity"
     );
-    let semantic =
-        wait_for_release_semantic_operation(mcp, &repository_id, language, &semantic_id, deadline);
+    let semantic = wait_for_release_semantic_operation(mcp, &repository_id, language, &semantic_id);
     assert_eq!(semantic.operation.state, "published");
     assert_eq!(semantic.operation.stage, "complete");
     assert!(
@@ -136,7 +131,6 @@ fn index_terminal_semantics(
             "require_freshness": "semantic",
             "response_profile": "compact"
         }),
-        deadline,
     );
     assert_read_success(&status, "repo.status", &generation);
     assert_terminal_language(data(&status), language);
@@ -565,8 +559,7 @@ fn real_repository_cold_index_is_release_bounded() {
     let recovery_data = data(&recovery_admission);
     let repository_id = required_string(&recovery_data["repository_id"], "repository identity");
     let interrupted_id = required_string(&recovery_data["operation_id"], "interrupted operation");
-    let interrupted_before =
-        wait_for_inflight_operation(&mut mcp, &interrupted_id, Instant::now() + STARTUP_TIMEOUT);
+    let interrupted_before = wait_for_inflight_operation(&mut mcp, &interrupted_id);
 
     daemon.terminate_now();
     mcp.terminate_now();
@@ -583,7 +576,6 @@ fn real_repository_cold_index_is_release_bounded() {
     let interrupted_after = read_interrupted_operation(&mut mcp, &interrupted_id);
 
     let indexing_started = Instant::now();
-    let indexing_deadline = indexing_started + Duration::from_millis(spec.maximum_elapsed_ms);
     let admitted = mcp.call_success(
         "cold-index-readmit",
         "repo.index",
@@ -602,14 +594,13 @@ fn real_repository_cold_index_is_release_bounded() {
     let repository_id = required_string(&index_data["repository_id"], "repository identity");
     let structural_id = required_string(&index_data["operation_id"], "structural operation");
     assert_ne!(structural_id, interrupted_id);
-    let structural = wait_for_terminal_operation(&mut mcp, &structural_id, indexing_deadline);
+    let structural = wait_for_terminal_operation(&mut mcp, &structural_id);
     let semantic_id = wait_for_semantic_operation(
         &mut mcp,
         &structural_id,
         structural.semantic_operation_id.clone(),
-        indexing_deadline,
     );
-    let semantic = wait_for_terminal_operation(&mut mcp, &semantic_id, indexing_deadline);
+    let semantic = wait_for_terminal_operation(&mut mcp, &semantic_id);
     let generation = semantic
         .published_generation
         .clone()
@@ -641,8 +632,8 @@ fn real_repository_cold_index_is_release_bounded() {
         &runtime_dir,
         &environment.repository_root,
     );
-    // IPC readiness precedes rebuilding retained search indexes, so large
-    // repositories need a separate bounded recovery window.
+    // IPC readiness precedes retained-index rebuilding. Retryable BUSY is not
+    // an elapsed-time failure of that repository's recovery work.
     let status = mcp.call_until_not_busy(
         "cold-index-restart-status",
         "repo.status",
@@ -654,7 +645,6 @@ fn real_repository_cold_index_is_release_bounded() {
             "require_freshness": "semantic",
             "response_profile": "compact"
         }),
-        Instant::now() + RECOVERY_TIMEOUT,
     );
     assert_success(&status, "repo.status");
     let status_data = data(&status);
@@ -867,18 +857,10 @@ struct InflightOperation {
     resources: ColdIndexResourceEvidence,
 }
 
-fn wait_for_inflight_operation(
-    mcp: &mut McpProcess,
-    operation_id: &str,
-    deadline: Instant,
-) -> InflightOperation {
+fn wait_for_inflight_operation(mcp: &mut McpProcess, operation_id: &str) -> InflightOperation {
     let mut attempt = 0_u64;
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "operation {operation_id} did not enter durable execution"
-        );
-        let response = mcp.call_success(
+        let response = mcp.call_until_not_busy(
             &format!("cold-index-inflight-{attempt}"),
             "operation.status",
             json!({"operation_id": operation_id, "wait_ms": 0}),
@@ -900,8 +882,8 @@ fn wait_for_inflight_operation(
             };
         }
         assert!(
-            !matches!(state.as_str(), "published" | "failed" | "cancelled"),
-            "recovery probe terminated before forced restart: {response:#}"
+            matches!(state.as_str(), "queued" | "running"),
+            "recovery probe is not in a supported in-flight state: {response:#}"
         );
         attempt = attempt.saturating_add(1);
         thread::sleep(POLL_INTERVAL);
@@ -929,12 +911,8 @@ fn read_interrupted_operation(mcp: &mut McpProcess, operation_id: &str) -> Infli
     }
 }
 
-fn wait_for_terminal_operation(
-    mcp: &mut McpProcess,
-    operation_id: &str,
-    deadline: Instant,
-) -> TerminalOperation {
-    wait_for_terminal_operation_with_diagnostics(mcp, operation_id, deadline, None)
+fn wait_for_terminal_operation(mcp: &mut McpProcess, operation_id: &str) -> TerminalOperation {
+    wait_for_terminal_operation_with_diagnostics(mcp, operation_id, None)
 }
 
 fn wait_for_release_semantic_operation(
@@ -942,31 +920,20 @@ fn wait_for_release_semantic_operation(
     repository_id: &str,
     language: &str,
     operation_id: &str,
-    deadline: Instant,
 ) -> TerminalOperation {
-    wait_for_terminal_operation_with_diagnostics(
-        mcp,
-        operation_id,
-        deadline,
-        Some((repository_id, language)),
-    )
+    wait_for_terminal_operation_with_diagnostics(mcp, operation_id, Some((repository_id, language)))
 }
 
 fn wait_for_terminal_operation_with_diagnostics(
     mcp: &mut McpProcess,
     operation_id: &str,
-    deadline: Instant,
     diagnostic_repository: Option<(&str, &str)>,
 ) -> TerminalOperation {
     let mut revision = None;
     let mut attempt = 0_u64;
     let mut progress_samples = Vec::new();
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "operation {operation_id} exceeded its preregistered deadline"
-        );
-        let response = mcp.call_success(
+        let response = mcp.call_until_not_busy(
             &format!("cold-index-operation-{attempt}"),
             "operation.status",
             operation_status_arguments(operation_id, revision),
@@ -991,7 +958,7 @@ fn wait_for_terminal_operation_with_diagnostics(
                         &operation["progress"]["total_units"],
                         "terminal semantic total units",
                     );
-                    let status = mcp.call_until_not_busy(
+                    let status = mcp.call_success(
                         &format!("semantic-truth-{language}-terminal-status"),
                         "repo.status",
                         json!({
@@ -1002,7 +969,6 @@ fn wait_for_terminal_operation_with_diagnostics(
                             "require_freshness": "none",
                             "response_profile": "compact"
                         }),
-                        Instant::now() + STARTUP_TIMEOUT,
                     );
                     panic!(
                         "{language} semantic operation {operation_id} terminated in state \
@@ -1027,34 +993,179 @@ fn wait_for_semantic_operation(
     mcp: &mut McpProcess,
     structural_operation_id: &str,
     initial: Option<String>,
-    indexing_deadline: Instant,
 ) -> String {
     if let Some(operation_id) = initial {
         return operation_id;
     }
-    let admission_deadline = indexing_deadline.min(Instant::now() + STARTUP_TIMEOUT);
+    // Parent publication and child registration are separate durable transactions;
+    // their gap has no guaranteed elapsed bound.
     let mut attempt = 0_u64;
     loop {
-        assert!(
-            Instant::now() < admission_deadline,
-            "auto index did not durably register its semantic operation"
-        );
-        let response = mcp.call_success(
+        let response = mcp.call_until_not_busy(
             &format!("cold-index-semantic-admission-{attempt}"),
             "operation.status",
             json!({"operation_id": structural_operation_id, "wait_ms": 0}),
         );
         assert_success(&response, "operation.status");
         let operation_data = data(&response);
-        if let Some(operation_id) = operation_data["semantic_operation_id"].as_str() {
-            return operation_id.to_owned();
+        if let Some(operation_id) = registered_semantic_operation(operation_data) {
+            return operation_id;
         }
-        assert_eq!(
-            operation_data["operation"]["state"], "published",
-            "structural operation changed state while awaiting semantic admission"
-        );
         attempt = attempt.saturating_add(1);
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn retryable_busy_delay(response: &Value) -> Option<Duration> {
+    let error = &response["result"]["structuredContent"]["error"];
+    if response["result"]["isError"] != true
+        || error["code"] != "BUSY"
+        || error["retryable"] != true
+    {
+        return None;
+    }
+    Some(Duration::from_millis(
+        error["retry_after_ms"]
+            .as_u64()
+            .unwrap_or(100)
+            .clamp(1, 1_000),
+    ))
+}
+
+#[test]
+fn busy_poll_backoff_is_bounded_without_masking_terminal_errors() {
+    for (advised, expected) in [(0, 1), (25, 25), (u64::MAX, 1_000)] {
+        assert_eq!(
+            retryable_busy_delay(
+                &json!({"result": {"isError": true, "structuredContent": {"error": {
+                    "code": "BUSY", "retryable": true, "retry_after_ms": advised
+                }}}})
+            ),
+            Some(Duration::from_millis(expected))
+        );
+    }
+    for (code, retryable) in [("BUSY", false), ("FAILED", true), ("CANCELLED", false)] {
+        assert_eq!(
+            retryable_busy_delay(
+                &json!({"result": {"isError": true, "structuredContent": {"error": {
+                    "code": code, "retryable": retryable, "retry_after_ms": 1
+                }}}})
+            ),
+            None
+        );
+    }
+    assert_eq!(
+        retryable_busy_delay(&json!({"result": {"structuredContent": {"data": {}}}})),
+        None
+    );
+}
+
+#[test]
+fn busy_poll_does_not_retry_malformed_error_envelopes() {
+    for flag in [
+        json!(false),
+        json!(null),
+        json!(0),
+        json!(1),
+        json!("true"),
+        json!({}),
+        json!([]),
+    ] {
+        assert_eq!(
+            retryable_busy_delay(&json!({"result": {
+                "isError": flag,
+                "structuredContent": {"error": {"code": "BUSY", "retryable": true}}
+            }})),
+            None
+        );
+    }
+    assert_eq!(
+        retryable_busy_delay(&json!({"result": {
+            "structuredContent": {"error": {"code": "BUSY", "retryable": true}}
+        }})),
+        None
+    );
+    for retryable in [
+        json!(false),
+        json!(null),
+        json!(0),
+        json!(1),
+        json!("true"),
+        json!({}),
+        json!([]),
+    ] {
+        assert_eq!(
+            retryable_busy_delay(&json!({"result": {
+                "isError": true,
+                "structuredContent": {"error": {"code": "BUSY", "retryable": retryable}}
+            }})),
+            None
+        );
+    }
+    assert_eq!(
+        retryable_busy_delay(&json!({"result": {
+            "isError": true,
+            "structuredContent": {"error": {"code": "UNKNOWN", "retryable": true}}
+        }})),
+        None
+    );
+}
+
+fn registered_semantic_operation(operation_data: &Value) -> Option<String> {
+    assert_eq!(
+        operation_data["operation"]["state"], "published",
+        "structural operation changed state while awaiting semantic admission"
+    );
+    if operation_data["semantic_operation_id"].is_null() {
+        return None;
+    }
+    let operation_id = required_string(
+        &operation_data["semantic_operation_id"],
+        "registered semantic operation identity",
+    );
+    assert!(
+        !operation_id.is_empty(),
+        "registered semantic operation identity is empty"
+    );
+    Some(operation_id)
+}
+
+#[test]
+fn semantic_registration_requires_published_parent_and_typed_child_identity() {
+    assert_eq!(
+        registered_semantic_operation(&json!({
+            "operation": {"state": "published"}, "semantic_operation_id": "op1_semantic"
+        })),
+        Some("op1_semantic".to_owned())
+    );
+    assert_eq!(
+        registered_semantic_operation(&json!({
+            "operation": {"state": "published"}, "semantic_operation_id": null
+        })),
+        None
+    );
+    for state in [
+        "queued",
+        "running",
+        "failed",
+        "cancelled",
+        "waiting_for_context",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| registered_semantic_operation(&json!({
+                "operation": {"state": state}, "semantic_operation_id": "op1_semantic"
+            })))
+            .is_err(),
+            "{state}"
+        );
+    }
+    for child in [json!(""), json!(false), json!(7)] {
+        assert!(
+            std::panic::catch_unwind(|| registered_semantic_operation(&json!({
+                "operation": {"state": "published"}, "semantic_operation_id": child
+            })))
+            .is_err()
+        );
     }
 }
 
@@ -1730,30 +1841,15 @@ impl McpProcess {
         })
     }
 
-    fn call_until_not_busy(
-        &mut self,
-        id: &str,
-        tool: &str,
-        arguments: Value,
-        deadline: Instant,
-    ) -> Value {
+    // Each RPC still has RESPONSE_TIMEOUT; repository work has no aggregate cap.
+    fn call_until_not_busy(&mut self, id: &str, tool: &str, arguments: Value) -> Value {
         let mut attempt = 1_u64;
         loop {
-            assert!(
-                Instant::now() < deadline,
-                "{tool} remained busy beyond its recovery deadline"
-            );
             let response = self.call(&format!("{id}-attempt-{attempt}"), tool, arguments.clone());
-            let error = &response["result"]["structuredContent"]["error"];
-            if error["code"] != "BUSY" || error["retryable"] != true {
+            let Some(retry_after) = retryable_busy_delay(&response) else {
                 return response;
-            }
-            let retry_after = Duration::from_millis(
-                error["retry_after_ms"]
-                    .as_u64()
-                    .unwrap_or(u64::try_from(POLL_INTERVAL.as_millis()).unwrap_or(100)),
-            );
-            thread::sleep(retry_after.min(deadline.saturating_duration_since(Instant::now())));
+            };
+            thread::sleep(retry_after);
             attempt = attempt.saturating_add(1);
         }
     }

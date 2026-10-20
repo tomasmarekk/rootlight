@@ -11,6 +11,8 @@
 
 mod dart_dependencies;
 mod source_find;
+mod source_only;
+mod source_recovery;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -44,7 +46,7 @@ use rootlight_ids::{
 use rootlight_ir::{
     AnalysisTier, ContainerRef, CoverageRecord, CoverageStatus, FactDomain as IrFactDomain,
     LineRange, NormalizedIrDocument, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
-    RelationEndpoint, RelationPredicate, SourceRef, SourceSpan,
+    RelationPredicate, SourceRef, SourceSpan,
 };
 use rootlight_observability::{
     ShutdownPhase, SpanGuard, SpanKind, SupportAdapterInventory, SupportChecksumStatus,
@@ -83,7 +85,7 @@ use rootlight_query::{
     AnalysisScope, ArchitectureOverviewDetail, ArchitectureOverviewView,
     ChangeImpactRelationPolicy, CodeDeadEntryPointPolicy, CycleProjectionLevel, CycleRankBy,
     ExecutionCompletenessState, HistoryCompareScope, LocateMode, QueryResource, QueryUsage,
-    RelationDirection, RelationFamily, TestsSelectKind,
+    RelationDirection, RelationFamily, SymbolExplainRelationEndpoints, TestsSelectKind,
 };
 use rootlight_runtime::{
     CoordinatedStartupSignal, STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
@@ -167,6 +169,7 @@ const WATCHER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const WATCHER_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WATCHER_MAX_REPOSITORY_ENTRIES: usize = 250_000;
 const DEFAULT_RELATIONSHIP_RESULTS: u32 = 100;
+const MAX_SYMBOL_RELATION_SAMPLES: usize = 250;
 const DEFAULT_FLOW_DEPTH: u32 = 3;
 const DEFAULT_FLOW_PATHS: u32 = 10;
 const DEFAULT_CYCLE_MIN_SIZE: u32 = 2;
@@ -7943,6 +7946,7 @@ fn execute_service_request(
     };
     if let (Some(repository), Some(recovery)) = (requested_repository, requested_recovery)
         && recovery.phase.blocks_reads()
+        && !source_only::ready(&*read_service(&lanes.service)?, &request, &context)?
     {
         lanes
             .recovery_demand
@@ -11829,8 +11833,10 @@ fn symbol_explain(
             .as_ref()
             .ok_or_else(incomplete_coverage)?;
         let mut relations = RelationCounts::default();
-        for relation in &response.data.relations {
-            relations.observe(symbol, relation)?;
+        for (relation, endpoints) in
+            symbol_relation_contexts(&response.data.relations, &response.data.relation_endpoints)?
+        {
+            relations.observe(symbol, relation, endpoints)?;
         }
         let has_candidate_references = response
             .data
@@ -11842,9 +11848,11 @@ fn symbol_explain(
         let relation_samples = symbol_relation_samples(
             symbol,
             &response.data.relations,
+            &response.data.relation_endpoints,
             &response.data.occurrences,
             relation_sample_limit,
         )?;
+        relation_samples.record_completeness(&mut execution_state, &mut limiting_resources);
         let container = entity.container.map(container_label);
         let source_lines = u8::try_from(request.source_preview_lines.unwrap_or(0))
             .map_err(|_| invalid_argument())?;
@@ -11939,7 +11947,7 @@ fn symbol_explain(
             tier: analysis_tier_to_wire(tier) as i32,
             qualified_name: entity.qualified_name,
             container,
-            relation_samples,
+            relation_samples: relation_samples.samples,
             source_preview,
             section_gaps,
             provenance_frontend_version: matches!(request.include_provenance.as_str(), "full")
@@ -11950,6 +11958,8 @@ fn symbol_explain(
                 .flatten(),
         });
     }
+    let (truncated, completeness) =
+        symbol_explain_completeness(execution_state, &limiting_resources);
     Ok(daemon::SymbolExplainResponse {
         schema_version: Some(schema_version()),
         context: Some(query_context(
@@ -11961,14 +11971,26 @@ fn symbol_explain(
         )?),
         symbols,
         unresolved_symbols,
-        truncated: !limiting_resources.is_empty(),
-        completeness: Some(execution_completeness(
-            execution_state,
-            &limiting_resources,
+        truncated,
+        completeness: Some(completeness),
+    })
+}
+
+fn symbol_explain_completeness(
+    state: ExecutionCompletenessState,
+    resources: &[QueryResource],
+) -> (bool, daemon::FirstSliceCompleteness) {
+    // Legacy IPC reserves the flag for Truncated; UnsupportedPartial retains
+    // all resource causes in the authoritative completeness object.
+    (
+        state == ExecutionCompletenessState::Truncated,
+        execution_completeness(
+            state,
+            resources,
             false,
             daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceSplitRequest,
-        )),
-    })
+        ),
+    )
 }
 
 fn explain_sections(requested: &[String]) -> Result<BTreeSet<String>, PublicError> {
@@ -12006,30 +12028,62 @@ fn explain_sections(requested: &[String]) -> Result<BTreeSet<String>, PublicErro
     Ok(sections)
 }
 
+struct SymbolRelationSampleProjection {
+    samples: Vec<daemon::FirstSliceSymbolRelationSample>,
+    truncated: bool,
+}
+
+impl SymbolRelationSampleProjection {
+    fn record_completeness(
+        &self,
+        state: &mut ExecutionCompletenessState,
+        resources: &mut Vec<QueryResource>,
+    ) {
+        if self.truncated {
+            *state = (*state).max(ExecutionCompletenessState::Truncated);
+            if !resources.contains(&QueryResource::Results) {
+                resources.push(QueryResource::Results);
+            }
+        }
+    }
+}
+
+fn symbol_relation_contexts<'a>(
+    relations: &'a [rootlight_ir::RelationRecord],
+    endpoints: &'a [SymbolExplainRelationEndpoints],
+) -> Result<
+    impl Iterator<
+        Item = (
+            &'a rootlight_ir::RelationRecord,
+            &'a SymbolExplainRelationEndpoints,
+        ),
+    >,
+    PublicError,
+> {
+    if relations.len() != endpoints.len()
+        || relations
+            .iter()
+            .zip(endpoints)
+            .any(|(relation, context)| relation.id != context.relation)
+    {
+        return Err(incomplete_coverage());
+    }
+    Ok(relations.iter().zip(endpoints))
+}
+
 fn symbol_relation_samples(
     symbol: SymbolId,
     relations: &[rootlight_ir::RelationRecord],
+    endpoints: &[SymbolExplainRelationEndpoints],
     occurrences: &[OccurrenceRecord],
     per_kind_limit: u32,
-) -> Result<Vec<daemon::FirstSliceSymbolRelationSample>, PublicError> {
+) -> Result<SymbolRelationSampleProjection, PublicError> {
     let mut samples = Vec::new();
-    for relation in relations {
-        let (direction, target) = if relation.subject == RelationEndpoint::Entity(symbol) {
-            (
-                "outbound",
-                match relation.object {
-                    RelationEndpoint::Entity(target) => Some(target),
-                    _ => None,
-                },
-            )
-        } else if relation.object == RelationEndpoint::Entity(symbol) {
-            (
-                "inbound",
-                match relation.subject {
-                    RelationEndpoint::Entity(target) => Some(target),
-                    _ => None,
-                },
-            )
+    for (relation, context) in symbol_relation_contexts(relations, endpoints)? {
+        let (direction, target) = if context.subject == Some(symbol) {
+            ("outbound", context.object)
+        } else if context.object == Some(symbol) {
+            ("inbound", context.subject)
         } else {
             continue;
         };
@@ -12074,7 +12128,11 @@ fn symbol_relation_samples(
         *count = count.saturating_add(1);
         true
     });
-    Ok(samples)
+    // Per-kind sampling precedes the independent public aggregate bound. Full
+    // relation counts remain authoritative; this flag discloses projection loss.
+    let truncated = samples.len() > MAX_SYMBOL_RELATION_SAMPLES;
+    samples.truncate(MAX_SYMBOL_RELATION_SAMPLES);
+    Ok(SymbolRelationSampleProjection { samples, truncated })
 }
 
 fn candidate_reference_to(occurrence: &OccurrenceRecord, symbol: SymbolId) -> bool {
@@ -14025,11 +14083,14 @@ fn source_read(
     require_source_read_protocol(&request, context.selected_protocol_minor)?;
     let repository = parse_repository(request.repository.as_ref())?;
     let selected = parse_generation_selector(request.generation.as_ref())?;
-    let generation = service
-        .resolve_generation(repository, selected)
-        .map_err(service_error)?;
     let encoding =
         daemon::SourceReadEncoding::try_from(request.encoding).map_err(|_| invalid_argument())?;
+    let generation = if encoding == daemon::SourceReadEncoding::LosslessText {
+        service.resolve_generation(repository, selected)
+    } else {
+        service.resolve_source_context(repository, selected, &context.cancellation)
+    }
+    .map_err(service_error)?;
     let context_lines_before =
         u16::try_from(request.context_lines_before).map_err(|_| invalid_argument())?;
     let context_lines_after =
@@ -14052,6 +14113,15 @@ fn source_read(
     if request.merge_overlaps {
         references = merge_source_references(references)?;
     }
+    let source_only = encoding != daemon::SourceReadEncoding::LosslessText
+        && service
+            .source_only_read_available(
+                repository,
+                generation.generation,
+                &references,
+                &context.cancellation,
+            )
+            .map_err(service_error)?;
     let encoding = match encoding {
         daemon::SourceReadEncoding::Utf8 => ServiceSourceEncoding::Utf8,
         daemon::SourceReadEncoding::Bytes => ServiceSourceEncoding::Bytes,
@@ -14096,13 +14166,26 @@ fn source_read(
         .try_reserve_exact(data.chunks.len())
         .map_err(|_| resource_exhausted())?;
     for chunk in data.chunks {
-        let (language, tier) = service
-            .source_language_coverage_until(
-                generation.generation,
-                chunk.reference.span().file(),
-                &context.cancellation,
+        let (language, tier) = if source_only {
+            (
+                service
+                    .source_file_language_until(
+                        generation.generation,
+                        chunk.reference.span().file(),
+                        &context.cancellation,
+                    )
+                    .map_err(service_error)?,
+                AnalysisTier::TierD,
             )
-            .map_err(service_error)?;
+        } else {
+            service
+                .source_language_coverage_until(
+                    generation.generation,
+                    chunk.reference.span().file(),
+                    &context.cancellation,
+                )
+                .map_err(service_error)?
+        };
         if language != chunk.language {
             return Err(internal_error());
         }
@@ -14144,17 +14227,35 @@ fn source_read(
         path_prefixes.sort_unstable();
         path_prefixes.dedup();
     }
+    let source_recovery =
+        source_recovery::source_recovery_to_wire(service, generation.generation, &chunks, context)?;
     Ok(daemon::SourceReadResponse {
         schema_version: Some(schema_version()),
-        context: Some(query_context_with_languages(
-            service,
-            generation,
-            &response.usage,
-            &[],
-            &[],
-            &path_prefixes,
-            &context.cancellation,
-        )?),
+        context: Some(if source_only {
+            let freshness = service
+                .source_generation_freshness(
+                    repository,
+                    generation.generation,
+                    &context.cancellation,
+                )
+                .map_err(service_error)?;
+            source_metadata_quote_context(
+                generation,
+                &response.usage,
+                freshness.structural,
+                freshness.semantic,
+            )
+        } else {
+            query_context_with_languages(
+                service,
+                generation,
+                &response.usage,
+                &[],
+                &[],
+                &path_prefixes,
+                &context.cancellation,
+            )?
+        }),
         chunks,
         total_source_bytes: response.usage.source_bytes,
         truncated: execution.is_truncated(),
@@ -14167,6 +14268,7 @@ fn source_read(
         conditional_activity,
         total_text_bytes: 0,
         prefix_truncated: None,
+        source_recovery,
     })
 }
 
@@ -14316,6 +14418,8 @@ fn source_read_lossless_text_response(
         path_prefixes.sort_unstable();
         path_prefixes.dedup();
     }
+    let source_recovery =
+        source_recovery::source_recovery_to_wire(service, generation.generation, &chunks, context)?;
     Ok(daemon::SourceReadResponse {
         schema_version: Some(schema_version()),
         context: Some(query_context_with_languages(
@@ -14339,6 +14443,7 @@ fn source_read_lossless_text_response(
         )),
         conditional_activity,
         prefix_truncated,
+        source_recovery,
     })
 }
 
@@ -14855,24 +14960,26 @@ impl RelationCounts {
         &mut self,
         symbol: SymbolId,
         relation: &rootlight_ir::RelationRecord,
+        endpoints: &SymbolExplainRelationEndpoints,
     ) -> Result<(), PublicError> {
+        if relation.id != endpoints.relation {
+            return Err(incomplete_coverage());
+        }
         if relation.predicate == RelationPredicate::Calls {
-            if relation.subject == RelationEndpoint::Entity(symbol) {
+            if endpoints.subject == Some(symbol) {
                 self.outbound_exact = self
                     .outbound_exact
                     .checked_add(1)
                     .ok_or_else(resource_exhausted)?;
             }
-            if relation.object == RelationEndpoint::Entity(symbol) {
+            if endpoints.object == Some(symbol) {
                 self.inbound_exact = self
                     .inbound_exact
                     .checked_add(1)
                     .ok_or_else(resource_exhausted)?;
             }
         }
-        if relation.predicate == RelationPredicate::RefersTo
-            && relation.object == RelationEndpoint::Entity(symbol)
-        {
+        if relation.predicate == RelationPredicate::RefersTo && endpoints.object == Some(symbol) {
             self.references_exact = self
                 .references_exact
                 .checked_add(1)
@@ -16977,8 +17084,8 @@ mod tests {
     use rootlight_ir::{
         BuildContextIdentity, Confidence, CoverageScope, DiagnosticRecord, DiagnosticSeverity,
         EvidenceKind, FactDomain, FactEvidence, FileIdentityClaim, FileRecord, ProducerIdentity,
-        ProducerKind, ProvenanceRecord, RelationRecord, derive_coverage_record_id,
-        derive_provenance_record_id, new_file_identity_claim_envelope,
+        ProducerKind, ProvenanceRecord, RelationEndpoint, RelationRecord,
+        derive_coverage_record_id, derive_provenance_record_id, new_file_identity_claim_envelope,
     };
     use rootlight_operations::{ClientInstanceId, OperationJournal, OperationStage, RecoveryClass};
     use rootlight_runtime::RuntimePaths;
@@ -24805,6 +24912,354 @@ mod tests {
         );
     }
 
+    fn direct_relation_context(relation: &RelationRecord) -> SymbolExplainRelationEndpoints {
+        let entity = |endpoint| match endpoint {
+            RelationEndpoint::Entity(symbol) => Some(symbol),
+            _ => None,
+        };
+        SymbolExplainRelationEndpoints {
+            relation: relation.id,
+            subject: entity(relation.subject),
+            object: entity(relation.object),
+        }
+    }
+
+    fn direct_relation_contexts(
+        relations: &[RelationRecord],
+    ) -> Vec<SymbolExplainRelationEndpoints> {
+        relations.iter().map(direct_relation_context).collect()
+    }
+
+    #[test]
+    fn symbol_relation_occurrence_calls_keep_counts_and_source_samples() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let caller = SymbolId::from_bytes([3; 20]);
+        let callee = SymbolId::from_bytes([4; 20]);
+        let file = FileId::from_bytes([5; 20]);
+        let relations: Vec<_> = [6, 7]
+            .into_iter()
+            .map(|id| RelationRecord {
+                id: FactId::from_bytes([id; 20]),
+                repository,
+                generation,
+                subject: RelationEndpoint::Occurrence(FactId::from_bytes([id + 10; 20])),
+                predicate: RelationPredicate::Calls,
+                object: RelationEndpoint::Entity(callee),
+                confidence: Confidence::new(850).expect("confidence is bounded"),
+                evidence_kind: EvidenceKind::Syntax,
+                provenance: FactId::from_bytes([9; 20]),
+                evidence: FactEvidence {
+                    source: Some(SourceRef::new(
+                        repository,
+                        generation,
+                        SourceSpan::new(file, u64::from(id), u64::from(id + 1))
+                            .expect("source span is bounded"),
+                        content_hash(b"two distinct call sites"),
+                        None,
+                    )),
+                    derivation: Vec::new(),
+                },
+            })
+            .collect();
+        let contexts: Vec<_> = relations
+            .iter()
+            .map(|relation| SymbolExplainRelationEndpoints {
+                relation: relation.id,
+                subject: Some(caller),
+                object: Some(callee),
+            })
+            .collect();
+        let mut counts = RelationCounts::default();
+        for (relation, context) in relations.iter().zip(&contexts) {
+            counts
+                .observe(caller, relation, context)
+                .expect("call counts");
+        }
+        assert_eq!(counts.outbound_exact, 2);
+        let samples = symbol_relation_samples(caller, &relations, &contexts, &[], 2)
+            .expect("call samples materialize");
+        assert_eq!(samples.samples.len(), 2);
+        for (sample, relation) in samples.samples.iter().zip(&relations) {
+            assert_eq!(sample.kind, "calls");
+            assert_eq!(sample.direction, "outbound");
+            assert_eq!(sample.target, Some(symbol_to_wire(callee)));
+            assert_eq!(sample.confidence, 850);
+            assert_eq!(
+                sample.source_refs,
+                vec![source_ref_to_wire(
+                    relation.evidence.source.as_ref().expect("call source"),
+                )]
+            );
+        }
+        let inbound = symbol_relation_samples(callee, &relations, &contexts, &[], 2)
+            .expect("inbound call samples materialize");
+        assert!(
+            inbound
+                .samples
+                .iter()
+                .all(|sample| sample.direction == "inbound"
+                    && sample.target == Some(symbol_to_wire(caller)))
+        );
+        let one = symbol_relation_samples(caller, &relations, &contexts, &[], 1)
+            .expect("requested sample limit applies");
+        assert_eq!(one.samples.len(), 1);
+        assert_eq!(counts.outbound_exact, 2);
+
+        let direct = RelationRecord {
+            id: FactId::from_bytes([8; 20]),
+            subject: RelationEndpoint::Entity(caller),
+            ..relations[0].clone()
+        };
+        counts
+            .observe(caller, &direct, &direct_relation_context(&direct))
+            .expect("direct call counts once");
+        assert_eq!(counts.outbound_exact, 3);
+        let candidate = RelationRecord {
+            predicate: RelationPredicate::DispatchCandidate,
+            ..direct.clone()
+        };
+        counts
+            .observe(caller, &candidate, &direct_relation_context(&candidate))
+            .expect("candidate remains distinct at the same confidence");
+        assert_eq!(counts.outbound_exact, 3);
+
+        let self_context = SymbolExplainRelationEndpoints {
+            relation: relations[0].id,
+            subject: Some(caller),
+            object: Some(caller),
+        };
+        let mut self_counts = RelationCounts::default();
+        self_counts
+            .observe(caller, &relations[0], &self_context)
+            .expect("self call counts");
+        assert_eq!(
+            (self_counts.outbound_exact, self_counts.inbound_exact),
+            (1, 1)
+        );
+        let self_samples =
+            symbol_relation_samples(caller, &relations[..1], &[self_context], &[], 2)
+                .expect("one self relation yields one sample");
+        assert_eq!(self_samples.samples.len(), 1);
+
+        assert!(symbol_relation_samples(caller, &relations, &contexts[..1], &[], 2).is_err());
+        let mut reversed = contexts.clone();
+        reversed.reverse();
+        assert!(symbol_relation_samples(caller, &relations, &reversed, &[], 2).is_err());
+        assert!(counts.observe(caller, &relations[0], &contexts[1]).is_err());
+    }
+
+    #[test]
+    fn symbol_relation_samples_bound_the_combined_projection() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let symbol = SymbolId::from_bytes([3; 20]);
+        let file = FileId::from_bytes([4; 20]);
+        let target = SymbolId::from_bytes([5; 20]);
+        let source_bytes = vec![b'x'; 275];
+        let predicates = [
+            RelationPredicate::Calls,
+            RelationPredicate::CallsForeign,
+            RelationPredicate::CallsRoute,
+            RelationPredicate::DispatchCandidate,
+            RelationPredicate::Embeds,
+            RelationPredicate::Extends,
+            RelationPredicate::Implements,
+            RelationPredicate::MixesIn,
+            RelationPredicate::Overrides,
+            RelationPredicate::ParameterType,
+            RelationPredicate::RefersTo,
+        ];
+        let relations: Vec<_> = predicates
+            .into_iter()
+            .flat_map(|predicate| std::iter::repeat_n(predicate, 25))
+            .enumerate()
+            .map(|(ordinal, predicate)| {
+                let ordinal = u64::try_from(ordinal).expect("small fixture ordinal fits");
+                let mut id = [0; 20];
+                id[..8].copy_from_slice(&(ordinal + 1).to_le_bytes());
+                RelationRecord {
+                    id: FactId::from_bytes(id),
+                    repository,
+                    generation,
+                    subject: RelationEndpoint::Entity(
+                        if predicate == RelationPredicate::RefersTo {
+                            target
+                        } else {
+                            symbol
+                        },
+                    ),
+                    predicate,
+                    object: RelationEndpoint::Entity(if predicate == RelationPredicate::RefersTo {
+                        symbol
+                    } else {
+                        target
+                    }),
+                    confidence: Confidence::new(900).expect("fixture confidence is bounded"),
+                    evidence_kind: EvidenceKind::Syntax,
+                    provenance: FactId::from_bytes([9; 20]),
+                    evidence: FactEvidence {
+                        source: Some(SourceRef::new(
+                            repository,
+                            generation,
+                            SourceSpan::new(file, ordinal, ordinal + 1)
+                                .expect("fixture source span is bounded"),
+                            content_hash(&source_bytes),
+                            None,
+                        )),
+                        derivation: Vec::new(),
+                    },
+                }
+            })
+            .collect();
+
+        let mut full_counts = RelationCounts::default();
+        for relation in &relations {
+            full_counts
+                .observe(symbol, relation, &direct_relation_context(relation))
+                .expect("relation counts");
+        }
+        assert_eq!(full_counts.outbound_exact, 25);
+        assert_eq!(full_counts.references_exact, 25);
+        for count in [250, 251, 275] {
+            let input = &relations[..count];
+            let projection =
+                symbol_relation_samples(symbol, input, &direct_relation_contexts(input), &[], 25)
+                    .expect("mixed-kind relation samples materialize");
+            assert_eq!(projection.samples.len(), 250);
+            assert_eq!(projection.truncated, count > 250);
+            assert!(
+                projection
+                    .samples
+                    .iter()
+                    .all(|sample| sample.kind != "refers_to")
+            );
+            assert!(
+                projection
+                    .samples
+                    .windows(2)
+                    .all(|pair| { !compare_symbol_relation_samples(&pair[0], &pair[1]).is_gt() })
+            );
+            assert!(projection.samples.iter().all(|sample| {
+                sample.target == Some(symbol_to_wire(target))
+                    && sample.confidence == 900
+                    && input.iter().any(|relation| {
+                        sample.source_refs
+                            == vec![source_ref_to_wire(
+                                relation.evidence.source.as_ref().expect("fixture source"),
+                            )]
+                    })
+            }));
+            let mut reversed = input.to_vec();
+            reversed.reverse();
+            let reordered = symbol_relation_samples(
+                symbol,
+                &reversed,
+                &direct_relation_contexts(&reversed),
+                &[],
+                25,
+            )
+            .expect("reordered samples materialize");
+            assert_eq!(projection.samples, reordered.samples);
+
+            let mut state = ExecutionCompletenessState::Complete;
+            let mut resources = Vec::new();
+            projection.record_completeness(&mut state, &mut resources);
+            let (truncated, completeness) = symbol_explain_completeness(state, &resources);
+            assert_eq!(truncated, count > 250);
+            if count > 250 {
+                assert_eq!(resources, vec![QueryResource::Results]);
+                assert_eq!(
+                    completeness.state,
+                    daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated as i32
+                );
+                assert_eq!(
+                    completeness.limiting_resources[0].kind,
+                    daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResults as i32
+                );
+            } else {
+                assert_eq!(state, ExecutionCompletenessState::Complete);
+                assert!(completeness.limiting_resources.is_empty());
+            }
+        }
+        for limit in [0, 2] {
+            let projection = symbol_relation_samples(
+                symbol,
+                &relations,
+                &direct_relation_contexts(&relations),
+                &[],
+                limit,
+            )
+            .expect("requested per-kind sample limit is valid");
+            assert_eq!(
+                projection.samples.len(),
+                11 * usize::try_from(limit).unwrap()
+            );
+            assert!(!projection.truncated);
+            let mut per_kind = BTreeMap::new();
+            for sample in &projection.samples {
+                *per_kind.entry(&sample.kind).or_insert(0_u32) += 1;
+            }
+            assert!(per_kind.values().all(|count| *count <= limit));
+        }
+        assert_eq!(relations.len(), 275);
+        assert_eq!(full_counts.outbound_exact, 25);
+        assert_eq!(full_counts.references_exact, 25);
+    }
+
+    #[test]
+    fn symbol_relation_sample_projection_preserves_existing_partiality() {
+        let projection = SymbolRelationSampleProjection {
+            samples: Vec::new(),
+            truncated: true,
+        };
+        for (mut state, mut resources) in [
+            (
+                ExecutionCompletenessState::Truncated,
+                vec![QueryResource::Rows, QueryResource::MemoryBytes],
+            ),
+            (
+                ExecutionCompletenessState::UnsupportedPartial,
+                vec![QueryResource::Capability, QueryResource::Results],
+            ),
+        ] {
+            let original_state = state;
+            let mut expected_resources = resources.clone();
+            if !expected_resources.contains(&QueryResource::Results) {
+                expected_resources.push(QueryResource::Results);
+            }
+            projection.record_completeness(&mut state, &mut resources);
+            projection.record_completeness(&mut state, &mut resources);
+            assert_eq!(state, original_state);
+            assert_eq!(resources, expected_resources);
+            let (truncated, completeness) = symbol_explain_completeness(state, &resources);
+            assert_eq!(truncated, state == ExecutionCompletenessState::Truncated);
+            assert_eq!(
+                completeness.state,
+                match state {
+                    ExecutionCompletenessState::Truncated => {
+                        daemon::FirstSliceCompletenessState::FirstSliceCompletenessTruncated
+                    }
+                    ExecutionCompletenessState::UnsupportedPartial => {
+                        daemon::FirstSliceCompletenessState::FirstSliceCompletenessUnsupportedPartial
+                    }
+                    _ => unreachable!("fixture has two partial states"),
+                } as i32
+            );
+            assert_eq!(
+                completeness
+                    .limiting_resources
+                    .iter()
+                    .map(|resource| resource.kind)
+                    .collect::<Vec<_>>(),
+                expected_resources
+                    .into_iter()
+                    .map(|resource| limiting_resource_to_wire(resource) as i32)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     #[test]
     fn symbol_relation_samples_sort_by_logical_evidence_before_limiting() {
         let repository = RepositoryId::from_bytes([1; 16]);
@@ -24848,8 +25303,15 @@ mod tests {
             ),
         ];
 
-        let samples = symbol_relation_samples(symbol, &relations, &[], 1)
-            .expect("relation samples materialize");
+        let samples = symbol_relation_samples(
+            symbol,
+            &relations,
+            &direct_relation_contexts(&relations),
+            &[],
+            1,
+        )
+        .expect("relation samples materialize")
+        .samples;
 
         assert_eq!(
             samples
@@ -24896,8 +25358,9 @@ mod tests {
                 derivation: Vec::new(),
             },
         };
-        let samples = symbol_relation_samples(symbol, &[], &[candidate], 1)
-            .expect("candidate sample materializes");
+        let samples = symbol_relation_samples(symbol, &[], &[], &[candidate], 1)
+            .expect("candidate sample materializes")
+            .samples;
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].kind, "refers_to_candidate");
         assert_eq!(samples[0].direction, "inbound");
@@ -24922,7 +25385,7 @@ mod tests {
         };
         let mut counts = RelationCounts::default();
         counts
-            .observe(symbol, &exact)
+            .observe(symbol, &exact, &direct_relation_context(&exact))
             .expect("exact relation counts");
         assert_eq!(counts.references_exact, 1);
         let outbound = RelationRecord {
@@ -24931,7 +25394,7 @@ mod tests {
             ..exact
         };
         counts
-            .observe(symbol, &outbound)
+            .observe(symbol, &outbound, &direct_relation_context(&outbound))
             .expect("outbound reference is not inbound");
         assert_eq!(counts.references_exact, 1);
     }

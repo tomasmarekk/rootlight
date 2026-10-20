@@ -1,6 +1,8 @@
 //! Scheme reader nodes become written identities only after direct-shape proof.
-//! Data/template ancestry remains opaque; executable symbol uses stay unresolved.
+//! Data/template ancestry remains opaque; direct-file operators need a closed native proof.
 //! The cache shares caller capture/body limits and never evaluates reader state.
+
+mod calls;
 
 use std::collections::HashMap;
 
@@ -165,6 +167,8 @@ pub(super) struct CaptureCache {
     entries: HashMap<usize, CacheEntry>,
     maximum_entries: usize,
     exhausted: bool,
+    complete_source: bool,
+    direct_calls: Option<calls::Census>,
 }
 
 impl CaptureCache {
@@ -173,7 +177,35 @@ impl CaptureCache {
             entries: HashMap::new(),
             maximum_entries,
             exhausted: false,
+            complete_source: false,
+            direct_calls: None,
         }
+    }
+
+    pub(super) fn with_complete_source(mut self, complete_source: bool) -> Self {
+        self.complete_source = complete_source;
+        self
+    }
+
+    fn direct_call(
+        &mut self,
+        node: Node<'_>,
+        source: &[u8],
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        cancel.check()?;
+        if self.direct_calls.is_none() {
+            let mut root = node;
+            while let Some(parent) = root.parent() {
+                cancel.check()?;
+                root = parent;
+            }
+            self.direct_calls = Some(calls::Census::new(self, root, source, cancel)?);
+        }
+        Ok(self
+            .direct_calls
+            .as_ref()
+            .is_some_and(|census| census.contains(node)))
     }
 
     pub(super) const fn exhausted(&self) -> bool {
@@ -1170,6 +1202,12 @@ pub(super) fn retain_capture(
         return Ok(false);
     }
     if node.kind() == "symbol"
+        && role == StructuralRole::Declaration
+        && cache.direct_call(node, source, cancellation)?
+    {
+        return Ok(true);
+    }
+    if node.kind() == "symbol"
         && matches!(
             role,
             StructuralRole::Declaration | StructuralRole::Definition
@@ -1212,7 +1250,7 @@ pub(super) fn retain_capture(
     Ok(false)
 }
 
-/// Projects raw names and written headers without normalization or target claims.
+/// Projects raw names and headers; only certified direct-file operators become required uses.
 pub(super) fn candidate(
     node: Node<'_>,
     role: StructuralRole,
@@ -1222,6 +1260,22 @@ pub(super) fn candidate(
 ) -> Result<QueryCandidate, AdapterError> {
     cancellation.check()?;
     let mut span = Span::of(node);
+    if node.kind() == "symbol"
+        && matches!(
+            role,
+            StructuralRole::Declaration | StructuralRole::Reference
+        )
+        && cache.direct_call(node, source, cancellation)?
+    {
+        return Ok(QueryCandidate {
+            start: span.start,
+            end: span.end,
+            role: StructuralRole::Reference,
+            syntax: "scheme.direct_file_call",
+            required: true,
+            native_depth: native_depth(node, cancellation)?,
+        });
+    }
     let syntax = if node.kind() == "program" {
         span = Span {
             start: 0,

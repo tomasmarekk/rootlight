@@ -50,6 +50,11 @@ members = [
     "xtask",
 ]
 exclude = [
+    "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser",
+    "source-inputs/producers/raffia-0.13.0/raffia",
+    "source-inputs/producers/raffia-0.13.0/raffia_macro",
+    "third_party/tree-sitter-elixir-0.3.5",
+    "third_party/tree-sitter-graphql-0.0.1",
     "tests/fixtures/architecture/forbidden-edge",
     "third_party/dekobon-tree-sitter-groovy-0.2.0",
     "third_party/tree-sitter-astro-next-0.1.1",
@@ -57,16 +62,38 @@ exclude = [
     "third_party/tree-sitter-css-0.25.0",
     "third_party/tree-sitter-cobol-0.0.1",
     "third_party/tree-sitter-commonlisp-0.4.1",
+    "third_party/tree-sitter-clojure-0.0.8",
+    "third_party/tree-sitter-racket-0.25.0",
+    "third_party/tree-sitter-fish-3.7.0",
+    "third_party/tree-sitter-nim-0.6.2",
+    "third_party/tree-sitter-cue-0.2.0",
+    "third_party/tree-sitter-pony-0.0.3",
+    "third_party/tree-sitter-hcl-1.2.0",
+    "third_party/tree-sitter-ada-0.9.1",
+    "third_party/tree-sitter-d-0.8.2",
+    "third_party/tree-sitter-haxe-0.13.0",
+    "third_party/tree-sitter-qsharp-0.2.0",
+    "third_party/tree-sitter-sml-0.25.0",
+    "third_party/tree-sitter-wat-0.1.0",
+    "third_party/tree-sitter-mojo-0.25.0",
+    "third_party/tree-sitter-hare-1.0.0",
+    "third_party/tree-sitter-qmljs-0.3.1",
+    "third_party/tree-sitter-modelica-0.0.1",
+    "third_party/tree-sitter-ring-1.1.1",
+    "third_party/tree-sitter-zig-1.1.2",
+    "third_party/tree-sitter-crystal-0.0.1",
     "third_party/tree-sitter-scheme-0.24.7-1",
     "third_party/tree-sitter-ocaml-0.25.0",
     "third_party/tree-sitter-asm-0.24.0",
     "third_party/tree-sitter-glsl-0.2.0",
     "third_party/tree-sitter-hlsl-0.2.0",
     "third_party/tree-sitter-wgsl-0.0.9",
+    "third_party/tree-sitter-capnp-1.5.0",
     "third_party/tree-sitter-xml-0.7.0",
     "third_party/tree-sitter-cmake-0.7.5",
     "third_party/tree-sitter-julia-0.25.0",
     "third_party/tree-sitter-eiffel-1.0.0",
+    "third_party/tree-sitter-vhdl-2.0.3",
     "third_party/tree-sitter-systemverilog-0.4.1",
     "third_party/tree-sitter-v-0.0.6",
     "third_party/tree-sitter-plsql-0.0.1",
@@ -85,6 +112,8 @@ exclude = [
     "third_party/tree-sitter-powershell-0.26.4",
     "third_party/tree-sitter-r-1.3.0",
     "third_party/tree-sitter-rocq-0.2.0",
+    "third_party/tree-sitter-proto-0.0.1",
+    "third_party/tree-sitter-thrift-0.5.0",
     "third_party/tree-sitter-sas-0.4.2",
     "third_party/tree-sitter-sequel-0.3.11",
     "third_party/tree-sitter-swift-0.7.3",
@@ -103,6 +132,9 @@ repository = "https://github.com/tomasmarekk/rootlight"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+tree-sitter-graphql = { path = "third_party/tree-sitter-graphql-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-elixir = { path = "third_party/tree-sitter-elixir-0.3.5", version = "=0.3.5", default-features = false }
+tree-sitter-capnp = { path = "third_party/tree-sitter-capnp-1.5.0", version = "=1.5.0", default-features = false }
 anyhow = { version = "1.0.103", default-features = false, features = ["std"] }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 blake3 = { version = "1.8.5", default-features = false, features = ["pure", "std"] }
@@ -144,6 +176,26 @@ tree-sitter-cobol = { path = "third_party/tree-sitter-cobol-0.0.1", version = "=
 tree-sitter-plsql = { path = "third_party/tree-sitter-plsql-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-pascal = { path = "third_party/tree-sitter-pascal-0.10.2", version = "=0.10.2", default-features = false }
 tree-sitter-commonlisp = { path = "third_party/tree-sitter-commonlisp-0.4.1", version = "=0.4.1", default-features = false }
+tree-sitter-clojure = { path = "third_party/tree-sitter-clojure-0.0.8", version = "=0.0.8", default-features = false }
+tree-sitter-racket = { path = "third_party/tree-sitter-racket-0.25.0", version = "=0.25.0", default-features = false }
+tree-sitter-fish = { path = "third_party/tree-sitter-fish-3.7.0", version = "=3.7.0", default-features = false }
+tree-sitter-nim = { path = "third_party/tree-sitter-nim-0.6.2", version = "=0.6.2", default-features = false }
+tree-sitter-cue = { path = "third_party/tree-sitter-cue-0.2.0", version = "=0.2.0", default-features = false }
+tree-sitter-pony = { path = "third_party/tree-sitter-pony-0.0.3", version = "=0.0.3", default-features = false }
+tree-sitter-hcl = { path = "third_party/tree-sitter-hcl-1.2.0", version = "=1.2.0", default-features = false }
+tree-sitter-ada = { path = "third_party/tree-sitter-ada-0.9.1", version = "=0.9.1", default-features = false }
+tree-sitter-d = { path = "third_party/tree-sitter-d-0.8.2", version = "=0.8.2", default-features = false }
+tree-sitter-haxe = { path = "third_party/tree-sitter-haxe-0.13.0", version = "=0.13.0", default-features = false }
+tree-sitter-qmljs = { path = "third_party/tree-sitter-qmljs-0.3.1", version = "=0.3.1", default-features = false }
+tree-sitter-modelica = { path = "third_party/tree-sitter-modelica-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-qsharp = { path = "third_party/tree-sitter-qsharp-0.2.0", version = "=0.2.0", default-features = false }
+tree-sitter-sml = { path = "third_party/tree-sitter-sml-0.25.0", version = "=0.25.0", default-features = false }
+tree-sitter-wat = { path = "third_party/tree-sitter-wat-0.1.0", version = "=0.1.0", default-features = false }
+tree-sitter-mojo = { path = "third_party/tree-sitter-mojo-0.25.0", version = "=0.25.0", default-features = false }
+tree-sitter-hare = { path = "third_party/tree-sitter-hare-1.0.0", version = "=1.0.0", default-features = false }
+tree-sitter-ring = { path = "third_party/tree-sitter-ring-1.1.1", version = "=1.1.1", default-features = false }
+tree-sitter-zig = { path = "third_party/tree-sitter-zig-1.1.2", version = "=1.1.2", default-features = false }
+tree-sitter-crystal = { path = "third_party/tree-sitter-crystal-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-scheme = { package = "tree-sitter-scheme-native-local", path = "third_party/tree-sitter-scheme-0.24.7-1", version = "=0.24.7-1", default-features = false }
 tree-sitter-ocaml = { path = "third_party/tree-sitter-ocaml-0.25.0", version = "=0.25.0", default-features = false }
 tree-sitter-asm = { path = "third_party/tree-sitter-asm-0.24.0", version = "=0.24.0", default-features = false }
@@ -155,6 +207,9 @@ tree-sitter-cmake = { path = "third_party/tree-sitter-cmake-0.7.5", version = "=
 tree-sitter-julia = { path = "third_party/tree-sitter-julia-0.25.0", version = "=0.25.0", default-features = false }
 tree-sitter-eiffel = { path = "third_party/tree-sitter-eiffel-1.0.0", version = "=1.0.0", default-features = false }
 tree-sitter-rocq = { path = "third_party/tree-sitter-rocq-0.2.0", version = "=0.2.0", default-features = false }
+tree-sitter-vhdl = { path = "third_party/tree-sitter-vhdl-2.0.3", version = "=2.0.3", default-features = false }
+tree-sitter-proto = { path = "third_party/tree-sitter-proto-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-thrift = { path = "third_party/tree-sitter-thrift-0.5.0", version = "=0.5.0", default-features = false }
 tree-sitter-systemverilog = { path = "third_party/tree-sitter-systemverilog-0.4.1", version = "=0.4.1", default-features = false }
 tree-sitter-v = { path = "third_party/tree-sitter-v-0.0.6", version = "=0.0.6", default-features = false }
 tree-sitter-sfapex = { path = "third_party/tree-sitter-sfapex-3.0.1", version = "=3.0.1", default-features = false }

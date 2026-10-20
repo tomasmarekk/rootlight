@@ -24,8 +24,9 @@ use rootlight_adapter_sdk::{
     ProjectLanguageAnalyzer, ProjectSourceInput, RemainingBudget, ResourceUsage, RustBindingLookup,
     RustBindings, SinkError, StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind, WorkReport,
     canonical_ecmascript_identifier, derive_structural_occurrence_identity, execute_parse,
-    structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
-    structural_type_member_kind,
+    structural_entity_kind, structural_entity_kind_from_source,
+    structural_preprocessor_context_gaps, structural_signature_is_preprocessor_context,
+    structural_syntax_fact_order, structural_type_member_kind,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId, content_hash};
@@ -1463,6 +1464,16 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
         structural_entity_kind(fact).is_some()
             || is_definition_fact(fact)
             || is_symbol_signature_fact(fact)
+            || formal_binding_context_metadata(fact).is_some()
+            || (fact.kind() == SyntaxFactKind::Signature
+                && matches!(
+                    fact.syntax_kind().as_str(),
+                    "scss.mixin_target.signature"
+                        | "scss.parameter_list_unavailable.signature"
+                        | "prolog.goal_context.signature"
+                        | "prolog.goal_target.signature"
+                ))
+            || structural_signature_is_preprocessor_context(fact)
             || ecmascript::is_export_metadata(fact)
             || ecmascript::lexical::is_binding_metadata(fact)
             || rust_binding_metadata_fact(fact)
@@ -1942,7 +1953,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             self.rust_module_calls = module_calls.proofs;
             for span in module_calls.generic_gaps {
                 let input = self.input_for_file(span.file())?.clone();
-                self.push_rust_binding_gap(
+                self.push_source_gap(
                     &input,
                     span,
                     FactDomain::Relations,
@@ -2239,6 +2250,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .and_then(|parent| nearest_declaration.get(&parent).copied().flatten());
                 if structural_entity_kind(fact).is_some() {
                     nearest_declaration.insert(fact.local_id(), Some(fact.local_id()));
+                } else if fact.kind() == SyntaxFactKind::Declaration {
+                    nearest_declaration.insert(fact.local_id(), None);
                 } else {
                     nearest_declaration.insert(fact.local_id(), parent_declaration);
                     if let Some(declaration) = parent_declaration {
@@ -2678,8 +2691,16 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
 
             for (fact_index, fact) in facts.iter().enumerate() {
                 check_periodically(fact_index, self.cancellation)?;
-                for &(domain, detail) in rust_binding_gaps(fact) {
-                    self.push_rust_binding_gap(input, fact.span(), domain, detail)?;
+                for &(domain, detail) in rust_binding_gaps(fact)
+                    .iter()
+                    .chain(structural_preprocessor_context_gaps(fact))
+                {
+                    self.push_source_gap(input, fact.span(), domain, detail)?;
+                }
+                if let Some((language, detail)) = formal_binding_context_metadata(fact)
+                    && self.analyzer.language == language
+                {
+                    self.push_source_gap(input, fact.span(), FactDomain::Relations, detail)?;
                 }
                 match fact.kind() {
                     SyntaxFactKind::Import => {
@@ -3216,7 +3237,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 EvidenceKind::Syntax,
                 draft.source.clone(),
             )?;
-            if draft.rust_local || draft.synthetic {
+            if draft.rust_local || draft.synthetic || draft.kind == EntityKind::Parameter {
                 self.push_relation(
                     draft.file,
                     subject,
@@ -3296,7 +3317,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             self.materialize_rust_direct_call(&draft)?;
             if self.rust_module_calls.contains_key(&draft.source.span()) {
                 let input = self.input_for_file(draft.file)?.clone();
-                self.push_rust_binding_gap(
+                self.push_source_gap(
                     &input,
                     draft.source.span(),
                     FactDomain::Relations,
@@ -3321,12 +3342,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     "rust-namespace-and-binding-target-unavailable"
                 };
                 let input = self.input_for_file(draft.file)?.clone();
-                self.push_rust_binding_gap(
-                    &input,
-                    draft.source.span(),
-                    FactDomain::Relations,
-                    detail,
-                )?;
+                self.push_source_gap(&input, draft.source.span(), FactDomain::Relations, detail)?;
             }
             let provenance = self.provenance_for_file(draft.file)?;
             let enclosing = draft
@@ -4328,6 +4344,30 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 kind: ResolutionKind::Binding,
             };
         }
+        // The Structural native formal certificate has no project-layer owner join.
+        // Retained metadata reports that limit instead of name-only adoption.
+        if self.analyzer.language == SemanticProjectLanguage::Go
+            && matches!(
+                occurrence.syntax_kind.as_str(),
+                "go.call_formal.reference" | "go.unproven_call_formal.reference"
+            )
+        {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::C
+            && matches!(
+                occurrence.syntax_kind.as_str(),
+                "c.formal_value.reference" | "c.unproven_formal_value.reference"
+            )
+        {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
         if self.analyzer.language == SemanticProjectLanguage::Dart {
             return self.resolve_dart_occurrence(occurrence, definitions, import_targets);
         }
@@ -5021,10 +5061,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         span: SourceSpan,
         detail: &str,
     ) -> Result<(), AdapterError> {
-        self.push_rust_binding_gap(input, span, FactDomain::Relations, detail)
+        self.push_source_gap(input, span, FactDomain::Relations, detail)
     }
 
-    fn push_rust_binding_gap(
+    fn push_source_gap(
         &mut self,
         input: &ProjectSourceInput<'_>,
         span: SourceSpan,
@@ -5927,9 +5967,49 @@ fn select_unique_syntax_fact<'a>(facts: &[&'a SyntaxFact]) -> Option<&'a SyntaxF
         .then_some(selected)
 }
 
+fn formal_binding_context_metadata(
+    fact: &SyntaxFact,
+) -> Option<(SemanticProjectLanguage, &'static str)> {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return None;
+    }
+    match fact.syntax_kind().as_str() {
+        "c.formal_binding_context.signature" => Some((
+            SemanticProjectLanguage::C,
+            "c-formal-proof-is-limited-to-direct-arguments-in-a-single-clean-call-statement",
+        )),
+        "python.parameter_binding_context.signature" => Some((
+            SemanticProjectLanguage::Python,
+            "python-function-binding-proof-is-limited-to-the-ordinary-formal-read-subset",
+        )),
+        "java.setter_binding_context.signature" => Some((
+            SemanticProjectLanguage::Java,
+            "java-formal-binding-proof-is-limited-to-single-assignment-setters",
+        )),
+        "go.call_formal_context.signature" => Some((
+            SemanticProjectLanguage::Go,
+            "go-call-argument-proof-requires-clean-free-function-and-no-formal-rebinding-or-inner-function",
+        )),
+        "go.composite_formal_context.signature" => Some((
+            SemanticProjectLanguage::Go,
+            "go-formal-proof-is-limited-to-ascii-free-functions-and-direct-single-return-literal-values",
+        )),
+        _ => None,
+    }
+}
+
 fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str().ends_with(".signature")
+        && !structural_signature_is_preprocessor_context(fact)
+        && formal_binding_context_metadata(fact).is_none()
+        && !matches!(
+            fact.syntax_kind().as_str(),
+            "scss.mixin_target.signature"
+                | "scss.parameter_list_unavailable.signature"
+                | "prolog.goal_context.signature"
+                | "prolog.goal_target.signature"
+        )
         && !ecmascript::is_export_metadata(fact)
         && !ecmascript::lexical::is_binding_metadata(fact)
         && !rust_binding_metadata_fact(fact)
@@ -7094,3 +7174,155 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod python_parameter_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn function_binding_context_is_not_a_project_identity_signature() {
+        let source = SourceSpan::new(rootlight_ids::FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let fact = |label| {
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                source,
+                0,
+                rootlight_adapter_sdk::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        assert!(!is_symbol_signature_fact(&fact(
+            "python.parameter_binding_context.signature"
+        )));
+        assert!(is_symbol_signature_fact(&fact(
+            "python.parameters.signature"
+        )));
+        assert!(
+            is_symbol_signature_fact(&fact("python.parameter_binding_context_extra.signature")),
+            "only the exact metadata label is excluded"
+        );
+    }
+}
+
+#[cfg(test)]
+mod python_required_context_qualification_tests {
+    use super::*;
+    use rootlight_adapter_sdk::SyntaxKindLabel;
+
+    #[test]
+    fn zero_optional_allowance_keeps_python_context_without_identity_signature_pollution() {
+        let source = b"def owned(value: int):\n    return value\n";
+        let file = FileId::from_bytes([9; 20]);
+        let fact = |id, parent, kind, start, end, label| {
+            SyntaxFact::new(
+                id,
+                parent,
+                kind,
+                SourceSpan::new(file, start, end).unwrap(),
+                usize::try_from(id).expect("fixture depth fits memory indexing"),
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let mut facts = vec![
+            fact(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                0,
+                source.len() as u64 - 1,
+                "python.function.declaration",
+            ),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                4,
+                9,
+                "python.identifier.definition",
+            ),
+            fact(
+                3,
+                Some(1),
+                SyntaxFactKind::Signature,
+                9,
+                21,
+                "python.parameters.signature",
+            ),
+            fact(
+                4,
+                Some(1),
+                SyntaxFactKind::Declaration,
+                10,
+                20,
+                "python.parameter.declaration",
+            ),
+            fact(
+                5,
+                Some(4),
+                SyntaxFactKind::Occurrence,
+                10,
+                15,
+                "python.parameter.definition",
+            ),
+            fact(
+                6,
+                Some(1),
+                SyntaxFactKind::Signature,
+                0,
+                source.len() as u64 - 1,
+                "python.parameter_binding_context.signature",
+            ),
+            fact(
+                7,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                source.len() as u64 - 6,
+                source.len() as u64 - 1,
+                "python.parameter_body.reference",
+            ),
+        ];
+        let context = facts[5].clone();
+        let signature = facts[2].clone();
+        let signature_start = usize::try_from(signature.span().start_byte()).unwrap();
+        let signature_end = usize::try_from(signature.span().end_byte()).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&source[signature_start..signature_end]).unwrap(),
+            "(value: int)"
+        );
+        retain_project_syntax_facts(
+            SemanticProjectLanguage::Python,
+            &mut facts,
+            source,
+            0,
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(
+            facts.iter().any(|fact| fact == &context),
+            "required full-function limitation metadata cannot be spent as optional syntax"
+        );
+        assert!(
+            facts.iter().any(|fact| fact == &signature),
+            "ordinary written parameter signature remains required"
+        );
+        assert!(facts.iter().any(|fact| fact.local_id() == 4));
+        assert!(
+            facts.iter().all(|fact| fact.local_id() != 7),
+            "zero optional allowance genuinely removes the optional body read"
+        );
+        let signatures: Vec<_> = facts
+            .iter()
+            .filter(|fact| is_symbol_signature_fact(fact))
+            .collect();
+        assert_eq!(signatures, [&signature]);
+        let written = std::str::from_utf8(&source[signature_start..signature_end]).unwrap();
+        assert_eq!(
+            canonical_symbol_signature(written, 4096).unwrap(),
+            "(value:int)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod formal_context_tests;

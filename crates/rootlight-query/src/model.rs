@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use rootlight_cancel::CancellationReason;
-use rootlight_ids::{ContentHash, FileId, GenerationId, SymbolId};
+use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, SymbolId};
 use rootlight_ir::{
     CoverageRecord, CoverageStatus, EntityKind as IrEntityKind, EntityRecord, OccurrenceRecord,
     ProvenanceRecord, RelationPredicate, RelationRecord, SourceRef,
@@ -1075,6 +1075,20 @@ pub struct CodeLocateResult {
     pub next_page_offset: Option<u64>,
 }
 
+/// Effective entity endpoints of one retained `symbol.explain` relation.
+///
+/// Occurrences contribute only their recorded enclosing entity. This context
+/// does not change the original relation's identity, typed endpoints, or proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymbolExplainRelationEndpoints {
+    /// Identity of the unchanged relation whose endpoints were projected.
+    pub relation: FactId,
+    /// Direct subject entity or the subject occurrence's recorded enclosure.
+    pub subject: Option<SymbolId>,
+    /// Direct object entity or the object occurrence's recorded enclosure.
+    pub object: Option<SymbolId>,
+}
+
 /// Data returned by a `symbol.explain` plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SymbolExplainResult {
@@ -1088,6 +1102,9 @@ pub struct SymbolExplainResult {
     pub signature: Option<rootlight_ir::LexicalEvidenceV1>,
     /// Typed relations touching the entity.
     pub relations: Vec<RelationRecord>,
+    /// Effective entity endpoints in the exact same order as `relations`.
+    /// Every retained relation has one context entry, even without an owner.
+    pub relation_endpoints: Vec<SymbolExplainRelationEndpoints>,
     /// Source occurrences enclosing or targeting the entity.
     pub occurrences: Vec<OccurrenceRecord>,
     /// Deduplicated producer record for the entity.

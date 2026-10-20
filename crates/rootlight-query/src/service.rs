@@ -1,3 +1,6 @@
+mod source_only;
+pub use source_only::read_source_authority;
+
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
@@ -691,6 +694,7 @@ where
             )?
         };
         let mut relations = Vec::new();
+        let mut relation_endpoints = Vec::new();
         if !limits_optional_results(&limiting_resources) {
             for &ordinal in self.generation.relation_ordinals_for_symbol(plan.symbol) {
                 control.check()?;
@@ -698,28 +702,50 @@ where
                     .relations
                     .get(ordinal)
                     .ok_or(QueryError::IndexDrift)?;
-                if !tracker.can_add(QueryResource::Rows, 1) {
+                let endpoint_rows = [relation.subject, relation.object]
+                    .into_iter()
+                    .filter(|endpoint| matches!(endpoint, RelationEndpoint::Occurrence(_)))
+                    .count();
+                let rows = 1 + checked_usize_to_u64(endpoint_rows)?;
+                if !tracker.can_add(QueryResource::Rows, rows) {
                     record_limit(&mut limiting_resources, QueryResource::Rows)?;
                     break;
                 }
-                tracker.add_rows(1)?;
+                tracker.add_rows(rows)?;
                 if !tracker.can_add(QueryResource::Edges, 1) {
                     record_limit(&mut limiting_resources, QueryResource::Edges)?;
                     break;
                 }
                 tracker.add_edges(1)?;
-                if !tracker.can_add(QueryResource::Results, 1) {
+                if !tracker.can_add(QueryResource::Results, 2) {
                     record_limit(&mut limiting_resources, QueryResource::Results)?;
                     break;
                 }
-                let bytes = serialized_size(relation, u64::MAX, &control)?;
+                let endpoints = crate::model::SymbolExplainRelationEndpoints {
+                    relation: relation.id,
+                    subject: endpoint_entity(document, relation.subject),
+                    object: endpoint_entity(document, relation.object),
+                };
+                control.check()?;
+                // Projection records and their serialized output coexist.
+                // Four slots per entry cover Vec's initial capacity and growth.
+                let projection_allocation = checked_usize_to_u64(std::mem::size_of::<
+                    crate::model::SymbolExplainRelationEndpoints,
+                >())?
+                .checked_mul(4)
+                .ok_or(QueryError::MemoryUnavailable)?;
+                let bytes = serialized_size(relation, u64::MAX, &control)?
+                    .checked_add(serialized_size(&endpoints, u64::MAX, &control)?)
+                    .and_then(|bytes| bytes.checked_add(projection_allocation))
+                    .ok_or(QueryError::MemoryUnavailable)?;
                 if !tracker.can_add(QueryResource::MemoryBytes, bytes) {
                     record_limit(&mut limiting_resources, QueryResource::MemoryBytes)?;
                     break;
                 }
-                tracker.add_results(1)?;
+                tracker.add_results(2)?;
                 tracker.add_memory(bytes)?;
                 try_push(&mut relations, relation.clone())?;
+                try_push(&mut relation_endpoints, endpoints)?;
             }
         }
         let symbols = BTreeSet::from([plan.symbol]);
@@ -752,6 +778,7 @@ where
             entity: entity.clone(),
             signature,
             relations,
+            relation_endpoints,
             occurrences,
             provenance: provenance.clone(),
             coverage,

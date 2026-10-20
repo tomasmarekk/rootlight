@@ -17,6 +17,7 @@ pub mod pagination;
 pub mod repository;
 pub mod source_entity;
 pub mod source_find;
+pub mod source_recovery;
 pub mod source_text;
 pub mod vertical;
 

@@ -1,0 +1,10 @@
+{
+  "schema": "rootlight.source-fixture-provenance/1",
+  "repository": "graphql-200-blindspot-lab",
+  "source_path": "schema/storefront.graphql",
+  "bytes": 1531,
+  "sha256": "135302558cd2b71594322e3eee45e469441da94e05715168a6d7d1f617737e47",
+  "license": "MIT",
+  "license_sha256": "cf8484a80c675008d36d6cf6edc5912bff63973b08e2476f823dc5334a172c8b",
+  "scope": "Exact independent source fixture; no schema validation, runtime execution or whole-language completeness claim."
+}

@@ -1,4 +1,4 @@
-//! First-party Tcl scanner for literal procedures, namespaces, and script bodies.
+//! First-party Tcl scanner for literal procedures, formal parameters and namespaces.
 //! It retains exact source spans without executing Tcl substitutions; dynamic
 //! command construction and unvisited script-bearing arguments stay bounded.
 
@@ -20,7 +20,7 @@ const MAX_NAME_BYTES: usize = 256;
 const GAP_CODE_BYTES: usize = 48;
 const GAP_ACCOUNTED_BYTES: usize = 256;
 
-/// Bounded parser for source-written Tcl procedures and namespaces.
+/// Bounded parser for source-written Tcl procedures, parameters and namespaces.
 pub struct TclParseProvider {
     capabilities: ParseCapabilities,
 }
@@ -175,6 +175,33 @@ impl ParseProvider for TclParseProvider {
             ));
             next_id += 2;
         }
+        for parameter in &parsed.parameters {
+            cancellation.check()?;
+            let parent = *ids
+                .get(parameter.owner_item)
+                .ok_or_else(|| failure("tcl-parent-order-invalid"))?;
+            let depth = depths
+                .get(parameter.owner_item)
+                .ok_or_else(|| failure("tcl-parent-order-invalid"))?
+                + 1;
+            facts.push(SyntaxFact::new(
+                next_id,
+                Some(parent),
+                SyntaxFactKind::Declaration,
+                source_span(file, parameter.start, parameter.end)?,
+                depth,
+                label("tcl.parameter.declaration"),
+            ));
+            facts.push(SyntaxFact::new(
+                next_id + 1,
+                Some(next_id),
+                SyntaxFactKind::Occurrence,
+                source_span(file, parameter.name_start, parameter.name_end)?,
+                depth + 1,
+                label("tcl.parameter.definition"),
+            ));
+            next_id += 2;
+        }
         for call in &parsed.calls {
             cancellation.check()?;
             let (parent, depth) = if let Some(index) = call.owner_item {
@@ -211,6 +238,31 @@ impl ParseProvider for TclParseProvider {
                 cancellation,
             )?;
         }
+        let mut diagnostic_count = 0_usize;
+        for gap in &parsed.formal_gaps {
+            cancellation.check()?;
+            if !can_emit_gap(request, sink.staged_usage()) {
+                return Err(failure("tcl-formal-gap-report-limit"));
+            }
+            let reference = source.source_ref();
+            let diagnostic = AdapterDiagnostic::new(
+                DiagnosticCode::new(gap.code).expect("fixed Tcl formal diagnostic code"),
+                DiagnosticSeverity::Warning,
+                Some(SourceRef::new(
+                    reference.repository(),
+                    reference.generation(),
+                    source_span(file, gap.start, gap.end)?,
+                    reference.content_hash(),
+                    None,
+                )),
+                CoverageStatus::Bounded,
+            );
+            sink.push_cancellable(
+                SyntaxFactBatch::new(sink.next_sequence(), Vec::new(), vec![diagnostic]),
+                cancellation,
+            )?;
+            diagnostic_count += 1;
+        }
         if !source.bytes().is_empty() && can_emit_gap(request, sink.staged_usage()) {
             let reference = source.source_ref();
             let code = if parsed.lexical_incomplete {
@@ -234,36 +286,53 @@ impl ParseProvider for TclParseProvider {
                 SyntaxFactBatch::new(sink.next_sequence(), Vec::new(), vec![diagnostic]),
                 cancellation,
             )?;
+            diagnostic_count += 1;
         }
         let usage = sink.staged_usage();
         let bytes = source.bytes().len();
+        let entities = parsed
+            .items
+            .len()
+            .checked_add(parsed.parameters.len())
+            .ok_or_else(|| failure("tcl-syntax-node-limit"))?;
+        let occurrences = entities
+            .checked_add(parsed.calls.len())
+            .ok_or_else(|| failure("tcl-syntax-node-limit"))?;
         let coverage = CoverageReport::new(
             AnalysisTier::TierD,
             CoverageStatus::Bounded,
             bytes,
             bytes,
-            usize::from(bytes > 0),
+            diagnostic_count,
             vec![
                 DomainCoverage::new(FactDomain::Files, CoverageStatus::Complete, 1, 1, 0)?,
                 DomainCoverage::new(
                     FactDomain::Entities,
                     CoverageStatus::Bounded,
-                    parsed.items.len(),
-                    parsed.items.len(),
+                    entities,
+                    entities,
                     0,
                 )?,
                 DomainCoverage::new(
                     FactDomain::Occurrences,
                     CoverageStatus::Bounded,
-                    parsed.calls.len(),
-                    parsed.calls.len(),
+                    occurrences,
+                    occurrences,
+                    0,
+                )?,
+                DomainCoverage::new(
+                    FactDomain::Diagnostics,
+                    CoverageStatus::Bounded,
+                    diagnostic_count,
+                    diagnostic_count,
                     0,
                 )?,
             ],
         )?;
+        let maximum_depth = facts.iter().map(SyntaxFact::depth).max().unwrap_or(0);
         Ok(ParseReport::new(
             coverage,
-            ResourceUsage::new(bytes, facts.len(), facts.len(), 2, None, usage),
+            ResourceUsage::new(bytes, facts.len(), facts.len(), maximum_depth, None, usage),
             StreamEnd::new(sink.next_sequence(), usage),
         )?)
     }
@@ -319,8 +388,30 @@ struct Call {
     owner_item: Option<usize>,
 }
 
+#[derive(Clone, Copy)]
+struct Parameter {
+    start: usize,
+    end: usize,
+    name_start: usize,
+    name_end: usize,
+    owner_item: usize,
+}
+
+struct FormalGap {
+    start: usize,
+    end: usize,
+    code: &'static str,
+}
+
+struct FormalList {
+    parameters: Vec<Parameter>,
+    gaps: Vec<FormalGap>,
+}
+
 struct ParsedSource {
     items: Vec<Item>,
+    parameters: Vec<Parameter>,
+    formal_gaps: Vec<FormalGap>,
     calls: Vec<Call>,
     fact_count: usize,
     lexical_incomplete: bool,
@@ -389,6 +480,8 @@ fn scan_source(
     }];
     let mut items = Vec::new();
     let mut command_calls = Vec::new();
+    let mut parameters: Vec<Parameter> = Vec::new();
+    let mut formal_gaps: Vec<FormalGap> = Vec::new();
     let mut lexical_incomplete = false;
     let mut script_index = 0;
     while let Some(script) = scripts.get(script_index).copied() {
@@ -462,7 +555,7 @@ fn scan_source(
                 && first.literal_name(source) == Some(&b"proc"[..])
                 && let (Some(name), Some(args), Some(body)) = (words[1], words[2], words[3])
                 && name.literal_name(source).is_some()
-                && args.form == WordForm::Braced
+                && static_formal_list(args, source)
                 && let Some((body_start, body_end)) = body.braced_script()
             {
                 let index = items.len();
@@ -476,6 +569,26 @@ fn scan_source(
                     name_end: name.content_end,
                     parent_item: script.owner_item,
                 });
+                let formals = scan_formals(source, args, index, max_syntax_nodes, cancellation)?;
+                let parameter_count = parameters
+                    .len()
+                    .checked_add(formals.parameters.len())
+                    .ok_or_else(|| failure("tcl-syntax-node-limit"))?;
+                let gap_count = formal_gaps
+                    .len()
+                    .checked_add(formals.gaps.len())
+                    .ok_or_else(|| failure("tcl-syntax-node-limit"))?;
+                if parameter_count.saturating_mul(2).saturating_add(gap_count) > max_syntax_nodes {
+                    return Err(failure("tcl-syntax-node-limit"));
+                }
+                parameters
+                    .try_reserve(formals.parameters.len())
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                formal_gaps
+                    .try_reserve(formals.gaps.len())
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                parameters.extend(formals.parameters);
+                formal_gaps.extend(formals.gaps);
                 push_script(
                     &mut scripts,
                     body_start,
@@ -546,6 +659,12 @@ fn scan_source(
         })
     });
     let fact_count = declaration_facts
+        .and_then(|count| {
+            parameters
+                .len()
+                .checked_mul(2)
+                .and_then(|extra| count.checked_add(extra))
+        })
         .and_then(|count| count.checked_add(command_calls.len()))
         .and_then(|count| count.checked_add(1))
         .filter(|count| *count <= max_syntax_nodes)
@@ -553,10 +672,219 @@ fn scan_source(
     cancellation.check()?;
     Ok(ParsedSource {
         items,
+        parameters,
+        formal_gaps,
         calls: command_calls,
         fact_count,
         lexical_incomplete,
     })
+}
+
+fn static_formal_list(word: Word, source: &[u8]) -> bool {
+    word.form == WordForm::Braced
+        || source
+            .get(word.content_start..word.content_end)
+            .is_some_and(|bytes| !bytes.iter().any(|byte| matches!(byte, b'\\' | b'$' | b'[')))
+}
+
+fn scan_formals(
+    source: &[u8],
+    args: Word,
+    owner_item: usize,
+    maximum: usize,
+    cancellation: &Cancellation,
+) -> Result<FormalList, AdapterError> {
+    let unsupported = |code| FormalList {
+        parameters: Vec::new(),
+        gaps: vec![FormalGap {
+            start: args.start,
+            end: args.end,
+            code,
+        }],
+    };
+    for offset in args.content_start..args.content_end {
+        if offset.is_multiple_of(CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        // The command's pre-pass changes this text before either list layer.
+        if line_continuation_end(source, offset, args.content_end).is_some() {
+            return Ok(unsupported("tcl-formal-escape-not-analyzed"));
+        }
+    }
+    let mut result = FormalList {
+        parameters: Vec::new(),
+        gaps: Vec::new(),
+    };
+    let mut cursor = args.content_start;
+    loop {
+        skip_list_space(source, &mut cursor, args.content_end, cancellation)?;
+        if cursor >= args.content_end {
+            return Ok(result);
+        }
+        let Some(specifier) = read_list_word(source, cursor, args.content_end, cancellation)?
+        else {
+            return Ok(unsupported("tcl-formal-list-not-analyzed"));
+        };
+        cursor = specifier.end;
+        let specifier_text = source
+            .get(specifier.content_start..specifier.content_end)
+            .ok_or_else(|| failure("tcl-source-span-invalid"))?;
+        if specifier.form != WordForm::Braced && specifier_text.contains(&b'\\') {
+            // Decoding the outer list could change the inner list's boundaries.
+            return Ok(unsupported("tcl-formal-escape-not-analyzed"));
+        }
+        let mut field = specifier.content_start;
+        skip_list_space(source, &mut field, specifier.content_end, cancellation)?;
+        let Some(name) = read_list_word(source, field, specifier.content_end, cancellation)? else {
+            return Ok(unsupported("tcl-formal-list-not-analyzed"));
+        };
+        field = name.end;
+        skip_list_space(source, &mut field, specifier.content_end, cancellation)?;
+        if field < specifier.content_end {
+            let Some(default) = read_list_word(source, field, specifier.content_end, cancellation)?
+            else {
+                return Ok(unsupported("tcl-formal-list-not-analyzed"));
+            };
+            field = default.end;
+            skip_list_space(source, &mut field, specifier.content_end, cancellation)?;
+        }
+        if field != specifier.content_end {
+            return Ok(unsupported("tcl-formal-list-not-analyzed"));
+        }
+        let literal = Word {
+            form: WordForm::Bare,
+            ..name
+        }
+        .literal_name(source);
+        let additional = if literal.is_some() { 2 } else { 1 };
+        if result
+            .parameters
+            .len()
+            .saturating_mul(2)
+            .saturating_add(result.gaps.len())
+            .saturating_add(additional)
+            > maximum
+        {
+            return Err(failure("tcl-syntax-node-limit"));
+        }
+        if literal.is_some() {
+            result
+                .parameters
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            result.parameters.push(Parameter {
+                start: specifier.start,
+                end: specifier.end,
+                name_start: name.content_start,
+                name_end: name.content_end,
+                owner_item,
+            });
+        } else {
+            result
+                .gaps
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            result.gaps.push(FormalGap {
+                start: name.start,
+                end: name.end,
+                code: "tcl-formal-name-not-analyzed",
+            });
+        }
+    }
+}
+
+fn list_separator(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+fn skip_list_space(
+    source: &[u8],
+    cursor: &mut usize,
+    end: usize,
+    cancellation: &Cancellation,
+) -> Result<(), AdapterError> {
+    while *cursor < end
+        && source
+            .get(*cursor)
+            .is_some_and(|byte| list_separator(*byte))
+    {
+        if (*cursor).is_multiple_of(CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        *cursor += 1;
+    }
+    Ok(())
+}
+
+fn read_list_word(
+    source: &[u8],
+    start: usize,
+    end: usize,
+    cancellation: &Cancellation,
+) -> Result<Option<Word>, AdapterError> {
+    let Some(first) = source
+        .get(start)
+        .copied()
+        .filter(|byte| !list_separator(*byte))
+    else {
+        return Ok(None);
+    };
+    if start >= end {
+        return Ok(None);
+    }
+    if first == b'{' {
+        let Some(after) = balanced_braces(source, start, end, cancellation)? else {
+            return Ok(None);
+        };
+        if after < end && !source.get(after).is_some_and(|byte| list_separator(*byte)) {
+            return Ok(None);
+        }
+        return Ok(Some(Word {
+            start,
+            end: after,
+            content_start: start + 1,
+            content_end: after - 1,
+            form: WordForm::Braced,
+        }));
+    }
+    let quoted = first == b'"';
+    let mut cursor = start + usize::from(quoted);
+    while cursor < end {
+        if cursor.is_multiple_of(CHECK_INTERVAL) {
+            cancellation.check()?;
+        }
+        let Some(byte) = source.get(cursor).copied() else {
+            return Ok(None);
+        };
+        if byte == b'\\' {
+            cursor = cursor.saturating_add(2).min(end);
+            continue;
+        }
+        if quoted && byte == b'"' {
+            let after = cursor + 1;
+            if after < end && !source.get(after).is_some_and(|byte| list_separator(*byte)) {
+                return Ok(None);
+            }
+            return Ok(Some(Word {
+                start,
+                end: after,
+                content_start: start + 1,
+                content_end: cursor,
+                form: WordForm::Quoted,
+            }));
+        }
+        if !quoted && list_separator(byte) {
+            break;
+        }
+        cursor += 1;
+    }
+    Ok((!quoted).then_some(Word {
+        start,
+        end: cursor,
+        content_start: start,
+        content_end: cursor,
+        form: WordForm::Bare,
+    }))
 }
 
 fn reserve_item(items: &mut Vec<Item>, max_syntax_nodes: usize) -> Result<(), AdapterError> {
@@ -1132,6 +1460,20 @@ fn failure(value: &str) -> AdapterError {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path, sync::Arc};
+
+    use rootlight_adapter_sdk::{
+        AnalysisLimits, AnalysisRequest, BatchThresholds, GenerationBoundSnapshot,
+        MemoryAdmissionPolicy, ParseOutput, StreamLimits, execute_analysis, execute_parse,
+    };
+    use rootlight_adapter_treesitter::TreeSitterAnalyzer;
+    use rootlight_ids::{GenerationId, derive_repository};
+    use rootlight_ir::{
+        BuildContextIdentity, ContainerRef, EntityKind, ExtensionSupport, IrLimits, OccurrenceRole,
+        OccurrenceTarget, ProducerIdentity, RelationEndpoint, RelationPredicate,
+    };
+    use rootlight_vfs::{RelativePath, RepositoryRoot};
+
     use super::*;
 
     #[test]
@@ -1140,7 +1482,7 @@ mod tests {
         let parsed = scan_source(source, 32, &Cancellation::new()).expect("Tcl source parses");
         assert_eq!(parsed.items.len(), 4);
         assert_eq!(parsed.calls.len(), 4);
-        assert_eq!(parsed.fact_count, 16);
+        assert_eq!(parsed.fact_count, 20);
         assert_eq!(parsed.items[2].parent_item, Some(0));
         assert_eq!(
             &source[parsed.items[2].name_start..parsed.items[2].name_end],
@@ -1313,5 +1655,462 @@ mod tests {
             .is_err()
         );
         assert!(scan_source(b"\xff", 4, &Cancellation::new()).is_err());
+    }
+    #[test]
+    fn formal_defaults_and_variadic_name_are_distinct_source_definitions() {
+        let source = b"proc paint {w {color {dark blue}} args} {return $w}\n";
+        let parsed = scan_source(source, 64, &Cancellation::new()).unwrap();
+        assert!(parsed.formal_gaps.is_empty());
+        assert_eq!(parsed.fact_count, 11);
+        assert_eq!(parsed.parameters.len(), 3);
+        let names: Vec<_> = parsed
+            .parameters
+            .iter()
+            .map(|parameter| {
+                assert_eq!(parameter.owner_item, 0);
+                &source[parameter.name_start..parameter.name_end]
+            })
+            .collect();
+        assert_eq!(names, [b"w".as_slice(), b"color", b"args"]);
+        assert_eq!(
+            &source[parsed.parameters[1].start..parsed.parameters[1].end],
+            b"{color {dark blue}}"
+        );
+        assert!(
+            parsed.parameters.iter().all(|parameter| parameter.name_end
+                < source.iter().position(|byte| *byte == b'$').unwrap())
+        );
+    }
+
+    #[test]
+    fn formal_list_data_never_creates_default_expression_calls() {
+        let source =
+            br#"proc show {a {b "[never] $value; literal"} {c {{nested} list}}} {return $a}"#;
+        let parsed = scan_source(source, 64, &Cancellation::new()).unwrap();
+        assert_eq!(parsed.parameters.len(), 3);
+        assert!(parsed.formal_gaps.is_empty());
+        assert_eq!(parsed.calls.len(), 1);
+        assert_eq!(
+            &source[parsed.calls[0].start..parsed.calls[0].end],
+            b"return"
+        );
+    }
+
+    #[test]
+    fn quoted_braced_names_and_static_command_words_keep_physical_bytes() {
+        for source in [
+            br#"proc quoted {"w" {{color} red} args} {}"#.as_slice(),
+            br#"proc quoted "w {color red} args" {}"#.as_slice(),
+        ] {
+            let parsed = scan_source(source, 64, &Cancellation::new()).unwrap();
+            let names: Vec<_> = parsed
+                .parameters
+                .iter()
+                .map(|parameter| &source[parameter.name_start..parameter.name_end])
+                .collect();
+            assert_eq!(names, [b"w".as_slice(), b"color", b"args"]);
+            assert!(parsed.formal_gaps.is_empty());
+        }
+        let parsed = scan_source(b"proc all args {}", 16, &Cancellation::new()).unwrap();
+        assert_eq!(parsed.parameters.len(), 1);
+        assert_eq!(
+            &b"proc all args {}"[parsed.parameters[0].name_start..parsed.parameters[0].name_end],
+            b"args"
+        );
+    }
+
+    #[test]
+    fn unicode_formals_keep_byte_offsets_and_each_written_procedure_owner() {
+        let source = "namespace eval palette {\r\nproc λ {α {β {π λ}} args} {return $α}\r\nproc other {α} {}\r\n}";
+        let parsed = scan_source(source.as_bytes(), 64, &Cancellation::new()).unwrap();
+        let names: Vec<_> = parsed
+            .parameters
+            .iter()
+            .map(|parameter| &source.as_bytes()[parameter.name_start..parameter.name_end])
+            .collect();
+        assert_eq!(
+            names,
+            ["α".as_bytes(), "β".as_bytes(), b"args", "α".as_bytes()]
+        );
+        assert_eq!(
+            parsed
+                .parameters
+                .iter()
+                .map(|parameter| parameter.owner_item)
+                .collect::<Vec<_>>(),
+            [1, 1, 1, 2]
+        );
+        assert_ne!(
+            parsed.parameters[0].name_start,
+            parsed.parameters[3].name_start
+        );
+        assert!(
+            parsed
+                .parameters
+                .iter()
+                .all(|parameter| source.is_char_boundary(parameter.name_start)
+                    && source.is_char_boundary(parameter.name_end))
+        );
+    }
+
+    #[test]
+    fn malformed_formal_specs_do_not_preserve_a_valid_prefix() {
+        for source in [
+            br#"proc bad {valid {broken one two}} {}"#.as_slice(),
+            br#"proc bad {valid {}} {}"#.as_slice(),
+            br#"proc bad {valid "name"trailing} {}"#.as_slice(),
+            br#"proc bad {valid {name "unterminated}} {}"#.as_slice(),
+        ] {
+            let parsed = scan_source(source, 64, &Cancellation::new()).unwrap();
+            assert!(parsed.parameters.is_empty());
+            assert_eq!(parsed.formal_gaps.len(), 1);
+            assert_eq!(parsed.formal_gaps[0].code, "tcl-formal-list-not-analyzed");
+            assert_eq!(
+                &source[parsed.formal_gaps[0].start..parsed.formal_gaps[0].end],
+                &source[9..source.len() - 3]
+            );
+        }
+    }
+
+    #[test]
+    fn legal_unrepresentable_names_and_transforming_escapes_stay_explicit() {
+        let source = br#"proc names {ok {a;b} {$literal} {[literal]} {{two words}}} {}"#;
+        let parsed = scan_source(source, 64, &Cancellation::new()).unwrap();
+        assert_eq!(parsed.parameters.len(), 1);
+        assert_eq!(parsed.formal_gaps.len(), 4);
+        assert!(
+            parsed
+                .formal_gaps
+                .iter()
+                .all(|gap| gap.code == "tcl-formal-name-not-analyzed")
+        );
+        for source in [
+            br#"proc escaped {ok na\me} {}"#.as_slice(),
+            b"proc continued {ok \\\n name} {}".as_slice(),
+        ] {
+            let parsed = scan_source(source, 64, &Cancellation::new()).unwrap();
+            assert!(parsed.parameters.is_empty());
+            assert_eq!(parsed.formal_gaps[0].code, "tcl-formal-escape-not-analyzed");
+        }
+    }
+
+    #[test]
+    fn formal_fact_ceiling_and_cancellation_are_not_silent_truncation() {
+        let source = b"proc f {a b c} {}";
+        assert_eq!(
+            scan_source(source, 10, &Cancellation::new())
+                .unwrap()
+                .fact_count,
+            10
+        );
+        assert!(scan_source(source, 9, &Cancellation::new()).is_err());
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(scan_source(source, 64, &cancelled).is_err());
+    }
+
+    struct NativeFixture {
+        _directory: tempfile::TempDir,
+        snapshot: rootlight_vfs::SourceSnapshot,
+        source: SourceRef,
+    }
+
+    impl NativeFixture {
+        fn new(bytes: &[u8]) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            fs::write(directory.path().join("parameters.tcl"), bytes).unwrap();
+            let repository = derive_repository(b"native-tcl-formals").id();
+            let root = RepositoryRoot::open(repository, directory.path()).unwrap();
+            let snapshot = root
+                .snapshot(
+                    &RelativePath::parse(Path::new("parameters.tcl")).unwrap(),
+                    4096,
+                )
+                .unwrap();
+            let source = SourceRef::new(
+                repository,
+                GenerationId::from_bytes([9; 20]),
+                SourceSpan::new(snapshot.file(), 0, u64::try_from(bytes.len()).unwrap()).unwrap(),
+                snapshot.content_hash(),
+                None,
+            );
+            Self {
+                _directory: directory,
+                snapshot,
+                source,
+            }
+        }
+
+        fn limits(nodes: usize, diagnostics: usize) -> AnalysisLimits {
+            let batch = BatchThresholds::new(32, 32 * 1024, diagnostics, 4096).unwrap();
+            let stream = StreamLimits::new(
+                64,
+                128,
+                1024 * 1024,
+                diagnostics,
+                64 * 1024,
+                64 * 1024,
+                batch,
+            )
+            .unwrap();
+            AnalysisLimits::new(
+                4096,
+                nodes,
+                8,
+                0,
+                1024 * 1024,
+                stream.clone(),
+                stream,
+                IrLimits::default(),
+            )
+            .unwrap()
+        }
+
+        fn parse(
+            &self,
+            nodes: usize,
+            diagnostics: usize,
+        ) -> (
+            Result<usize, AdapterError>,
+            Result<ParseOutput, AdapterError>,
+        ) {
+            let limits = Self::limits(nodes, diagnostics);
+            let request = ParseRequest::new(
+                GenerationBoundSnapshot::new(&self.snapshot, &self.source).unwrap(),
+                LanguageId::new("tcl").unwrap(),
+                EncodingId::utf8(),
+                Vec::new(),
+                &limits,
+            )
+            .unwrap();
+            let provider = TclParseProvider::new(4096, nodes).unwrap();
+            let cancel = Cancellation::new();
+            (
+                provider.required_syntax_fact_count(&request, &cancel),
+                execute_parse(
+                    &provider,
+                    &request,
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancel,
+                ),
+            )
+        }
+    }
+
+    #[test]
+    fn sdk_sink_preflight_usage_and_definition_parents_agree() {
+        let fixture = NativeFixture::new(b"proc paint {w {color {dark blue}} args} {return $w}");
+        let (required, output) = fixture.parse(11, 8);
+        let output = output.unwrap();
+        assert_eq!(required.unwrap(), 11);
+        assert_eq!(output.facts().len(), 11);
+        assert_eq!(output.report().resources().syntax_nodes(), 11);
+        assert_eq!(output.report().resources().output_records(), 11);
+        assert_eq!(output.report().resources().max_syntax_depth(), 3);
+        assert_eq!(
+            output.report().end().usage(),
+            output.report().resources().stream()
+        );
+        for (domain, count) in [
+            (FactDomain::Entities, 4),
+            (FactDomain::Occurrences, 5),
+            (FactDomain::Diagnostics, 1),
+        ] {
+            let actual = output
+                .report()
+                .coverage()
+                .domains()
+                .iter()
+                .find(|row| row.domain() == domain)
+                .unwrap();
+            assert_eq!(
+                (actual.discovered(), actual.indexed(), actual.skipped()),
+                (count, count, 0)
+            );
+        }
+        let procedure = output
+            .facts()
+            .iter()
+            .find(|fact| fact.syntax_kind().as_str() == "tcl.function.declaration")
+            .unwrap();
+        let body_use = b"proc paint {w {color {dark blue}} args} {return $w}"
+            .iter()
+            .position(|byte| *byte == b'$')
+            .unwrap();
+        for parameter in output
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "tcl.parameter.declaration")
+        {
+            assert_eq!(parameter.parent(), Some(procedure.local_id()));
+            let definitions: Vec<_> = output
+                .facts()
+                .iter()
+                .filter(|fact| {
+                    fact.parent() == Some(parameter.local_id())
+                        && fact.syntax_kind().as_str() == "tcl.parameter.definition"
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            assert!(definitions[0].span().end_byte() < u64::try_from(body_use).unwrap());
+        }
+        assert!(fixture.parse(10, 8).0.is_err());
+        assert!(fixture.parse(10, 8).1.is_err());
+    }
+
+    #[test]
+    fn formal_gap_diagnostics_are_exact_and_cannot_disappear_at_a_limit() {
+        let bytes = b"proc names {ok {a;b} {$literal}} {}";
+        let fixture = NativeFixture::new(bytes);
+        let output = fixture.parse(64, 8).1.unwrap();
+        let gaps: Vec<_> = output
+            .diagnostics()
+            .iter()
+            .filter(|gap| gap.code().as_str() == "tcl-formal-name-not-analyzed")
+            .collect();
+        assert_eq!(gaps.len(), 2);
+        for (gap, expected) in gaps.iter().zip([b"a;b".as_slice(), b"$literal"]) {
+            let source = gap.source().unwrap();
+            assert_eq!(source.repository(), fixture.source.repository());
+            assert_eq!(source.generation(), fixture.source.generation());
+            assert_eq!(source.content_hash(), fixture.source.content_hash());
+            let range = source.span();
+            assert_eq!(
+                &bytes[usize::try_from(range.start_byte()).unwrap()
+                    ..usize::try_from(range.end_byte()).unwrap()],
+                expected
+            );
+        }
+        assert!(fixture.parse(64, 1).1.is_err());
+    }
+
+    #[test]
+    fn lowering_keeps_parameter_definition_and_exactly_one_procedure_contains_edge() {
+        let bytes = b"proc paint {w {color red} args} {return $w}";
+        let fixture = NativeFixture::new(bytes);
+        let limits = NativeFixture::limits(64, 8);
+        let parser = Arc::new(TclParseProvider::new(4096, 64).unwrap());
+        let analyzer = TreeSitterAnalyzer::new(
+            parser,
+            ProducerIdentity::new(
+                "native-tcl-formals",
+                "1",
+                content_hash(b"native-tcl-formals-config"),
+            )
+            .unwrap(),
+            LanguageId::new("tcl").unwrap(),
+            "native-tcl-formals",
+            TclParseProvider::binary_digest(),
+        )
+        .unwrap();
+        let request = AnalysisRequest::new(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            LanguageId::new("tcl").unwrap(),
+            AnalysisTier::TierD,
+            BuildContextIdentity::new(content_hash(b"tcl-formals-context")),
+            &limits,
+        )
+        .unwrap()
+        .with_generated_status(false);
+        let output = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let document = output.document();
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "paint")
+            .unwrap();
+        for (name, expected_start, expected_end) in
+            [("w", 12, 13), ("color", 15, 20), ("args", 26, 30)]
+        {
+            let parameter = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Parameter && entity.canonical_name == name
+                })
+                .unwrap();
+            assert_eq!(parameter.container, Some(ContainerRef::Entity(owner.id)));
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|edge| edge.predicate == RelationPredicate::Contains
+                        && edge.subject == RelationEndpoint::Entity(owner.id)
+                        && edge.object == RelationEndpoint::Entity(parameter.id))
+                    .count(),
+                1
+            );
+            let sites: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target
+                            == (OccurrenceTarget::Resolved {
+                                symbol: parameter.id,
+                            })
+                })
+                .collect();
+            assert_eq!(sites.len(), 1);
+            let span = sites[0].source.span();
+            assert_eq!(
+                &bytes[usize::try_from(span.start_byte()).unwrap()
+                    ..usize::try_from(span.end_byte()).unwrap()],
+                name.as_bytes()
+            );
+            assert_eq!(
+                (span.start_byte(), span.end_byte()),
+                (expected_start, expected_end)
+            );
+        }
+        let body_use = bytes.windows(2).position(|pair| pair == b"$w").unwrap() + 1;
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == u64::try_from(body_use).unwrap())
+        );
+    }
+
+    #[test]
+    fn resource_depth_matches_flat_calls_and_nested_parameter_ownership() {
+        for (bytes, expected) in [
+            (b"".as_slice(), 0),
+            (b"return value".as_slice(), 1),
+            (b"proc f {} {}".as_slice(), 2),
+            (b"proc f {w} {}".as_slice(), 3),
+            (
+                b"namespace eval palette {proc outer {x} {proc inner {y} {return $y}}}".as_slice(),
+                5,
+            ),
+        ] {
+            let fixture = NativeFixture::new(bytes);
+            let (required, output) = fixture.parse(64, 8);
+            let output = output.unwrap();
+            assert_eq!(required.unwrap(), output.facts().len());
+            assert_eq!(output.report().resources().max_syntax_depth(), expected);
+            assert_eq!(
+                output.facts().iter().map(SyntaxFact::depth).max(),
+                Some(expected)
+            );
+            for fact in output.facts() {
+                if let Some(parent) = fact.parent() {
+                    let owner = output
+                        .facts()
+                        .iter()
+                        .find(|candidate| candidate.local_id() == parent)
+                        .unwrap();
+                    assert_eq!(fact.depth(), owner.depth() + 1);
+                }
+            }
+        }
     }
 }

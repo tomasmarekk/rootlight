@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.mcp-budget-conformance/1",
-  "source_revision": "85fb09087c2b54a5337dfbf86ff07ab495570f7e",
+  "source_revision": "4ba8124bfe8d81529bb465cc9abbd5253f8fedc9",
   "tools": [
     {
       "tool": "repo.index",
@@ -360,6 +360,27 @@
       ],
       "runtime_trigger_coverage": "covered_source_bound",
       "omitted_client_budget_disposition": "server_ceiling_applies"
+    },
+    {
+      "tool": "source.find",
+      "budget_semantics": "per_request",
+      "default_token_budget": 3200,
+      "batch_shared_budget": false,
+      "declared_budget_dimensions": [
+        "rows",
+        "results",
+        "estimated_tokens",
+        "actual_tokens_when_available",
+        "source_bytes",
+        "traversal_facts",
+        "depth",
+        "paths",
+        "response_bytes",
+        "memory_bytes",
+        "wall_time"
+      ],
+      "runtime_trigger_coverage": "not_measured",
+      "omitted_client_budget_disposition": "server_ceiling_applies"
     }
   ],
   "ledger_boundaries": [
@@ -538,7 +559,7 @@
     },
     {
       "file": "crates/rootlight-query/tests/query_slice.rs",
-      "sha256": "1986083f8c539e6e064187ce54d1a4ab2b20c76b4e795327d79417759ad65c0c",
+      "sha256": "5e3371e734cf543b9c2d257b5c8922b3ed215ba45bdbac295ff2f4dc30e7488e",
       "symbols": [
         "execution_enforces_cancellation_and_exact_output_bounds",
         "plans_and_execution_enforce_all_query_resource_families",
@@ -547,7 +568,7 @@
     },
     {
       "file": "apps/rootlight-mcp/src/executor/tests.rs",
-      "sha256": "c2d55e03d82f726b5247b4a2f545f0fd351c59e5bfb037792d2fa0038ebfbbde",
+      "sha256": "71d6efc3d74b6eb9cd4b83fb420632270cee0b32cdf3c88c2565f4f37e369b6d",
       "symbols": [
         "analytical_budget_lowers_every_public_resource_dimension",
         "omitted_analytical_budget_transports_the_complete_server_ceiling",
@@ -559,7 +580,7 @@
     },
     {
       "file": "apps/rootlight-daemon/src/first_slice.rs",
-      "sha256": "a65123c667dbafef6652dcd6095fcce829b9166a86ef6a0e1c953424d0d6e7f0",
+      "sha256": "b215c0bde9f18526be574064ca10ddd1fe09a7c3b059140538bfe4abae4d0f26",
       "symbols": [
         "peer_cancellation_leaves_work_lane_reusable_before_publication",
         "durable_commit_boundary_failure_is_terminal_and_publishes_nothing"
@@ -593,10 +614,10 @@
       "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     },
     "input_schema": "rootlight.mcp-budget-conformance-input/1",
-    "input_sha256": "ef41d533c8ae23ac6830f7429aa63ab975a194553281217618d1fd195f804904",
-    "serialized_bytes": 13148,
-    "deterministic_estimated_tokens": 3287,
-    "actual_tokens": 2996,
+    "input_sha256": "3ae2aa230e0d8a8fd51583b66d324702057e45f76e9ce3d449ab3a4524da3106",
+    "serialized_bytes": 13554,
+    "deterministic_estimated_tokens": 3389,
+    "actual_tokens": 3083,
     "normalization": "none_exact_utf8",
     "framing": "canonical_compact_json_without_accounting_measurement"
   },

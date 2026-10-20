@@ -18,8 +18,8 @@ use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
 use rootlight_query::{QueryResponse, SymbolExplainResult, SymbolRelationshipsResult};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
-    FirstSliceBudget, FirstSliceService, LocateMode, RelationDirection, RelationFamily,
-    SourceEncoding, SourceReadOptions, with_first_slice_locate_profile,
+    FirstSliceBudget, FirstSliceDeferredRestore, FirstSliceService, LocateMode, RelationDirection,
+    RelationFamily, SourceEncoding, SourceReadOptions, with_first_slice_locate_profile,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,6 +28,10 @@ use serde_json::{Value, json};
 mod literal_find;
 #[path = "reopen_query/paged_source.rs"]
 mod paged_source;
+
+#[cfg(test)]
+#[path = "reopen_query/source_only_tests.rs"]
+mod source_only_tests;
 
 const MAX_CALL_EVIDENCE_READS: usize = 128;
 // JSON can expand one admitted literal byte to six escaped ASCII bytes. Keep
@@ -174,7 +178,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let mut input = BufReader::new(std::fs::File::open(PathBuf::from(&args[3]))?);
         let cancellation = Cancellation::new();
-        let (service, repository) = if let Some(output) = profile.as_mut() {
+        let (mut service, repository, mut deferred) = if let Some(output) = profile.as_mut() {
             let started = std::time::Instant::now();
             let result = open_service(&args[1], &args[2], &cancellation);
             serde_json::to_writer(
@@ -195,10 +199,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut attempted = 0_u64;
         return run_batch(&mut input, &mut stdout, |request| {
             let Some(output) = profile.as_mut() else {
-                return query_existing(&service, repository, request, true, &cancellation);
+                return query_reopened(
+                    &mut service,
+                    &mut deferred,
+                    repository,
+                    request,
+                    true,
+                    &cancellation,
+                );
             };
             let (result, observation) = with_first_slice_locate_profile(|| {
-                query_existing(&service, repository, request, true, &cancellation)
+                query_reopened(
+                    &mut service,
+                    &mut deferred,
+                    repository,
+                    request,
+                    true,
+                    &cancellation,
+                )
             });
             serde_json::to_writer(
                 &mut *output,
@@ -233,8 +251,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     request.validate()?;
     let cancellation = Cancellation::new();
-    let (service, repository) = open_service(&args[0], &args[1], &cancellation)?;
-    let result = query_existing(&service, repository, &request, false, &cancellation)?;
+    let (mut service, repository, mut deferred) = open_service(&args[0], &args[1], &cancellation)?;
+    let result = query_reopened(
+        &mut service,
+        &mut deferred,
+        repository,
+        &request,
+        false,
+        &cancellation,
+    )?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
@@ -243,18 +268,84 @@ fn open_service(
     state: &OsString,
     repository_root: &OsString,
     cancellation: &Cancellation,
-) -> Result<(FirstSliceService, RepositoryId), Box<dyn Error>> {
+) -> Result<
+    (
+        FirstSliceService,
+        RepositoryId,
+        Option<FirstSliceDeferredRestore>,
+    ),
+    Box<dyn Error>,
+> {
     let state = std::fs::canonicalize(PathBuf::from(state))?;
     let repository_root = std::fs::canonicalize(PathBuf::from(repository_root))?;
     let paths = RuntimePaths::new(state.join("state"), state.join("runtime"))?;
     if !paths.state_dir().is_dir() {
         return Err("durable state directory does not exist".into());
     }
-    let service = FirstSliceService::new_durable(2, paths.state_dir(), cancellation)?;
+    cancellation.check()?;
+    let (service, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())?;
     let repository = service
         .registered_repository_for_root(&repository_root, cancellation)?
         .ok_or("repository is not registered in the durable state")?;
-    Ok((service, repository))
+    Ok((service, repository, Some(deferred)))
+}
+
+fn query_reopened(
+    service: &mut FirstSliceService,
+    deferred: &mut Option<FirstSliceDeferredRestore>,
+    repository: RepositoryId,
+    request: &QueryRequest,
+    allow_symbol_free: bool,
+    cancellation: &Cancellation,
+) -> Result<Value, Box<dyn Error>> {
+    request.validate()?;
+    let independent = if request.mode == QueryMode::SourceFind {
+        match service.resolve_source_generation(repository, request.generation, cancellation) {
+            Ok(generation) => {
+                let available = service.source_only_read_available(
+                    repository,
+                    generation,
+                    &[],
+                    cancellation,
+                )?;
+                let activity_required =
+                    if available && request.find.as_ref().is_some_and(|find| find.read_matches) {
+                        let file = request
+                            .find
+                            .as_ref()
+                            .ok_or("missing literal selector")?
+                            .file;
+                        matches!(
+                            service
+                                .source_file_language_until(generation, file, cancellation)?
+                                .as_str(),
+                            "vba" | "visual-basic-classic"
+                        )
+                    } else {
+                        false
+                    };
+                available && !activity_required
+            }
+            Err(
+                rootlight_service::FirstSliceError::GenerationNotFound
+                | rootlight_service::FirstSliceError::RepositoryNotFound,
+            ) => false,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        false
+    };
+    if !independent && let Some(restore) = deferred.as_ref() {
+        service.restore_deferred_for_queries(restore, cancellation)?;
+        *deferred = None;
+    }
+    query_existing(
+        service,
+        repository,
+        request,
+        allow_symbol_free,
+        cancellation,
+    )
 }
 
 fn query_existing(
@@ -265,17 +356,13 @@ fn query_existing(
     cancellation: &Cancellation,
 ) -> Result<Value, Box<dyn Error>> {
     request.validate()?;
+    if request.mode == QueryMode::SourceFind {
+        let generation =
+            service.resolve_source_generation(repository, request.generation, cancellation)?;
+        return literal_find::query(service, repository, generation, request, cancellation);
+    }
     let status = service.repository_status(repository, request.generation)?;
     let generation = status.resolved_generation;
-    if request.mode == QueryMode::SourceFind {
-        return literal_find::query(
-            service,
-            status.repository,
-            generation,
-            request,
-            cancellation,
-        );
-    }
     let located = service.code_locate_with_filters_and_budget(
         generation,
         request.query.clone(),

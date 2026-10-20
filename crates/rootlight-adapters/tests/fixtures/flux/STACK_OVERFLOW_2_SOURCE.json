@@ -1,0 +1,18 @@
+{
+  "upstream": "https://github.com/influxdata/flux",
+  "repository_revision": "9ff345187ee76ad5e5d55351f6fd75c593d6fa6b",
+  "path": "libflux/flux-core/src/parser/tests/stack_overflow_2.flux",
+  "fixture": {
+    "bytes": 1757,
+    "sha256": "1137e9189f975040a608132bb9c6b704b404b312801bf74f889fb8b19928d6c5"
+  },
+  "license": "STACK_OVERFLOW_LICENSE",
+  "license_sha256": "f511b57090a77d51d24614a6a217b9d6c574010d075e4652fcbb6de2a35991c4",
+  "reviewed_parser_source_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11",
+  "reviewed_upstream_source": {
+    "bytes": 1756,
+    "sha256": "68108fb4958a841bf0885291d04527cc420fbf40a10a9a485be3e1b9e8e18099"
+  },
+  "physical_boundary": "Exact original working-tree CRLF bytes; pinned producer upstream copy has LF and differs only at that final line ending. No corpus restoration or normalization was performed.",
+  "scope": "A long ordinary logical-expression AST reaches native audit depth; paths and identifiers do not select production behavior."
+}

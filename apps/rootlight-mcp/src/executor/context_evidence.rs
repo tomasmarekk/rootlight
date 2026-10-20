@@ -308,6 +308,21 @@ where
         {
             return Err(invalid());
         }
+        if let Some(recovery) = &response.source_recovery {
+            super::source_recovery::validate_analysis(
+                Some(recovery),
+                &response.context,
+                response.chunks.iter().map(|chunk| chunk.tier),
+            )
+            .map_err(|_| invalid())?;
+            let returned: Vec<_> = response
+                .chunks
+                .iter()
+                .map(|chunk| chunk.source.file())
+                .collect();
+            super::source_recovery::validate_membership(recovery, &returned)
+                .map_err(|_| invalid())?;
+        }
         completeness = merge_context_evidence_completeness(
             completeness,
             context_evidence_completeness(response.execution_completeness.clone())
@@ -399,6 +414,15 @@ where
             || (context_lines_after == 0 && prefix_truncated != approved_range_clipped)
         {
             return Err(invalid());
+        }
+        if response.source_recovery.is_some() {
+            // This context vocabulary cannot retain the recovery witness.
+            // Validate the bounded read first and conserve received work;
+            // exact bytes remain available through standalone source.read 1.4.
+            return Err(context_evidence_error(
+                ContextEvidencePortErrorKind::Unsupported,
+                usage,
+            ));
         }
     }
     let mut materials = Vec::with_capacity(request.targets.len());

@@ -7,10 +7,14 @@ use tree_sitter::Node;
 
 use super::{QueryCandidate, StructuralRole, query_failure};
 
+mod certificates;
+
 pub(super) struct CaptureCache<'tree> {
     root: Node<'tree>,
     remaining: usize,
     exhausted: bool,
+    proofs: Option<certificates::Proofs>,
+    complete_context: bool,
 }
 
 impl<'tree> CaptureCache<'tree> {
@@ -19,7 +23,14 @@ impl<'tree> CaptureCache<'tree> {
             root,
             remaining,
             exhausted: false,
+            proofs: None,
+            complete_context: true,
         }
+    }
+
+    pub(super) const fn with_complete_context(mut self, complete: bool) -> Self {
+        self.complete_context = complete;
+        self
     }
 
     pub(super) const fn exhausted(&self) -> bool {
@@ -194,10 +205,14 @@ fn term_reference(node: Node<'_>) -> bool {
             | "record_field_value"
             | "projection_object"
             | "projection_name"
-    ) || (matches!(parent.kind(), "definition_command" | "fixpoint_command")
+    ) || (parent.kind() == "notation_declaration"
         && parent
-            .child_by_field_name("body")
+            .child_by_field_name("definition")
             .is_some_and(|body| body.id() == node.id()))
+        || (matches!(parent.kind(), "definition_command" | "fixpoint_command")
+            && parent
+                .child_by_field_name("body")
+                .is_some_and(|body| body.id() == node.id()))
         || (matches!(parent.kind(), "instance_command" | "field_assignment")
             && parent
                 .child_by_field_name(if parent.kind() == "field_assignment" {
@@ -291,6 +306,17 @@ pub(super) fn candidate<'tree>(
 ) -> Result<Option<QueryCandidate>, AdapterError> {
     if !cache.visit(cancellation)? {
         return Ok(None);
+    }
+    if cache.proofs.is_none() {
+        cache.proofs = Some(certificates::Proofs::build(
+            source,
+            cache.complete_context,
+            cache,
+            cancellation,
+        )?);
+    }
+    if let Some(candidate) = certificate_candidate(node, role, source, cancellation, cache)? {
+        return Ok(Some(candidate));
     }
     let mut range = node.byte_range();
     // Parent walks are costly in deep recovery trees; rejected captures need none.
@@ -402,6 +428,17 @@ pub(super) fn candidate<'tree>(
                 required: true,
                 native_depth: cache.depth(node, cancellation)?,
             }));
+        }
+        if owner.kind() == "theorem_command"
+            && cache
+                .proofs
+                .as_ref()
+                .and_then(|proofs| proofs.headers.get(&owner.start_byte()))
+                .is_some_and(|admission| {
+                    !matches!(admission, certificates::HeaderAdmission::Legacy)
+                })
+        {
+            return Ok(None);
         }
         if !admitted(owner, source, cancellation, cache)? {
             return Ok(None);
@@ -623,7 +660,154 @@ pub(super) fn candidate<'tree>(
                 | StructuralRole::Declaration
                 | StructuralRole::Definition
                 | StructuralRole::Signature
-        ),
+        ) || (role == StructuralRole::Reference
+            && cache
+                .proofs
+                .as_ref()
+                .and_then(|proofs| proofs.references.get(&range.end))
+                .map(|(range, _)| range)
+                == Some(&range)),
+        native_depth: cache.depth(depth_node, cancellation)?,
+    }))
+}
+
+pub(super) fn notation_reference_candidate(
+    node: Node<'_>,
+    role: StructuralRole,
+    cancellation: &Cancellation,
+    cache: &CaptureCache<'_>,
+) -> Result<Option<QueryCandidate>, AdapterError> {
+    cancellation.check()?;
+    if role != StructuralRole::Signature || node.kind() != "notation_declaration" {
+        return Ok(None);
+    }
+    let Some(proofs) = cache.proofs.as_ref() else {
+        return Ok(None);
+    };
+    let Some(marker) = proofs.notations.get(&node.start_byte()) else {
+        return Ok(None);
+    };
+    let Some((reference, depth)) = proofs.references.get(&marker.end) else {
+        return Ok(None);
+    };
+    Ok(Some(QueryCandidate {
+        start: reference.start,
+        end: reference.end,
+        role: StructuralRole::Reference,
+        syntax: "coq.written_reference",
+        required: true,
+        native_depth: *depth,
+    }))
+}
+
+fn certificate_candidate<'tree>(
+    node: Node<'tree>,
+    role: StructuralRole,
+    source: &[u8],
+    cancellation: &Cancellation,
+    cache: &mut CaptureCache<'tree>,
+) -> Result<Option<QueryCandidate>, AdapterError> {
+    let Some(proofs) = cache.proofs.as_ref() else {
+        return Ok(None);
+    };
+    let (range, syntax, depth_node) = if node.kind() == "notation_declaration"
+        && role == StructuralRole::Signature
+    {
+        match proofs.notations.get(&node.start_byte()) {
+            Some(range) => (range.clone(), "coq.notation_target", cache.root),
+            None => (node.byte_range(), "coq.notation_binding_unavailable", node),
+        }
+    } else if node.kind() == "ident_decl" {
+        let Some(owner) = node
+            .parent()
+            .filter(|owner| owner.kind() == "theorem_command")
+        else {
+            return Ok(None);
+        };
+        match proofs.headers.get(&owner.start_byte()) {
+            Some(certificates::HeaderAdmission::Proved(header)) => match role {
+                StructuralRole::Declaration => {
+                    (header.prefix.clone(), "coq.parameterized_assertion", owner)
+                }
+                StructuralRole::Signature => (header.prefix.clone(), "coq.written_header", owner),
+                StructuralRole::Definition => {
+                    let Some(name) =
+                        direct_name(node, cancellation, cache)?.filter(|name| named(*name, source))
+                    else {
+                        return Ok(None);
+                    };
+                    (name.byte_range(), "coq.name", name)
+                }
+                _ => return Ok(None),
+            },
+            Some(certificates::HeaderAdmission::Blocked) if role == StructuralRole::Signature => (
+                owner.byte_range(),
+                "coq.assertion_header_unavailable",
+                owner,
+            ),
+            _ => return Ok(None),
+        }
+    } else if node.kind() == "binder" && role == StructuralRole::Signature {
+        let Some(owner) = node
+            .parent()
+            .filter(|parent| parent.kind() == "theorem_command")
+        else {
+            return Ok(None);
+        };
+        let Some(certificates::HeaderAdmission::Proved(header)) =
+            proofs.headers.get(&owner.start_byte())
+        else {
+            return Ok(None);
+        };
+        if !header
+            .formals
+            .iter()
+            .any(|formal| formal.start >= node.start_byte() && formal.end <= node.end_byte())
+        {
+            return Ok(None);
+        }
+        (node.byte_range(), "coq.header_formal_semantics", node)
+    } else if node.kind() == "ident"
+        && matches!(
+            role,
+            StructuralRole::Declaration | StructuralRole::Definition
+        )
+    {
+        let Some(binder) = node.parent().filter(|parent| parent.kind() == "binder") else {
+            return Ok(None);
+        };
+        let Some(owner) = binder
+            .parent()
+            .filter(|parent| parent.kind() == "theorem_command")
+        else {
+            return Ok(None);
+        };
+        let Some(certificates::HeaderAdmission::Proved(header)) =
+            proofs.headers.get(&owner.start_byte())
+        else {
+            return Ok(None);
+        };
+        if !header.formals.contains(&node.byte_range()) {
+            return Ok(None);
+        }
+        (
+            node.byte_range(),
+            if role == StructuralRole::Declaration {
+                "coq.header_parameter"
+            } else {
+                "coq.name"
+            },
+            node,
+        )
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(QueryCandidate {
+        start: range.start,
+        end: range.end,
+        role,
+        syntax,
+        required: true,
         native_depth: cache.depth(depth_node, cancellation)?,
     }))
 }

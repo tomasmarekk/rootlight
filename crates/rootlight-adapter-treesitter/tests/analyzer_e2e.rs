@@ -48,6 +48,10 @@ mod apex_native;
 mod assembly_native;
 #[path = "analyzer_e2e/astro_native.rs"]
 mod astro_native;
+#[path = "analyzer_e2e/bash_bindings.rs"]
+mod bash_bindings;
+#[path = "analyzer_e2e/capnp_native.rs"]
+mod capnp_native;
 #[path = "analyzer_e2e/cmake_native.rs"]
 mod cmake_native;
 #[path = "analyzer_e2e/cmake_patch.rs"]
@@ -58,6 +62,8 @@ mod common_lisp_native;
 mod coq_native;
 #[path = "analyzer_e2e/cpp_preprocessor.rs"]
 mod cpp_preprocessor;
+#[path = "analyzer_e2e/css_fields.rs"]
+mod css_fields;
 #[path = "analyzer_e2e/dart_native.rs"]
 mod dart_native;
 #[path = "analyzer_e2e/dtd_native.rs"]
@@ -74,6 +80,8 @@ mod ecmascript_references;
 mod eiffel_native;
 #[path = "analyzer_e2e/glsl_native.rs"]
 mod glsl_native;
+#[path = "analyzer_e2e/graphql_native.rs"]
+mod graphql_native;
 #[path = "analyzer_e2e/groovy_native.rs"]
 mod groovy_native;
 #[path = "analyzer_e2e/hdl_native.rs"]
@@ -90,6 +98,8 @@ mod julia_native;
 mod markdown_native;
 #[path = "analyzer_e2e/matlab_native.rs"]
 mod matlab_native;
+#[path = "analyzer_e2e/mojo_native.rs"]
+mod mojo_native;
 #[path = "analyzer_e2e/nix_native.rs"]
 mod nix_native;
 #[path = "analyzer_e2e/objective_c_native.rs"]
@@ -110,16 +120,24 @@ mod rust_bindings;
 mod sas_native;
 #[path = "analyzer_e2e/scala_native.rs"]
 mod scala_native;
+#[path = "analyzer_e2e/scheme_direct_calls.rs"]
+mod scheme_direct_calls;
 #[path = "analyzer_e2e/scheme_native.rs"]
 mod scheme_native;
 #[path = "analyzer_e2e/solidity_native.rs"]
 mod solidity_native;
 #[path = "analyzer_e2e/sql_native.rs"]
 mod sql_native;
+#[path = "analyzer_e2e/typescript_calls.rs"]
+mod typescript_calls;
+#[path = "analyzer_e2e/typescript_interface_fields.rs"]
+mod typescript_interface_fields;
 #[path = "analyzer_e2e/v_native.rs"]
 mod v_native;
 #[path = "analyzer_e2e/vba_native.rs"]
 mod vba_native;
+#[path = "analyzer_e2e/vhdl_native.rs"]
+mod vhdl_native;
 #[path = "analyzer_e2e/wgsl_native.rs"]
 mod wgsl_native;
 #[path = "analyzer_e2e/xml_native.rs"]
@@ -817,15 +835,34 @@ fn bash_native_declarations_keep_exact_sources_and_body_stable_ids() {
         "{:?}",
         document.diagnostics
     );
-    assert!(
-        document.skipped_regions.is_empty(),
-        "{:?}",
-        document.skipped_regions
-    );
+    assert_eq!(document.skipped_regions.len(), 4);
+    let gaps: BTreeSet<_> = document
+        .skipped_regions
+        .iter()
+        .map(|gap| {
+            assert_eq!(gap.domain, FactDomain::Relations);
+            assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+            assert_eq!(gap.detail, "bash-module-parameter-binding-unavailable");
+            assert_eq!(gap.source.repository(), fixture.source.repository());
+            assert_eq!(gap.source.generation(), fixture.source.generation());
+            assert_eq!(gap.source.span().file(), fixture.source.span().file());
+            assert_eq!(gap.source.content_hash(), fixture.source.content_hash());
+            (gap.source.span().start_byte(), gap.source.span().end_byte())
+        })
+        .collect();
     assert_eq!(
-        output.report().coverage().status(),
-        CoverageStatus::Complete
+        gaps,
+        BTreeSet::from([(149, 150), (186, 193), (252, 256), (314, 318)])
     );
+    for (start, end, written) in [
+        (149, 150, "1"),
+        (186, 193, "message"),
+        (252, 256, "item"),
+        (314, 318, "ROOT"),
+    ] {
+        assert_eq!(&BASH_CASE.source[start..end], written);
+    }
+    assert_eq!(output.report().coverage().status(), CoverageStatus::Bounded);
     for (name, kind, marker) in [
         ("emit", EntityKind::Function, "function emit()"),
         ("process", EntityKind::Function, "process()"),
@@ -2162,6 +2199,19 @@ fn css_declarations_preserve_exact_sources_and_body_stable_identity() {
             ":root { --accent: #1a2b3c; }",
         ),
         ("--accent", EntityKind::Property, "--accent: #1a2b3c;"),
+        ("color", EntityKind::Property, "color: var(--accent);"),
+        ("opacity", EntityKind::Property, "opacity: 0.8;"),
+        ("display", EntityKind::Property, "display: grid;"),
+        (
+            "transform",
+            EntityKind::Property,
+            "transform: rotate(0deg);",
+        ),
+        (
+            "transform",
+            EntityKind::Property,
+            "transform: rotate(360deg);",
+        ),
         (
             ".card > .π, [data-label=\"A B\"]",
             EntityKind::StyleRule,
@@ -2193,7 +2243,15 @@ fn css_declarations_preserve_exact_sources_and_body_stable_identity() {
         let entity = document
             .entities
             .iter()
-            .find(|entity| entity.canonical_name == name && entity.kind == kind)
+            .find(|entity| {
+                entity.canonical_name == name
+                    && entity.kind == kind
+                    && entity.evidence.source.as_ref().is_some_and(|reference| {
+                        let start = usize::try_from(reference.span().start_byte()).unwrap();
+                        let end = usize::try_from(reference.span().end_byte()).unwrap();
+                        CSS_CASE.source.get(start..end) == Some(declaration)
+                    })
+            })
             .expect("each CSS declaration survives lowering");
         assert_eq!(entity.language, "css");
         let evidence = entity
@@ -4406,3 +4464,14 @@ fn capture(
     );
     (snapshot, source)
 }
+
+#[path = "analyzer_e2e/jsx_markup.rs"]
+mod jsx_markup;
+
+#[path = "analyzer_e2e/c_formal_reads.rs"]
+mod c_formal_reads;
+
+#[path = "analyzer_e2e/qsharp_native.rs"]
+mod qsharp_native;
+#[path = "analyzer_e2e/sml_wat_native.rs"]
+mod sml_wat_native;

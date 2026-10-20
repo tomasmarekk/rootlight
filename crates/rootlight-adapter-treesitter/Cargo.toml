@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tree-sitter-graphql.workspace = true
 blake3.workspace = true
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
@@ -17,10 +18,33 @@ rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-vba = { path = "../rootlight-vba" }
 thiserror.workspace = true
 tree-sitter.workspace = true
+tree-sitter-elixir.workspace = true
+tree-sitter-capnp.workspace = true
 tree-sitter-cobol.workspace = true
 tree-sitter-plsql.workspace = true
 tree-sitter-pascal.workspace = true
 tree-sitter-commonlisp.workspace = true
+tree-sitter-clojure.workspace = true
+tree-sitter-racket.workspace = true
+tree-sitter-fish.workspace = true
+tree-sitter-nim.workspace = true
+tree-sitter-cue.workspace = true
+tree-sitter-pony.workspace = true
+tree-sitter-hcl.workspace = true
+tree-sitter-ada.workspace = true
+tree-sitter-d.workspace = true
+
+tree-sitter-haxe.workspace = true
+tree-sitter-qmljs.workspace = true
+tree-sitter-modelica.workspace = true
+tree-sitter-ring.workspace = true
+tree-sitter-qsharp.workspace = true
+tree-sitter-sml.workspace = true
+tree-sitter-wat.workspace = true
+tree-sitter-mojo.workspace = true
+tree-sitter-hare.workspace = true
+tree-sitter-zig.workspace = true
+tree-sitter-crystal.workspace = true
 tree-sitter-scheme.workspace = true
 tree-sitter-ocaml.workspace = true
 tree-sitter-asm.workspace = true
@@ -32,6 +56,9 @@ tree-sitter-cmake.workspace = true
 tree-sitter-julia.workspace = true
 tree-sitter-eiffel.workspace = true
 tree-sitter-rocq.workspace = true
+tree-sitter-vhdl.workspace = true
+tree-sitter-proto.workspace = true
+tree-sitter-thrift.workspace = true
 tree-sitter-systemverilog.workspace = true
 tree-sitter-v.workspace = true
 tree-sitter-sfapex.workspace = true

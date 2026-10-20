@@ -987,6 +987,8 @@ fn require_supported_extensions_with_checkpoint(
         if !matches!(
             extension.namespace.as_str(),
             FILE_IDENTITY_CLAIM_NAMESPACE
+                | crate::AGGREGATE_SOURCE_RECOVERY_NAMESPACE
+                | crate::AGGREGATE_SOURCE_ORIGIN_NAMESPACE
                 | SYMBOL_IDENTITY_CLAIM_NAMESPACE
                 | LEXICAL_EXTENSION_NAMESPACE
                 | PERL_BINDING_NAMESPACE
@@ -1614,6 +1616,27 @@ fn rebind_extension(
         .map(|source| rebind_source(source, generation))
         .ok_or(NormalizedRebindError::IdentityRecipe)?;
     match extension.namespace.as_str() {
+        crate::AGGREGATE_SOURCE_RECOVERY_NAMESPACE => {
+            let cause = crate::decode_aggregate_source_recovery_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            crate::new_aggregate_source_recovery_envelope(
+                repository, generation, provenance, source, cause,
+            )
+            .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        crate::AGGREGATE_SOURCE_ORIGIN_NAMESPACE => {
+            let (derived, container) = crate::decode_aggregate_source_origin_envelope(&extension)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            crate::new_aggregate_source_origin_envelope(
+                repository,
+                generation,
+                provenance,
+                source,
+                rebind_source(derived, generation),
+                rebind_source(container, generation),
+            )
+            .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
         VBA_COMPILATION_NAMESPACE => {
             let evidence = decode_vba_compilation_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;

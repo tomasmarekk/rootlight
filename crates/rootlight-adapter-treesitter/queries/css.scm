@@ -3,8 +3,7 @@
 (stylesheet) @root @module @scope
 (rule_set (selectors) @definition) @declaration @scope
 (keyframes_statement (keyframes_name) @definition) @declaration @scope
-((declaration (property_name) @definition) @declaration
- (#match? @definition "^--"))
+(declaration (property_name) @definition) @declaration
 (import_statement) @import
 [(media_statement) (supports_statement) (scope_statement)
  (at_rule (block)) (keyframe_block)] @scope @scope_type

@@ -1,0 +1,9 @@
+{
+  "repository": "157_Isabelle_AutoCorrode",
+  "path": "ic2/src/endpoint.scala",
+  "source_sha256": "8fd63ee198caea59a5ec46b04a6d7c77ac73550759ea2a89ec00c79f5bd4ebdf",
+  "source_bytes": 3194,
+  "license_sha256": "1107725064b4f41b946e16d0b96b9051b9ad2404ce9a4dfd249819b14874f247",
+  "retained_cohort": "secondary-programming-next-batch-r4",
+  "purpose": "Unchanged physical source for native observation and lexical formal binding."
+}

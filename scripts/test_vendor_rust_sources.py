@@ -53,7 +53,7 @@ class VendorRustSourcesTests(unittest.TestCase):
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def _locks(self, root: Path) -> None:
-        groups = [(self.identities[0],), tuple(self.identities), (self.identities[1],)]
+        groups = [(self.identities[0],), tuple(self.identities), (self.identities[1],), tuple(self.identities)]
         for relative, identities in zip(vendor.LOCK_PATHS, groups):
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -818,7 +818,7 @@ mod tests {
             assert_eq!(descriptor.adapter.name(), descriptor.batch_tool.name());
             if descriptor.batch_tool == BatchTool::SourceRead {
                 assert_eq!(descriptor.contract_version, "1.2");
-                assert_eq!(descriptor.tool.contract_version(), "1.3");
+                assert_eq!(descriptor.tool.contract_version(), "1.4");
                 assert_eq!(
                     descriptor.input_schema_json(),
                     descriptor.adapter.pre_label_input_schema_json().unwrap()

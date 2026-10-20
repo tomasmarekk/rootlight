@@ -9,6 +9,7 @@
 mod graph_projection;
 mod source_find;
 mod source_metadata_quote;
+mod source_recovery;
 mod source_text;
 mod update;
 
@@ -27,6 +28,10 @@ pub use source_find::{
 pub use source_metadata_quote::{
     SourceTextPrefixFixedUpper, SourceTextPrefixMetadataQuoteEntry,
     SourceTextPrefixMetadataQuoteResult,
+};
+pub use source_recovery::{
+    AggregateCapacityResource, AggregateCapacityStage, AggregateSourceRecovery, SourceReadRecovery,
+    SourceRecoveryFile, SourceTextSearchCoverage,
 };
 pub use source_text::{
     SourceTextChunk, SourceTextEncoding, SourceTextPrefixReadResult, SourceTextReadOptions,
@@ -75,13 +80,13 @@ use rootlight_observability::{
     RECENT_LOG_CAPACITY, RECENT_TRACE_CAPACITY, RedactionReport, SUPPORT_BUNDLE_SCHEMA_VERSION,
     SUPPORT_BUNDLE_SCHEMA_VERSION_V3, SUPPORT_BUNDLE_SCHEMA_VERSION_V4,
     SUPPORT_BUNDLE_SCHEMA_VERSION_V5, SUPPORT_BUNDLE_SCHEMA_VERSION_V6,
-    SUPPORT_BUNDLE_SCHEMA_VERSION_V7, SUPPORT_ENTRY_NAMES, SUPPORT_ENTRY_NAMES_V2,
-    SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SUPPORT_ENTRY_NAMES_V5, SUPPORT_ENTRY_NAMES_V6,
-    SUPPORT_ENTRY_NAMES_V7, SUPPORT_ENTRY_NAMES_V8, SupportBundleInput, SupportBundleSchema,
-    SupportChecksumStatus, SupportInventory, SupportManifest, SupportOperationKind,
-    SupportOperationState, SupportOperationsV4, SupportStorageAccountingState,
-    SupportTerminalOperation, TELEMETRY_SCHEMA_VERSION, TelemetrySnapshot,
-    build_support_bundle_for_schema,
+    SUPPORT_BUNDLE_SCHEMA_VERSION_V7, SUPPORT_BUNDLE_SCHEMA_VERSION_V8, SUPPORT_ENTRY_NAMES,
+    SUPPORT_ENTRY_NAMES_V2, SUPPORT_ENTRY_NAMES_V3, SUPPORT_ENTRY_NAMES_V4, SUPPORT_ENTRY_NAMES_V5,
+    SUPPORT_ENTRY_NAMES_V6, SUPPORT_ENTRY_NAMES_V7, SUPPORT_ENTRY_NAMES_V8, SUPPORT_ENTRY_NAMES_V9,
+    SupportBundleInput, SupportBundleSchema, SupportChecksumStatus, SupportInventory,
+    SupportManifest, SupportOperationKind, SupportOperationState, SupportOperationsV4,
+    SupportStorageAccountingState, SupportTerminalOperation, TELEMETRY_SCHEMA_VERSION,
+    TelemetrySnapshot, build_support_bundle_for_schema,
 };
 use rootlight_protocol::{
     CONDITIONAL_ACTIVITY_PROTOCOL_MINOR, CURRENT_PROTOCOL_MINOR,
@@ -133,6 +138,9 @@ const CLIENT_CAPABILITIES: &[&str] = &[
 const PRE_NEGOTIATION_PUBLIC_ERROR_MINOR: u32 = 14;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_RELATIONSHIP_RESULTS: u16 = 50;
+const DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT: u8 = 5;
+const MAX_SYMBOL_RELATION_SAMPLES_PER_KIND: u8 = 25;
+const MAX_SYMBOL_RELATION_SAMPLES: usize = 250;
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
 const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
@@ -1630,6 +1638,9 @@ pub struct SourceRead {
     pub context: QueryContext,
     /// Verified source chunks in request order.
     pub chunks: Vec<SourceChunk>,
+    /// Authenticated source-only recovery; absence makes no completeness claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_recovery: Option<SourceReadRecovery>,
     /// Total returned source bytes.
     pub total_source_bytes: u64,
     /// Whether the response was cut by a bound.
@@ -4557,9 +4568,13 @@ impl Client {
             )?,
             options,
         )? {
-            daemon::response_envelope::Response::SymbolExplain(response) => {
-                parse_symbol_explain(response, repository, generation, symbols)
-            }
+            daemon::response_envelope::Response::SymbolExplain(response) => parse_symbol_explain(
+                response,
+                repository,
+                generation,
+                symbols,
+                DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT,
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -4648,9 +4663,15 @@ impl Client {
             )
             .await?
         {
-            daemon::response_envelope::Response::SymbolExplain(response) => {
-                parse_symbol_explain(response, repository, generation, symbols)
-            }
+            daemon::response_envelope::Response::SymbolExplain(response) => parse_symbol_explain(
+                response,
+                repository,
+                generation,
+                symbols,
+                projection
+                    .relation_sample_limit
+                    .unwrap_or(DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT),
+            ),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -8529,8 +8550,12 @@ fn parse_support_bundle(
     response: daemon::SupportBundleResponse,
     selected_protocol_minor: u32,
 ) -> Result<SupportBundle, ClientError> {
-    let expected_schema = if selected_protocol_minor >= 15 {
+    let expected_schema = if selected_protocol_minor
+        >= rootlight_protocol::COMPLETE_SUPPORT_LANGUAGE_TABLE_PROTOCOL_MINOR
+    {
         CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
+    } else if selected_protocol_minor >= 15 {
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V8
     } else if selected_protocol_minor >= 14 {
         SUPPORT_BUNDLE_SCHEMA_VERSION_V7
     } else if selected_protocol_minor >= 13 {
@@ -8593,7 +8618,8 @@ fn validate_support_archive(
         SUPPORT_BUNDLE_SCHEMA_VERSION_V5 => &SUPPORT_ENTRY_NAMES_V5,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V6 => &SUPPORT_ENTRY_NAMES_V6,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V7 => &SUPPORT_ENTRY_NAMES_V7,
-        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V8,
+        SUPPORT_BUNDLE_SCHEMA_VERSION_V8 => &SUPPORT_ENTRY_NAMES_V8,
+        CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &SUPPORT_ENTRY_NAMES_V9,
         _ => return Err(ClientError::InvalidSupportBundle),
     };
     let mut zip = zip::ZipArchive::new(Cursor::new(archive))
@@ -8634,6 +8660,7 @@ fn validate_support_archive(
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V8
             | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         let operations: SupportOperationsV4 =
@@ -8653,6 +8680,7 @@ fn validate_support_archive(
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V8
             | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         Some(decode_support_entry(&entries, "inventory.json")?)
@@ -8702,8 +8730,10 @@ fn validate_support_archive(
             SupportBundleSchema::V6
         } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V7 {
             SupportBundleSchema::V7
-        } else {
+        } else if schema_version == SUPPORT_BUNDLE_SCHEMA_VERSION_V8 {
             SupportBundleSchema::V8
+        } else {
+            SupportBundleSchema::V9
         },
     )
     .map_err(|_| ClientError::InvalidSupportBundle)?;
@@ -8764,6 +8794,7 @@ fn validate_support_semantics(
         schema_version,
         SUPPORT_BUNDLE_SCHEMA_VERSION_V6
             | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
+            | SUPPORT_BUNDLE_SCHEMA_VERSION_V8
             | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
     ) {
         rootlight_observability::OMITTED_DATA_CLASSES_V6.as_slice()
@@ -8794,6 +8825,7 @@ fn validate_support_semantics(
                 | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
                 | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
                 | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
+                | SUPPORT_BUNDLE_SCHEMA_VERSION_V8
                 | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION
         ) != inventory.is_some()
     {
@@ -8813,6 +8845,7 @@ fn validate_support_semantics(
         | SUPPORT_BUNDLE_SCHEMA_VERSION_V5
         | SUPPORT_BUNDLE_SCHEMA_VERSION_V6
         | SUPPORT_BUNDLE_SCHEMA_VERSION_V7
+        | SUPPORT_BUNDLE_SCHEMA_VERSION_V8
         | CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION => &[
             "diagnostics/quick.json",
             "health.json",
@@ -9280,7 +9313,7 @@ fn build_symbol_explain_request(
             .any(|section| section.is_empty() || section.len() > 32)
         || projection
             .relation_sample_limit
-            .is_some_and(|limit| limit > 25)
+            .is_some_and(|limit| limit > MAX_SYMBOL_RELATION_SAMPLES_PER_KIND)
         || projection
             .source_preview_lines
             .is_some_and(|lines| lines > 40)
@@ -13406,6 +13439,7 @@ fn parse_symbol_explain(
     repository: RepositoryId,
     selector: GenerationSelector,
     requested: &[SymbolId],
+    relation_sample_limit: u8,
 ) -> Result<SymbolExplain, ClientError> {
     require_first_slice_response_schema(response.schema_version)?;
     let execution_completeness =
@@ -13441,7 +13475,7 @@ fn parse_symbol_explain(
                 .source_preview
                 .as_ref()
                 .is_some_and(|value| value.len() > 262_144)
-            || explanation.relation_samples.len() > 25
+            || explanation.relation_samples.len() > MAX_SYMBOL_RELATION_SAMPLES
             || explanation.section_gaps.len() > 10
             || explanation
                 .section_gaps
@@ -13457,6 +13491,19 @@ fn parse_symbol_explain(
                 .is_some_and(|value| value.is_empty() || value.len() > 256)
         {
             return Err(ClientError::InvalidResponseCorrelation);
+        }
+        // The request bounds each kind; the public projection separately bounds
+        // the combined vector. Applying one kind's ceiling to the vector loses
+        // otherwise valid multi-kind explanations.
+        {
+            let mut counts = BTreeMap::<&str, u8>::new();
+            for sample in &explanation.relation_samples {
+                let count = counts.entry(sample.kind.as_str()).or_default();
+                if *count >= relation_sample_limit {
+                    return Err(ClientError::InvalidResponseCorrelation);
+                }
+                *count += 1;
+            }
         }
         let mut relation_samples = Vec::new();
         relation_samples
@@ -13706,9 +13753,20 @@ fn parse_source_read_for_minor(
         &execution_completeness,
         false,
     )?;
+    let source_recovery = source_recovery::parse_source_recovery(
+        response.source_recovery,
+        chunks.iter().map(|chunk| chunk.source.file),
+        selected_protocol_minor,
+    )?;
+    source_recovery::validate_recovery_coverage(
+        &source_recovery,
+        &context,
+        chunks.iter().map(|chunk| chunk.tier),
+    )?;
     Ok(SourceRead {
         context,
         chunks,
+        source_recovery,
         total_source_bytes: response.total_source_bytes,
         truncated: response.truncated,
         execution_completeness,
@@ -16737,9 +16795,216 @@ mod tests {
         }
     }
 
+    #[test]
+    fn symbol_explain_accepts_samples_for_each_relation_kind() {
+        let symbol = SymbolId::from_bytes([4; 20]);
+        let source = test_source(4, 1, 2);
+        let mut response = wire_symbol_explain(symbol, &source);
+        response.symbols[0].relation_samples = (0..25)
+            .map(|_| wire_symbol_sample("calls", &source))
+            .chain(std::iter::once(wire_symbol_sample("contains", &source)))
+            .collect();
+        let expected = response.symbols[0].relation_samples.clone();
+
+        let parsed = parse_symbol_explain(
+            response,
+            test_repository(),
+            GenerationSelector::Active,
+            &[symbol],
+            25,
+        )
+        .expect("each relation kind has at most 25 samples");
+
+        assert_eq!(parsed.symbols[0].relation_samples.len(), expected.len());
+        for (actual, expected) in parsed.symbols[0].relation_samples.iter().zip(expected) {
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.direction, expected.direction);
+            assert_eq!(actual.target, Some(SymbolId::from_bytes([8; 20])));
+            assert_eq!(actual.source_refs, vec![source.clone()]);
+            assert_eq!(actual.confidence, 900);
+        }
+    }
+
+    #[test]
+    fn symbol_explain_checks_per_kind_and_combined_sample_bounds() {
+        let symbol = SymbolId::from_bytes([4; 20]);
+        let source = test_source(4, 1, 2);
+        let cases: &[(&[usize], u8, bool)] = &[
+            (&[25], 25, true),
+            (&[25; 10], 25, true),
+            (&[25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 1], 25, false),
+            (&[26], 25, false),
+            (&[3, 3], 3, true),
+            (&[4], 3, false),
+            (&[], 0, true),
+            (&[1], 0, false),
+            (&[5, 5], DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT, true),
+            (&[6], DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT, false),
+        ];
+        for &(counts, limit, accepted) in cases {
+            let mut response = wire_symbol_explain(symbol, &source);
+            response.symbols[0].relation_samples = counts
+                .iter()
+                .enumerate()
+                .flat_map(|(kind, count)| {
+                    let source = &source;
+                    (0..*count)
+                        .map(move |_| wire_symbol_sample(&format!("sample_kind_{kind}"), source))
+                })
+                .collect();
+
+            let parsed = parse_symbol_explain(
+                response,
+                test_repository(),
+                GenerationSelector::Active,
+                &[symbol],
+                limit,
+            );
+            if accepted {
+                assert_eq!(
+                    parsed
+                        .expect("samples satisfy both independent limits")
+                        .symbols[0]
+                        .relation_samples
+                        .len(),
+                    counts.iter().sum::<usize>()
+                );
+            } else {
+                assert!(matches!(
+                    parsed,
+                    Err(ClientError::InvalidResponseCorrelation)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn symbol_explain_rejects_invalid_sample_evidence() {
+        let symbol = SymbolId::from_bytes([4; 20]);
+        let source = test_source(4, 1, 2);
+        for invalid_case in 0..4 {
+            let mut response = wire_symbol_explain(symbol, &source);
+            let mut sample = wire_symbol_sample("calls", &source);
+            match invalid_case {
+                0 => sample.source_refs[0].file = None,
+                1 => {
+                    sample.source_refs[0].repository =
+                        Some(repository_to_wire(RepositoryId::from_bytes([9; 16])));
+                }
+                2 => sample.direction = "sideways".to_owned(),
+                3 => sample.confidence = 1_001,
+                _ => unreachable!("four malformed wire cases"),
+            }
+            response.symbols[0].relation_samples = vec![sample];
+            assert!(matches!(
+                parse_symbol_explain(
+                    response,
+                    test_repository(),
+                    GenerationSelector::Active,
+                    &[symbol],
+                    25,
+                ),
+                Err(ClientError::InvalidResponseCorrelation)
+            ));
+        }
+    }
+
+    #[test]
+    fn symbol_explain_preserves_partiality_when_samples_are_capped() {
+        let symbol = SymbolId::from_bytes([4; 20]);
+        let source = test_source(4, 1, 2);
+        let mut response = wire_symbol_explain(symbol, &source);
+        response.symbols[0].relation_samples = (0..10)
+            .flat_map(|kind| {
+                let source = &source;
+                (0..25).map(move |_| wire_symbol_sample(&format!("sample_kind_{kind}"), source))
+            })
+            .collect();
+        response.completeness = Some(daemon::FirstSliceCompleteness {
+            state: daemon::FirstSliceCompletenessState::FirstSliceCompletenessUnsupportedPartial
+                as i32,
+            limiting_resources: [
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitCapability,
+                daemon::FirstSliceLimitingResourceKind::FirstSliceLimitResults,
+            ]
+            .into_iter()
+            .map(|kind| daemon::FirstSliceLimitingResource {
+                kind: kind as i32,
+                limit: None,
+                observed: None,
+            })
+            .collect(),
+            continuation:
+                daemon::FirstSliceContinuationAvailability::FirstSliceContinuationUnavailable as i32,
+            guidance: vec![
+                daemon::FirstSliceContinuationGuidance::FirstSliceGuidanceUnsupportedNoContinuation
+                    as i32,
+            ],
+        });
+
+        let parsed = parse_symbol_explain(
+            response.clone(),
+            test_repository(),
+            GenerationSelector::Active,
+            &[symbol],
+            25,
+        )
+        .expect("unsupported evidence and a capped sample projection remain explicit");
+        assert_eq!(parsed.symbols[0].relation_samples.len(), 250);
+        assert_eq!(
+            parsed.execution_completeness.state,
+            ResultCompletenessState::UnsupportedPartial
+        );
+        assert_eq!(parsed.execution_completeness.limiting_resources.len(), 2);
+        for expected in [
+            LimitingResourceKind::Capability,
+            LimitingResourceKind::Results,
+        ] {
+            assert!(
+                parsed
+                    .execution_completeness
+                    .limiting_resources
+                    .iter()
+                    .any(|resource| resource.kind == expected)
+            );
+        }
+        assert!(
+            parsed.symbols[0]
+                .relation_samples
+                .iter()
+                .all(|sample| sample.source_refs == [source.clone()])
+        );
+
+        response.truncated = true;
+        assert!(matches!(
+            parse_symbol_explain(
+                response,
+                test_repository(),
+                GenerationSelector::Active,
+                &[symbol],
+                25,
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+    }
+
+    fn wire_symbol_sample(
+        kind: &str,
+        source: &SourceReference,
+    ) -> daemon::FirstSliceSymbolRelationSample {
+        daemon::FirstSliceSymbolRelationSample {
+            kind: kind.to_owned(),
+            direction: "outbound".to_owned(),
+            target: Some(symbol_to_wire(SymbolId::from_bytes([8; 20]))),
+            source_refs: vec![wire_source(source)],
+            confidence: 900,
+        }
+    }
+
     pub(super) fn wire_source_read(source: &SourceReference) -> daemon::SourceReadResponse {
         daemon::SourceReadResponse {
             prefix_truncated: None,
+            source_recovery: None,
             conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(1, 3)),
@@ -17725,6 +17990,7 @@ mod tests {
             test_repository(),
             GenerationSelector::Active,
             &[symbol],
+            DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT,
         )
         .expect("explain fixture parses");
         let expected_source = parse_source_read(
@@ -17891,7 +18157,7 @@ mod tests {
             }],
         };
         let support_wire = support_response_with_schema(
-            valid_support_archive_v8(),
+            valid_support_archive_v9(),
             CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
         );
         let expected_health = parse_health(health_wire.clone(), CURRENT_PROTOCOL_MINOR)
@@ -20451,6 +20717,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 &[symbol, second_symbol],
+                DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT,
             )
             .is_ok()
         );
@@ -20462,6 +20729,7 @@ mod tests {
                 test_repository(),
                 GenerationSelector::Active,
                 &[symbol, second_symbol],
+                DEFAULT_SYMBOL_RELATION_SAMPLE_LIMIT,
             ),
             Err(ClientError::InvalidResponseCorrelation)
         ));
@@ -20491,6 +20759,7 @@ mod tests {
         };
         let source_read = daemon::SourceReadResponse {
             prefix_truncated: None,
+            source_recovery: None,
             conditional_activity: Vec::new(),
             schema_version: Some(first_slice_schema()),
             context: Some(wire_query_context(2, 6)),
@@ -20743,6 +21012,24 @@ mod tests {
             .to_vec()
     }
 
+    fn valid_support_archive_v9() -> Vec<u8> {
+        let decoded = validate_support_archive(
+            &valid_support_archive_v8(),
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
+        )
+        .expect("frozen schema v8 remains valid");
+        let mut input = telemetry_support_input(rootlight_observability::ProtocolVersion::V1_29);
+        let mut inventory = decoded.inventory.expect("production inventory exists");
+        inventory.runtime.protocol_minor = 29;
+        inventory.language_capabilities_total =
+            Some(u64::try_from(inventory.languages.len()).expect("fixture count fits"));
+        input.inventory = Some(inventory);
+        build_support_bundle_for_schema(&input, SupportBundleSchema::V9)
+            .expect("complete language support archive builds")
+            .archive()
+            .to_vec()
+    }
+
     fn valid_support_archive_v8() -> Vec<u8> {
         let mut input = telemetry_support_input(rootlight_observability::ProtocolVersion::V1_15);
         let mut inventory = test_support_inventory();
@@ -20862,6 +21149,7 @@ mod tests {
 
     fn test_support_inventory() -> rootlight_observability::SupportInventory {
         rootlight_observability::SupportInventory {
+            language_capabilities_total: None,
             runtime: rootlight_observability::SupportRuntimeInventory {
                 product_version: "0.1.0".to_owned(),
                 binary_name: "rootlight-daemon".to_owned(),
@@ -21389,11 +21677,11 @@ mod tests {
 
         let v8 = support_response_with_schema(
             valid_support_archive_v8(),
-            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
         );
         let parsed = parse_support_bundle(v8.clone(), 15)
             .expect("protocol 1.15 accepts schema v8 support evidence");
-        assert_eq!(parsed.schema_version, CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(parsed.schema_version, SUPPORT_BUNDLE_SCHEMA_VERSION_V8);
         assert_eq!(
             parsed
                 .inventory
@@ -21408,6 +21696,31 @@ mod tests {
         ));
         assert!(matches!(
             parse_support_bundle(support_response(valid_support_archive()), 4),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+    }
+
+    #[test]
+    fn support_bundle_v9_requires_its_negotiated_complete_table() {
+        let response = support_response_with_schema(
+            valid_support_archive_v9(),
+            CURRENT_SUPPORT_BUNDLE_SCHEMA_VERSION,
+        );
+        let parsed =
+            parse_support_bundle(response.clone(), 29).expect("complete v9 archive decodes");
+        let inventory = parsed.inventory.expect("v9 includes inventory");
+        assert_eq!(inventory.language_capabilities_total, Some(1));
+        assert_eq!(inventory.languages.len(), 1);
+        assert!(matches!(
+            parse_support_bundle(response, 28),
+            Err(ClientError::InvalidSupportBundle)
+        ));
+        let legacy = support_response_with_schema(
+            valid_support_archive_v8(),
+            SUPPORT_BUNDLE_SCHEMA_VERSION_V8,
+        );
+        assert!(matches!(
+            parse_support_bundle(legacy, 29),
             Err(ClientError::InvalidSupportBundle)
         ));
     }

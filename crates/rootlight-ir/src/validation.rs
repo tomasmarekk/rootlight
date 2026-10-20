@@ -14,7 +14,9 @@ use crate::{
 
 const DEFAULT_MAX_NESTED_ITEMS_PER_RECORD: usize = 4_096;
 const DEFAULT_MAX_STRING_BYTES: usize = 32_768;
+const DEFAULT_MAX_TOTAL_STRING_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES: usize = 1024 * 1024;
+const DEFAULT_MAX_TOTAL_EXTENSION_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_EXTENSION_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_RECORDS: usize = 10_000_000;
 const JSON_ESCAPE_EXPANSION: usize = 6;
@@ -55,8 +57,8 @@ const fn checked_default_envelope_bytes() -> usize {
 pub struct IrLimits {
     /// Maximum bytes in the encoded JSON document before decoding.
     ///
-    /// The 512 MiB default leaves structural headroom above the 256 MiB
-    /// non-payload string and 16 MiB extension-payload budgets.
+    /// This encoded-size limit is independent of decoded string and payload
+    /// quotas; JSON structure and escaping also consume it.
     pub max_document_bytes: usize,
     /// Maximum bytes in one encoded standalone extension envelope.
     ///
@@ -104,6 +106,18 @@ pub struct IrLimits {
     pub max_total_diagnostic_bytes: usize,
 }
 
+impl IrLimits {
+    /// Combined default UTF-8 capacity for non-payload strings and extension payloads.
+    ///
+    /// Diagnostic strings and extension metadata already belong to the
+    /// non-payload quota. Encoded document size is limited independently.
+    pub const DEFAULT_MAX_TOTAL_TEXT_BYTES: usize =
+        match DEFAULT_MAX_TOTAL_STRING_BYTES.checked_add(DEFAULT_MAX_TOTAL_EXTENSION_BYTES) {
+            Some(bytes) => bytes,
+            None => panic!("default combined IR text capacity overflowed"),
+        };
+}
+
 impl Default for IrLimits {
     fn default() -> Self {
         Self {
@@ -125,9 +139,9 @@ impl Default for IrLimits {
             max_nested_items_per_record: DEFAULT_MAX_NESTED_ITEMS_PER_RECORD,
             max_total_nested_items: 20_000_000,
             max_string_bytes: DEFAULT_MAX_STRING_BYTES,
-            max_total_string_bytes: 256 * 1024 * 1024,
+            max_total_string_bytes: DEFAULT_MAX_TOTAL_STRING_BYTES,
             max_extension_payload_bytes: DEFAULT_MAX_EXTENSION_PAYLOAD_BYTES,
-            max_total_extension_bytes: 256 * 1024 * 1024,
+            max_total_extension_bytes: DEFAULT_MAX_TOTAL_EXTENSION_BYTES,
             max_diagnostic_message_bytes: 4_096,
             max_total_diagnostic_bytes: 4 * 1024 * 1024,
         }

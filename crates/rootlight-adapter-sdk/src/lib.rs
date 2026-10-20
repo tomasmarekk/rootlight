@@ -33,6 +33,9 @@ mod toml_names;
 mod typescript_bindings;
 mod yaml_names;
 
+/// Validated Unicode views over caller-owned bytes without filesystem access.
+pub use rootlight_vfs::{SourceText, TextEncoding};
+
 pub use dart_names::canonical_dart_constructor_signature;
 pub use descriptor::{
     EncodingId, LanguageId, MemoryAdmissionPolicy, MemoryAdmissionStatus, MemoryEnforcement,
@@ -81,8 +84,9 @@ pub use structural::{
     StructuralClassificationGap, structural_captured_name, structural_captured_name_for_fact,
     structural_captured_name_for_language, structural_display_name_for_language,
     structural_entity_classification_gap, structural_entity_kind,
-    structural_entity_kind_from_source, structural_syntax_fact_order, structural_type_member_kind,
-    vba_module_name,
+    structural_entity_kind_from_source, structural_preprocessor_context_gaps,
+    structural_signature_is_preprocessor_context, structural_syntax_fact_order,
+    structural_type_member_kind, vba_module_name,
 };
 pub use structural_identity::derive_structural_occurrence_identity;
 pub use typescript_bindings::{TypeScriptInferBinding, typescript_infer_bindings};

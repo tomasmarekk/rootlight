@@ -1,0 +1,23 @@
+{
+  "upstream_repository": "https://github.com/PWCT/PWCT2",
+  "authority": "Exact readonly original filesystem bytes joined to the closed physical inventory; not a reconstructed Git newline frame",
+  "license_path": "LICENSE",
+  "fixtures": [
+    {
+      "original_path": "selfhosting/visualsrc/goaldesigner/htmlfunctions.ring",
+      "bytes": 1778,
+      "sha256": "9c60b863482f2ba45ec8b827d44b447d37547b719b1ce060243ac1708998e45c"
+    },
+    {
+      "original_path": "applications/UsingRayLib/more/resources/cubicmap.png",
+      "bytes": 74,
+      "sha256": "f6319da579381d5441ce24aad350df20dfabb9f7c1de7f6a078bec6565adb853"
+    },
+    {
+      "original_path": "LICENSE",
+      "bytes": 1096,
+      "sha256": "63206b6e15fc7e962149ca2b17b41f0eb89c5d22956680126da922aeb4805492"
+    }
+  ],
+  "purpose": "Discovery retention accounting only; fixture names and repetition impose a deterministic small budget without parsing, changing or weakening original Ring semantics"
+}

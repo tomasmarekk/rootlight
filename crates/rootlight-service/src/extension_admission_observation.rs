@@ -881,6 +881,7 @@ fn capture_guard_is_thread_owned_and_census_rejects_unreconciled_bytes() {
 
 fn safe_error(error: &FirstSliceError) -> serde_json::Value {
     let kind = match error {
+        FirstSliceError::AggregateCapacity(_) => "aggregate_capacity",
         FirstSliceError::Configuration => "configuration",
         FirstSliceError::RandomUnavailable => "random_unavailable",
         FirstSliceError::DeadlineRequired => "deadline_required",

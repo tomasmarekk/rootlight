@@ -1,0 +1,13 @@
+{
+  "upstream": "https://github.com/deepnight/ldtk",
+  "revision": "6d69bd1d6be92f01ac30778f6a934f0da8448b16",
+  "source": "src/electron.common/MacroTools.hx",
+  "bytes": 1843,
+  "sha256": "55ada34867ac9313363cb97f498a4d4de6b83fb927c55d02d00dc30cc20b235c",
+  "git_blob_sha1": "5c7ca3bbcea1e49ef53c76592bdf59ee71cd0a41",
+  "git_blob_representation": "1,794-byte LF projection joins the original Git blob; retained fixture is exact 1,843-byte materialized CRLF source with independently authored physical spans.",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "license_sha256": "af64e783900e7123c5773a94b9b62d827c8c07b16dcc82967d1fcb37b81c64e3",
+  "scope": "Written declarations and ordinary local use inside a static macro method; no macro execution or emitted release content qualification."
+}

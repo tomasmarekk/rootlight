@@ -77,7 +77,46 @@ fn incremental_executor_accepts_optional_deadlines_and_explicit_memory_admission
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 63] = [
+    let cases: [(&str, &str, &[u8]); 90] = [
+        ("written.qs","qsharp",b"namespace Written { operation Measure(value : Int) : Unit { External(value); } }\n"),
+        ("written.sml", "standard-ml", b"fun measure value = value;\n"),
+        ("written.wat", "webassembly", b"(module $written (func $measure (param $value i32) local.get $value))\n"),
+    ("written.mojo", "mojo", b"struct Written:\n    var value: Int\n"),
+    ("written.ring", "ring", include_bytes!("fixtures/ring/htmlfunctions.ring")),
+    ("written.ha", "hare", include_bytes!("fixtures/hare/original-part1.ha")),
+    ("written.hx", "haxe", b"class Written { static function measure() { var value = 1; consume(value); } }"),
+    (
+        "SettingsUiState.qml",
+        "qml",
+        include_bytes!("fixtures/qml/SettingsUiState.qml"),
+    ),
+    (
+        "measurement.mo",
+        "modelica",
+        b"within Neutral;\nfunction measure\n input Real value;\n output Real result;\nalgorithm\n result := value;\nend measure;\n",
+    ),
+    (
+        "measurement.schema.json",
+        "json-schema",
+        br##"{"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{"Measurement":{"type":"object","properties":{"value":{"type":"number"}}}},"properties":{"result":{"$ref":"#/$defs/Measurement"}}}"##,
+    ),
+        ("sample.adb", "ada", b"procedure Sample is begin null; end Sample;\n"),
+    ("written.tf", "hcl", b"written = { nested = 1 }\n"),
+    ("written.d", "d", b"module sample; void measure(int value) {}\n"),
+    ("written.zig", "zig", b"pub fn written() void { var value: u8 = 1; _ = &value; }\n"),
+    ("written.cr", "crystal", b"class Written\n  def value\n    1\n  end\nend\n"),
+    ("written.cue", "cue", b"package sample\nparent: {child: string}\n"),
+    ("written.pony", "pony", b"class Written\n  fun ref value(): U32 => 1\n"),
+    ("written.fish", "fish", b"function measure; echo value; end\n"),
+    ("written.nim", "nim", b"proc measure(value: int): int = value\n"),
+    ("written.clj", "clojure", b"(ns written) (defn measure [value] value)\n"),
+    ("written.rkt", "racket", b"#lang racket/base\n(define (measure value) value)\n"),
+    ("written.vhdl", "vhdl", b"entity Written is port (Clock : in bit); end Written;\n"),
+        ("schema.graphql", "graphql", b"type Query { value: String }\n"),
+        ("sample.ex", "elixir", b"defmodule Sample do\n def value, do: 1\nend\n"),
+        ("schema.proto", "protobuf", b"syntax = \"proto3\"; message Record { string value = 1; }\n"),
+        ("schema.thrift", "thrift", b"struct Record { 1: string value; }\n"),
+    ("schema.capnp", "capnp", b"struct Item { value @0 :Text; }\n"),
     ("written.v", "coq", b"(* marker *)\r\nDefinition written_value : nat := 1.\r\nLemma statement : True. Proof. exact I. Qed.\r\n"),
     ("source.v", "v", b"module written\nstruct Box { value int }\nfn measure(value int) int { return value }\n"),
     ("written.v", "verilog", b"module Written(input wire clk); wire value; endmodule\n"),
@@ -281,6 +320,68 @@ fn every_audited_grammar_parses_a_clean_representative_file() {
         );
         assert!(output.diagnostics().is_empty());
     }
+}
+
+#[test]
+fn graphql_nested_capture_depth_is_admitted_by_the_strict_sdk_report() {
+    let source = b"scalar ID\ntype User { friend(limit: ID): [User!]! }\nquery Read($id: ID!) { user(id: $id) { friend(limit: $id) { id } } }\n";
+    let fixture = Fixture::new("depth.graphql", source);
+    let limits = limits(MAX_SOURCE_BYTES, 4096, 128);
+    let provider = provider(MAX_SOURCE_BYTES, 4096, 128, 2 * 1024 * 1024);
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "graphql",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &Cancellation::new(),
+    )
+    .unwrap();
+    let observed = output
+        .facts()
+        .iter()
+        .map(rootlight_adapter_sdk::SyntaxFact::depth)
+        .max()
+        .unwrap_or(0);
+    assert!(observed >= 4);
+    assert!(output.report().resources().max_syntax_depth() >= observed);
+    assert!(output.report().resources().max_syntax_depth() <= 128);
+}
+
+#[test]
+fn capnp_nested_capture_depth_is_admitted_by_the_strict_sdk_report() {
+    let source = b"struct Box { struct Inner { field @0 :List(Box); } }\ninterface Service { get @0 (input: Box) -> (output: Box); }\n";
+    let fixture = Fixture::new("depth.capnp", source);
+    let limits = limits(MAX_SOURCE_BYTES, 4096, 128);
+    let provider = provider(MAX_SOURCE_BYTES, 4096, 128, 2 * 1024 * 1024);
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "capnp",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &Cancellation::new(),
+    )
+    .unwrap();
+    let observed = output
+        .facts()
+        .iter()
+        .map(rootlight_adapter_sdk::SyntaxFact::depth)
+        .max()
+        .unwrap_or(0);
+    assert!(observed >= 4);
+    assert!(output.report().resources().max_syntax_depth() >= observed);
+    assert!(output.report().resources().max_syntax_depth() <= 128);
 }
 
 #[test]
@@ -1891,4 +1992,35 @@ fn capture(temporary: &TempDir, relative: &RelativePath) -> (SourceSnapshot, Sou
         None,
     );
     (snapshot, source)
+}
+
+#[test]
+fn thrift_nested_throws_facts_keep_actual_native_depth_for_strict_admission() {
+    let source = b"exception Problem { 1: string reason; } service Store { void ping(1: i64 key) throws (1: Problem problem); }";
+    let fixture = Fixture::new("depth.thrift", source);
+    let limits = limits(MAX_SOURCE_BYTES, 4096, 128);
+    let provider = provider(MAX_SOURCE_BYTES, 4096, 128, 2 * 1024 * 1024);
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "thrift",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &Cancellation::new(),
+    )
+    .unwrap();
+    let observed = output
+        .facts()
+        .iter()
+        .map(rootlight_adapter_sdk::SyntaxFact::depth)
+        .max()
+        .unwrap_or(0);
+    assert!(observed >= 4);
+    assert!(output.report().resources().max_syntax_depth() >= observed);
+    assert!(output.report().resources().max_syntax_depth() <= 128);
 }

@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, cmp::Ordering};
 
-use rootlight_ir::EntityKind;
+use rootlight_ir::{EntityKind, FactDomain};
 
 use crate::{SyntaxFact, SyntaxFactKind};
 
@@ -27,8 +27,64 @@ mod ocaml;
 #[path = "structural_scheme.rs"]
 mod scheme;
 
+#[path = "structural_elixir.rs"]
+mod elixir;
+#[path = "structural_protobuf.rs"]
+mod protobuf;
+#[path = "structural_thrift.rs"]
+mod thrift;
 #[path = "structural_wgsl.rs"]
 mod wgsl;
+
+#[path = "structural_ada.rs"]
+mod ada;
+#[path = "structural_clojure.rs"]
+mod clojure;
+#[path = "structural_crystal.rs"]
+mod crystal;
+#[path = "structural_cue.rs"]
+mod cue;
+#[path = "structural_d.rs"]
+mod d;
+#[path = "structural_fish.rs"]
+mod fish;
+#[path = "structural_haxe.rs"]
+mod haxe;
+#[path = "structural_hcl.rs"]
+mod hcl;
+#[path = "structural_json_schema.rs"]
+mod json_schema;
+#[path = "structural_jsx.rs"]
+mod jsx;
+#[path = "structural_modelica.rs"]
+mod modelica;
+#[path = "structural_mojo.rs"]
+mod mojo;
+#[path = "structural_nim.rs"]
+mod nim;
+#[path = "structural_pony.rs"]
+mod pony;
+
+#[path = "structural_flux.rs"]
+mod flux;
+#[path = "structural_hare.rs"]
+mod hare;
+#[path = "structural_less.rs"]
+mod less;
+#[path = "structural_qml.rs"]
+mod qml;
+#[path = "structural_qsharp.rs"]
+mod qsharp;
+#[path = "structural_racket.rs"]
+mod racket;
+#[path = "structural_ring.rs"]
+mod ring;
+#[path = "structural_sass.rs"]
+mod sass;
+#[path = "structural_sml_wat.rs"]
+mod sml_wat;
+#[path = "structural_zig.rs"]
+mod zig;
 
 #[path = "structural_cmake.rs"]
 mod cmake;
@@ -42,10 +98,127 @@ mod hdl;
 mod julia;
 #[path = "structural_v.rs"]
 mod v;
+#[path = "structural_vhdl.rs"]
+mod vhdl;
 #[path = "structural_xml.rs"]
 mod xml;
 
 pub use fsharp::StructuralClassificationGap;
+
+/// Returns whether a C-family signature capture is preprocessor context.
+///
+/// Conditional and unsupported replacement markers remain coverage evidence;
+/// they must never compete with a declaration's written signature discriminator.
+/// Authored macro headers and parameter lists return `false`.
+#[must_use]
+pub fn structural_signature_is_preprocessor_context(fact: &SyntaxFact) -> bool {
+    !structural_preprocessor_context_gaps(fact).is_empty()
+}
+
+/// Returns reviewed C-family context gaps for both structural and project lowering.
+///
+/// Each entry requires an exact-span `UnsupportedConstruct` skipped region in
+/// its domain. Context facts remain mandatory coverage evidence even though
+/// they never contribute a written declaration signature or symbol identity.
+#[must_use]
+pub fn structural_preprocessor_context_gaps(
+    fact: &SyntaxFact,
+) -> &'static [(FactDomain, &'static str)] {
+    if fact.kind() != SyntaxFactKind::Signature {
+        return &[];
+    }
+    match fact.syntax_kind().as_str() {
+        "c.preprocessor_condition.signature" => &[
+            (
+                FactDomain::Entities,
+                "c-preprocessor-conditional-evaluation-unavailable",
+            ),
+            (
+                FactDomain::Occurrences,
+                "c-preprocessor-conditional-evaluation-unavailable",
+            ),
+            (
+                FactDomain::Relations,
+                "c-preprocessor-conditional-evaluation-unavailable",
+            ),
+        ],
+        "cpp.preprocessor_condition.signature" => &[
+            (
+                FactDomain::Entities,
+                "cpp-preprocessor-conditional-evaluation-unavailable",
+            ),
+            (
+                FactDomain::Occurrences,
+                "cpp-preprocessor-conditional-evaluation-unavailable",
+            ),
+            (
+                FactDomain::Relations,
+                "cpp-preprocessor-conditional-evaluation-unavailable",
+            ),
+        ],
+        "c.preprocessor_lexical_unavailable.signature" => &[(
+            FactDomain::Occurrences,
+            "c-preprocessor-replacement-lexical-unavailable",
+        )],
+        "cpp.preprocessor_lexical_unavailable.signature" => &[
+            (
+                FactDomain::Entities,
+                "cpp-preprocessor-replacement-lexical-unavailable",
+            ),
+            (
+                FactDomain::Occurrences,
+                "cpp-preprocessor-replacement-lexical-unavailable",
+            ),
+            (
+                FactDomain::Relations,
+                "cpp-preprocessor-replacement-lexical-unavailable",
+            ),
+        ],
+        "cpp.preprocessor_parameters.signature" => &[
+            (
+                FactDomain::Entities,
+                "cpp-macro-parameter-bindings-unavailable",
+            ),
+            (
+                FactDomain::Occurrences,
+                "cpp-macro-parameter-bindings-unavailable",
+            ),
+            (
+                FactDomain::Relations,
+                "cpp-macro-parameter-bindings-unavailable",
+            ),
+        ],
+        "c.preprocessor_projection_unavailable.signature" => &[
+            (
+                FactDomain::Entities,
+                "c-preprocessor-replacement-not-analyzed",
+            ),
+            (
+                FactDomain::Occurrences,
+                "c-preprocessor-replacement-not-analyzed",
+            ),
+            (
+                FactDomain::Relations,
+                "c-preprocessor-replacement-not-analyzed",
+            ),
+        ],
+        "cpp.preprocessor_projection_unavailable.signature" => &[
+            (
+                FactDomain::Entities,
+                "cpp-preprocessor-replacement-not-analyzed",
+            ),
+            (
+                FactDomain::Occurrences,
+                "cpp-preprocessor-replacement-not-analyzed",
+            ),
+            (
+                FactDomain::Relations,
+                "cpp-preprocessor-replacement-not-analyzed",
+            ),
+        ],
+        _ => &[],
+    }
+}
 
 /// Returns the grammar-reviewed base entity kind for one structural syntax fact.
 ///
@@ -58,9 +231,157 @@ pub use fsharp::StructuralClassificationGap;
 /// only exact reviewed labels; unknown labels never use the substring classifier.
 /// HLSL buffer labels and contexts are not declarations, types or named scopes.
 /// Physical patch headers and hunks are document sections, never target-language declarations.
+/// Cap'n Proto accepts exact schema-owner labels; aliases and generic binding
+/// never fall through to the generic substring classifier.
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if jsx::owns(label) {
+        return jsx::entity_kind(fact);
+    }
+    if label.starts_with("hcl.") {
+        return hcl::entity_kind(fact);
+    }
+    if label.starts_with("ada.") {
+        return ada::entity_kind(fact);
+    }
+    if label.starts_with("json_schema.") {
+        return json_schema::entity_kind(fact);
+    }
+    if label.starts_with("flux.") {
+        return flux::entity_kind(fact);
+    }
+    if label.starts_with("less.") {
+        return less::entity_kind(fact);
+    }
+    if label.starts_with("sass.") {
+        return sass::entity_kind(fact);
+    }
+    if label.starts_with("qsharp.") {
+        return qsharp::entity_kind(fact);
+    }
+    if label.starts_with("sml.") || label.starts_with("wat.") {
+        return sml_wat::entity_kind(fact);
+    }
+    if label.starts_with("mojo.") {
+        return mojo::entity_kind(fact);
+    }
+    if label.starts_with("haxe.") {
+        return haxe::entity_kind(fact);
+    }
+    if label.starts_with("qml.") {
+        return qml::entity_kind(fact);
+    }
+    if label.starts_with("hare.") {
+        return hare::entity_kind(fact);
+    }
+    if label.starts_with("ring.") {
+        return ring::entity_kind(fact);
+    }
+    if label.starts_with("modelica.") {
+        return modelica::entity_kind(fact);
+    }
+    if label.starts_with("d.") {
+        return d::entity_kind(fact);
+    }
+    if label.starts_with("zig.") {
+        return zig::entity_kind(fact);
+    }
+    if label.starts_with("crystal.") {
+        return crystal::entity_kind(fact);
+    }
+    if label.starts_with("cue.") {
+        return cue::entity_kind(fact);
+    }
+    if label.starts_with("pony.") {
+        return pony::entity_kind(fact);
+    }
+    if label.starts_with("fish.") {
+        return fish::entity_kind(fact);
+    }
+    if label.starts_with("nim.") {
+        return nim::entity_kind(fact);
+    }
+    if label.starts_with("clojure.") {
+        return clojure::entity_kind(fact);
+    }
+    if label.starts_with("racket.") {
+        return racket::entity_kind(fact);
+    }
+    if label.starts_with("graphql.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Module, "graphql.file.module") => Some(EntityKind::Module),
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.object.declaration" | "graphql.input.declaration",
+            ) => Some(EntityKind::Struct),
+            (SyntaxFactKind::Declaration, "graphql.interface.declaration") => {
+                Some(EntityKind::Interface)
+            }
+            (SyntaxFactKind::Declaration, "graphql.union.declaration") => Some(EntityKind::Union),
+            (SyntaxFactKind::Declaration, "graphql.enum.declaration") => Some(EntityKind::Enum),
+            (SyntaxFactKind::Declaration, "graphql.scalar.declaration") => {
+                Some(EntityKind::TypeAlias)
+            }
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.field.declaration" | "graphql.input_field.declaration",
+            ) => Some(EntityKind::Field),
+            (SyntaxFactKind::Declaration, "graphql.argument.declaration") => {
+                Some(EntityKind::Parameter)
+            }
+            (SyntaxFactKind::Declaration, "graphql.enum_value.declaration") => {
+                Some(EntityKind::Constant)
+            }
+            (SyntaxFactKind::Declaration, "graphql.variable.declaration") => {
+                Some(EntityKind::Variable)
+            }
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.operation.declaration"
+                | "graphql.fragment.declaration"
+                | "graphql.directive.declaration",
+            ) => Some(EntityKind::Function),
+            _ => None,
+        };
+    }
+    if label.starts_with("elixir.") {
+        return elixir::entity_kind(fact);
+    }
+    if label.starts_with("protobuf.") {
+        return protobuf::entity_kind(fact);
+    }
+    if label.starts_with("thrift.") {
+        return thrift::entity_kind(fact);
+    }
+    if label.starts_with("capnp.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Module, "capnp.file.module") => Some(EntityKind::Module),
+            (SyntaxFactKind::Declaration, "capnp.struct.declaration") => Some(EntityKind::Struct),
+            (SyntaxFactKind::Declaration, "capnp.interface.declaration") => {
+                Some(EntityKind::Interface)
+            }
+            (SyntaxFactKind::Declaration, "capnp.enum.declaration") => Some(EntityKind::Enum),
+            (SyntaxFactKind::Declaration, "capnp.union.declaration") => Some(EntityKind::Union),
+            (
+                SyntaxFactKind::Declaration,
+                "capnp.field.declaration" | "capnp.group.declaration",
+            ) => Some(EntityKind::Field),
+            (
+                SyntaxFactKind::Declaration,
+                "capnp.parameter.declaration" | "capnp.return_parameter.declaration",
+            ) => Some(EntityKind::Parameter),
+            (
+                SyntaxFactKind::Declaration,
+                "capnp.enum_value.declaration" | "capnp.const.declaration",
+            ) => Some(EntityKind::Constant),
+            (SyntaxFactKind::Declaration, "capnp.method.declaration") => Some(EntityKind::Method),
+            (SyntaxFactKind::Declaration, "capnp.annotation.declaration") => {
+                Some(EntityKind::Function)
+            }
+            _ => None,
+        };
+    }
     if label.starts_with("patch.") {
         return match (fact.kind(), label) {
             (SyntaxFactKind::Module, "patch.file.module") => Some(EntityKind::Module),
@@ -84,6 +405,9 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     }
     if label.starts_with("v.") {
         return v::entity_kind(fact);
+    }
+    if label.starts_with("vhdl.") {
+        return vhdl::entity_kind(fact);
     }
     if label.starts_with("verilog.") || label.starts_with("systemverilog.") {
         return hdl::entity_kind(fact);
@@ -666,6 +990,10 @@ pub fn structural_captured_name(text: &str, maximum_bytes: usize) -> Option<&str
 /// QName prefixes, namespaces or expanded entities.
 /// OCaml profiles borrow raw bounded identifier spelling; native capture owns
 /// letter-category, keyword and declaration-context proof. Paths use exact fact labels.
+/// Cap'n Proto declaration names preserve bounded ASCII spelling and case;
+/// qualified type-use paths are admitted separately by the fact classifier.
+/// VHDL folds ASCII basic identifiers to lowercase and preserves delimited extended
+/// spelling as a distinct exact identity; native context owns declaration proof.
 /// Other languages retain the shared borrowed-name contract. Source and canonical
 /// output must both fit `maximum_bytes`. Invalid names, excess bytes or allocation
 /// failure return `None`.
@@ -675,7 +1003,98 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
-    if language == "coq" {
+    if language == "hcl" {
+        return hcl::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "ada" {
+        return ada::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "json-schema" {
+        return json_schema::captured_body(text, maximum_bytes);
+    }
+    if language == "qsharp" {
+        return qsharp::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if matches!(language, "standard-ml" | "webassembly") {
+        return sml_wat::captured_name(language, text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "mojo" {
+        return mojo::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "haxe" {
+        return haxe::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "qml" {
+        return qml::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "hare" {
+        return hare::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "ring" {
+        return ring::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "modelica" {
+        return modelica::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "d" {
+        return d::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "zig" {
+        return zig::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "crystal" {
+        return crystal::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "cue" {
+        return cue::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "pony" {
+        return pony::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "fish" {
+        return fish::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "nim" {
+        return nim::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "clojure" {
+        return clojure::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "racket" {
+        return racket::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "vhdl" {
+        return vhdl::captured_name(text, maximum_bytes);
+    }
+    if language == "graphql" {
+        return (text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if language == "elixir" {
+        return elixir::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "protobuf" {
+        protobuf::captured_name(text, maximum_bytes)
+    } else if language == "thrift" {
+        thrift::captured_name(text, maximum_bytes)
+    } else if language == "capnp" {
+        (text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        .then_some(Cow::Borrowed(text))
+    } else if language == "coq" {
         coq::captured_name(text, maximum_bytes).map(Cow::Borrowed)
     } else if language == "v" {
         v::captured_name(text, maximum_bytes).map(Cow::Borrowed)
@@ -896,8 +1315,9 @@ fn plsql_captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
 /// other roles or foreign languages cannot acquire a name through its namespace.
 /// HLSL uses its own exact occurrence labels with the same namespace fence;
 /// buffer labels and contexts are not admitted as definition or reference names.
-/// Scheme admits only `scheme.name.definition` and `scheme.symbol.reference`
-/// occurrences in `scheme`, preserving raw spelling without reader equivalence.
+/// Scheme admits exact `scheme.name.definition`, `scheme.symbol.reference` and
+/// `scheme.direct_file_call.reference` occurrences in `scheme`, preserving raw
+/// spelling without reader equivalence or generic call-target inference.
 /// Unknown labels, other roles and foreign languages never use a generic fallback.
 /// WGSL uses exact definition and unresolved-use labels in its own namespace;
 /// accepted source spelling does not establish shader or call-target bindings.
@@ -915,6 +1335,214 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("go.call_formal") || label.starts_with("go.unproven_call_formal") {
+        return (language == "go"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "go.call_formal.reference" | "go.unproven_call_formal.reference"
+            )
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("c.formal_") || label.starts_with("c.unproven_formal_") {
+        return (language == "c"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "c.formal_value.reference" | "c.unproven_formal_value.reference"
+            )
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("prolog.direct_goal.") || label.starts_with("prolog.goal_") {
+        return (language == "prolog"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "prolog.direct_goal.reference"
+            && text.len() <= maximum_bytes
+            && text.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if jsx::owns(label) {
+        return jsx::captured_name(language, fact, text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "hcl" || label.starts_with("hcl.") {
+        return (language == "hcl")
+            .then(|| hcl::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "ada" || label.starts_with("ada.") {
+        return (language == "ada")
+            .then(|| ada::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "json-schema" || label.starts_with("json_schema.") {
+        return (language == "json-schema")
+            .then(|| json_schema::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten();
+    }
+    if language == "flux" || label.starts_with("flux.") {
+        return (language == "flux")
+            .then(|| flux::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "less" || label.starts_with("less.") {
+        return (language == "less")
+            .then(|| less::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "sass" || label.starts_with("sass.") {
+        return (language == "sass")
+            .then(|| sass::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if matches!(language, "standard-ml" | "webassembly")
+        || label.starts_with("sml.")
+        || label.starts_with("wat.")
+    {
+        return sml_wat::captured_name_for_fact(language, fact, text, maximum_bytes)
+            .map(Cow::Borrowed);
+    }
+    if language == "qsharp" || label.starts_with("qsharp.") {
+        return (language == "qsharp")
+            .then(|| qsharp::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "mojo" || label.starts_with("mojo.") {
+        return (language == "mojo")
+            .then(|| mojo::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "haxe" || label.starts_with("haxe.") {
+        return (language == "haxe")
+            .then(|| haxe::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "qml" || label.starts_with("qml.") {
+        return (language == "qml")
+            .then(|| qml::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "hare" || label.starts_with("hare.") {
+        return (language == "hare")
+            .then(|| hare::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "ring" || label.starts_with("ring.") {
+        return (language == "ring")
+            .then(|| ring::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "modelica" || label.starts_with("modelica.") {
+        return (language == "modelica")
+            .then(|| modelica::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "d" || label.starts_with("d.") {
+        return (language == "d")
+            .then(|| d::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "zig" || label.starts_with("zig.") {
+        return (language == "zig")
+            .then(|| zig::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "crystal" || label.starts_with("crystal.") {
+        return (language == "crystal")
+            .then(|| crystal::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "cue" || label.starts_with("cue.") {
+        return (language == "cue")
+            .then(|| cue::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "pony" || label.starts_with("pony.") {
+        return (language == "pony")
+            .then(|| pony::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "fish" || label.starts_with("fish.") {
+        return (language == "fish")
+            .then(|| fish::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "nim" || label.starts_with("nim.") {
+        return (language == "nim")
+            .then(|| nim::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "clojure" || label.starts_with("clojure.") {
+        return (language == "clojure")
+            .then(|| clojure::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "racket" || label.starts_with("racket.") {
+        return (language == "racket")
+            .then(|| racket::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "vhdl" || label.starts_with("vhdl.") {
+        return (language == "vhdl"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "vhdl.name.definition")
+            .then(|| vhdl::captured_name(text, maximum_bytes))
+            .flatten();
+    }
+    if label.starts_with("capnp.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Occurrence, "capnp.name.definition") => {
+                structural_captured_name_for_language(language, text, maximum_bytes)
+                    .filter(|_| language == "capnp")
+            }
+            (
+                SyntaxFactKind::Occurrence,
+                "capnp.named_type.reference"
+                | "capnp.unavailable_type.reference"
+                | "capnp.written_name.reference",
+            ) if language == "capnp" => (text.len() <= maximum_bytes
+                && text.split('.').all(|part| {
+                    structural_captured_name_for_language("capnp", part, maximum_bytes).is_some()
+                }))
+            .then_some(Cow::Borrowed(text)),
+            _ => None,
+        };
+    }
     if label.starts_with("patch.") {
         return (language == "diff"
             && fact.kind() == SyntaxFactKind::Occurrence
@@ -923,6 +1551,24 @@ pub fn structural_captured_name_for_fact<'a>(
             && text.len() <= maximum_bytes
             && !text.contains(['\0', '\r', '\n']))
         .then_some(Cow::Borrowed(text));
+    }
+    if language == "elixir" || label.starts_with("elixir.") {
+        return (language == "elixir"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "elixir.name.definition")
+            .then(|| elixir::captured_name(text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "protobuf" || label.starts_with("protobuf.") {
+        return (language == "protobuf")
+            .then(|| protobuf::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten();
+    }
+    if language == "thrift" || label.starts_with("thrift.") {
+        return (language == "thrift")
+            .then(|| thrift::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten();
     }
     if language == "coq" || label.starts_with("coq.") {
         return (language == "coq")
@@ -1051,7 +1697,7 @@ pub fn structural_captured_name_for_fact<'a>(
     } else if language == "make"
         && matches!(
             fact.syntax_kind().as_str(),
-            "make.name.definition" | "make.target.reference"
+            "make.name.definition" | "make.target.reference" | "make.variable.reference"
         )
     {
         let bytes = text.as_bytes();
@@ -1272,6 +1918,48 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c_family_preprocessor_context_never_replaces_written_headers() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 32).unwrap();
+        let fact = |kind, label| {
+            SyntaxFact::new(1, None, kind, span, 0, SyntaxKindLabel::new(label).unwrap())
+        };
+        for label in [
+            "c.preprocessor_condition.signature",
+            "cpp.preprocessor_condition.signature",
+            "c.preprocessor_lexical_unavailable.signature",
+            "cpp.preprocessor_lexical_unavailable.signature",
+            "cpp.preprocessor_parameters.signature",
+            "c.preprocessor_projection_unavailable.signature",
+            "cpp.preprocessor_projection_unavailable.signature",
+        ] {
+            assert!(structural_signature_is_preprocessor_context(&fact(
+                SyntaxFactKind::Signature,
+                label
+            )));
+            assert!(!structural_signature_is_preprocessor_context(&fact(
+                SyntaxFactKind::Declaration,
+                label
+            )));
+        }
+        for label in [
+            "c.parameters.signature",
+            "cpp.parameters.signature",
+            "c.written_macro.signature",
+            "cpp.written_macro.signature",
+            "python.parameters.signature",
+        ] {
+            assert!(!structural_signature_is_preprocessor_context(&fact(
+                SyntaxFactKind::Signature,
+                label
+            )));
+        }
+    }
 
     #[test]
     fn patch_headings_are_document_sections_without_target_language_bindings() {
@@ -1823,7 +2511,49 @@ mod tests {
     }
 
     #[test]
-    fn tcl_declarations_retain_namespace_and_function_identity() {
+    fn capnp_methods_and_annotations_keep_distinct_kinds() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        for (kind, syntax, expected) in [
+            (
+                SyntaxFactKind::Declaration,
+                "capnp.method.declaration",
+                Some(EntityKind::Method),
+            ),
+            (
+                SyntaxFactKind::Declaration,
+                "capnp.annotation.declaration",
+                Some(EntityKind::Function),
+            ),
+            (
+                SyntaxFactKind::Declaration,
+                "capnp.method.declaration.extra",
+                None,
+            ),
+            (SyntaxFactKind::Occurrence, "capnp.method.declaration", None),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([4; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(syntax).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), expected, "{syntax}");
+            if expected == Some(EntityKind::Method) {
+                assert_eq!(
+                    structural_type_member_kind(&fact, EntityKind::Method),
+                    EntityKind::Method
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tcl_declarations_retain_namespace_function_and_parameter_identity() {
         use crate::SyntaxKindLabel;
         use rootlight_ids::FileId;
         use rootlight_ir::SourceSpan;
@@ -1831,6 +2561,7 @@ mod tests {
         for (syntax, expected) in [
             ("tcl.namespace.declaration", EntityKind::Namespace),
             ("tcl.function.declaration", EntityKind::Function),
+            ("tcl.parameter.declaration", EntityKind::Parameter),
         ] {
             let fact = SyntaxFact::new(
                 1,
@@ -1896,7 +2627,11 @@ mod tests {
         use rootlight_ir::SourceSpan;
 
         let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
-        for label in ["make.name.definition", "make.target.reference"] {
+        for label in [
+            "make.name.definition",
+            "make.target.reference",
+            "make.variable.reference",
+        ] {
             let fact = SyntaxFact::new(
                 1,
                 None,
@@ -2346,5 +3081,234 @@ mod tests {
                 "{source}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod graphql_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn graphql_classifies_exact_declaration_roles_without_selection_guesses() {
+        for (kind, label, expected) in [
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.object.declaration",
+                Some(EntityKind::Struct),
+            ),
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.field.declaration",
+                Some(EntityKind::Field),
+            ),
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.argument.declaration",
+                Some(EntityKind::Parameter),
+            ),
+            (
+                SyntaxFactKind::Occurrence,
+                "graphql.field.declaration",
+                None,
+            ),
+            (SyntaxFactKind::Declaration, "graphql.field.reference", None),
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.selection.declaration",
+                None,
+            ),
+            (
+                SyntaxFactKind::Declaration,
+                "graphql.object.declaration.extra",
+                None,
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(structural_entity_kind(&fact), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn graphql_names_keep_ascii_case_and_obey_the_complete_byte_limit() {
+        for name in ["Query", "viewer", "_private2"] {
+            assert!(
+                matches!(structural_captured_name_for_language("graphql", name, name.len()),
+                Some(Cow::Borrowed(found)) if found == name)
+            );
+            assert!(
+                structural_captured_name_for_language("graphql", name, name.len() - 1).is_none()
+            );
+        }
+        for name in [
+            "",
+            "two names",
+            "1leading",
+            "Type.field",
+            "@tag",
+            "λ",
+            "x\0y",
+        ] {
+            assert!(
+                structural_captured_name_for_language("graphql", name, 64).is_none(),
+                "{name:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod prolog_goal_capture_tests {
+    use super::*;
+
+    #[test]
+    fn direct_goal_names_require_the_exact_language_role_label_and_plain_atom() {
+        let file = rootlight_ids::FileId::from_bytes([45; 20]);
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                rootlight_ir::SourceSpan::new(file, 0, 6).unwrap(),
+                0,
+                crate::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let goal = fact(SyntaxFactKind::Occurrence, "prolog.direct_goal.reference");
+        assert_eq!(
+            structural_captured_name_for_fact("prolog", &goal, "target", 6).as_deref(),
+            Some("target")
+        );
+        for (language, site, text, maximum) in [
+            ("scheme", goal.clone(), "target", 6),
+            (
+                "prolog",
+                fact(SyntaxFactKind::Signature, "prolog.direct_goal.reference"),
+                "target",
+                6,
+            ),
+            (
+                "prolog",
+                fact(SyntaxFactKind::Occurrence, "prolog.direct_goal.extra"),
+                "target",
+                6,
+            ),
+            ("prolog", goal.clone(), "target(X)", 64),
+            ("prolog", goal.clone(), "target", 5),
+            ("prolog", goal, "Target", 6),
+        ] {
+            assert!(structural_captured_name_for_fact(language, &site, text, maximum).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod c_formal_capture_tests {
+    use super::*;
+    #[test]
+    fn native_formal_names_require_the_exact_language_role_label_and_ascii_source() {
+        let file = rootlight_ids::FileId::from_bytes([165; 20]);
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                rootlight_ir::SourceSpan::new(file, 0, 5).unwrap(),
+                0,
+                crate::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let read = fact(SyntaxFactKind::Occurrence, "c.formal_value.reference");
+        assert_eq!(
+            structural_captured_name_for_fact("c", &read, "value", 5).as_deref(),
+            Some("value")
+        );
+        for (language, site, text, maximum) in [
+            ("cpp", read.clone(), "value", 5),
+            (
+                "c",
+                fact(SyntaxFactKind::Signature, "c.formal_value.reference"),
+                "value",
+                5,
+            ),
+            (
+                "c",
+                fact(SyntaxFactKind::Occurrence, "c.formal_value.extra"),
+                "value",
+                5,
+            ),
+            (
+                "c",
+                fact(
+                    SyntaxFactKind::Signature,
+                    "c.formal_binding_context.signature",
+                ),
+                "value",
+                5,
+            ),
+            ("c", read.clone(), "value", 4),
+            ("c", read.clone(), "value()", 64),
+            ("c", read, "Î»", 64),
+        ] {
+            assert!(structural_captured_name_for_fact(language, &site, text, maximum).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod go_call_formal_contract_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+
+    #[test]
+    fn call_argument_protocol_names_require_exact_go_occurrence_labels() {
+        let span = rootlight_ir::SourceSpan::new(rootlight_ids::FileId::from_bytes([3; 20]), 0, 5)
+            .unwrap();
+        for label in [
+            "go.call_formal.reference",
+            "go.unproven_call_formal.reference",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("go", &fact, "value", 5).as_deref(),
+                Some("value")
+            );
+            assert!(structural_captured_name_for_fact("c", &fact, "value", 5).is_none());
+            assert!(structural_captured_name_for_fact("go", &fact, "value", 4).is_none());
+            let signature = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert!(structural_captured_name_for_fact("go", &signature, "value", 5).is_none());
+        }
+        let fact = SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Occurrence,
+            span,
+            1,
+            SyntaxKindLabel::new("go.call_formal.extra").unwrap(),
+        );
+        assert!(structural_captured_name_for_fact("go", &fact, "value", 5).is_none());
     }
 }

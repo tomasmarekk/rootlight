@@ -400,47 +400,62 @@ impl SourceReadDataV1_3 {
     /// # Errors
     /// Returns [`ConditionalActivityError`] for contradictory returned evidence.
     pub fn validate_conditional_activity(&self) -> Result<(), ConditionalActivityError> {
-        validate_ordinals(&self.conditional_activity, self.chunks.len(), 32)?;
-        if self.stale_references.len() > 32 || self.elisions.len() > 64 {
-            return Err(ConditionalActivityError);
-        }
-        let mut assessments = self.conditional_activity.iter().peekable();
-        let mut totals = (0_u64, 0_u64);
-        for (index, chunk) in self.chunks.iter().enumerate() {
-            let (physical, text) = chunk.byte_totals()?;
-            totals.0 = totals
-                .0
-                .checked_add(physical)
-                .ok_or(ConditionalActivityError)?;
-            totals.1 = totals.1.checked_add(text).ok_or(ConditionalActivityError)?;
-            let assessment = assessments
-                .peek()
-                .filter(|assessment| usize::try_from(assessment.result_index).ok() == Some(index));
-            if is_conditional_activity_language(chunk.language()) != assessment.is_some() {
-                return Err(ConditionalActivityError);
-            }
-            if assessment.is_some() {
-                assessments
-                    .next()
-                    .ok_or(ConditionalActivityError)?
-                    .validate_returned_source(
-                        Some(chunk.source_ref()),
-                        ConditionalActivityBasis::ReturnedRange,
-                    )?;
-            }
-        }
-        if totals
-            != (
-                u64::from(self.total_source_bytes),
-                u64::from(self.total_text_bytes),
-            )
-            || totals.0 > 524_288
-            || totals.1 > 786_432
-        {
-            return Err(ConditionalActivityError);
-        }
-        Ok(())
+        validate_source_text_data(
+            &self.chunks,
+            &self.conditional_activity,
+            self.stale_references.len(),
+            self.elisions.len(),
+            self.total_source_bytes,
+            self.total_text_bytes,
+        )
     }
+}
+
+// Both revisions retain identical byte and conditional-source validation.
+pub(crate) fn validate_source_text_data(
+    chunks: &[SourceChunkV1_3],
+    conditional_activity: &[ConditionalActivityAssessment],
+    stale_references: usize,
+    elisions: usize,
+    total_source_bytes: u32,
+    total_text_bytes: u32,
+) -> Result<(), ConditionalActivityError> {
+    validate_ordinals(conditional_activity, chunks.len(), 32)?;
+    if stale_references > 32 || elisions > 64 {
+        return Err(ConditionalActivityError);
+    }
+    let mut assessments = conditional_activity.iter().peekable();
+    let mut totals = (0_u64, 0_u64);
+    for (index, chunk) in chunks.iter().enumerate() {
+        let (physical, text) = chunk.byte_totals()?;
+        totals.0 = totals
+            .0
+            .checked_add(physical)
+            .ok_or(ConditionalActivityError)?;
+        totals.1 = totals.1.checked_add(text).ok_or(ConditionalActivityError)?;
+        let assessment = assessments
+            .peek()
+            .filter(|assessment| usize::try_from(assessment.result_index).ok() == Some(index));
+        if is_conditional_activity_language(chunk.language()) != assessment.is_some() {
+            return Err(ConditionalActivityError);
+        }
+        if assessment.is_some() {
+            assessments
+                .next()
+                .ok_or(ConditionalActivityError)?
+                .validate_returned_source(
+                    Some(chunk.source_ref()),
+                    ConditionalActivityBasis::ReturnedRange,
+                )?;
+        }
+    }
+    if totals != (u64::from(total_source_bytes), u64::from(total_text_bytes))
+        || totals.0 > 524_288
+        || totals.1 > 786_432
+    {
+        return Err(ConditionalActivityError);
+    }
+    Ok(())
 }
 
 impl<'de> Deserialize<'de> for SourceReadDataV1_3 {

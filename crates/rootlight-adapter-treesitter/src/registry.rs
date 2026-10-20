@@ -13,6 +13,56 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// Q# written headers and finite native same-owner argument reads.
+    Qsharp,
+    /// Standard ML written function heads without inferred pattern bindings.
+    StandardMl,
+    /// WebAssembly text named modules, functions and scalar parameters.
+    Wat,
+    /// Mojo written declarations without compiler or runtime inference.
+    Mojo,
+    /// Hare written declarations and native-certified same-file ordinary calls.
+    Hare,
+    /// Haxe written class members and native-proven local argument reads.
+    Haxe,
+    /// Ring written single-class methods and certified ordinary formal Reads.
+    Ring,
+    /// QML written object members and native-proven id calls.
+    Qml,
+    /// Modelica written functions and inputs, without equation or runtime evaluation.
+    Modelica,
+    /// D written headers without template evaluation or compiler binding.
+    D,
+    /// HCL bare written properties without evaluation or provider binding.
+    Hcl,
+    /// Ada written owners with bounded direct nested procedure calls.
+    Ada,
+    /// Zig written binders without import or comptime evaluation.
+    Zig,
+    /// Crystal written declarations without type inference or macro expansion.
+    Crystal,
+    /// CUE static labels without constraint or import evaluation.
+    Cue,
+    /// Pony written owners and direct members without runtime dispatch.
+    Pony,
+    /// Fish written functions without command execution or expansion.
+    Fish,
+    /// Nim written declarations without compile-time evaluation or type inference.
+    Nim,
+    /// Clojure and ClojureScript written namespaces and lexical functions.
+    Clojure,
+    /// Racket written bindings without custom-reader execution.
+    Racket,
+    /// GraphQL physical SDL and executable documents without schema execution.
+    Graphql,
+    /// Elixir written modules and functions without macro expansion or BEAM binding.
+    Elixir,
+    /// Written Protocol Buffers schemas without descriptor or wire validation.
+    Protobuf,
+    /// Written Thrift IDL without codegen or wire validation.
+    Thrift,
+    /// Cap'n Proto schema owners without compiler or wire-format evaluation.
+    Capnp,
     /// Rust grammar.
     Rust,
     /// Python grammar.
@@ -51,6 +101,8 @@ pub enum GrammarFamily {
     Json,
     /// JSON with comments and trailing commas, preserving physical source offsets.
     Jsonc,
+    /// Explicit Draft 2020-12 schema contexts over the checked JSON grammar.
+    JsonSchema,
     /// TOML grammar with source-bound keys, tables and array occurrences.
     Toml,
     /// YAML grammar with document-local data and serialization identities.
@@ -135,6 +187,8 @@ pub enum GrammarFamily {
     Coq,
     /// Written Verilog source before preprocessing and elaboration.
     Verilog,
+    /// Physical VHDL declarations before library binding or elaboration.
+    Vhdl,
     /// Written SystemVerilog source before preprocessing and elaboration.
     SystemVerilog,
     /// Written V source without compiler, foreign or receiver binding inference.
@@ -235,8 +289,33 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(63);
+        let mut descriptors = Vec::with_capacity(90);
         for family in [
+            GrammarFamily::Qsharp,
+            GrammarFamily::StandardMl,
+            GrammarFamily::Wat,
+            GrammarFamily::Mojo,
+            GrammarFamily::Haxe,
+            GrammarFamily::Qml,
+            GrammarFamily::Modelica,
+            GrammarFamily::Ring,
+            GrammarFamily::Hare,
+            GrammarFamily::D,
+            GrammarFamily::Hcl,
+            GrammarFamily::Ada,
+            GrammarFamily::Zig,
+            GrammarFamily::Crystal,
+            GrammarFamily::Cue,
+            GrammarFamily::Pony,
+            GrammarFamily::Fish,
+            GrammarFamily::Nim,
+            GrammarFamily::Clojure,
+            GrammarFamily::Racket,
+            GrammarFamily::Graphql,
+            GrammarFamily::Elixir,
+            GrammarFamily::Protobuf,
+            GrammarFamily::Thrift,
+            GrammarFamily::Capnp,
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
@@ -256,6 +335,7 @@ impl GrammarRegistry {
             GrammarFamily::Bash,
             GrammarFamily::Json,
             GrammarFamily::Jsonc,
+            GrammarFamily::JsonSchema,
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
@@ -297,6 +377,7 @@ impl GrammarRegistry {
             GrammarFamily::Julia,
             GrammarFamily::Eiffel,
             GrammarFamily::Coq,
+            GrammarFamily::Vhdl,
             GrammarFamily::Verilog,
             GrammarFamily::SystemVerilog,
             GrammarFamily::V,
@@ -394,6 +475,31 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::Hcl => tree_sitter_hcl::LANGUAGE.into(),
+        GrammarFamily::Ada => tree_sitter_ada::LANGUAGE.into(),
+        GrammarFamily::Haxe => tree_sitter_haxe::LANGUAGE.into(),
+        GrammarFamily::Qml => tree_sitter_qmljs::LANGUAGE.into(),
+        GrammarFamily::Ring => tree_sitter_ring::LANGUAGE.into(),
+        GrammarFamily::Qsharp => tree_sitter_qsharp::LANGUAGE.into(),
+        GrammarFamily::StandardMl => tree_sitter_sml::LANGUAGE.into(),
+        GrammarFamily::Wat => tree_sitter_wat::LANGUAGE.into(),
+        GrammarFamily::Mojo => tree_sitter_mojo::LANGUAGE.into(),
+        GrammarFamily::Hare => tree_sitter_hare::LANGUAGE.into(),
+        GrammarFamily::Modelica => tree_sitter_modelica::LANGUAGE.into(),
+        GrammarFamily::D => tree_sitter_d::LANGUAGE.into(),
+        GrammarFamily::Zig => tree_sitter_zig::LANGUAGE.into(),
+        GrammarFamily::Crystal => tree_sitter_crystal::LANGUAGE.into(),
+        GrammarFamily::Cue => tree_sitter_cue::LANGUAGE.into(),
+        GrammarFamily::Pony => tree_sitter_pony::LANGUAGE.into(),
+        GrammarFamily::Fish => tree_sitter_fish::LANGUAGE.into(),
+        GrammarFamily::Nim => tree_sitter_nim::LANGUAGE.into(),
+        GrammarFamily::Clojure => tree_sitter_clojure::LANGUAGE.into(),
+        GrammarFamily::Racket => tree_sitter_racket::LANGUAGE.into(),
+        GrammarFamily::Graphql => tree_sitter_graphql::LANGUAGE_GRAPHQL.into(),
+        GrammarFamily::Elixir => tree_sitter_elixir::LANGUAGE.into(),
+        GrammarFamily::Protobuf => tree_sitter_proto::LANGUAGE.into(),
+        GrammarFamily::Thrift => tree_sitter_thrift::LANGUAGE.into(),
+        GrammarFamily::Capnp => tree_sitter_capnp::LANGUAGE.into(),
         GrammarFamily::Rust => tree_sitter_rust::LANGUAGE.into(),
         GrammarFamily::Python => tree_sitter_python::LANGUAGE.into(),
         // TSX accepts ordinary JavaScript and JSX while retaining declarations
@@ -413,7 +519,9 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Swift => tree_sitter_swift::LANGUAGE.into(),
         GrammarFamily::Css => tree_sitter_css::LANGUAGE.into(),
         GrammarFamily::Bash => tree_sitter_bash::LANGUAGE.into(),
-        GrammarFamily::Json | GrammarFamily::Jsonc => tree_sitter_json::LANGUAGE.into(),
+        GrammarFamily::Json | GrammarFamily::Jsonc | GrammarFamily::JsonSchema => {
+            tree_sitter_json::LANGUAGE.into()
+        }
         GrammarFamily::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
         GrammarFamily::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         GrammarFamily::Html => tree_sitter_html::LANGUAGE.into(),
@@ -455,6 +563,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Eiffel => tree_sitter_eiffel::LANGUAGE_EIFFEL.into(),
         GrammarFamily::Coq => tree_sitter_rocq::LANGUAGE.into(),
         GrammarFamily::V => tree_sitter_v::LANGUAGE_V.into(),
+        GrammarFamily::Vhdl => tree_sitter_vhdl::LANGUAGE.into(),
         GrammarFamily::Verilog | GrammarFamily::SystemVerilog => {
             tree_sitter_systemverilog::LANGUAGE_SYSTEMVERILOG.into()
         }
@@ -472,6 +581,213 @@ struct GrammarIdentity {
 
 const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
     match family {
+        GrammarFamily::Hcl => GrammarIdentity {
+            language_id: "hcl",
+            grammar_version: "1.2.0",
+            source_package_sha256: "a990425a19545a653a8935bc36c53bc6027319a379c06538ec42533c2e286b09",
+            parser_sha256: "09ebb173def18078ed193fc933052f5942b39859eea27ff9301f721e96c7803a",
+            scanner_sha256: Some(
+                "54738235a9d4b0052d35bdb30691906040265bafc751377ba9393749ee8d6bf1",
+            ),
+        },
+        GrammarFamily::Ada => GrammarIdentity {
+            language_id: "ada",
+            grammar_version: "0.9.1",
+            source_package_sha256: "16926552494876001b7cfca6f7147d3d253d4f328840ee9a7ac512fdea137ae9",
+            parser_sha256: "d268db88890c106464ae933cfa8465c02439411b95d111a030732395044ef3a3",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Haxe => GrammarIdentity {
+            language_id: "haxe",
+            grammar_version: "0.13.0",
+            source_package_sha256: "d294a758649b01dab6007beacdf0788310461427c0fc0cb580cc491776237bc1",
+            parser_sha256: "a64fdefc7de96de0d23ab45ee3fd4f90b61db13909abb9c5b466a4f27e772852",
+            scanner_sha256: Some(
+                "2eee9efa0cfbcd6cf8c69e638a059ddf3f1abf47540a1e9460f1b9c805374277",
+            ),
+        },
+        GrammarFamily::Qml => GrammarIdentity {
+            language_id: "qml",
+            grammar_version: "0.3.1",
+            source_package_sha256: "1a8c3a2c14859d4a4ff4ba18a461dabd63741d65eab3945209c22bff67a658e4",
+            parser_sha256: "da82f082ad20cba807cd4fd543bb66de82f0203b4a249c1da763e0f22defaaa5",
+            scanner_sha256: Some(
+                "bfb77d967596144bd1b69b8c418b671ed0885d4fb78ca648c4feb93ff80ef558",
+            ),
+        },
+        GrammarFamily::Qsharp => GrammarIdentity {
+            language_id: "qsharp",
+            grammar_version: "0.2.0",
+            source_package_sha256: "39a0f7ecf9d38c7dd87446b04468f57d4b140d3b95a2c59c5226f1bf99f19b65",
+            parser_sha256: "49cf44132fc6b46826321dabd90c97e6aa5b1788469fcd34af73796d88010c3a",
+            scanner_sha256: Some(
+                "5b64d24f020111fe67eccfdb2588fa7b932a48731488935386233e39a04213bf",
+            ),
+        },
+        GrammarFamily::StandardMl => GrammarIdentity {
+            language_id: "standard-ml",
+            grammar_version: "0.25.0",
+            source_package_sha256: "f1fca01af0d0766f2553929872f0512590d05ebd10d1bfe4df519d58b89142d9",
+            parser_sha256: "303199534db6b4f422182b84fdcdededb5162e1fa7a582f1a664fac55f7c0e08",
+            scanner_sha256: Some(
+                "6a68dd28fabd46be6199c3ff0e5c7a36cc592948cd0e202c04fd44b8a1d8d587",
+            ),
+        },
+        GrammarFamily::Wat => GrammarIdentity {
+            language_id: "webassembly",
+            grammar_version: "0.1.0",
+            source_package_sha256: "3a95933fe9bafb0214c990ed1b64aa3407fa9dd7ee2a98831f96e1da4d77f166",
+            parser_sha256: "ba3659413ddfa7acd66d1739ca96ace762e6d08f2c60a43d22670503fac87ec6",
+            scanner_sha256: Some(
+                "a963e5418419657958662c536901ec2b06b1ef73daaa220294bfac1747c8c1d1",
+            ),
+        },
+        GrammarFamily::Mojo => GrammarIdentity {
+            language_id: "mojo",
+            grammar_version: "0.25.0",
+            source_package_sha256: "af419002d318cf1981d7ff09511a4b7e45b77574ad463207f040f6aede7e8bd9",
+            parser_sha256: "0a42ee50e3d60b705c0ba955fc2c3e92b96cfea7b09a3fd0fc86e9bc259aa488",
+            scanner_sha256: Some(
+                "bc2ce107fe0e25874a526ea639f7ff26f9a101dee512f48d0dc7effd5c92d22a",
+            ),
+        },
+        GrammarFamily::Hare => GrammarIdentity {
+            language_id: "hare",
+            grammar_version: "1.0.0",
+            source_package_sha256: "effdf64e7d6f3b777ff3eb4be2abe8a891cea0b982904dd6dee852aea387fdaa",
+            parser_sha256: "e539db43869662eab9a700e67ea361f61251804cad50e4c91951db578ea26f8f",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Ring => GrammarIdentity {
+            language_id: "ring",
+            grammar_version: "1.1.1",
+            source_package_sha256: "ea35f0aea7883c2b80dc0c2e047004942daa11dbd7c1277c3bc2a46bef125069",
+            parser_sha256: "cb5bb1e7683bc8319dd3cff1c63ac9a45ebbc9acb030a719104d63f9acf89c38",
+            scanner_sha256: Some(
+                "646e1b3f23167d6767d78c10660b1433bd0314d0811959eb82b262cb54522754",
+            ),
+        },
+        GrammarFamily::Modelica => GrammarIdentity {
+            language_id: "modelica",
+            grammar_version: "0.0.1",
+            source_package_sha256: "69e459f26663225b7c72108fbd30ce4eace8ad9c17f1184ad4b295dcd7ae6700",
+            parser_sha256: "b447c9dcd8ee7b0ffd385e72bab1fea543495724ae583c58d90687a70f7fa2af",
+            scanner_sha256: None,
+        },
+        GrammarFamily::D => GrammarIdentity {
+            language_id: "d",
+            grammar_version: "0.8.2",
+            source_package_sha256: "e14c52bac0819be1671209289cee8128736cfe26a969a6d55362bc7c98b5c4de",
+            parser_sha256: "abe349a6ac5ca070f2b59f81b108f3bb1c216f37598e46d40440e4e048dd8c36",
+            scanner_sha256: Some(
+                "7cb10b786db2487cb6e5b84bfdb2d4d9dfe4fc99fd8264a3181e7bc2068e953a",
+            ),
+        },
+        GrammarFamily::Zig => GrammarIdentity {
+            language_id: "zig",
+            grammar_version: "1.1.2",
+            source_package_sha256: "e5bc165112d0efca8a1882e84a7b222f3bc9efdc34be2252027fc9c51bdd7a55",
+            parser_sha256: "3ddc4d39455fcbce8b30d706f67b0639b5cd887e386076fde3979d815215a626",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Crystal => GrammarIdentity {
+            language_id: "crystal",
+            grammar_version: "0.0.1",
+            source_package_sha256: "2dbe11c4d049948d2b667cd45b96590c9b8902e029552ee0c2c8cfbb5c43dbbf",
+            parser_sha256: "b847965437b548e77bbc1a1469e310764c75e05a6613975fc7c11fc95011c032",
+            scanner_sha256: Some(
+                "72902052dd0ff1a236f05dd504cdcfa1815339bd56be8575e700d708bb18ca4b",
+            ),
+        },
+        GrammarFamily::Cue => GrammarIdentity {
+            language_id: "cue",
+            grammar_version: "0.2.0",
+            source_package_sha256: "957d595e88861fdf80a0d880b50eb7669712012babc398a6243217cb05b542d4",
+            parser_sha256: "9301d8d967ad7c86a6f235c83e8951da5cf4adafb26e4fadf6b081fda058035b",
+            scanner_sha256: Some(
+                "4dbdfcca1c542fb5e9226102d1558d40c22d0a773ecfbefaa97671e91ac7a245",
+            ),
+        },
+        GrammarFamily::Pony => GrammarIdentity {
+            language_id: "pony",
+            grammar_version: "0.0.3",
+            source_package_sha256: "3476689cb3331c29f9adaa65b7514679969b0358564bcaaf9a5edfde6822ccd0",
+            parser_sha256: "a97ffae44f76184bd65ec1ebb3856614ac7071d4545b475394f20bef1c0749c8",
+            scanner_sha256: Some(
+                "715e0a0ad71ec2d4b9c7ea6a3b6b589b9ac08616e7bf3b46e71fe2b6af898bb3",
+            ),
+        },
+        GrammarFamily::Fish => GrammarIdentity {
+            language_id: "fish",
+            grammar_version: "3.7.0",
+            source_package_sha256: "0c2760fdf948fd9ad7e639f30c63b4883ba62742af920f4cf35fa8950e575722",
+            parser_sha256: "b94af544be88b0fe26316c806ce5a349c16166030028098eeff7b85b3bc3186e",
+            scanner_sha256: Some(
+                "ecf7bd668bf07280d468df5dad5fc66ef63952d41fb7db588976205f328ee647",
+            ),
+        },
+        GrammarFamily::Nim => GrammarIdentity {
+            language_id: "nim",
+            grammar_version: "0.6.2",
+            source_package_sha256: "5008548d97680bc3738f4a50dafabedcae6f8f82c3f65c59daf506eb91d2ebc9",
+            parser_sha256: "8b8ab9019d9f8d7872862273c77c54fbce801546323722b1b6381b684f88d92f",
+            scanner_sha256: Some(
+                "4457918faf95b8bb0f7b98e2146bdcaaa3c26249ba499883409105ebdfe25e35",
+            ),
+        },
+        GrammarFamily::Clojure => GrammarIdentity {
+            language_id: "clojure",
+            grammar_version: "0.0.8",
+            source_package_sha256: "9c5f3779b1502abec604979b6115a73fb585558f64d47e61f9fa3be6c0ababa6",
+            parser_sha256: "5607db8cc468e6d665cfe392c2a8ad1c9b419e9f2945f1d83eed9a6eaebcedd7",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Racket => GrammarIdentity {
+            language_id: "racket",
+            grammar_version: "0.25.0",
+            source_package_sha256: "c3b1ef220aebf912fc0e19a230e062043d2f129fa7f2865b66306dc5f730b815",
+            parser_sha256: "3cbab79ab9bd99684a7de4cb93a0aafd6773bb3ecf6720c59f1b7cdb0ceddd9c",
+            scanner_sha256: Some(
+                "275f54ccbcfdfd4fa0abd06acfcf9e32817f1ec80d1317be3df67148415f1700",
+            ),
+        },
+        GrammarFamily::Graphql => GrammarIdentity {
+            language_id: "graphql",
+            grammar_version: "0.0.1",
+            source_package_sha256: "cfc60a9394a5c0eca78227ba81633573804ccf91a85dd94de154ecab56b11aeb",
+            parser_sha256: "5b56cf9d98c1f70ddf211e4c9271608da158d015eba6e300dd0243b16c1e43d6",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Elixir => GrammarIdentity {
+            language_id: "elixir",
+            grammar_version: "0.3.5",
+            source_package_sha256: "fb7e09181eb45c78d55c96d15f1635af7c66a0e4cee4af3872152674f7d1cfaa",
+            parser_sha256: "d1c2000b477e873e44e485f55809e3af7e2bfce83fa4d58cfa3a9f83660e7d79",
+            scanner_sha256: Some(
+                "2d49d8974f7fdf0d38bdb7ed792f7a60aa87dd087b0c0bb469cd5b138b08ba57",
+            ),
+        },
+        GrammarFamily::Protobuf => GrammarIdentity {
+            language_id: "protobuf",
+            grammar_version: "0.0.1",
+            source_package_sha256: "c769d77682fecd620789db08607db7e0aee26125645bda92f6f1515927d2423e",
+            parser_sha256: "0c8fd7157103b28da28f6c63afc321ca434a835ae61ebaa2ae1847e07e5bddf4",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Thrift => GrammarIdentity {
+            language_id: "thrift",
+            grammar_version: "0.5.0",
+            source_package_sha256: "f4cec11118d267928a0471b9b3faad3f24d18201e76d326ed50fc6f878731b82",
+            parser_sha256: "4bccae3f435ab44d52a2811728749e59c030b51dcf79f854df813e8496af2047",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Capnp => GrammarIdentity {
+            language_id: "capnp",
+            grammar_version: "1.5.0",
+            source_package_sha256: "5eadccfa26383aca16f8ef7348f8bb174efb1ff51f528432e3e89a22ec96eab4",
+            parser_sha256: "cc5771efe4f52ea7f7d4b7aee46979f681180420d8081a4d8407a5ca9af97ea7",
+            scanner_sha256: None,
+        },
         GrammarFamily::Coq => GrammarIdentity {
             language_id: "coq",
             grammar_version: "0.2.0",
@@ -485,6 +801,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             source_package_sha256: "41b362b3f2796828ad87b08f44083ec10c280f0bb4cbf838d83d447591ef5624",
             parser_sha256: "6c25b5ec57aa91ec0d6204208f388be315e9368f6d0e8298f79a12d6dc183040",
             scanner_sha256: None,
+        },
+        GrammarFamily::Vhdl => GrammarIdentity {
+            language_id: "vhdl",
+            grammar_version: "2.0.3",
+            source_package_sha256: "5eaa9e956b862a7f158d326841de4eeb9e35d3cba262bfeab8f220e77613f854",
+            parser_sha256: "1953b218e6f19861094e908f3967f6387d5a72c6b81f41ae0cec8746149671d0",
+            scanner_sha256: Some(
+                "b98b82c88bb881ff49fb2eea8b6c4e869fd1a923b89f8794a996098b734b8f6c",
+            ),
         },
         GrammarFamily::Verilog => GrammarIdentity {
             language_id: "verilog",
@@ -853,6 +1178,10 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "a3d0a4fbefb13d518e8e46b9b18b9b8bb16ece184faa3a543a4bbe18b466f7db",
             scanner_sha256: None,
         },
+        GrammarFamily::JsonSchema => GrammarIdentity {
+            language_id: "json-schema",
+            ..identity_for(GrammarFamily::Json)
+        },
         GrammarFamily::Jsonc => GrammarIdentity {
             language_id: "jsonc",
             ..identity_for(GrammarFamily::Json)
@@ -1034,8 +1363,31 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 63);
+        assert_eq!(registry.descriptors().len(), 90);
         for family in [
+            GrammarFamily::Qsharp,
+            GrammarFamily::StandardMl,
+            GrammarFamily::Wat,
+            GrammarFamily::Mojo,
+            GrammarFamily::Haxe,
+            GrammarFamily::Qml,
+            GrammarFamily::Modelica,
+            GrammarFamily::Ring,
+            GrammarFamily::Hare,
+            GrammarFamily::D,
+            GrammarFamily::Hcl,
+            GrammarFamily::Ada,
+            GrammarFamily::Zig,
+            GrammarFamily::Crystal,
+            GrammarFamily::Cue,
+            GrammarFamily::Pony,
+            GrammarFamily::Fish,
+            GrammarFamily::Nim,
+            GrammarFamily::Clojure,
+            GrammarFamily::Racket,
+            GrammarFamily::Protobuf,
+            GrammarFamily::Thrift,
+            GrammarFamily::Capnp,
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::JavaScript,
@@ -1055,6 +1407,7 @@ mod tests {
             GrammarFamily::Bash,
             GrammarFamily::Json,
             GrammarFamily::Jsonc,
+            GrammarFamily::JsonSchema,
             GrammarFamily::Toml,
             GrammarFamily::Yaml,
             GrammarFamily::Html,
@@ -1096,6 +1449,7 @@ mod tests {
             GrammarFamily::Julia,
             GrammarFamily::Eiffel,
             GrammarFamily::Coq,
+            GrammarFamily::Vhdl,
             GrammarFamily::Verilog,
             GrammarFamily::SystemVerilog,
             GrammarFamily::V,
@@ -1130,6 +1484,48 @@ mod tests {
     }
 
     #[test]
+    fn graphql_identity_uses_the_exact_local_abi14_source() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let grammar = registry.get(GrammarFamily::Graphql).unwrap();
+        assert_eq!(grammar.language().as_str(), "graphql");
+        assert_eq!(grammar.grammar_version(), "0.0.1");
+        assert_eq!(grammar.abi_version(), 14);
+        assert_eq!(
+            grammar.parser_sha256(),
+            "5b56cf9d98c1f70ddf211e4c9271608da158d015eba6e300dd0243b16c1e43d6"
+        );
+        assert_eq!(grammar.scanner_sha256(), None);
+    }
+
+    #[test]
+    fn thrift_identity_uses_the_exact_reviewed_local_abi14_source() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let grammar = registry.get(GrammarFamily::Thrift).unwrap();
+        assert_eq!(grammar.language().as_str(), "thrift");
+        assert_eq!(grammar.grammar_version(), "0.5.0");
+        assert_eq!(grammar.abi_version(), 14);
+        assert_eq!(
+            grammar.parser_sha256(),
+            "4bccae3f435ab44d52a2811728749e59c030b51dcf79f854df813e8496af2047"
+        );
+        assert_eq!(grammar.scanner_sha256(), None);
+    }
+
+    #[test]
+    fn capnp_identity_uses_the_exact_local_abi14_source() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let grammar = registry.get(GrammarFamily::Capnp).unwrap();
+        assert_eq!(grammar.language().as_str(), "capnp");
+        assert_eq!(grammar.grammar_version(), "1.5.0");
+        assert_eq!(grammar.abi_version(), 14);
+        assert_eq!(
+            grammar.parser_sha256(),
+            "cc5771efe4f52ea7f7d4b7aee46979f681180420d8081a4d8407a5ca9af97ea7"
+        );
+        assert_eq!(grammar.scanner_sha256(), None);
+    }
+
+    #[test]
     fn ocaml_profiles_keep_distinct_factories_and_shared_source_identity() {
         let registry = GrammarRegistry::audited().unwrap();
         let implementation = registry.get(GrammarFamily::Ocaml).unwrap();
@@ -1153,7 +1549,12 @@ mod tests {
             language_for(GrammarFamily::Ocaml),
             language_for(GrammarFamily::OcamlInterface)
         );
-        for family in [GrammarFamily::Ocaml, GrammarFamily::OcamlInterface] {
+        for family in [
+            GrammarFamily::Clojure,
+            GrammarFamily::Racket,
+            GrammarFamily::Ocaml,
+            GrammarFamily::OcamlInterface,
+        ] {
             for path in ["written.ml", "written.mli", "unqualified.txt"] {
                 assert_eq!(native_family_for_source(family, path), family);
             }
@@ -1184,7 +1585,12 @@ mod tests {
             language_for(GrammarFamily::FSharp),
             language_for(GrammarFamily::FSharpSignature)
         );
-        for family in [GrammarFamily::FSharp, GrammarFamily::FSharpSignature] {
+        for family in [
+            GrammarFamily::Clojure,
+            GrammarFamily::Racket,
+            GrammarFamily::FSharp,
+            GrammarFamily::FSharpSignature,
+        ] {
             for path in ["source.fs", "source.fsx", "source.fsi", "unqualified.txt"] {
                 assert_eq!(native_family_for_source(family, path), family);
             }
@@ -1215,7 +1621,12 @@ mod tests {
             language_for(GrammarFamily::CobolFixed),
             language_for(GrammarFamily::CobolFree)
         );
-        for family in [GrammarFamily::CobolFixed, GrammarFamily::CobolFree] {
+        for family in [
+            GrammarFamily::Clojure,
+            GrammarFamily::Racket,
+            GrammarFamily::CobolFixed,
+            GrammarFamily::CobolFree,
+        ] {
             for path in ["source.cbl", "source.cob", "unqualified.txt"] {
                 assert_eq!(native_family_for_source(family, path), family);
             }
@@ -1300,6 +1711,28 @@ mod tests {
 
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
         for (family, language, package) in [
+            (GrammarFamily::Hcl, "hcl", "tree-sitter-hcl"),
+            (GrammarFamily::Ada, "ada", "tree-sitter-ada"),
+            (GrammarFamily::Haxe, "haxe", "tree-sitter-haxe"),
+            (GrammarFamily::Qml, "qml", "tree-sitter-qmljs"),
+            (GrammarFamily::Ring, "ring", "tree-sitter-ring"),
+            (GrammarFamily::Qsharp, "qsharp", "tree-sitter-qsharp"),
+            (GrammarFamily::StandardMl, "standard-ml", "tree-sitter-sml"),
+            (GrammarFamily::Wat, "webassembly", "tree-sitter-wat"),
+            (GrammarFamily::Mojo, "mojo", "tree-sitter-mojo"),
+            (GrammarFamily::Hare, "hare", "tree-sitter-hare"),
+            (GrammarFamily::Modelica, "modelica", "tree-sitter-modelica"),
+            (GrammarFamily::D, "d", "tree-sitter-d"),
+            (GrammarFamily::Zig, "zig", "tree-sitter-zig"),
+            (GrammarFamily::Crystal, "crystal", "tree-sitter-crystal"),
+            (GrammarFamily::Cue, "cue", "tree-sitter-cue"),
+            (GrammarFamily::Pony, "pony", "tree-sitter-pony"),
+            (GrammarFamily::Fish, "fish", "tree-sitter-fish"),
+            (GrammarFamily::Nim, "nim", "tree-sitter-nim"),
+            (GrammarFamily::Clojure, "clojure", "tree-sitter-clojure"),
+            (GrammarFamily::Racket, "racket", "tree-sitter-racket"),
+            (GrammarFamily::Graphql, "graphql", "tree-sitter-graphql"),
+            (GrammarFamily::Capnp, "capnp", "tree-sitter-capnp"),
             (GrammarFamily::Rust, "rust", "tree-sitter-rust"),
             (GrammarFamily::Python, "python", "tree-sitter-python"),
             (
@@ -1327,6 +1760,8 @@ mod tests {
             (GrammarFamily::Bash, "bash", "tree-sitter-bash"),
             (GrammarFamily::Json, "json", "tree-sitter-json"),
             (GrammarFamily::Toml, "toml", "tree-sitter-toml-ng"),
+            (GrammarFamily::Protobuf, "protobuf", "tree-sitter-proto"),
+            (GrammarFamily::Thrift, "thrift", "tree-sitter-thrift"),
             (GrammarFamily::Yaml, "yaml", "tree-sitter-yaml"),
             (GrammarFamily::Html, "html", "tree-sitter-html"),
             (GrammarFamily::Sql, "sql", "tree-sitter-sequel"),
@@ -1365,6 +1800,7 @@ mod tests {
             (GrammarFamily::Dtd, "dtd", "tree-sitter-xml"),
             (GrammarFamily::CMake, "cmake", "tree-sitter-cmake"),
             (GrammarFamily::Julia, "julia", "tree-sitter-julia"),
+            (GrammarFamily::Vhdl, "vhdl", "tree-sitter-vhdl"),
             (GrammarFamily::Eiffel, "eiffel", "tree-sitter-eiffel"),
             (GrammarFamily::Coq, "coq", "tree-sitter-rocq"),
             (GrammarFamily::V, "v", "tree-sitter-v"),
@@ -1427,7 +1863,31 @@ mod tests {
                     ) || family.is_cobol()
                         || matches!(
                             family,
-                            GrammarFamily::PlSql
+                            GrammarFamily::Haxe
+                                | GrammarFamily::Qml
+                                | GrammarFamily::Ring
+                                | GrammarFamily::Qsharp
+                                | GrammarFamily::StandardMl
+                                | GrammarFamily::Wat
+                                | GrammarFamily::Mojo
+                                | GrammarFamily::Hare
+                                | GrammarFamily::Modelica
+                                | GrammarFamily::D
+                                | GrammarFamily::Hcl
+                                | GrammarFamily::Ada
+                                | GrammarFamily::Zig
+                                | GrammarFamily::Crystal
+                                | GrammarFamily::Cue
+                                | GrammarFamily::Pony
+                                | GrammarFamily::Fish
+                                | GrammarFamily::Nim
+                                | GrammarFamily::Clojure
+                                | GrammarFamily::Racket
+                                | GrammarFamily::Graphql
+                                | GrammarFamily::Protobuf
+                                | GrammarFamily::Thrift
+                                | GrammarFamily::Capnp
+                                | GrammarFamily::PlSql
                                 | GrammarFamily::Apex
                                 | GrammarFamily::Sas
                                 | GrammarFamily::Pascal
@@ -1447,6 +1907,7 @@ mod tests {
                                 | GrammarFamily::Coq
                                 | GrammarFamily::V
                                 | GrammarFamily::Verilog
+                                | GrammarFamily::Vhdl
                                 | GrammarFamily::SystemVerilog
                         )
                     {

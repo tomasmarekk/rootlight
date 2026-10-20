@@ -66,7 +66,9 @@ fn interpreter_language(path: &str) -> Option<&'static str> {
         match name {
             "awk" | "gawk" | "mawk" | "nawk" => Some("awk"),
             "groovy" => Some("groovy"),
+            "fish" => Some("fish"),
             "julia" => Some("julia"),
+            "elixir" => Some("elixir"),
             "v" => Some("v"),
             "node" | "nodejs" | "deno" => Some("javascript"),
             "sh" | "bash" | "dash" | "ksh" => Some("bash"),

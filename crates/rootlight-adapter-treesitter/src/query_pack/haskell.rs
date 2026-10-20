@@ -717,6 +717,61 @@ fn reference_syntax(
     })
 }
 
+fn ordinary_record_field(
+    node: Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    cancellation.check()?;
+    let Some(fields) = node.parent() else {
+        return Ok(false);
+    };
+    let Some(record) = fields.parent() else {
+        return Ok(false);
+    };
+    let Some(constructor) = record.parent() else {
+        return Ok(false);
+    };
+    let Some(constructors) = constructor.parent() else {
+        return Ok(false);
+    };
+    let Some(datatype) = constructors.parent() else {
+        return Ok(false);
+    };
+    if node.kind() != "field"
+        || fields.kind() != "fields"
+        || record.kind() != "record"
+        || constructor.kind() != "data_constructor"
+        || constructors.kind() != "data_constructors"
+        || datatype.kind() != "data_type"
+        || data_instance(datatype)
+        || record.child_by_field_name("fields") != Some(fields)
+        || constructor.child_by_field_name("constructor") != Some(record)
+        || datatype.child_by_field_name("constructors") != Some(constructors)
+    {
+        return Ok(false);
+    }
+    for part in [node, fields, record, constructor, constructors, datatype] {
+        cancellation.check()?;
+        if part.has_error() || part.is_missing() || part.start_byte() == part.end_byte() {
+            return Ok(false);
+        }
+    }
+    let mut cursor = fields.walk();
+    let mut field_member = false;
+    for child in fields.children_by_field_name("field", &mut cursor) {
+        cancellation.check()?;
+        field_member |= child == node;
+    }
+    let mut cursor = constructors.walk();
+    let mut constructor_member = false;
+    for child in constructors.children_by_field_name("constructor", &mut cursor) {
+        cancellation.check()?;
+        constructor_member |= child == constructor;
+    }
+    cancellation.check()?;
+    Ok(field_member && constructor_member)
+}
+
 pub(super) fn syntax(
     node: Node<'_>,
     role: StructuralRole,
@@ -742,6 +797,9 @@ pub(super) fn syntax(
             "match" => "haskell.simple_equation_match",
             "bind" => "haskell.binding_header",
             "signature" => "haskell.written_signature",
+            "field" if ordinary_record_field(node, cancellation)? => {
+                "haskell.ordinary_record_field"
+            }
             "field" => "haskell.field_signature",
             "instance" => "haskell.instance_header",
             "lambda" => "haskell.lambda_header",
@@ -1671,5 +1729,34 @@ mod tests {
                 reason: CancellationReason::ClientRequest
             })
         ));
+    }
+
+    #[test]
+    fn ordinary_record_certificate_excludes_newtype_gadt_and_family_instances() {
+        let source = "{-# LANGUAGE GADTs, TypeFamilies #-}\ndata Plain = Plain { ordinary :: Int }\nnewtype Wrapped = Wrapped { wrapped :: Int }\ndata General where G :: { gadtField :: Int } -> General\ndata family Family a\ndata instance Family Int = FamilyInt { familyField :: Int }\n";
+        let tree = parse(source);
+        assert!(!tree.root_node().has_error());
+        let cancellation = Cancellation::new();
+        let proved: Vec<_> = nodes(tree.root_node(), "field")
+            .into_iter()
+            .filter(|field| ordinary_record_field(*field, &cancellation).unwrap())
+            .map(|field| field.utf8_text(source.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(proved, ["ordinary :: Int"]);
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_haskell::LANGUAGE.into())
+            .unwrap();
+        let recovery = parser
+            .parse("data Broken = Broken { field :: }\n", None)
+            .unwrap();
+        assert!(recovery.root_node().has_error());
+        let recovered_fields = nodes(recovery.root_node(), "field");
+        assert!(!recovered_fields.is_empty());
+        assert!(
+            recovered_fields
+                .into_iter()
+                .all(|field| !ordinary_record_field(field, &cancellation).unwrap())
+        );
     }
 }

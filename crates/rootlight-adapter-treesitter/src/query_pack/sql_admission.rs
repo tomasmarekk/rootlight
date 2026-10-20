@@ -26,17 +26,39 @@ pub(super) fn retain(
         cancellation.check()?;
         if owner.is_error()
             || owner.is_missing()
-            || (owner.kind() == "tsql_procedure" && sql::procedure_header(owner).is_none())
             || (owner.kind() == "tsql_table_variable" && owner.has_error())
             || (matches!(owner.kind(), "tsql_if" | "tsql_conditional_block") && owner.has_error())
         {
             return Ok(false);
         }
+        if owner.kind() == "tsql_procedure" && sql::procedure_header(owner).is_none() {
+            let header_identity = sql::recovered_procedure_header(owner, cancellation)?;
+            let own_header = header_identity.is_some_and(|header| {
+                node == header
+                    || node.kind() == "tsql_parameter"
+                        && node.parent().is_some_and(|parameters| {
+                            parameters.kind() == "tsql_parameters"
+                                && parameters.parent() == Some(header)
+                        })
+            });
+            let body_metadata = role == StructuralRole::Signature
+                && node.parent() == Some(owner)
+                && sql::recovered_body(node, cancellation)?;
+            if !own_header && !body_metadata {
+                return Ok(false);
+            }
+        }
         ancestor = owner.parent();
     }
     Ok(match node.kind() {
-        "tsql_procedure" => sql::procedure_header(node).is_some(),
-        "tsql_procedure_header" => node.parent().and_then(sql::procedure_header) == Some(node),
+        "tsql_procedure" => sql::declaration_header(node, cancellation)?.is_some(),
+        "tsql_procedure_header" => {
+            if let Some(parent) = node.parent() {
+                sql::declaration_header(parent, cancellation)? == Some(node)
+            } else {
+                false
+            }
+        }
         "tsql_parameter" => {
             if node.has_error() || node.is_missing() {
                 return Ok(false);
@@ -53,7 +75,11 @@ pub(super) fn retain(
             else {
                 return Ok(false);
             };
-            header.parent().and_then(sql::procedure_header) == Some(header)
+            if let Some(parent) = header.parent() {
+                sql::declaration_header(parent, cancellation)? == Some(header)
+            } else {
+                false
+            }
         }
         "tsql_variable" | "tsql_table_variable" => !node.has_error() && !node.is_missing(),
         _ => true,

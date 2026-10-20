@@ -36,6 +36,15 @@
   (variable_declarator name: (identifier) @definition)
 ]
 
+; Named callable formals exclude record components and lambda binders.
+(method_declaration
+  parameters: (formal_parameters
+    (formal_parameter name: (identifier) @definition) @declaration))
+
+(constructor_declaration
+  parameters: (formal_parameters
+    (formal_parameter name: (identifier) @definition) @declaration))
+
 (import_declaration) @import
 (formal_parameters) @signature
 
@@ -57,3 +66,6 @@
   (#match? @documentation "^/\\*\\*"))
 
 (string_literal) @string
+
+; The required context records the limits of native setter-formal binding.
+(method_declaration) @signature

@@ -107,7 +107,7 @@ fn coverage_aliases_preserve_the_same_source_scoped_gaps() {
 }
 
 #[test]
-fn snapshot_preparation_spends_the_same_source_deadline_as_matching() {
+fn explicit_preparation_spends_the_same_source_deadline_as_matching() {
     let maximum = Duration::from_secs(2);
     assert_eq!(
         remaining_literal_duration(maximum, Duration::from_millis(1750)).unwrap(),
@@ -121,6 +121,106 @@ fn snapshot_preparation_spends_the_same_source_deadline_as_matching() {
             )))
         ));
     }
+}
+
+#[test]
+fn explicit_source_deadlines_include_preparation_for_both_backings() {
+    let mut budget = SourceFindBudget::new();
+    let maximum = Duration::from_secs(2);
+    budget.source = budget.source.with_max_duration(maximum);
+    for verified_backing in [false, true] {
+        let prepared =
+            budget_after_literal_preparation(budget, verified_backing, Duration::from_millis(1750))
+                .unwrap();
+        let mut expected = budget;
+        expected.source.max_verification_duration = Some(Duration::from_millis(250));
+        if !verified_backing {
+            expected.source.max_duration = Duration::from_millis(250);
+        }
+        assert_eq!(prepared, expected);
+        for elapsed in [maximum, Duration::from_secs(3), Duration::MAX] {
+            assert!(matches!(
+                budget_after_literal_preparation(budget, verified_backing, elapsed),
+                Err(SourceFindError::Source(SourceError::Cancelled(
+                    CancellationReason::DeadlineExceeded
+                )))
+            ));
+        }
+    }
+}
+
+#[test]
+fn preparation_never_extends_snapshot_work_or_adds_a_verified_default_deadline() {
+    let default = SourceFindBudget::new();
+    for verified_backing in [false, true] {
+        assert_eq!(
+            budget_after_literal_preparation(default, verified_backing, Duration::MAX).unwrap(),
+            default,
+        );
+        let mut explicit = default;
+        explicit.source = explicit
+            .source
+            .with_max_verification_duration(Duration::from_secs(10));
+        let prepared =
+            budget_after_literal_preparation(explicit, verified_backing, Duration::from_secs(3))
+                .unwrap();
+        let mut expected = explicit;
+        expected.source.max_verification_duration = Some(Duration::from_secs(7));
+        assert_eq!(prepared, expected);
+        assert_eq!(prepared.source.max_duration, default.source.max_duration);
+    }
+}
+
+#[test]
+fn implicit_snapshot_duration_does_not_expire_while_preparing_a_generation() {
+    let fixture = temporary();
+    let original = b"// needle\npub fn entry() {}\n";
+    fs::write(fixture.path().join("sample.rs"), original).unwrap();
+    let cancellation = Cancellation::new();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(fixture.path(), &cancellation)
+        .unwrap();
+    let file = file_id(&service, receipt.generation, "sample.rs");
+    let lease = service
+        .generation_lease(receipt.generation, &cancellation)
+        .unwrap();
+    let snapshot = lease.generation();
+    let identity = SourceRef::new(
+        receipt.repository,
+        receipt.generation,
+        SourceSpan::new(file, 0, 0).unwrap(),
+        content_hash(original),
+        None,
+    );
+    let sources = service
+        .resolve_source_backing(snapshot, std::slice::from_ref(&identity), &cancellation)
+        .unwrap();
+    let source = sources.service(snapshot, &cancellation).unwrap();
+    assert!(!source.uses_verified_backing());
+    let budget = SourceFindBudget::new();
+    assert_eq!(budget.source.max_verification_duration, None);
+    let elapsed_preparation = budget.source.max_duration + Duration::from_secs(1);
+    let prepared = budget_after_literal_preparation(budget, false, elapsed_preparation)
+        .expect("implicit interactive duration belongs to source work, not generation preparation");
+    assert_eq!(prepared, budget);
+    let found = source
+        .find_literal(file, "needle", None, prepared, &cancellation)
+        .unwrap();
+    assert_eq!(found.generation, receipt.generation);
+    assert_eq!(found.file.id, file);
+    assert_eq!(found.file.content_hash, content_hash(original));
+    assert_eq!(found.stop, SourceFindStop::EndOfSource);
+    assert_eq!(
+        found.matches,
+        vec![SourceRef::new(
+            receipt.repository,
+            receipt.generation,
+            SourceSpan::new(file, 3, 9).unwrap(),
+            content_hash(original),
+            None,
+        )]
+    );
 }
 
 #[test]

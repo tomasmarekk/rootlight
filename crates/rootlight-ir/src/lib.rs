@@ -14,6 +14,15 @@
 
 #![forbid(unsafe_code)]
 
+mod aggregate_source_recovery;
+pub use aggregate_source_recovery::{
+    AGGREGATE_SOURCE_ORIGIN_NAMESPACE, AGGREGATE_SOURCE_RECOVERY_DIAGNOSTIC,
+    AGGREGATE_SOURCE_RECOVERY_NAMESPACE, AGGREGATE_SOURCE_RECOVERY_REVISION,
+    AggregateCapacityResource, AggregateCapacityStage, AggregateSourceRecovery,
+    AggregateSourceRecoveryError, decode_aggregate_source_origin_envelope,
+    decode_aggregate_source_recovery_envelope, new_aggregate_source_origin_envelope,
+    new_aggregate_source_recovery_envelope,
+};
 mod fsharp_binding;
 mod groovy_binding;
 mod groovy_call_lookup;

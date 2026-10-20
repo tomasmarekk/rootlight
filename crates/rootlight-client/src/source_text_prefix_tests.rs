@@ -707,3 +707,46 @@ async fn lossless_prefix_invalid_controls_fail_before_connecting() {
         ));
     }
 }
+
+#[test]
+fn prefix_retains_recovery_cause_for_the_approved_physical_file() {
+    let source = test_source(4, 0, 3);
+    let mut response = wire_prefix(
+        &source,
+        "ab",
+        daemon::SourcePhysicalEncoding::Utf8,
+        0..2,
+        true,
+    );
+    response.context.as_mut().unwrap().tier =
+        daemon::FirstSliceAnalysisTier::FirstSliceTierD as i32;
+    response.context.as_mut().unwrap().coverage_status =
+        daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32;
+    response.chunks[0].tier = daemon::FirstSliceAnalysisTier::FirstSliceTierD as i32;
+    response.source_recovery = Some(daemon::SourceReadRecovery {
+        cause: Some(daemon::AggregateSourceRecoveryCause {
+            source_inventory: Some(content_hash_to_wire(ContentHash::from_bytes([9; 32]))),
+            members: 10,
+            derived_members: 0,
+            stage: daemon::AggregateSourceRecoveryStage::StructuralAppend as i32,
+            resource: daemon::AggregateSourceRecoveryResource::Occurrences as i32,
+            observed: 11,
+            limit: 10,
+            text_snapshot_bytes: 1,
+        }),
+        files: vec![daemon::SourceRecoveryFile {
+            file: Some(file_to_wire(source.file)),
+            text_search: daemon::SourceRecoveryTextSearch::MetadataOnlyCaptured as i32,
+        }],
+    });
+    let result = parse(response, std::slice::from_ref(&source), projection(), 2).unwrap();
+    assert!(result.prefix_truncated);
+    assert_eq!(result.result.chunks[0].source, source);
+    let recovery = result.result.source_recovery.unwrap();
+    assert_eq!(recovery.files[0].file, source.file);
+    assert_eq!(
+        recovery.files[0].text_search,
+        SourceTextSearchCoverage::MetadataOnlyCaptured
+    );
+    assert_eq!(recovery.cause.text_snapshot_bytes, 1);
+}

@@ -278,6 +278,7 @@ impl FirstSliceClientPort for BudgetedSourcePort {
             )));
         let response = SourceReadLosslessPortResponse::new(
             client::SourceTextReadResult {
+                source_recovery: None,
                 context,
                 chunks,
                 total_source_bytes: physical,

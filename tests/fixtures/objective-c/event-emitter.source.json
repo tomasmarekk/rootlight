@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/facebook/react-native",
+  "revision": "85a81818c6b9aa19e3d19453640e6ea58afb0357",
+  "path": "packages/react-native/React/Modules/RCTEventEmitter.m",
+  "fixture": "event-emitter.m",
+  "bytes": 4447,
+  "sha256": "085b2bd4cf15aa0fe93979985a0723b82303e7b7fa1ae6d287f91b424912415c",
+  "license": "event-emitter.LICENSE",
+  "modifications": "None. Exact source bytes from the conserved development corpus."
+}

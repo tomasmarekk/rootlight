@@ -20,6 +20,12 @@ pub(super) fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             | "coq.instance.declaration"
             | "coq.declared_instance.declaration",
         ) => Some(EntityKind::Constant),
+        (SyntaxFactKind::Declaration, "coq.parameterized_assertion.declaration") => {
+            Some(EntityKind::Function)
+        }
+        (SyntaxFactKind::Declaration, "coq.header_parameter.declaration") => {
+            Some(EntityKind::Parameter)
+        }
         (SyntaxFactKind::Declaration, "coq.inductive.declaration") => Some(EntityKind::Enum),
         (SyntaxFactKind::Declaration, "coq.record.declaration") => Some(EntityKind::Struct),
         (SyntaxFactKind::Declaration, "coq.class.declaration") => Some(EntityKind::Class),
@@ -127,6 +133,11 @@ mod tests {
         for (label, kind) in [
             ("coq.definition.declaration", EntityKind::Constant),
             ("coq.theorem.declaration", EntityKind::Constant),
+            (
+                "coq.parameterized_assertion.declaration",
+                EntityKind::Function,
+            ),
+            ("coq.header_parameter.declaration", EntityKind::Parameter),
             ("coq.fixpoint.declaration", EntityKind::Constant),
             ("coq.instance.declaration", EntityKind::Constant),
             ("coq.declared_instance.declaration", EntityKind::Constant),

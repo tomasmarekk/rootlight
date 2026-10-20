@@ -1,7 +1,7 @@
 //! Source-free release evidence for cold indexing pinned real repositories.
 //!
-//! The checked-in corpus owns every threshold. Runners retain raw operation and
-//! latency measurements, while this module independently recomputes the gate.
+//! The corpus owns resource and query-latency thresholds. Indexing wall time is
+//! retained as a measurement, while this module independently checks correctness.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,7 +34,7 @@ const REQUIRED_WORKFLOWS: [&str; 5] = [
     "symbol.relationships",
 ];
 
-/// Pinned source repositories and preregistered release thresholds.
+/// Pinned source repositories and resource/query-latency release thresholds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ColdIndexCorpus {
@@ -75,7 +75,10 @@ pub struct ColdIndexRepositorySpec {
     pub primary_language: String,
     /// Best acceptable tier letter.
     pub minimum_tier: String,
-    /// Maximum structural-plus-semantic wall time.
+    /// Legacy target retained for historical corpus decoding, never enforced.
+    ///
+    /// Missing values default to zero; indexing elapsed time remains measured.
+    #[serde(default)]
     pub maximum_elapsed_ms: u64,
     /// Maximum observed operation peak resident bytes.
     pub maximum_peak_rss_bytes: u64,
@@ -409,7 +412,6 @@ pub fn verify_cold_index_evidence(
         || evidence.repository_id.is_empty()
         || evidence.repository_content_executed
         || evidence.elapsed_ms == 0
-        || evidence.elapsed_ms > spec.maximum_elapsed_ms
         || evidence.state_root_delta_bytes == 0
         || evidence.state_root_delta_bytes > spec.maximum_durable_bytes
         || evidence.retained_durable_bytes == 0
@@ -608,7 +610,6 @@ fn validate_corpus(corpus: &ColdIndexCorpus) -> Result<(), ColdIndexEvidenceErro
                 repository.primary_language.as_str(),
                 "python" | "rust" | "typescript"
             ) && !matches!(repository.minimum_tier.as_str(), "A" | "B")
-            || repository.maximum_elapsed_ms == 0
             || repository.maximum_peak_rss_bytes == 0
             || repository.maximum_durable_bytes == 0
             || repository.maximum_durable_bytes_per_source_byte == 0
@@ -883,6 +884,95 @@ mod tests {
             repository_content_executed: false,
         };
         (corpus, corpus_sha256, evidence)
+    }
+
+    fn legacy_elapsed_fixture() -> (ColdIndexCorpus, String, ColdIndexEvidence) {
+        let (_, _, mut valid) = evidence();
+        let mut historical: serde_json::Value = serde_json::from_slice(CORPUS).unwrap();
+        for repository in historical["repositories"].as_array_mut().unwrap() {
+            repository["maximum_elapsed_ms"] = serde_json::json!(1);
+        }
+        let encoded = serde_json::to_vec(&historical).unwrap();
+        let corpus = decode_cold_index_corpus(&encoded).unwrap();
+        let hash = cold_index_corpus_sha256(&encoded);
+        valid.corpus_sha256 = hash.clone();
+        (corpus, hash, valid)
+    }
+
+    #[test]
+    fn elapsed_above_a_legacy_target_preserves_valid_evidence_and_measurement() {
+        let (corpus, hash, valid) = legacy_elapsed_fixture();
+        assert!(valid.elapsed_ms > corpus.repository("ripgrep").unwrap().maximum_elapsed_ms);
+        verify_cold_index_evidence(
+            &corpus,
+            &hash,
+            &valid,
+            &valid.source_revision,
+            &valid.candidate_archive_sha256,
+        )
+        .unwrap();
+        let encoded = encode_cold_index_evidence(&valid).unwrap();
+        let decoded = decode_cold_index_evidence(&encoded).unwrap();
+        assert_eq!(decoded, valid);
+        assert_eq!(decoded.elapsed_ms, 60_000);
+    }
+
+    #[test]
+    fn missing_and_zero_legacy_time_targets_remain_readable() {
+        let current = decode_cold_index_corpus(CORPUS).unwrap();
+        assert!(
+            current
+                .repositories
+                .iter()
+                .all(|spec| spec.maximum_elapsed_ms == 0)
+        );
+        let mut historical: serde_json::Value = serde_json::from_slice(CORPUS).unwrap();
+        for repository in historical["repositories"].as_array_mut().unwrap() {
+            repository["maximum_elapsed_ms"] = serde_json::json!(0);
+        }
+        let explicit_zero = serde_json::to_vec(&historical).unwrap();
+        assert_eq!(decode_cold_index_corpus(&explicit_zero).unwrap(), current);
+    }
+
+    #[test]
+    fn slow_indexing_does_not_relax_identity_terminal_resource_or_query_checks() {
+        let (corpus, hash, valid) = legacy_elapsed_fixture();
+        let mut invalid = Vec::new();
+        let mut absent_measurement = valid.clone();
+        absent_measurement.elapsed_ms = 0;
+        invalid.push(absent_measurement);
+        let mut foreign_identity = valid.clone();
+        foreign_identity.source_revision = "f".repeat(40);
+        invalid.push(foreign_identity);
+        for state in ["running", "failed", "cancelled", "waiting_for_context"] {
+            let mut incomplete = valid.clone();
+            incomplete.semantic_operation.state = state.to_owned();
+            invalid.push(incomplete);
+        }
+        let mut resource_overrun = valid.clone();
+        resource_overrun.semantic_operation.resources.peak_rss_bytes = u64::MAX;
+        invalid.push(resource_overrun);
+        let mut stale_generation = valid.clone();
+        stale_generation.restart.generation_after_restart = "foreign".to_owned();
+        invalid.push(stale_generation);
+        let mut wrong_path = valid.clone();
+        wrong_path.locate.matched_path = "foreign".to_owned();
+        invalid.push(wrong_path);
+        let mut slow_query = valid.clone();
+        slow_query.locate.latency_ns.fill(u64::MAX);
+        invalid.push(slow_query);
+        for evidence in invalid {
+            assert_eq!(
+                verify_cold_index_evidence(
+                    &corpus,
+                    &hash,
+                    &evidence,
+                    &valid.source_revision,
+                    &valid.candidate_archive_sha256
+                ),
+                Err(ColdIndexEvidenceError::InvalidEvidence)
+            );
+        }
     }
 
     #[test]

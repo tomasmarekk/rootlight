@@ -1,0 +1,9 @@
+{
+  "upstream": "https://github.com/AvengeMedia/DankMaterialShell",
+  "revision": "bde4decc5d6f4b1765b4492b5969a2c926586284",
+  "path": "quickshell/Common/SettingsUiState.qml",
+  "bytes": 502,
+  "sha256": "90a008d8e5070e38990e702a74d85425bc5c22c28490c0ad668a2401fe40d694",
+  "license": "MIT; original root LICENSE retained byte-exact",
+  "purpose": "Original source-authored routing regression. No QML provider or full-language support claim."
+}

@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "2939b4d5701c81235973ca49aa209c57716cb5c83624faa626d0af9a736d93c4";
+    "ad5de3ad5f23feec32379f909417b06f57ace16a5cbbbe824641266ff3ea6efc";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,163 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 21] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 47] = [
+    (
+        "tree-sitter-qsharp",
+        "0.2.0",
+        "third_party/tree-sitter-qsharp-0.2.0",
+        "e3d9b65ff4c70ff8ac3e624d6be881187867b7715e87318932894e43fe67f045",
+    ),
+    (
+        "tree-sitter-sml",
+        "0.25.0",
+        "third_party/tree-sitter-sml-0.25.0",
+        "f1fca01af0d0766f2553929872f0512590d05ebd10d1bfe4df519d58b89142d9",
+    ),
+    (
+        "tree-sitter-wat",
+        "0.1.0",
+        "third_party/tree-sitter-wat-0.1.0",
+        "3a95933fe9bafb0214c990ed1b64aa3407fa9dd7ee2a98831f96e1da4d77f166",
+    ),
+    (
+        "tree-sitter-mojo",
+        "0.25.0",
+        "third_party/tree-sitter-mojo-0.25.0",
+        "4b55cfd6df9be7f5c2213c6e065bd311b17d5de12f266937af9f5b4fb25fe5fe",
+    ),
+    (
+        "tree-sitter-hare",
+        "1.0.0",
+        "third_party/tree-sitter-hare-1.0.0",
+        "effdf64e7d6f3b777ff3eb4be2abe8a891cea0b982904dd6dee852aea387fdaa",
+    ),
+    (
+        "tree-sitter-ring",
+        "1.1.1",
+        "third_party/tree-sitter-ring-1.1.1",
+        "ea35f0aea7883c2b80dc0c2e047004942daa11dbd7c1277c3bc2a46bef125069",
+    ),
+    (
+        "tree-sitter-haxe",
+        "0.13.0",
+        "third_party/tree-sitter-haxe-0.13.0",
+        "d294a758649b01dab6007beacdf0788310461427c0fc0cb580cc491776237bc1",
+    ),
+    (
+        "tree-sitter-qmljs",
+        "0.3.1",
+        "third_party/tree-sitter-qmljs-0.3.1",
+        "1a8c3a2c14859d4a4ff4ba18a461dabd63741d65eab3945209c22bff67a658e4",
+    ),
+    (
+        "tree-sitter-modelica",
+        "0.0.1",
+        "third_party/tree-sitter-modelica-0.0.1",
+        "69e459f26663225b7c72108fbd30ce4eace8ad9c17f1184ad4b295dcd7ae6700",
+    ),
+    (
+        "tree-sitter-d",
+        "0.8.2",
+        "third_party/tree-sitter-d-0.8.2",
+        "e14c52bac0819be1671209289cee8128736cfe26a969a6d55362bc7c98b5c4de",
+    ),
+    (
+        "tree-sitter-ada",
+        "0.9.1",
+        "third_party/tree-sitter-ada-0.9.1",
+        "16926552494876001b7cfca6f7147d3d253d4f328840ee9a7ac512fdea137ae9",
+    ),
+    (
+        "tree-sitter-hcl",
+        "1.2.0",
+        "third_party/tree-sitter-hcl-1.2.0",
+        "a990425a19545a653a8935bc36c53bc6027319a379c06538ec42533c2e286b09",
+    ),
+    (
+        "tree-sitter-zig",
+        "1.1.2",
+        "third_party/tree-sitter-zig-1.1.2",
+        "e5bc165112d0efca8a1882e84a7b222f3bc9efdc34be2252027fc9c51bdd7a55",
+    ),
+    (
+        "tree-sitter-crystal",
+        "0.0.1",
+        "third_party/tree-sitter-crystal-0.0.1",
+        "2dbe11c4d049948d2b667cd45b96590c9b8902e029552ee0c2c8cfbb5c43dbbf",
+    ),
+    (
+        "tree-sitter-cue",
+        "0.2.0",
+        "third_party/tree-sitter-cue-0.2.0",
+        "957d595e88861fdf80a0d880b50eb7669712012babc398a6243217cb05b542d4",
+    ),
+    (
+        "tree-sitter-pony",
+        "0.0.3",
+        "third_party/tree-sitter-pony-0.0.3",
+        "3476689cb3331c29f9adaa65b7514679969b0358564bcaaf9a5edfde6822ccd0",
+    ),
+    (
+        "tree-sitter-fish",
+        "3.7.0",
+        "third_party/tree-sitter-fish-3.7.0",
+        "0c2760fdf948fd9ad7e639f30c63b4883ba62742af920f4cf35fa8950e575722",
+    ),
+    (
+        "tree-sitter-nim",
+        "0.6.2",
+        "third_party/tree-sitter-nim-0.6.2",
+        "5008548d97680bc3738f4a50dafabedcae6f8f82c3f65c59daf506eb91d2ebc9",
+    ),
+    (
+        "tree-sitter-clojure",
+        "0.0.8",
+        "third_party/tree-sitter-clojure-0.0.8",
+        "9c5f3779b1502abec604979b6115a73fb585558f64d47e61f9fa3be6c0ababa6",
+    ),
+    (
+        "tree-sitter-racket",
+        "0.25.0",
+        "third_party/tree-sitter-racket-0.25.0",
+        "c3b1ef220aebf912fc0e19a230e062043d2f129fa7f2865b66306dc5f730b815",
+    ),
+    (
+        "tree-sitter-vhdl",
+        "2.0.3",
+        "third_party/tree-sitter-vhdl-2.0.3",
+        "5eaa9e956b862a7f158d326841de4eeb9e35d3cba262bfeab8f220e77613f854",
+    ),
+    (
+        "tree-sitter-graphql",
+        "0.0.1",
+        "third_party/tree-sitter-graphql-0.0.1",
+        "cfc60a9394a5c0eca78227ba81633573804ccf91a85dd94de154ecab56b11aeb",
+    ),
+    (
+        "tree-sitter-elixir",
+        "0.3.5",
+        "third_party/tree-sitter-elixir-0.3.5",
+        "fb7e09181eb45c78d55c96d15f1635af7c66a0e4cee4af3872152674f7d1cfaa",
+    ),
+    (
+        "tree-sitter-proto",
+        "0.0.1",
+        "third_party/tree-sitter-proto-0.0.1",
+        "c769d77682fecd620789db08607db7e0aee26125645bda92f6f1515927d2423e",
+    ),
+    (
+        "tree-sitter-thrift",
+        "0.5.0",
+        "third_party/tree-sitter-thrift-0.5.0",
+        "f4cec11118d267928a0471b9b3faad3f24d18201e76d326ed50fc6f878731b82",
+    ),
+    (
+        "tree-sitter-capnp",
+        "1.5.0",
+        "third_party/tree-sitter-capnp-1.5.0",
+        "5eadccfa26383aca16f8ef7348f8bb174efb1ff51f528432e3e89a22ec96eab4",
+    ),
     (
         "tree-sitter-rocq",
         "0.2.0",
@@ -576,7 +732,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 61 {
+    if manifest.grammars.len() != 87 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -601,6 +757,32 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "qsharp",
+        "standard-ml",
+        "webassembly",
+        "mojo",
+        "hare",
+        "ring",
+        "haxe",
+        "qml",
+        "modelica",
+        "d",
+        "ada",
+        "hcl",
+        "zig",
+        "crystal",
+        "cue",
+        "pony",
+        "fish",
+        "nim",
+        "clojure",
+        "racket",
+        "vhdl",
+        "graphql",
+        "elixir",
+        "protobuf",
+        "thrift",
+        "capnp",
         "coq",
         "v",
         "verilog",
@@ -1372,7 +1554,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 61")]
+    #[error("grammar lock contains {0} grammars instead of 79")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1652,7 +1834,7 @@ mod tests {
         assert_eq!(acquisition["archive_modes_applied"], false);
         assert_eq!(acquisition["upstream_code_executed"], false);
         let members = acquisition["authored_inventory"].as_array().unwrap();
-        assert_eq!(members.len(), 69);
+        assert_eq!(members.len(), 71);
         let mut originals = BTreeSet::new();
         for member in members {
             let original = member["path"].as_str().unwrap();

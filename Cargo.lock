@@ -317,6 +317,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chrono"
+version = "0.4.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "145052bdd345b87320e369255277e3fb5152762ad123a901ef5c262dd38fe8d2"
+dependencies = [
+ "num-traits",
+ "serde",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -446,6 +456,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "derive_more"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "093242cf7570c207c83073cf82f79706fe7b8317e98620a47d5be7c3d8497678"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bda628edc44c4bb645fbe0f758797143e4e07926f7ebf4e9bdfbd3d2ce621df3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -591,6 +622,19 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "flux-source-parser"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "derive_more",
+ "fnv",
+ "ordered-float 3.9.2",
+ "regex",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -1177,6 +1221,17 @@ checksum = "269bca4c2591a28585d6bf10d9ed0332b7d76900a1b02bec41bdc3a2cdcda107"
 
 [[package]]
 name = "ordered-float"
+version = "3.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1e1c390732d15f1d48471625cd92d154e66db2c56645e29a9cd26f4699f72dc"
+dependencies = [
+ "num-traits",
+ "rand 0.8.6",
+ "serde",
+]
+
+[[package]]
+name = "ordered-float"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
@@ -1264,7 +1319,7 @@ checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
  "bitflags 2.13.0",
  "num-traits",
- "rand",
+ "rand 0.9.5",
  "rand_chacha",
  "rand_xorshift",
  "regex-syntax",
@@ -1428,13 +1483,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "raffia"
+version = "0.13.0"
+dependencies = [
+ "raffia_macro",
+ "smallvec",
+]
+
+[[package]]
+name = "raffia_macro"
+version = "0.2.0"
+dependencies = [
+ "heck",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "rand"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+dependencies = [
+ "rand_core 0.6.4",
+ "serde",
+]
+
+[[package]]
 name = "rand"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha",
- "rand_core",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -1444,7 +1526,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1462,7 +1553,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
- "rand_core",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -1641,23 +1732,35 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tree-sitter",
+ "tree-sitter-ada",
  "tree-sitter-asm",
  "tree-sitter-astro-next",
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-c-sharp",
+ "tree-sitter-capnp",
+ "tree-sitter-clojure",
  "tree-sitter-cmake",
  "tree-sitter-cobol",
  "tree-sitter-commonlisp",
  "tree-sitter-cpp",
+ "tree-sitter-crystal",
  "tree-sitter-css",
+ "tree-sitter-cue",
+ "tree-sitter-d",
  "tree-sitter-dart",
  "tree-sitter-eiffel",
+ "tree-sitter-elixir",
+ "tree-sitter-fish",
  "tree-sitter-fortran",
  "tree-sitter-fsharp",
  "tree-sitter-glsl",
  "tree-sitter-go",
+ "tree-sitter-graphql",
+ "tree-sitter-hare",
  "tree-sitter-haskell",
+ "tree-sitter-haxe",
+ "tree-sitter-hcl",
  "tree-sitter-hlsl",
  "tree-sitter-html",
  "tree-sitter-java",
@@ -1667,15 +1770,24 @@ dependencies = [
  "tree-sitter-lua",
  "tree-sitter-matlab",
  "tree-sitter-md",
+ "tree-sitter-modelica",
+ "tree-sitter-mojo",
+ "tree-sitter-nim",
  "tree-sitter-nix",
  "tree-sitter-objc",
  "tree-sitter-ocaml",
  "tree-sitter-pascal",
  "tree-sitter-php",
  "tree-sitter-plsql",
+ "tree-sitter-pony",
  "tree-sitter-powershell",
+ "tree-sitter-proto",
  "tree-sitter-python",
+ "tree-sitter-qmljs",
+ "tree-sitter-qsharp",
  "tree-sitter-r",
+ "tree-sitter-racket",
+ "tree-sitter-ring",
  "tree-sitter-rocq",
  "tree-sitter-ruby",
  "tree-sitter-rust",
@@ -1684,16 +1796,21 @@ dependencies = [
  "tree-sitter-scheme-native-local",
  "tree-sitter-sequel",
  "tree-sitter-sfapex",
+ "tree-sitter-sml",
  "tree-sitter-solidity",
  "tree-sitter-swift",
  "tree-sitter-systemverilog",
+ "tree-sitter-thrift",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-v",
  "tree-sitter-vba",
+ "tree-sitter-vhdl",
+ "tree-sitter-wat",
  "tree-sitter-wgsl",
  "tree-sitter-xml",
  "tree-sitter-yaml",
+ "tree-sitter-zig",
  "ts-parser-perl",
 ]
 
@@ -1701,7 +1818,9 @@ dependencies = [
 name = "rootlight-adapters"
 version = "0.1.0"
 dependencies = [
+ "flux-source-parser",
  "protobuf",
+ "raffia",
  "rootlight-adapter-sdk",
  "rootlight-adapter-treesitter",
  "rootlight-cancel",
@@ -2742,7 +2861,7 @@ checksum = "dfadb8526b6da90704feb293b0701a6aae62ea14983143344be2dc5ce30f1d82"
 dependencies = [
  "fnv",
  "nom",
- "ordered-float",
+ "ordered-float 5.3.0",
  "serde",
  "serde_json",
 ]
@@ -2985,6 +3104,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-ada"
+version = "0.9.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-asm"
 version = "0.24.0"
 dependencies = [
@@ -3029,6 +3156,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-capnp"
+version = "1.5.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-clojure"
+version = "0.0.8"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-cmake"
 version = "0.7.5"
 dependencies = [
@@ -3063,8 +3206,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-crystal"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-css"
 version = "0.25.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-cue"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-d"
+version = "0.8.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3083,6 +3250,22 @@ dependencies = [
 [[package]]
 name = "tree-sitter-eiffel"
 version = "1.0.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-elixir"
+version = "0.3.5"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-fish"
+version = "3.7.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3123,8 +3306,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-graphql"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-hare"
+version = "1.0.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-haskell"
 version = "0.23.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-haxe"
+version = "0.13.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-hcl"
+version = "1.2.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3213,6 +3428,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-modelica"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-mojo"
+version = "0.25.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-nim"
+version = "0.6.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-nix"
 version = "0.3.0"
 dependencies = [
@@ -3263,8 +3502,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-pony"
+version = "0.0.3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-powershell"
 version = "0.26.4"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-proto"
+version = "0.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3281,8 +3536,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-qmljs"
+version = "0.3.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-qsharp"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-r"
 version = "1.3.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-racket"
+version = "0.25.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-ring"
+version = "1.1.1"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3357,6 +3644,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-sml"
+version = "0.25.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-solidity"
 version = "1.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3377,6 +3672,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-systemverilog"
 version = "0.4.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-thrift"
+version = "0.5.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3415,6 +3718,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-vhdl"
+version = "2.0.3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-wat"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-wgsl"
 version = "0.0.9"
 dependencies = [
@@ -3433,6 +3752,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-yaml"
 version = "0.7.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-zig"
+version = "1.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3487,6 +3814,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-xid"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "utf8-ranges"

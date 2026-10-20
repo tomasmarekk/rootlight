@@ -1369,3 +1369,192 @@ fn analysis_coverage(tier: AnalysisTier, source_bytes: usize) -> CoverageReport 
 fn source_len(source: &SourceRef) -> usize {
     usize::try_from(source.span().end_byte()).expect("small fixture length fits")
 }
+
+#[test]
+fn file_locator_components_charge_raw_quotas_and_rejected_batches_are_atomic() {
+    let (_temporary, _snapshot, source) = source_fixture();
+    let (file, _provenance, _descriptor) = minimal_ir_records(&source);
+    let locator = file.path_locator.as_ref().unwrap();
+    assert_eq!(locator.components().len(), 2);
+    let mut document =
+        rootlight_ir::NormalizedIrDocument::empty(source.repository(), source.generation());
+    document.files.push(file.clone());
+    let usage = rootlight_ir::IrDocumentUsage::measure(&document, &IrLimits::default()).unwrap();
+    let mut without_locator = file.clone();
+    without_locator.path_locator = None;
+    document.files[0] = without_locator.clone();
+    let without = rootlight_ir::IrDocumentUsage::measure(&document, &IrLimits::default()).unwrap();
+    assert_eq!(usage.total_nested_items(), 2);
+    assert_eq!(without.total_nested_items(), 0);
+    assert!(usage.total_string_bytes() > without.total_string_bytes());
+
+    for string_bound in [false, true] {
+        let (resource, required) = if string_bound {
+            (ResourceKind::StringBytes, usage.total_string_bytes())
+        } else {
+            (ResourceKind::NestedItems, usage.total_nested_items())
+        };
+        let mut exact = IrLimits::default();
+        if string_bound {
+            exact.max_total_string_bytes = required;
+        } else {
+            exact.max_total_nested_items = required;
+        }
+        let analysis = limits(1, exact.clone());
+        let mut sink = BoundedIrSink::new(
+            source.clone(),
+            analysis.ir_stream().clone(),
+            exact,
+            ExtensionSupport::default(),
+        );
+        sink.push(IrBatch::new(0, vec![IrRecord::File(file.clone())]))
+            .unwrap();
+        let remaining = sink.remaining_ir_budget();
+        let staged = sink.staged_usage();
+        assert_eq!(
+            if string_bound {
+                remaining.string_bytes()
+            } else {
+                remaining.nested_items()
+            },
+            0
+        );
+        assert_eq!(
+            sink.push(IrBatch::new(1, vec![IrRecord::File(file.clone())])),
+            Err(SinkError::StreamLimit {
+                resource,
+                observed: required * 2,
+                limit: required
+            })
+        );
+        assert_eq!(sink.remaining_ir_budget(), remaining);
+        assert_eq!(sink.staged_usage(), staged);
+        assert_eq!(sink.next_sequence(), 1);
+
+        let mut smaller = IrLimits::default();
+        if string_bound {
+            smaller.max_total_string_bytes = required - 1;
+        } else {
+            smaller.max_total_nested_items = required - 1;
+        }
+        let analysis = limits(1, smaller.clone());
+        let mut sink = BoundedIrSink::new(
+            source.clone(),
+            analysis.ir_stream().clone(),
+            smaller,
+            ExtensionSupport::default(),
+        );
+        let remaining = sink.remaining_ir_budget();
+        let staged = sink.staged_usage();
+        assert_eq!(
+            sink.push(IrBatch::new(0, vec![IrRecord::File(file.clone())])),
+            Err(SinkError::StreamLimit {
+                resource,
+                observed: required,
+                limit: required - 1
+            })
+        );
+        assert_eq!(sink.remaining_ir_budget(), remaining);
+        assert_eq!(sink.staged_usage(), staged);
+        assert_eq!(sink.next_sequence(), 0);
+        sink.push(IrBatch::new(
+            0,
+            vec![IrRecord::File(without_locator.clone())],
+        ))
+        .unwrap();
+        assert_eq!(sink.staged_usage().records(), 1);
+        assert_eq!(sink.next_sequence(), 1);
+    }
+
+    let mut per_record = IrLimits::default();
+    per_record.max_nested_items_per_record = 1;
+    let analysis = limits(1, per_record.clone());
+    let mut sink = BoundedIrSink::new(
+        source,
+        analysis.ir_stream().clone(),
+        per_record,
+        ExtensionSupport::default(),
+    );
+    assert_eq!(
+        sink.push(IrBatch::new(0, vec![IrRecord::File(file)])),
+        Err(SinkError::StreamLimit {
+            resource: ResourceKind::NestedItems,
+            observed: 2,
+            limit: 1
+        })
+    );
+    assert_eq!(sink.staged_usage().records(), 0);
+    assert_eq!(sink.next_sequence(), 0);
+}
+
+#[test]
+fn file_locator_quota_refusal_precedes_public_transaction_commit() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let (file, provenance, descriptor) = minimal_ir_records(&source);
+    let analyzer = MockLanguageAnalyzer::new(
+        descriptor,
+        vec![
+            IrRecord::File(file.clone()),
+            IrRecord::Provenance(provenance),
+        ],
+        analysis_coverage(AnalysisTier::TierC, source_len(&source)),
+        0,
+    );
+    let baseline_limits = limits(1, IrLimits::default());
+    let request = analysis_request(&snapshot, &source, &baseline_limits);
+    let baseline = execute_analysis(
+        &analyzer,
+        &request,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::default(),
+        &Cancellation::new(),
+    )
+    .unwrap();
+    assert_eq!(baseline.document().files, vec![file]);
+    assert_eq!(snapshot.content_hash(), source.content_hash());
+    assert_eq!(
+        baseline.document().files[0].content_hash,
+        source.content_hash()
+    );
+    let usage =
+        rootlight_ir::IrDocumentUsage::measure(baseline.document(), &IrLimits::default()).unwrap();
+
+    for string_bound in [false, true] {
+        let (resource, required) = if string_bound {
+            (ResourceKind::StringBytes, usage.total_string_bytes())
+        } else {
+            (ResourceKind::NestedItems, usage.total_nested_items())
+        };
+        assert!(required > 1);
+        for exact in [true, false, true] {
+            let maximum = required - usize::from(!exact);
+            let mut selected = IrLimits::default();
+            if string_bound {
+                selected.max_total_string_bytes = maximum;
+            } else {
+                selected.max_total_nested_items = maximum;
+            }
+            let selected = limits(1, selected);
+            let request = analysis_request(&snapshot, &source, &selected);
+            let result = execute_analysis(
+                &analyzer,
+                &request,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::default(),
+                &Cancellation::new(),
+            );
+            if exact {
+                assert_eq!(result.unwrap().document(), baseline.document());
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    AdapterError::Sink(SinkError::StreamLimit {
+                        resource,
+                        observed: required,
+                        limit: maximum,
+                    })
+                );
+            }
+        }
+    }
+}

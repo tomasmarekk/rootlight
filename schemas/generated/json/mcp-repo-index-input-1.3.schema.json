@@ -6,7 +6,7 @@
   "type": "object",
   "properties": {
     "detached": {
-      "description": "Requests permission to continue after client disconnect.\n\nWhen `true`, the daemon owns the durable operation independently of the\nrequesting transport. Status and a successfully published generation\nremain recoverable after daemon restart.",
+      "description": "Requests permission to continue after client disconnect.\n\nDefaults to `true` so an admitted operation has no transport-derived work\ndeadline. An explicit `false` retains request lifetime and disconnect\ncancellation. Response waiting remains bounded separately by `wait_ms`.\n\nWhen `true`, the daemon owns the durable operation independently of the\nrequesting transport. Status and a successfully published generation\nremain recoverable after daemon restart.",
       "type": "boolean"
     },
     "mode": {

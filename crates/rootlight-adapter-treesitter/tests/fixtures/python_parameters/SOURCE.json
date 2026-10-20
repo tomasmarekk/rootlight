@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/TheAlgorithms/Python",
+  "revision": "f5988cc09713315817df6a7e327e258013a94440",
+  "source_path": "maths/floor.py",
+  "source_bytes": 505,
+  "source_sha256": "5b010d655d7f839ad5bb0ebdc1935a297e378dc45c30b7f58927234bfe6c000d",
+  "license": "MIT",
+  "license_path": "THEALGORITHMS-LICENSE.md",
+  "license_sha256": "7d6eccf2e488ca8e30752c1ed243fc0322e6d4025e79ab27940314713b45b7a8",
+  "scope": "Unmodified written Python source used to validate formal-parameter lookup, ownership and exact source retrieval."
+}

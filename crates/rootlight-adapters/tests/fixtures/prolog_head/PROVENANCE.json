@@ -1,0 +1,9 @@
+{
+  "upstream": "https://github.com/eyereasoner/eye",
+  "revision": "f14729b5bd1c6f25b54ab6490d6c17639f7353cf",
+  "path": "reasoning/arvol/input/age.pl",
+  "bytes": 353,
+  "sha256": "301a814a734255f2a8eebaebaabf4a41e1847f3074990e46d170356ee866934a",
+  "license": "Exact repository MIT LICENSE retained",
+  "scope": "Unmodified complete original; no executed product qualification"
+}

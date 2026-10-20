@@ -40,7 +40,7 @@ pub(super) fn execute(
     }
     let file = parse_file(request.file.as_ref())?;
     let generation = service
-        .resolve_generation(repository, selected)
+        .resolve_source_generation(repository, selected, &context.cancellation)
         .map_err(service_error)?;
     let cursor = request
         .cursor
@@ -56,7 +56,7 @@ pub(super) fn execute(
     let (budget, result_cap) = effective_budget(&request, context)?;
     let result = service
         .find_literal(
-            generation.generation,
+            generation,
             file,
             &request.literal,
             cursor,

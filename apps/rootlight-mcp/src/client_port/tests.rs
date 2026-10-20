@@ -520,6 +520,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 files: 4,
             }];
             Ok(SourceRead {
+                source_recovery: None,
                 conditional_activity: Vec::new(),
                 context,
                 chunks,
@@ -576,6 +577,7 @@ impl AsyncFirstSliceClient for FakeAsyncClient {
                 })
                 .collect::<Result<Vec<_>, ClientError>>()?;
             Ok(SourceTextReadResult {
+                source_recovery: legacy.source_recovery,
                 context: legacy.context,
                 chunks,
                 total_source_bytes: legacy.total_source_bytes,
@@ -1827,6 +1829,7 @@ fn read_metadata_preserves_safe_non_rust_languages() {
     )
     .expect("source reference validates");
     let read = SourceRead {
+        source_recovery: None,
         conditional_activity: Vec::new(),
         context,
         chunks: vec![SourceChunk {

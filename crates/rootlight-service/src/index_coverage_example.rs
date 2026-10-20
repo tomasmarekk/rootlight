@@ -361,6 +361,9 @@ impl DiagnosticSession {
                         return Ok((rows, snapshot.metadata().configuration_hash(), json!({
                             "report_scope":"retained_source_accounting",
                             "source_accounting":accounting,
+                            "aggregate_source_recovery":inspect_aggregate_source_recovery(
+                                snapshot.document(), snapshot.metadata(), snapshot.file_count()
+                            )?,
                             "normalized_proof_exported":false,
                             "structural_coverage_qualified":false,
                             "semantic_resolution_qualified":false,
@@ -684,7 +687,7 @@ impl<'a> FileSourceVerifier<'a> {
         let mut start = 0_usize;
         loop {
             let end = text.map_or_else(
-                || start.saturating_add(16 * 1024).min(file_length),
+                || start.saturating_add(64 * 1024).min(file_length),
                 |text| chunk_end(text, start),
             );
             let part = SourceRef::new(
@@ -792,6 +795,37 @@ fn verify_counted_source(
         return Err("counted record source differs from retained file".into());
     }
     Ok(())
+}
+
+fn inspect_aggregate_source_recovery(
+    document: &rootlight_ir::NormalizedIrDocument,
+    metadata: rootlight_storage::GenerationMetadata,
+    retained_file_count: usize,
+) -> Result<Option<rootlight_ir::AggregateSourceRecovery>, Box<dyn Error>> {
+    if document.repository != metadata.repository() || document.generation != metadata.generation()
+    {
+        return Err("aggregate recovery document differs from inspected generation".into());
+    }
+    let mut envelopes = document.extensions.iter().filter(|extension| {
+        extension.namespace == rootlight_ir::AGGREGATE_SOURCE_RECOVERY_NAMESPACE
+    });
+    let Some(envelope) = envelopes.next() else {
+        return Ok(None);
+    };
+    if envelopes.next().is_some()
+        || envelope.repository != document.repository
+        || envelope.generation != document.generation
+    {
+        return Err("aggregate recovery envelope differs from inspected generation".into());
+    }
+    let cause = rootlight_ir::decode_aggregate_source_recovery_envelope(envelope)?;
+    // Recovery keeps one normalized anchor and the remaining members in the source catalog.
+    if cause.source_inventory != metadata.manifest_hash()
+        || u64::try_from(retained_file_count).ok() != Some(cause.members)
+    {
+        return Err("aggregate recovery inventory differs from inspected generation".into());
+    }
+    Ok(Some(cause))
 }
 
 fn inspect_source_files(
@@ -1068,7 +1102,7 @@ fn inspect_files<'snapshot>(
 }
 
 fn chunk_end(text: &str, start: usize) -> usize {
-    let mut end = start.saturating_add(16 * 1024).min(text.len());
+    let mut end = start.saturating_add(64 * 1024).min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -3028,6 +3062,142 @@ mod tests {
         assert_eq!(accounting["installed_mcp_qualified"], false);
     }
 
+    fn aggregate_recovery_projection_fixture() -> (
+        rootlight_ir::NormalizedIrDocument,
+        rootlight_storage::GenerationMetadata,
+        usize,
+        rootlight_ir::AggregateSourceRecovery,
+    ) {
+        let directory = tempdir();
+        fs::write(directory.path().join("module.rs"), "pub fn sample() {}\n").unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(directory.path(), &Cancellation::new())
+            .unwrap();
+        let (mut document, metadata, file_count) = service
+            .inspect_generation(
+                receipt.repository,
+                Some(receipt.generation),
+                &Cancellation::new(),
+                |snapshot| {
+                    (
+                        snapshot.document().clone(),
+                        snapshot.metadata(),
+                        snapshot.file_count(),
+                    )
+                },
+            )
+            .unwrap();
+        let cause = rootlight_ir::AggregateSourceRecovery {
+            source_inventory: metadata.manifest_hash(),
+            members: u64::try_from(file_count).unwrap(),
+            derived_members: 0,
+            stage: rootlight_ir::AggregateCapacityStage::StructuralAppend,
+            resource: rootlight_ir::AggregateCapacityResource::Entities,
+            observed: 2,
+            limit: 1,
+            text_snapshot_bytes: 1024,
+        };
+        // This canonical-envelope fixture tests projection, not a claimed capacity event.
+        set_projection_cause(&mut document, cause);
+        (document, metadata, file_count, cause)
+    }
+
+    fn set_projection_cause(
+        document: &mut rootlight_ir::NormalizedIrDocument,
+        cause: rootlight_ir::AggregateSourceRecovery,
+    ) {
+        document.extensions.retain(|extension| {
+            extension.namespace != rootlight_ir::AGGREGATE_SOURCE_RECOVERY_NAMESPACE
+        });
+        let anchor = &document.files[0];
+        document.extensions.push(
+            rootlight_ir::new_aggregate_source_recovery_envelope(
+                document.repository,
+                document.generation,
+                anchor.provenance,
+                anchor.evidence.source.clone().unwrap(),
+                cause,
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn aggregate_source_recovery_projection_preserves_exact_cause_without_analysis_claims() {
+        let (document, metadata, file_count, cause) = aggregate_recovery_projection_fixture();
+        let observed = inspect_aggregate_source_recovery(&document, metadata, file_count).unwrap();
+        assert_eq!(observed, Some(cause));
+        assert_eq!(
+            serde_json::to_value(observed).unwrap(),
+            json!({
+                "source_inventory":metadata.manifest_hash(), "members":file_count,
+                "derived_members":0, "stage":"structural_append", "resource":"entities",
+                "observed":2, "limit":1, "text_snapshot_bytes":1024,
+            })
+        );
+    }
+
+    #[test]
+    fn aggregate_source_recovery_projection_rejects_invalid_inventory_and_context_joins() {
+        let (document, metadata, file_count, cause) = aggregate_recovery_projection_fixture();
+        for invalid in [
+            rootlight_ir::AggregateSourceRecovery {
+                source_inventory: rootlight_ids::content_hash(b"foreign inventory"),
+                ..cause
+            },
+            rootlight_ir::AggregateSourceRecovery {
+                members: cause.members + 1,
+                ..cause
+            },
+        ] {
+            let mut changed = document.clone();
+            set_projection_cause(&mut changed, invalid);
+            let envelope = changed.extensions.last().unwrap();
+            assert_eq!(
+                rootlight_ir::decode_aggregate_source_recovery_envelope(envelope).unwrap(),
+                invalid
+            );
+            assert!(inspect_aggregate_source_recovery(&changed, metadata, file_count).is_err());
+        }
+        let mut changed = document.clone();
+        changed
+            .extensions
+            .push(document.extensions.last().unwrap().clone());
+        assert!(inspect_aggregate_source_recovery(&changed, metadata, file_count).is_err());
+        let mut changed = document.clone();
+        changed.extensions.last_mut().unwrap().payload.push(' ');
+        assert!(inspect_aggregate_source_recovery(&changed, metadata, file_count).is_err());
+        let mut changed = document.clone();
+        changed.repository = rootlight_ids::derive_repository(b"foreign repository").id();
+        assert!(inspect_aggregate_source_recovery(&changed, metadata, file_count).is_err());
+        let mut changed = document;
+        changed.generation = rootlight_ids::derive_generation(rootlight_ids::GenerationIdentity {
+            repository: metadata.repository(),
+            parent: Some(metadata.generation()),
+            manifest_hash: metadata.manifest_hash(),
+            config_hash: metadata.configuration_hash(),
+            provider_set_hash: metadata.provider_set_hash(),
+            format_version: 1,
+        })
+        .id();
+        assert!(inspect_aggregate_source_recovery(&changed, metadata, file_count).is_err());
+    }
+
+    #[test]
+    fn source_accounting_reports_ordinary_recovery_absence_after_reopen() {
+        let directory = tempdir();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("module.rs"), "pub fn sample() {}\n").unwrap();
+        let state = directory.path().join("state");
+        for mode in [StateMode::Fresh, StateMode::Resume] {
+            let report = inspect_source_accounting(&repository, &state, None, mode).unwrap();
+            assert_source_accounting_scope(&report);
+            assert!(report.get("aggregate_source_recovery").unwrap().is_null());
+        }
+    }
+
     #[test]
     fn full_report_keeps_its_default_schema_and_field_contract() {
         let directory = tempdir();
@@ -3124,13 +3294,13 @@ mod tests {
             repository.join("notes.txt"),
             format!(
                 "{}🦀\r\n{}",
-                "x".repeat(16 * 1024 - 1),
-                "tail".repeat(3_000)
+                "x".repeat(64 * 1024 - 1),
+                "tail".repeat(20_000)
             ),
         )
         .unwrap();
         let encoded = std::iter::once(0xfeff_u16)
-            .chain("λ𝄞\r\n".repeat(5_000).encode_utf16())
+            .chain("λ𝄞\r\n".repeat(15_000).encode_utf16())
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>();
         fs::write(repository.join("encoded.txt"), &encoded).unwrap();
@@ -3139,8 +3309,10 @@ mod tests {
             b"pub fn compute(value: i32) -> i32 { value + 1 }\n",
         )
         .unwrap();
+        let started = Instant::now();
         let report =
             inspect_source_accounting(&repository, &state, None, StateMode::Fresh).unwrap();
+        let observer_wall_micros = started.elapsed().as_micros();
         assert_source_accounting_scope(&report);
         assert_eq!(
             report["schema"],
@@ -3201,12 +3373,34 @@ mod tests {
             .unwrap();
         assert_eq!(empty["source_read_chunks"], 1);
         assert_eq!(empty["source_read_bytes"], 0);
+        eprintln!(
+            "{}",
+            json!({
+                "control":"exact-source-accounting-windows",
+                "observer_wall_micros":observer_wall_micros,
+                "index_wall_micros":report["cold_wall_micros"],
+                "noop_wall_micros":report["no_op_wall_micros"],
+                "source_read_calls":report["source_accounting"]["source_read_chunks"],
+                "source_read_bytes":report["source_accounting"]["source_read_bytes"],
+                "files":rows.iter().map(|row| json!({
+                    "path":row["file"]["path"],
+                    "hash":row["file"]["content_hash"],
+                    "bytes":row["source_read_bytes"],
+                    "calls":row["source_read_chunks"]
+                })).collect::<Vec<_>>()
+            })
+        );
+        let notes = rows
+            .iter()
+            .find(|row| row["file"]["path"] == "notes.txt")
+            .unwrap();
+        assert_eq!(notes["source_read_chunks"], 3);
         let encoded_row = rows
             .iter()
             .find(|row| row["file"]["path"] == "encoded.txt")
             .unwrap();
         assert_eq!(encoded_row["file"]["encoding"], "utf-16le");
-        assert!(encoded_row["source_read_chunks"].as_u64().unwrap() > 1);
+        assert_eq!(encoded_row["source_read_chunks"], 3);
         let reopened =
             inspect_source_accounting(&repository, &state, None, StateMode::Resume).unwrap();
         assert_source_accounting_scope(&reopened);
@@ -3231,6 +3425,42 @@ mod tests {
             assert_eq!(report["no_op_timing"]["operation"]["changed_files"], 0);
         }
         assert!(inspect_source_accounting(&repository, &state, None, StateMode::Fresh).is_err());
+        let session =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Resume).unwrap();
+        let registered = session
+            .service
+            .registered_repository_for_root(&repository, &Cancellation::new())
+            .unwrap()
+            .unwrap();
+        let generation = session
+            .service
+            .repository_status(registered, None)
+            .unwrap()
+            .resolved_generation;
+        for (name, truncate) in [("notes.txt", false), ("encoded.txt", true)] {
+            let path = repository.join(name);
+            let original = fs::read(&path).unwrap();
+            let mut changed = original.clone();
+            if truncate {
+                changed.pop();
+            } else {
+                *changed.last_mut().unwrap() = b'!';
+            }
+            fs::write(&path, changed).unwrap();
+            let stale = session
+                .service
+                .inspect_generation(
+                    registered,
+                    Some(generation),
+                    &Cancellation::new(),
+                    |snapshot| {
+                        inspect_source_files(snapshot, &session.service, &repository, generation)
+                    },
+                )
+                .unwrap();
+            assert!(stale.is_err(), "changed source tail was accepted: {name}");
+            fs::write(path, original).unwrap();
+        }
     }
 
     #[test]
@@ -3399,12 +3629,12 @@ mod tests {
     #[test]
     fn source_chunks_preserve_utf8_boundaries_and_empty_files() {
         for tail in ["x", "é", "界", "🦀"] {
-            let text = format!("{}{}\r\n", "x".repeat(16 * 1024 - 1), tail.repeat(10_000));
+            let text = format!("{}{}\r\n", "x".repeat(64 * 1024 - 1), tail.repeat(20_000));
             let mut start = 0;
             let mut reconstructed = String::new();
             while start < text.len() {
                 let end = chunk_end(&text, start);
-                assert!(end > start && end - start <= 16 * 1024);
+                assert!(end > start && end - start <= 64 * 1024);
                 reconstructed.push_str(text.get(start..end).unwrap());
                 start = end;
             }
@@ -3420,7 +3650,7 @@ mod tests {
         let repository = root.join("repository");
         fs::create_dir(&repository).unwrap();
         for (name, little_endian) in [("little.txt", true), ("big.txt", false)] {
-            let source = "λ𝄞\r\n".repeat(5_000);
+            let source = "λ𝄞\r\n".repeat(15_000);
             let bytes = std::iter::once(0xfeff_u16)
                 .chain(source.encode_utf16())
                 .flat_map(|unit| {

@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/webyrd/Barliman",
+  "revision": "93d502eb60e4fc1e6b21a6a86b0157f5505f7249",
+  "source_path": "interpreter_experiments/mk/mk-vicare.scm",
+  "fixture_path": "mk-vicare.scm",
+  "bytes": 5337,
+  "sha256": "4ef2772daa530fe371ca87820c58f9ec19d2c8a1823ef87c1ab1a2f3ff26fc17",
+  "license": {
+    "upstream_path": "LICENSE",
+    "retained_path": "BARLIMAN-LICENSE",
+    "bytes": 1103,
+    "sha256": "a6d2d10639d7dc3c2fd0b909fc08eab933f59e425309df0282d961932dd07e6c"
+  },
+  "source_scope": "Complete original physical bytes; no reformatting or reduced reproducer."
+}

@@ -145,33 +145,53 @@ dependencies = [
  "rnix",
  "serde_json",
  "tree-sitter",
+ "tree-sitter-ada",
  "tree-sitter-astro-next",
  "tree-sitter-bash",
+ "tree-sitter-clojure",
  "tree-sitter-cmake",
  "tree-sitter-cobol",
  "tree-sitter-commonlisp",
+ "tree-sitter-crystal",
+ "tree-sitter-cue",
+ "tree-sitter-d",
  "tree-sitter-dart",
  "tree-sitter-eiffel",
+ "tree-sitter-elixir",
+ "tree-sitter-fish",
  "tree-sitter-fortran",
  "tree-sitter-fsharp",
+ "tree-sitter-graphql",
+ "tree-sitter-hare",
  "tree-sitter-haskell",
+ "tree-sitter-haxe",
+ "tree-sitter-hcl",
  "tree-sitter-html",
  "tree-sitter-json",
  "tree-sitter-julia",
  "tree-sitter-kotlin-ng",
  "tree-sitter-matlab",
  "tree-sitter-md",
+ "tree-sitter-modelica",
+ "tree-sitter-mojo",
+ "tree-sitter-nim",
  "tree-sitter-nix",
  "tree-sitter-objc",
  "tree-sitter-pascal",
+ "tree-sitter-pony",
  "tree-sitter-powershell",
+ "tree-sitter-qmljs",
+ "tree-sitter-qsharp",
  "tree-sitter-r",
+ "tree-sitter-racket",
+ "tree-sitter-ring",
  "tree-sitter-rocq",
  "tree-sitter-sas",
  "tree-sitter-scala",
  "tree-sitter-scheme-native-local",
  "tree-sitter-sequel",
  "tree-sitter-sfapex",
+ "tree-sitter-sml",
  "tree-sitter-solidity",
  "tree-sitter-swift",
  "tree-sitter-systemverilog",
@@ -179,7 +199,10 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-v",
  "tree-sitter-vba",
+ "tree-sitter-vhdl",
+ "tree-sitter-wat",
  "tree-sitter-yaml",
+ "tree-sitter-zig",
  "ts-parser-perl",
 ]
 
@@ -288,6 +311,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-ada"
+version = "0.9.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-astro-next"
 version = "0.1.1"
 dependencies = [
@@ -298,6 +329,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-bash"
 version = "0.25.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-clojure"
+version = "0.0.8"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -328,6 +367,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-crystal"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-cue"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-d"
+version = "0.8.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-dart"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -340,6 +403,22 @@ dependencies = [
 [[package]]
 name = "tree-sitter-eiffel"
 version = "1.0.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-elixir"
+version = "0.3.5"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-fish"
+version = "3.7.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -362,8 +441,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-graphql"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-hare"
+version = "1.0.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-haskell"
 version = "0.23.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-haxe"
+version = "0.13.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-hcl"
+version = "1.2.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -424,6 +535,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-modelica"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-mojo"
+version = "0.25.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-nim"
+version = "0.6.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-nix"
 version = "0.3.0"
 dependencies = [
@@ -448,6 +583,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-pony"
+version = "0.0.3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-powershell"
 version = "0.26.4"
 dependencies = [
@@ -456,8 +599,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-qmljs"
+version = "0.3.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-qsharp"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-r"
 version = "1.3.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-racket"
+version = "0.25.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-ring"
+version = "1.1.1"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -506,6 +681,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-sfapex"
 version = "3.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-sml"
+version = "0.25.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -570,8 +753,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-vhdl"
+version = "2.0.3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-wat"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-yaml"
 version = "0.7.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-zig"
+version = "1.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",

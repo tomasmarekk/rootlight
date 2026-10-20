@@ -1,0 +1,20 @@
+{
+  "upstream_repository": "https://github.com/PWCT/PWCT2",
+  "authority": "Unmodified original filesystem bytes; CRLF is retained",
+  "license_path": "../LICENSE",
+  "license_bytes": 1096,
+  "license_sha256": "63206b6e15fc7e962149ca2b17b41f0eb89c5d22956680126da922aeb4805492",
+  "fixtures": [
+    {
+      "path": "src/tools/import/input/test16.ring",
+      "bytes": 53,
+      "sha256": "5c625e1f88dbe606d658816269f95b69cf6832d53d8f86f83130bf1536d9fd94"
+    },
+    {
+      "path": "src/tools/import/input/test4.ring",
+      "bytes": 83,
+      "sha256": "416f071fc696c53e29b84067c74b7ffb9b8fe7cdd5c2ee162f902f9972e50bc7"
+    }
+  ],
+  "purpose": "Written ordinary top-level function definitions and header identities only; deeper bindings and runtime effects remain unproved"
+}

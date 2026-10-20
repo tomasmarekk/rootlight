@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/mbutterick/pollen",
+  "path": "pollen/private/whitespace.rkt",
+  "bytes": 1031,
+  "sha256": "75b8e305ab7183b626f0236c7d474c8c19933da462d11c286e650b0907e2a7d3",
+  "license": "MIT; POLLEN-LICENSE.md",
+  "scope": "Finite exact written definitions and direct local calls; custom readers, expansion and runtime binding remain explicit gaps"
+}

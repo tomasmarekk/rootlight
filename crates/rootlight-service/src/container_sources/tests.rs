@@ -5,8 +5,7 @@ use super::*;
 use rootlight_ir::{ContainerRef, EntityFlag, OccurrenceTarget};
 use std::fs;
 
-#[path = "fixture.rs"]
-mod fixture;
+use crate::office_fixture as fixture;
 
 #[path = "err_tests.rs"]
 mod err_tests;

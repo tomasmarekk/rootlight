@@ -1,0 +1,10 @@
+{
+  "source_repository": "https://github.com/nostalgic-css/NES.css",
+  "source_commit": "b1cc9944aae3274461c747d7ad1cab31df45e78c",
+  "original_path": "scss/utilities/rounded-corners-mixin.scss",
+  "original_bytes": 1994,
+  "sha256": "ea5cada2b635fb25c4d830aa45d734d41baa490a1a85a5223ee7182e48ce3183",
+  "license_file": "LICENSE",
+  "license_sha256": "1069b4e6684fb59c0634a04409a49e43baf8c7391f1970a6e4ce4686ac292a64",
+  "changes": "None. Complete physical source and license bytes are retained; .gitattributes prevents text normalization."
+}

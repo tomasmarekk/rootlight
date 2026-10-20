@@ -79,6 +79,24 @@ impl TreeSitterProvider {
         if !astro && request.language().as_str() != "html" {
             return Ok(EmbeddedExtractionLimits::default());
         }
+        // Identity extraction retains every host region before optional clipping.
+        // The proof still requires complete native host and child traversals.
+        let mut astro_reads = (astro
+            && request.included_ranges().is_empty()
+            && traversal.fully_traversed
+            && !tree.root_node().has_error()
+            && source.physical_bytes() == request.source().bytes().len()
+            && request.source().source_ref().span().start_byte() == 0
+            && usize::try_from(request.source().source_ref().span().end_byte()).ok()
+                == Some(request.source().bytes().len()))
+        .then(|| {
+            super::astro_reads::ReadPlan::new(
+                request
+                    .limits()
+                    .max_reported_memory_bytes()
+                    .saturating_sub(source.owned_bytes()),
+            )
+        });
         sort_cancellable_by(candidates, cancellation, |left, right| {
             (
                 left.start,
@@ -115,6 +133,7 @@ impl TreeSitterProvider {
                 continue;
             }
             let expression = candidate.syntax == "astro.expression";
+            let frontmatter = candidate.syntax == "astro.frontmatter";
             if expression && candidate.start < covered_expression_end {
                 if candidate.end > covered_expression_end {
                     return Err(provider_failure("expression-overlapping-ranges"));
@@ -139,6 +158,11 @@ impl TreeSitterProvider {
                 || body.byte_range() != (candidate.start..candidate.end)
             {
                 return Err(provider_failure("embedded-host-span"));
+            }
+            // Empty native bodies still belong to their host, but have no
+            // source bytes for a child parser's nonempty included range.
+            if candidate.start == candidate.end {
+                continue;
             }
             let language = if expression {
                 Some("typescript")
@@ -300,6 +324,32 @@ impl TreeSitterProvider {
                     }
                 };
             }
+            if let Some(proof) = astro_reads.as_mut()
+                && child_traversal.primary_diagnostic.is_none()
+                && child_traversal.fully_traversed
+            {
+                let remaining = request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_sub(traversal.processed_nodes);
+                let used = if frontmatter {
+                    proof.frontmatter(
+                        &child_tree,
+                        (candidate.start, candidate.end),
+                        source.as_bytes(),
+                        remaining,
+                        cancellation,
+                    )?
+                } else if expression {
+                    proof.expression(&child_tree, source.as_bytes(), remaining, cancellation)?
+                } else {
+                    0
+                };
+                traversal.processed_nodes = traversal
+                    .processed_nodes
+                    .checked_add(used)
+                    .ok_or(SinkError::AccountingOverflow)?;
+            }
             let pack = self
                 .query_packs
                 .get_for_native(family, native_family, cancellation)
@@ -347,6 +397,21 @@ impl TreeSitterProvider {
                 "embedded-candidates-allocation",
             )?;
             candidates.extend(child_candidates);
+        }
+        if !limited.context
+            && traversal.coverage == CoverageStatus::Complete
+            && let Some(proof) = astro_reads
+        {
+            let remaining = request
+                .limits()
+                .max_syntax_nodes()
+                .saturating_sub(traversal.processed_nodes);
+            let used =
+                proof.append(candidates, source.as_bytes().len(), remaining, cancellation)?;
+            traversal.processed_nodes = traversal
+                .processed_nodes
+                .checked_add(used)
+                .ok_or(SinkError::AccountingOverflow)?;
         }
         Ok(limited)
     }

@@ -13946,3 +13946,91 @@ fn vba_bounded_required_fact_stream_retains_unknown_visibility_and_all_definitio
         }
     }
 }
+#[test]
+fn original_analytics_export_preserves_exact_declarations_in_each_explicit_basic_profile() {
+    const ORIGINAL: &str = include_str!("../fixtures/vba_analytics_original/Analytics.bas");
+    assert_eq!(ORIGINAL.len(), 2105);
+    assert_eq!(&ORIGINAL.as_bytes()[1404..1420], b"AnalyticsRequest");
+    assert_eq!(&ORIGINAL.as_bytes()[1421..1430], b"ProfileId");
+    assert_eq!(&ORIGINAL.as_bytes()[1442..1451], b"StartDate");
+    for language in ["vba", "visual-basic-classic"] {
+        let result = native_source_proof_output(ORIGINAL, language);
+        let document = result.document();
+        validate_ir_document(document, limits().ir(), &ExtensionSupport::default()).unwrap();
+        assert_eq!(document.files.len(), 1);
+        assert_eq!(document.files[0].language, language);
+        assert_eq!(document.files[0].byte_length, 2105);
+        assert_eq!(
+            document.files[0].content_hash,
+            content_hash(ORIGINAL.as_bytes())
+        );
+        assert_radix_ir_source_identity(document, ORIGINAL, language);
+        let declared = |name: &str, kind: EntityKind, start, end| {
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1, "{language}: {name}");
+            let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+                panic!("original declaration must resolve to its own entity");
+            };
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(entity.canonical_name, name);
+            assert_eq!(entity.kind, kind);
+            assert_eq!(entity.language, language);
+            symbol
+        };
+        let function = declared("AnalyticsRequest", EntityKind::Function, 1404, 1420);
+        let profile = declared("ProfileId", EntityKind::Parameter, 1421, 1430);
+        let start_date = declared("StartDate", EntityKind::Parameter, 1442, 1451);
+        for (parameter, start, end) in [(profile, 1421, 1430), (start_date, 1442, 1451)] {
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == parameter)
+                .unwrap();
+            assert_eq!(entity.container, Some(ContainerRef::Entity(function)));
+            let edges: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::Contains
+                        && edge.subject == RelationEndpoint::Entity(function)
+                        && edge.object == RelationEndpoint::Entity(parameter)
+                })
+                .collect();
+            assert_eq!(edges.len(), 1);
+            let source = edges[0].evidence.source.as_ref().unwrap();
+            assert_eq!(source.repository(), document.repository);
+            assert_eq!(source.generation(), document.generation);
+            assert_eq!(source.span().file(), document.files[0].id);
+            assert_eq!(source.content_hash(), content_hash(ORIGINAL.as_bytes()));
+            assert!(source.span().start_byte() <= start && source.span().end_byte() >= end);
+        }
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == 1637
+                    && site.source.span().end_byte() == 1653)
+        );
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Contains
+                    && edge.subject == RelationEndpoint::Entity(profile)
+                    && edge.object == RelationEndpoint::Entity(function))
+        );
+    }
+}

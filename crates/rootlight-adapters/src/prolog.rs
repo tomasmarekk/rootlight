@@ -2,6 +2,9 @@
 //! The scanner preserves byte spans and predicate arity without evaluating
 //! directives or operators. Unrecognized sentences and unanalyzed rule bodies
 //! retain scoped diagnostics; preserved declaration groups are not skipped work.
+//! Closed own-file direct goals use separate required source witnesses.
+
+mod calls;
 
 use rootlight_adapter_sdk::{
     AdapterDiagnostic, AdapterError, CoverageReport, DescriptorError, DiagnosticCode,
@@ -26,7 +29,12 @@ impl PrologParseProvider {
     /// Returns the content identity of this first-party frontend.
     #[must_use]
     pub fn binary_digest() -> ContentHash {
-        content_hash(include_bytes!("prolog.rs"))
+        {
+            let mut input = [0_u8; 64];
+            input[..32].copy_from_slice(content_hash(include_bytes!("prolog.rs")).as_bytes());
+            input[32..].copy_from_slice(content_hash(include_bytes!("prolog/calls.rs")).as_bytes());
+            content_hash(&input)
+        }
     }
 
     /// Creates a parser with the caller's source and syntax-node ceilings.
@@ -76,7 +84,7 @@ impl PrologParseProvider {
             request.limits().syntax_stream().max_diagnostics(),
             cancellation,
         )?;
-        Ok(syntax_fact_count(&parsed.groups))
+        Ok(syntax_fact_count(&parsed.groups) + parsed.calls.len() * 3)
     }
 }
 
@@ -101,7 +109,7 @@ impl ParseProvider for PrologParseProvider {
             request.limits().syntax_stream().max_diagnostics(),
             cancellation,
         )?;
-        let fact_count = syntax_fact_count(&parsed.groups);
+        let fact_count = syntax_fact_count(&parsed.groups) + parsed.calls.len() * 3;
         let file = source.source_ref().span().file();
         let mut facts = Vec::new();
         facts
@@ -135,6 +143,13 @@ impl ParseProvider for PrologParseProvider {
                 .and_then(|offset| offset.checked_add(2))
                 .ok_or_else(|| failure("prolog-syntax-node-limit"))?;
             let head = source_span(file, clause.head_start, clause.head_end)?;
+            let written_head =
+                std::str::from_utf8(&source.bytes()[clause.head_start..clause.head_end])
+                    .map_err(|_| failure("invalid-utf8"))?;
+            let definition_end = clause
+                .head_start
+                .checked_add(written_head.trim_end().len())
+                .ok_or_else(|| failure("prolog-source-offset-limit"))?;
             facts.push(SyntaxFact::new(
                 local_id,
                 Some(1),
@@ -155,12 +170,60 @@ impl ParseProvider for PrologParseProvider {
                 local_id + 2,
                 Some(local_id),
                 SyntaxFactKind::Occurrence,
-                head,
+                source_span(file, clause.head_start, definition_end)?,
                 2,
                 label(definition_label),
             ));
         }
-        for batch in facts.chunks(32) {
+        for (index, call) in parsed.calls.iter().enumerate() {
+            cancellation.check()?;
+            let id = u64::try_from(syntax_fact_count(&parsed.groups))
+                .ok()
+                .and_then(|base| {
+                    u64::try_from(index)
+                        .ok()
+                        .and_then(|index| index.checked_mul(3))
+                        .and_then(|offset| base.checked_add(offset))
+                })
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| failure("prolog-syntax-node-limit"))?;
+            let owner = u64::try_from(call.owner)
+                .ok()
+                .and_then(|value| value.checked_mul(3))
+                .and_then(|value| value.checked_add(2))
+                .ok_or_else(|| failure("prolog-syntax-node-limit"))?;
+            facts.push(SyntaxFact::new(
+                id,
+                Some(owner),
+                SyntaxFactKind::Occurrence,
+                source_span(file, call.start, call.name_end)?,
+                2,
+                label("prolog.direct_goal.reference"),
+            ));
+            facts.push(SyntaxFact::new(
+                id + 1,
+                Some(owner),
+                SyntaxFactKind::Signature,
+                source_span(file, call.start, call.end)?,
+                2,
+                label("prolog.goal_context.signature"),
+            ));
+            facts.push(SyntaxFact::new(
+                id + 2,
+                Some(1),
+                SyntaxFactKind::Signature,
+                source_span(file, parsed.groups[call.target].head_start, call.name_end)?,
+                1,
+                label("prolog.goal_target.signature"),
+            ));
+        }
+        let fact_batch_size = request
+            .limits()
+            .syntax_stream()
+            .batch()
+            .max_records()
+            .min(32);
+        for batch in facts.chunks(fact_batch_size) {
             cancellation.check()?;
             let mut emitted = Vec::new();
             emitted
@@ -262,6 +325,7 @@ enum ClauseKind {
 struct ParsedSource {
     groups: Vec<Clause>,
     clause_count: usize,
+    calls: Vec<calls::DirectCall>,
     gaps: Vec<SourceGap>,
 }
 
@@ -404,7 +468,9 @@ fn scan_source(
         max_diagnostics,
         cancellation,
     )?;
+    let calls = calls::certify(source, &masked, &clauses, max_syntax_nodes, cancellation)?;
     Ok(ParsedSource {
+        calls,
         groups: clauses,
         clause_count,
         gaps,
@@ -591,10 +657,10 @@ fn mask_non_code(source: &[u8], cancellation: &Cancellation) -> Result<MaskedSou
         } else {
             None
         };
-        let quoted_atom_start = !line_comment
+        let quoted_literal_start = !line_comment
             && block_depth == 0
             && quote.is_none()
-            && byte == b'\''
+            && matches!(byte, b'\'' | b'"' | b'`')
             && character_code.is_none();
         let length = if line_comment {
             if byte == b'\n' {
@@ -658,12 +724,12 @@ fn mask_non_code(source: &[u8], cancellation: &Cancellation) -> Result<MaskedSou
                 *byte = b' ';
             }
         }
-        if quoted_atom_start {
-            // Keep only the opening marker so a quoted functor can start a
-            // sentence; its punctuation and delimiters stay masked as data.
+        if quoted_literal_start {
+            // Preserve each literal's start so closed-source proofs cannot
+            // erase unsupported syntax as layout; interiors remain opaque.
             *masked
                 .get_mut(index)
-                .ok_or_else(|| failure("prolog-source-span-invalid"))? = b'\'';
+                .ok_or_else(|| failure("prolog-source-span-invalid"))? = byte;
         }
         index = end;
     }
@@ -1137,6 +1203,18 @@ mod tests {
         Result<usize, AdapterError>,
         Result<ParseOutput, AdapterError>,
     ) {
+        parse_fixture_with_batch(bytes, maximum_nodes, maximum_diagnostics, 32)
+    }
+
+    fn parse_fixture_with_batch(
+        bytes: &[u8],
+        maximum_nodes: usize,
+        maximum_diagnostics: usize,
+        batch_records: usize,
+    ) -> (
+        Result<usize, AdapterError>,
+        Result<ParseOutput, AdapterError>,
+    ) {
         let temporary = tempfile::tempdir().expect("fixture directory is created");
         fs::write(temporary.path().join("source.pl"), bytes).expect("fixture source is written");
         let repository_id = "repo1_3hhm6hhk3shhmievg6ra3yjlhp2wuv5v"
@@ -1163,7 +1241,7 @@ mod tests {
             snapshot.content_hash(),
             None,
         );
-        let batch = BatchThresholds::new(32, 32 * 1024, maximum_diagnostics, 4096)
+        let batch = BatchThresholds::new(batch_records, 32 * 1024, maximum_diagnostics, 4096)
             .expect("fixture batch ceilings are valid");
         let stream = StreamLimits::new(
             64,
@@ -1209,5 +1287,38 @@ mod tests {
             &cancellation,
         );
         (required, output)
+    }
+
+    #[test]
+    fn original_sixteen_facts_honor_eight_record_batches() {
+        let source = include_bytes!("../tests/fixtures/prolog_head/age.pl");
+        assert_eq!(source.len(), 353);
+        assert_eq!(&source[200..208], b"birthDay");
+        let (required, parsed) = parse_fixture_with_batch(source, 16, 64, 8);
+        assert_eq!(
+            required.expect("original required proof cardinality is sixteen"),
+            16
+        );
+        let parsed = parsed.expect("the SDK accepts all sixteen facts in batches of at most eight");
+        assert_eq!(parsed.facts().len(), 16);
+        assert_eq!(parsed.report().resources().syntax_nodes(), 16);
+        assert_eq!(parsed.report().end().usage().records(), 16);
+        assert_eq!(parsed.report().end().next_sequence(), 3);
+        assert_eq!(parsed.diagnostics().len(), 2);
+        let goals: Vec<_> = parsed
+            .facts()
+            .iter()
+            .filter(|fact| fact.syntax_kind().as_str() == "prolog.direct_goal.reference")
+            .collect();
+        assert_eq!(goals.len(), 2);
+        assert_eq!(
+            (goals[0].span().start_byte(), goals[0].span().end_byte()),
+            (200, 208)
+        );
+        assert!(parsed.diagnostics().iter().all(|diagnostic| {
+            diagnostic
+                .source()
+                .is_some_and(|evidence| evidence.content_hash() == content_hash(source))
+        }));
     }
 }
