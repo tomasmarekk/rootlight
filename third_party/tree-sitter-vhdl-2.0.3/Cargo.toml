@@ -1,0 +1,25 @@
+# Local native binding; upstream lifecycle and optional query exports are inert.
+[package]
+name = "tree-sitter-vhdl"
+version = "2.0.3"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+license-file = "LICENSE"
+readme = "upstream/Readme.md"
+repository = "https://github.com/jpt13653903/tree-sitter-vhdl"
+description = "Pinned VHDL syntax tables with a reviewed local scanner"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = "=0.26.11"

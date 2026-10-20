@@ -1,0 +1,23 @@
+==================
+on-clause
+==================
+(module
+  (func
+    (resume (on $yield $on_yield) (on $yield switch))
+  )
+)
+---
+
+(root
+  (module
+    (module_field_func
+      (plain_instr
+        (instr_name)
+        (on_clause
+          (index
+            (identifier))
+          (index
+            (identifier)))
+        (on_clause
+          (index
+            (identifier)))))))

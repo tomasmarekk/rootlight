@@ -1,0 +1,530 @@
+===
+struct
+===
+
+c: {
+    for x in a
+    if x < 4
+    let y = 1 {
+        "\(x)": x + y
+    }
+}
+
+---
+
+(source_file
+ (field (label (identifier))
+	(value (struct_lit
+					(comprehension
+					 (for_clause (identifier) (identifier))
+					 (guard_clause (binary_expression (identifier) (number)))
+					 (let_clause (identifier) (number))
+					 (struct_lit
+					  (field
+						 (label (string (interpolation (identifier))))
+						 (value (binary_expression (identifier) (identifier))))))))))
+
+===
+list
+===
+
+b: [ for x in a if x > 1 { x+1 } ]
+
+--
+
+(source_file
+ (field (label (identifier))
+	(value (list_lit
+					(comprehension
+					 (for_clause (identifier) (identifier))
+					 (guard_clause (binary_expression (identifier) (number)))
+					 (struct_lit (binary_expression (identifier) (number))))))))
+
+===
+if-else
+===
+
+if enabled { a: 1 } else { b: 2 }
+
+---
+
+(source_file
+ (comprehension
+  (guard_clause (identifier))
+  (struct_lit (field (label (identifier)) (value (number))))
+  (else_clause (struct_lit (field (label (identifier)) (value (number)))))))
+
+===
+for-else
+===
+
+for x in list { (x): true } else { empty: true }
+
+---
+
+(source_file
+ (comprehension
+  (for_clause (identifier) (identifier))
+  (struct_lit (field (label (dynamic (identifier))) (value (boolean))))
+  (else_clause (struct_lit (field (label (identifier)) (value (boolean)))))))
+
+===
+try struct form
+===
+
+try { x: a }
+
+---
+
+(source_file
+ (comprehension
+  (try_clause)
+  (struct_lit (field (label (identifier)) (value (identifier))))))
+
+===
+try assignment form
+===
+
+try x = a { result: x }
+
+---
+
+(source_file
+ (comprehension
+  (try_clause left: (identifier) right: (identifier))
+  (struct_lit (field (label (identifier)) (value (identifier))))))
+
+===
+try with else
+===
+
+try { b: a } else { b: 0 }
+
+---
+
+(source_file
+ (comprehension
+  (try_clause)
+  (struct_lit (field (label (identifier)) (value (identifier))))
+  (else_clause (struct_lit (field (label (identifier)) (value (number)))))))
+
+===
+for with try
+===
+
+for x in list try { y: x }
+
+---
+
+(source_file
+ (comprehension
+  (for_clause (identifier) (identifier))
+  (try_clause)
+  (struct_lit (field (label (identifier)) (value (identifier))))))
+
+===
+try assignment chained
+===
+
+try x = a try y = b { result: x }
+
+---
+
+(source_file
+ (comprehension
+  (try_clause left: (identifier) right: (identifier))
+  (try_clause left: (identifier) right: (identifier))
+  (struct_lit (field (label (identifier)) (value (identifier))))))
+
+===
+postfix optional
+===
+
+try { x: a? }
+
+---
+
+(source_file
+ (comprehension
+  (try_clause)
+  (struct_lit (field (label (identifier)) (value (postfix_expression (identifier)))))))
+
+===
+field named else after a comprehension
+===
+
+x: {
+	for a in [] {}
+	else: 1
+}
+
+---
+
+(source_file
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (for_clause (identifier) (list_lit))
+     (struct_lit))
+    (field (label (identifier)) (value (number)))))))
+
+===
+fields named otherwise and fallback after comprehensions
+===
+
+x: {
+	for a in [] {}
+	otherwise: 1
+	for b in [] {}
+	fallback: 2
+}
+
+---
+
+(source_file
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (for_clause (identifier) (list_lit))
+     (struct_lit))
+    (field (label (identifier)) (value (number)))
+    (comprehension
+     (for_clause (identifier) (list_lit))
+     (struct_lit))
+    (field (label (identifier)) (value (number)))))))
+
+===
+otherwise and fallback as references
+===
+
+otherwise: 1
+fallback:  2
+x: otherwise
+y: fallback + 1
+z: {
+	for a in [] {}
+	otherwise
+}
+
+---
+
+(source_file
+ (field (label (identifier)) (value (number)))
+ (field (label (identifier)) (value (number)))
+ (field (label (identifier)) (value (identifier)))
+ (field (label (identifier)) (value (binary_expression (identifier) (number))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (for_clause (identifier) (list_lit))
+     (struct_lit))
+    (identifier)))))
+
+===
+otherwise and fallback called as functions
+===
+
+a: otherwise(1)
+b: fallback(1, 2)
+
+---
+
+(source_file
+ (field
+  (label (identifier))
+  (value (call_expression (identifier) (arguments (number)))))
+ (field
+  (label (identifier))
+  (value (call_expression (identifier) (arguments (number) (number))))))
+
+===
+clauses followed by a declaration
+===
+
+for v in [] {a: v} otherwise {b: 1}
+c: 2
+x: {
+	if true {d: 3} else {e: 4}
+	f: 5
+}
+y: {
+	for v in [] {g: v} fallback {h: 6}
+	i: 7
+}
+
+---
+
+(source_file
+ (comprehension
+  (for_clause (identifier) (list_lit))
+  (struct_lit (field (label (identifier)) (value (identifier))))
+  (else_clause (struct_lit (field (label (identifier)) (value (number))))))
+ (field (label (identifier)) (value (number)))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (guard_clause (boolean))
+     (struct_lit (field (label (identifier)) (value (number))))
+     (else_clause (struct_lit (field (label (identifier)) (value (number))))))
+    (field (label (identifier)) (value (number))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (for_clause (identifier) (list_lit))
+     (struct_lit (field (label (identifier)) (value (identifier))))
+     (else_clause (struct_lit (field (label (identifier)) (value (number))))))
+    (field (label (identifier)) (value (number)))))))
+
+===
+try and else as references
+===
+
+try:  1
+else: 2
+x: try
+y: else
+z: {
+	try
+}
+
+---
+
+(source_file
+ (field (label (identifier)) (value (number)))
+ (field (label (identifier)) (value (number)))
+ (field (label (identifier)) (value (identifier)))
+ (field (label (identifier)) (value (identifier)))
+ (field (label (identifier)) (value (struct_lit (identifier)))))
+
+===
+if, for and let as references
+===
+
+if:  1
+for: 2
+let: 3
+x: if
+y: for
+z: let
+w: {
+	if
+}
+
+---
+
+(source_file
+ (field (label (identifier)) (value (number)))
+ (field (label (identifier)) (value (number)))
+ (field (label (identifier)) (value (number)))
+ (field (label (identifier)) (value (identifier)))
+ (field (label (identifier)) (value (identifier)))
+ (field (label (identifier)) (value (identifier)))
+ (field (label (identifier)) (value (struct_lit (identifier)))))
+
+===
+if with a list condition directly after it
+===
+
+x: true
+f: {if[x][0] {g: 1}}
+
+---
+
+(source_file
+ (field (label (identifier)) (value (boolean)))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (guard_clause
+      condition: (index_expression
+       (list_lit (identifier))
+       index: (number)))
+     (struct_lit (field (label (identifier)) (value (number)))))))))
+
+===
+try and else called as functions
+===
+
+a: try(1)
+b: else(1)
+
+---
+
+(source_file
+ (field
+  (label (identifier))
+  (value (call_expression (identifier) (arguments (number)))))
+ (field
+  (label (identifier))
+  (value (call_expression (identifier) (arguments (number))))))
+
+===
+try assignment to _
+===
+
+x: {
+	try _ = a? {b: 1}
+}
+
+---
+
+(source_file
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (try_clause right: (postfix_expression (identifier)))
+     (struct_lit (field (label (identifier)) (value (number)))))))))
+
+===
+try and else as references followed by a declaration
+===
+
+a: {
+	try
+	b: 1
+}
+c: {
+	try
+	let d = 1
+	e: d
+}
+f: {
+	else
+	g: 2
+}
+h: {
+	try for x in l {i: x}
+	try let y = a? {j: y}
+}
+
+---
+
+(source_file
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (identifier)
+    (field (label (identifier)) (value (number))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (identifier)
+    (let_clause left: (identifier) right: (number))
+    (field (label (identifier)) (value (identifier))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (identifier)
+    (field (label (identifier)) (value (number))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (try_clause)
+     (for_clause (identifier) (identifier))
+     (struct_lit (field (label (identifier)) (value (identifier)))))
+    (comprehension
+     (try_clause)
+     (let_clause left: (identifier) right: (postfix_expression (identifier)))
+     (struct_lit (field (label (identifier)) (value (identifier)))))))))
+
+===
+if with a parenthesized condition directly after it
+===
+
+x: true
+if(x) {a: 1}
+b: [if(x) {c: 1}]
+d: {if(x) && (x) {e: 1}}
+
+---
+
+(source_file
+ (field (label (identifier)) (value (boolean)))
+ (comprehension
+  (guard_clause condition: (parenthesized_expression (identifier)))
+  (struct_lit (field (label (identifier)) (value (number)))))
+ (field
+  (label (identifier))
+  (value
+   (list_lit
+    (comprehension
+     (guard_clause condition: (parenthesized_expression (identifier)))
+     (struct_lit (field (label (identifier)) (value (number))))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (comprehension
+     (guard_clause
+      condition: (binary_expression
+       left: (parenthesized_expression (identifier))
+       right: (parenthesized_expression (identifier))))
+     (struct_lit (field (label (identifier)) (value (number)))))))))
+
+===
+if, for and let as references followed by a declaration
+===
+
+x: {
+	if
+	b: 1
+}
+y: {
+	for
+	c: 1
+}
+z: {
+	let
+	d: 1
+}
+w: {
+	if
+	-1
+}
+
+---
+
+(source_file
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (identifier)
+    (field (label (identifier)) (value (number))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (identifier)
+    (field (label (identifier)) (value (number))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (identifier)
+    (field (label (identifier)) (value (number))))))
+ (field
+  (label (identifier))
+  (value
+   (struct_lit
+    (identifier)
+    (unary_expression argument: (number))))))

@@ -1,0 +1,11 @@
+{
+    "compilerOptions": {
+        "strict": true,
+        "target": "es2020",
+        "moduleResolution": "nodenext"
+    },
+    "files": [
+        "./grammar.ts",
+        "./node_modules/tree-sitter-cli/dsl.d.ts"
+    ]
+}

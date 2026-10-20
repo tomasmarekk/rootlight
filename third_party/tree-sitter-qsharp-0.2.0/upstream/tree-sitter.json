@@ -1,0 +1,29 @@
+{
+  "grammars": [
+    {
+      "name": "qsharp",
+      "camelCase": "qsharp",
+      "scope": "source.qsharp",
+      "path": ".",
+      "file-types": ["qs"],
+      "highlights": "queries/highlights.scm",
+      "tags": "queries/tags.scm",
+      "folds": "queries/folds.scm",
+      "indents": "queries/indents.scm",
+      "injection-regex": "^(qsharp|qs|q#)$"
+    }
+  ],
+  "metadata": {
+    "version": "0.2.0",
+    "license": "MIT",
+    "description": "Q# grammar for tree-sitter",
+    "authors": [
+      {
+        "name": "bezpechno"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/bezpechno/tree-sitter-qsharp"
+    }
+  }
+}

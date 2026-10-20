@@ -1,0 +1,1689 @@
+{
+  "schema": "rootlight.vhdl-static-source-inventory/1",
+  "files": [
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 713,
+      "sha256": "0fed480b3a76cbac66732187da5139ac81f9ab12bbea3691924fd88f56cd41df"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 730,
+      "sha256": "94b2119b22b627d9b967e6cb698b631b270ad1d8ff3faffdaf8970228536d22b"
+    },
+    {
+      "path": "bindings/rust/tests.rs",
+      "bytes": 3518,
+      "sha256": "d69cf51cb062dff452a6a5b8e1117cba33aba6082af30d82b2e7c727f053bbc2"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 596,
+      "sha256": "18147e9862fad55a461ac5034d02d445a80f4dbf99006aabf481a8224fa4590a"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 74545,
+      "sha256": "1b486487faa5e199318c288c0293a0ef156f731f3f64b5034386d796c29d5f81"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1077,
+      "sha256": "a9323218abe9aabd3429b76634470b40c3be012600e1f96bd16ca254724fa954"
+    },
+    {
+      "path": "patches/scanner-safety.patch",
+      "bytes": 5399,
+      "sha256": "f85c53fe2d814a66ebd4d40e7cc9266291430d91da63650e1b6f995b7986627a"
+    },
+    {
+      "path": "src/debug_macros.h",
+      "bytes": 4377,
+      "sha256": "d67c7d65af0c5a7209a535255d5de74e92fc994e445a8dda36bc5873ffcfad2e"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 283977,
+      "sha256": "da5b1ed4ae959dcf3b2d443c6390fc79924223ad0984daa923b8f907319b46ad"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 211585,
+      "sha256": "a8fbb248fef42fb912a9f8b5f8fe3e350ded4cbc5ac080ce02c7aaf67399929a"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 9145496,
+      "sha256": "1953b218e6f19861094e908f3967f6387d5a72c6b81f41ae0cec8746149671d0"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 28175,
+      "sha256": "b98b82c88bb881ff49fb2eea8b6c4e869fd1a923b89f8794a996098b734b8f6c"
+    },
+    {
+      "path": "src/token_tree_match.inc",
+      "bytes": 1246538,
+      "sha256": "1b61902d6ebba726800ca82b39df00e8522b3db804027879df4f54d294840fff"
+    },
+    {
+      "path": "src/TokenTree.h",
+      "bytes": 1258,
+      "sha256": "35b86315cac1e7c8caf157c6adf12d25bb58fba2fd4e766b43613046fcb67893"
+    },
+    {
+      "path": "src/TokenTree.inc",
+      "bytes": 845,
+      "sha256": "b58ab34db45a9b0f097f5dd549e375fd3e2e9355d0ef20e27ff8cbecc76ec247"
+    },
+    {
+      "path": "src/TokenType.h",
+      "bytes": 4633,
+      "sha256": "b0eacaa21138fa29f06d74946d66017e79684f27fee91b0288745b33d2a03839"
+    },
+    {
+      "path": "src/TokenType.inc",
+      "bytes": 16671,
+      "sha256": "cefde62d6d773164c8a6108420d35327d5b8fac695b6b35bbd5741ff370aa44f"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "path": "tests/scanner_controls.c",
+      "bytes": 8916,
+      "sha256": "5f1651f547ee60917d86d40d4338ebc357ccab853b3cbd87279866e8e3768f3a"
+    },
+    {
+      "path": "upstream/.editorconfig",
+      "bytes": 548,
+      "sha256": "238ab8fa954515919830bcad283037d6756c78a850dea7c12291236e8c952c26"
+    },
+    {
+      "path": "upstream/.gitattributes.upstream",
+      "bytes": 358,
+      "sha256": "03e3575323a4ba81a87ab9dcb69851c9c6470a2be55e5227d865c854d043552d"
+    },
+    {
+      "path": "upstream/.github/dependabot.yml",
+      "bytes": 816,
+      "sha256": "01bfcdfb3b05238ebe8aa3102a58c274ca30688165e3ea8cd2a3afd8dbe537ce"
+    },
+    {
+      "path": "upstream/.github/ISSUE_TEMPLATE/bug_report.yml",
+      "bytes": 2433,
+      "sha256": "db2edc8c432d31dfa0b6520348392d84a070111aded43505643a5cae6d846312"
+    },
+    {
+      "path": "upstream/.github/ISSUE_TEMPLATE/config.yml",
+      "bytes": 156,
+      "sha256": "c9a0895c8fbb7e0fbe4286838390471697012e44ae6f7d95a6d5c0cdc004e35e"
+    },
+    {
+      "path": "upstream/.github/ISSUE_TEMPLATE/feature_request.yml",
+      "bytes": 1648,
+      "sha256": "43cf96e6a5365b19bd86bb212340f17dfc1bd91143d37bb6f4e5cdf039667bb6"
+    },
+    {
+      "path": "upstream/.github/workflows/ci.yml",
+      "bytes": 1072,
+      "sha256": "02ab7913e7860a49e6fd64b1a970ba60466ebafb7fca021ea9843c96a92d0dfc"
+    },
+    {
+      "path": "upstream/.github/workflows/fuzz.yml",
+      "bytes": 331,
+      "sha256": "627f938fabffc67462a3b32e76464b1bb294d786f1cead34e9893348cd8b4fd4"
+    },
+    {
+      "path": "upstream/.github/workflows/indent.yml",
+      "bytes": 1303,
+      "sha256": "1d87720b76ffebf17a4a729c3d1ad0f510c9c941dde87799d890e13a0b776dab"
+    },
+    {
+      "path": "upstream/.github/workflows/publish.yml",
+      "bytes": 286,
+      "sha256": "765bdc6e8fdb7a0b227e1e4e1ce8424cd92e760eb71d53ca32db2e3c64598b57"
+    },
+    {
+      "path": "upstream/.github/workflows/regenerate.yml",
+      "bytes": 320,
+      "sha256": "611351073e9a8dc40e603f13c301b600454ec1c017f36387e8baed6988dff55f"
+    },
+    {
+      "path": "upstream/.github/workflows/release.yml",
+      "bytes": 319,
+      "sha256": "845dc10d789a32944de8c73f44160a02f02865f88afef714027e1aea56c6fd33"
+    },
+    {
+      "path": "upstream/.gitignore.upstream",
+      "bytes": 397,
+      "sha256": "0e278bc1e46a4958b2706b1ca0017f0ef9c19a3eee316f4ff154b4063df64ced"
+    },
+    {
+      "path": "upstream/autogen/core.py",
+      "bytes": 17000,
+      "sha256": "0aa1ee89a75e91b4b7293eaaa58b72bafbb68a57f7d42cf5d3a82dfe4b343adf"
+    },
+    {
+      "path": "upstream/autogen/gen_token_trie.py",
+      "bytes": 3382,
+      "sha256": "77f7d8b54d6140143ef758bfa1d5739bfb283a4d7f557d391dd5cae38c47ec33"
+    },
+    {
+      "path": "upstream/autogen/ieee/fixed_pkg.py",
+      "bytes": 3451,
+      "sha256": "35481e126125ce1b73f14f9ba41b8be42c686ee1e44f5a3506b76b829cd5d1a7"
+    },
+    {
+      "path": "upstream/autogen/ieee/float_pkg.py",
+      "bytes": 4138,
+      "sha256": "99eeb017af4edec0d30de49d48c321788faa2c46b0f7b4f11cb7952ac5929004"
+    },
+    {
+      "path": "upstream/autogen/ieee/math_complex.py",
+      "bytes": 1327,
+      "sha256": "2cb8424134ea53cb73f25328972153e55673503c8e370d5c05686cc73f225570"
+    },
+    {
+      "path": "upstream/autogen/ieee/math_real.py",
+      "bytes": 2996,
+      "sha256": "f1826fca7ede4086f919df8db10e0e8713ff976e21763b6e5f5e1206403a48a7"
+    },
+    {
+      "path": "upstream/autogen/ieee/numeric_std.py",
+      "bytes": 1747,
+      "sha256": "44b786373c5806de9414fed666b7178637e9812145652ca18c57d032b8d4c4f6"
+    },
+    {
+      "path": "upstream/autogen/ieee/std_logic_1164.py",
+      "bytes": 3448,
+      "sha256": "229d5d9766e829619937f0a41b5ede27953f3135e2ddcf06365f837288b4fe61"
+    },
+    {
+      "path": "upstream/autogen/std/env.py",
+      "bytes": 6236,
+      "sha256": "093db24d86cb7e8e421f33a944ff30c8f5088e61f852b0565612052d975f0cb5"
+    },
+    {
+      "path": "upstream/autogen/std/standard.py",
+      "bytes": 11199,
+      "sha256": "9e8d8c4faf8c0ae64319e02bc908d67ee4658a799772dcf01aad750cfb3eeed3"
+    },
+    {
+      "path": "upstream/autogen/std/textio.py",
+      "bytes": 3407,
+      "sha256": "34e02c65fd2c06db42861f247b8aa7a2aae0d1d8d6be4e9e8b6c00fa1734eabe"
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 763,
+      "sha256": "409719f132da20ab265486f4f71e7c0ecc0bef90414ae8c042d6649556e816cf"
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-vhdl.pc.in",
+      "bytes": 293,
+      "sha256": "c115df59dee7aad1a8c2c2548596b27d863de604b8a2abc15458e321b4eeebe7"
+    },
+    {
+      "path": "upstream/bindings/c/tree_sitter/tree-sitter-vhdl.h",
+      "bytes": 238,
+      "sha256": "bd8b19bf524ac91b783b0f3cabbd688d13d408d17e58f952233cc4b7df1fb867"
+    },
+    {
+      "path": "upstream/bindings/go/binding.go",
+      "bytes": 337,
+      "sha256": "4985c4cfb402a9f8eaf53312bb2a8a1e6651be1383cb094f4ef3832840cee41a"
+    },
+    {
+      "path": "upstream/bindings/go/binding_test.go",
+      "bytes": 354,
+      "sha256": "bfa3b49d5426a95eb07942bf027d5c0545422e8cd17d96a3995b5c1b903e6492"
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 523,
+      "sha256": "fe925726ffa5ec1ec30e8427212ee95d93b5692a14c0f2f59a79a1f59c6d6708"
+    },
+    {
+      "path": "upstream/bindings/node/binding_test.js",
+      "bytes": 310,
+      "sha256": "d21db69cd974fafa44724a73dd9788d3b393a4d6af68f65a58486548e5b00f58"
+    },
+    {
+      "path": "upstream/bindings/node/index.d.ts",
+      "bytes": 1327,
+      "sha256": "2a941066b0bce05eab4c15bef6f363eed92458128d790d8115767a522d0acb58"
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 1174,
+      "sha256": "047debed34ea90342cd6f39be9e9c9d04618bee06ed8dfd0bc77f7ad6b378c41"
+    },
+    {
+      "path": "upstream/bindings/python/tests/test_binding.py",
+      "bytes": 314,
+      "sha256": "2f3297195aed07f38aa9c53865ea1c077eda1447ee8937e5e0863735ce3b06cb"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_vhdl/__init__.py",
+      "bytes": 1248,
+      "sha256": "3bd0de4b0f97263a57a079a63fa1174b2d865a35579eee252253555f0d3dad9a"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_vhdl/__init__.pyi",
+      "bytes": 504,
+      "sha256": "fceb2c08289d035296c8ce9df63df8df2e40cd2bcf72d7d9f601394ce7ff577c"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_vhdl/binding.c",
+      "bytes": 832,
+      "sha256": "1a4b3586a50de802dce129b50b96d23d4d70e5ec60c1720b08fcff1e43f65657"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_vhdl/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 1869,
+      "sha256": "b5afd865a9634b94a7780dd793de31a91932cbb6e9fb671642ff778a99791709"
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 2065,
+      "sha256": "b31f2049bb8c83f9e14edce865ea7b7f3f0545f86681a1cee88f6d81216b854e"
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterVhdl/vhdl.h",
+      "bytes": 238,
+      "sha256": "bd8b19bf524ac91b783b0f3cabbd688d13d408d17e58f952233cc4b7df1fb867"
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterVhdlTests/TreeSitterVhdlTests.swift",
+      "bytes": 359,
+      "sha256": "8795f3da7cef9c457f93f10a0e5656442e07107f6e4567395826cfa83a635aac"
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 696,
+      "sha256": "008634d9379159f8530c7fefc3a42d498cd47d58eb2f60a1b8d01f198cda4001"
+    },
+    {
+      "path": "upstream/CMakeLists.txt",
+      "bytes": 3489,
+      "sha256": "32ab66f70b5ae2f360ea92cf7b5353f967e28a51e1dc12c79a76c06d4cc101e5"
+    },
+    {
+      "path": "upstream/Contributing.md",
+      "bytes": 1293,
+      "sha256": "45d8a610a9be35e02b820d99b0e78bfebe14ed227b343d7a0d41e20cad1d2c83"
+    },
+    {
+      "path": "upstream/examples/Screenshot.png",
+      "bytes": 208393,
+      "sha256": "9b4e200f172d6ee53cbd70e8e35ddab1cc66bf3fef5f84eb0c17d091a7050f47"
+    },
+    {
+      "path": "upstream/examples/Screenshot.vhd",
+      "bytes": 2944,
+      "sha256": "2f668d4da0af37c6e5c1110a41810f0782f5eca60725c08d789ef3377beae132"
+    },
+    {
+      "path": "upstream/examples/Screenshot_OneDark.png",
+      "bytes": 287766,
+      "sha256": "72dac71d8d6a3ca709bf9c8d49ad42102d817ce113dd759aa181f2b1da8de160"
+    },
+    {
+      "path": "upstream/examples/Screenshot_TokyoNight.png",
+      "bytes": 283181,
+      "sha256": "982f0c30474c731f0ee4ffcc68287629ef05e7977c2add653f347353cfe047f4"
+    },
+    {
+      "path": "upstream/get_queries.sh",
+      "bytes": 62,
+      "sha256": "61402c864210e65a3ae235c9ee827cf7f9f65d7291a69c4ab0217e2fac4bf07e"
+    },
+    {
+      "path": "upstream/go.mod",
+      "bytes": 111,
+      "sha256": "fb87241fc710350e9fe0e20e95ab81a47218bc981c22300bf290f6e19aaead6e"
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 74545,
+      "sha256": "1b486487faa5e199318c288c0293a0ef156f731f3f64b5034386d796c29d5f81"
+    },
+    {
+      "path": "upstream/License.md",
+      "bytes": 1077,
+      "sha256": "a9323218abe9aabd3429b76634470b40c3be012600e1f96bd16ca254724fa954"
+    },
+    {
+      "path": "upstream/Makefile",
+      "bytes": 4195,
+      "sha256": "e1b962b9dc772a47590eb770b2a3daca119c5409cebf30e7643dd1f663e30cb2"
+    },
+    {
+      "path": "upstream/package-lock.json",
+      "bytes": 12374,
+      "sha256": "c7fc5bec93a43355a50acd7255d9fd061e7c7ad595e065e8fdc6130e245400e0"
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 1367,
+      "sha256": "44e164815fc31ae7cf184e5950de8d17301bc1aa1e36430484d596fe1ae24fc3"
+    },
+    {
+      "path": "upstream/Package.swift",
+      "bytes": 1165,
+      "sha256": "869bc3f301b36e55edb8411b0c9567251ecc795961e60c7ae698f01439a26e92"
+    },
+    {
+      "path": "upstream/pyproject.toml",
+      "bytes": 739,
+      "sha256": "43f2b405a5bca6fccf4ee5aa4188afd9a63604400588f87b11c7583e2b60d8ba"
+    },
+    {
+      "path": "upstream/queries/Helix/highlights.scm",
+      "bytes": 5432,
+      "sha256": "38bd50b6298fb644259ff79bd56ac262af3ccc5e539afb5cc37bf54ac775ff5b"
+    },
+    {
+      "path": "upstream/queries/Neovim/context.scm",
+      "bytes": 1443,
+      "sha256": "b6460f670ff2cf5d810bca5458dcd3057e7479628aff8acd909f6e52261d4757"
+    },
+    {
+      "path": "upstream/queries/Neovim/folds.scm",
+      "bytes": 1610,
+      "sha256": "f767c291dd75569d545684533bb07a9340891b201851668b6e329c6b4cb3e67b"
+    },
+    {
+      "path": "upstream/queries/Neovim/highlights.scm",
+      "bytes": 5904,
+      "sha256": "06c798421e37891fd5e76b57087459c6d1d9a2692dd9980bfc0328cdb10901a3"
+    },
+    {
+      "path": "upstream/queries/Neovim/indents.scm",
+      "bytes": 2260,
+      "sha256": "f033cf189b93d237bb67f7b65974193bc06c7652e11d917b4e0064496d1780d5"
+    },
+    {
+      "path": "upstream/queries/Neovim/injections.scm",
+      "bytes": 544,
+      "sha256": "69873618417e85024d30efee76d8f2f520bbb2ed5af0ad1590a8f488a2db75bf"
+    },
+    {
+      "path": "upstream/queries/Neovim/textobjects.scm",
+      "bytes": 9284,
+      "sha256": "5c61002abe19bc8e0302fb769118236b6bb4c23e218c168c766db5b7f6fa0103"
+    },
+    {
+      "path": "upstream/Readme.md",
+      "bytes": 4945,
+      "sha256": "f1226666ec009be03f32968098a3a081b2848f81ddab2000e5165cbec3abc627"
+    },
+    {
+      "path": "upstream/set_queries.sh",
+      "bytes": 62,
+      "sha256": "cfcc6902d7aca89ace61560a719e917fa3e74bd7b382896075addb32c676369f"
+    },
+    {
+      "path": "upstream/setup.py",
+      "bytes": 2391,
+      "sha256": "d54a8763ed2dd6f0765d0c597fd726a53d4ac412c8c9c6a4e9e3b6cd6c7c6286"
+    },
+    {
+      "path": "upstream/src/debug_macros.h",
+      "bytes": 4377,
+      "sha256": "d67c7d65af0c5a7209a535255d5de74e92fc994e445a8dda36bc5873ffcfad2e"
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 283977,
+      "sha256": "da5b1ed4ae959dcf3b2d443c6390fc79924223ad0984daa923b8f907319b46ad"
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 211585,
+      "sha256": "a8fbb248fef42fb912a9f8b5f8fe3e350ded4cbc5ac080ce02c7aaf67399929a"
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 9145496,
+      "sha256": "1953b218e6f19861094e908f3967f6387d5a72c6b81f41ae0cec8746149671d0"
+    },
+    {
+      "path": "upstream/src/scanner.c",
+      "bytes": 24981,
+      "sha256": "17b9aa0401ce9d80327fdbe7972a2f1e6de54c03e2c897e85acc9d5a7efed80f"
+    },
+    {
+      "path": "upstream/src/token_tree_match.inc",
+      "bytes": 1246538,
+      "sha256": "1b61902d6ebba726800ca82b39df00e8522b3db804027879df4f54d294840fff"
+    },
+    {
+      "path": "upstream/src/TokenTree.h",
+      "bytes": 1258,
+      "sha256": "35b86315cac1e7c8caf157c6adf12d25bb58fba2fd4e766b43613046fcb67893"
+    },
+    {
+      "path": "upstream/src/TokenTree.inc",
+      "bytes": 845,
+      "sha256": "b58ab34db45a9b0f097f5dd549e375fd3e2e9355d0ef20e27ff8cbecc76ec247"
+    },
+    {
+      "path": "upstream/src/TokenType.h",
+      "bytes": 4633,
+      "sha256": "b0eacaa21138fa29f06d74946d66017e79684f27fee91b0288745b33d2a03839"
+    },
+    {
+      "path": "upstream/src/TokenType.inc",
+      "bytes": 16671,
+      "sha256": "cefde62d6d773164c8a6108420d35327d5b8fac695b6b35bbd5741ff370aa44f"
+    },
+    {
+      "path": "upstream/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "upstream/src/tree_sitter/array.h",
+      "bytes": 13453,
+      "sha256": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2"
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "path": "upstream/test/corpus/architecture_basic.vhd",
+      "bytes": 1452,
+      "sha256": "9d6d3adfa8fdafe7f43466ad0ff78414af0c8d23b3f3f368f6d8802d4cdca849"
+    },
+    {
+      "path": "upstream/test/corpus/bit_values.vhd",
+      "bytes": 3155,
+      "sha256": "71a53e4ff0de27a5b52b16720bd3c9a3750597fb6a708d613b56380a85412c27"
+    },
+    {
+      "path": "upstream/test/corpus/comments.vhd",
+      "bytes": 980,
+      "sha256": "e605e7b8e7f5df58b4867c1eca7fa064f415c66ac52f57619f94d27e46c3586d"
+    },
+    {
+      "path": "upstream/test/corpus/entity.vhd",
+      "bytes": 12275,
+      "sha256": "362fc3d8e92cd93dc56329c800108680d5748d9fd191c27296bb5dc57abe993e"
+    },
+    {
+      "path": "upstream/test/corpus/if_generate.vhd",
+      "bytes": 2612,
+      "sha256": "1099d9685c187d19d5c5b4a26243c4c0d86522accc4dd104ee6e84bcbe8fcdd7"
+    },
+    {
+      "path": "upstream/test/corpus/if_statement.vhd",
+      "bytes": 3556,
+      "sha256": "8ac6d66e59409b525ce85fb73e4b6d6cb9aa7dcc930bcee8849bb92207ee85fc"
+    },
+    {
+      "path": "upstream/test/corpus/library_constant_as_identifier.vhd",
+      "bytes": 119575,
+      "sha256": "d9c3fc84260876c4ce3c18361a80eba6ea1fea75bc7be33136efc99215245acc"
+    },
+    {
+      "path": "upstream/test/corpus/library_constant_break.vhd",
+      "bytes": 1307,
+      "sha256": "54fe3ea79cad4c17fa7eec403fd4a0fc5c0ff527909eea0061a0deda3587719e"
+    },
+    {
+      "path": "upstream/test/corpus/literals.vhd",
+      "bytes": 13411,
+      "sha256": "22aec22cfdf118f904b358334cb29f1227e850dadc9573ee6c20bd146789f86a"
+    },
+    {
+      "path": "upstream/test/corpus/prioritised_if.vhd",
+      "bytes": 10111,
+      "sha256": "674bf5dedc4014089fe49232ee95668fb2b7a8509e983f72e71b03b4f1a9b3be"
+    },
+    {
+      "path": "upstream/test/corpus/specification_examples/architecture.vhd",
+      "bytes": 35107,
+      "sha256": "16ad0d943ea098450c6bab0184504a0b9a8ac8218e40ff075d97df1efb7257a6"
+    },
+    {
+      "path": "upstream/test/corpus/specification_examples/configuration.vhd",
+      "bytes": 2172,
+      "sha256": "8fa2b553ce19a93524fbbf7241d9f9313525d402fd3aab87cd749a451a09f27d"
+    },
+    {
+      "path": "upstream/test/corpus/specification_examples/entity.vhd",
+      "bytes": 15910,
+      "sha256": "449458df02f38d75854585f9cdaa6f5e516b5bc46a84fec820d72a91747db026"
+    },
+    {
+      "path": "upstream/test/corpus/specification_examples/generate.vhd",
+      "bytes": 29780,
+      "sha256": "9dd59492847b6e9b5ee99f2f136e66c6b05f6c5069e31a8fd86a1594c6b80621"
+    },
+    {
+      "path": "upstream/test/corpus/specification_examples/literal.vhd",
+      "bytes": 15694,
+      "sha256": "fd5d237631cf7e8f48038201486c0f2288d799fef76d6a4c087cef86bead5df1"
+    },
+    {
+      "path": "upstream/test/corpus/string_literal_std_logic.vhd",
+      "bytes": 6030,
+      "sha256": "745bf213d8c110a43f1a69579d8fa1adc983292985428bf09c87aa08010d3819"
+    },
+    {
+      "path": "upstream/test/corpus/tool_directives.vhd",
+      "bytes": 3098,
+      "sha256": "558558f91e012f1feefb1a3d3d34599aee9f4478d4c4efc6b6a43c8002d07d17"
+    },
+    {
+      "path": "upstream/test/corpus/use_clause.vhd",
+      "bytes": 1712,
+      "sha256": "d84ca572a2a4395659f6138890347933077f3ece494ab21ab35245595b133f3a"
+    },
+    {
+      "path": "upstream/test/highlight/architecture_basic.vhd",
+      "bytes": 787,
+      "sha256": "d8cc01410e8eba7ee169105937b597b3221c25a69cf445edd135ed6dc7db0ba8"
+    },
+    {
+      "path": "upstream/test/highlight/bit_values.vhd",
+      "bytes": 742,
+      "sha256": "9616b26513498a5557769d04383b27f713b4bc425b6d50000a4095f26b151af8"
+    },
+    {
+      "path": "upstream/test/highlight/multiuse_keywords.vhd",
+      "bytes": 1366,
+      "sha256": "892da898d914330b3f318bfd0d5bd4b1290ed91d35b21ce241521d9e0205d149"
+    },
+    {
+      "path": "upstream/test/indent/block_statement.vhd",
+      "bytes": 295,
+      "sha256": "069d9e32745f34e8c7c92e41a42f5da8f9079636bd9148b9f10ab18a5a92dc43"
+    },
+    {
+      "path": "upstream/test/indent/case_generate.vhd",
+      "bytes": 435,
+      "sha256": "e2f4d47f5f95c036f43154b132f4c49fc77cd987ec513b03737d93e1feb0a2d5"
+    },
+    {
+      "path": "upstream/test/indent/case_statement.vhd",
+      "bytes": 492,
+      "sha256": "59718f9c7a338d8826480623f4251694e643bbb5325b74818de3d1e43b89e018"
+    },
+    {
+      "path": "upstream/test/indent/component_instantiation.vhd",
+      "bytes": 504,
+      "sha256": "417655b8a958bbdf7985f1bf4d2efd6a3a3aae5bab2307d21efaf63d34218b65"
+    },
+    {
+      "path": "upstream/test/indent/for_generate.vhd",
+      "bytes": 642,
+      "sha256": "15c6f184ced0272d6be268d5253c32116b1c0bc9f94fdf47e155423812710b9a"
+    },
+    {
+      "path": "upstream/test/indent/if_generate.vhd",
+      "bytes": 422,
+      "sha256": "6955fc39a9cefb36185ad3b32e6ea098c2a72f423f4cd896e95656b945655517"
+    },
+    {
+      "path": "upstream/test/indent/if_statement.vhd",
+      "bytes": 461,
+      "sha256": "9373f42d61fd3ed9558b804f81ac5fea36173ac09227dd9f6bf774e959e47b7b"
+    },
+    {
+      "path": "upstream/test/indent/init.lua",
+      "bytes": 1543,
+      "sha256": "8affa083e25a775e6eadc99fc2398f4d811e9a34bb5b332f8210a290a24b08c8"
+    },
+    {
+      "path": "upstream/test/indent/interface_list.vhd",
+      "bytes": 366,
+      "sha256": "04cef3466666c4a9deaccfe11ac40f7602121d5238ed0f8813a34de7115f21aa"
+    },
+    {
+      "path": "upstream/test/indent/loop_statement.vhd",
+      "bytes": 596,
+      "sha256": "3926aaa3bb3d21aed1f1083ff3b6a097b7a6482c3d34af9b2f9f2a5f11822734"
+    },
+    {
+      "path": "upstream/test/indent/package.vhd",
+      "bytes": 445,
+      "sha256": "6455e33bffd2615e794c1eb25cdfcf067d9f0c3158d72ffd140794a600834eeb"
+    },
+    {
+      "path": "upstream/test/indent/parenthesis_group.vhd",
+      "bytes": 674,
+      "sha256": "8a0bbf2de891d2e1f419fb5e76afd051d286d11db7cd33267d9659e3dc7c4628"
+    },
+    {
+      "path": "upstream/test/indent/process_statement.vhd",
+      "bytes": 574,
+      "sha256": "7bfe9e7a05968dac143d0e77b7c7a099b483b1c1de708f135c40edf4829626c7"
+    },
+    {
+      "path": "upstream/test/indent/record_type.vhd",
+      "bytes": 303,
+      "sha256": "bfa66224d2610104f82958050756439e632080eceef6e94245934e784d2cb3b8"
+    },
+    {
+      "path": "upstream/test/indent/run.sh",
+      "bytes": 2074,
+      "sha256": "040619052930a0d0cabdcff971b13652259bf48eef31f9e3f05862df9eb0a775"
+    },
+    {
+      "path": "upstream/test/indent/subprogram.vhd",
+      "bytes": 655,
+      "sha256": "d29e8a6acabc801f6e6a593e28c113e7922d51d394177d9b5138d441e85619c5"
+    },
+    {
+      "path": "upstream/test.sh",
+      "bytes": 533,
+      "sha256": "6508453e72ac3a1cd7e5a740fa5887456d3025ad51c6e671525602f58781f6c7"
+    },
+    {
+      "path": "upstream/tree-sitter-vhdl-9be8e45c3ae7e7a4373a943a5c81ff92ce3656f8.tar.gz",
+      "bytes": 1313918,
+      "sha256": "3c39fd44ec63eed9f0270697258274fb785f8df2e28137794abd1202ad98769e"
+    },
+    {
+      "path": "upstream/tree-sitter.json",
+      "bytes": 823,
+      "sha256": "f42c9555348f8cf89ed660759da41bebf566205fda2e9a347fb4cde5a6117926"
+    },
+    {
+      "path": "upstream/update_bindings.sh",
+      "bytes": 346,
+      "sha256": "dcb1bcce576b991f7fb73fd573554b53df1b5b44211ca77c44ad4fc2ab5ff9be"
+    }
+  ],
+  "authored_members": [
+    {
+      "original_path": ".editorconfig",
+      "retained_path": "upstream/.editorconfig",
+      "bytes": 548,
+      "sha256": "238ab8fa954515919830bcad283037d6756c78a850dea7c12291236e8c952c26",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".gitattributes",
+      "retained_path": "upstream/.gitattributes.upstream",
+      "bytes": 358,
+      "sha256": "03e3575323a4ba81a87ab9dcb69851c9c6470a2be55e5227d865c854d043552d",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "retained_path": "upstream/.github/ISSUE_TEMPLATE/bug_report.yml",
+      "bytes": 2433,
+      "sha256": "db2edc8c432d31dfa0b6520348392d84a070111aded43505643a5cae6d846312",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/ISSUE_TEMPLATE/config.yml",
+      "retained_path": "upstream/.github/ISSUE_TEMPLATE/config.yml",
+      "bytes": 156,
+      "sha256": "c9a0895c8fbb7e0fbe4286838390471697012e44ae6f7d95a6d5c0cdc004e35e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/ISSUE_TEMPLATE/feature_request.yml",
+      "retained_path": "upstream/.github/ISSUE_TEMPLATE/feature_request.yml",
+      "bytes": 1648,
+      "sha256": "43cf96e6a5365b19bd86bb212340f17dfc1bd91143d37bb6f4e5cdf039667bb6",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/dependabot.yml",
+      "retained_path": "upstream/.github/dependabot.yml",
+      "bytes": 816,
+      "sha256": "01bfcdfb3b05238ebe8aa3102a58c274ca30688165e3ea8cd2a3afd8dbe537ce",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/workflows/ci.yml",
+      "retained_path": "upstream/.github/workflows/ci.yml",
+      "bytes": 1072,
+      "sha256": "02ab7913e7860a49e6fd64b1a970ba60466ebafb7fca021ea9843c96a92d0dfc",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/workflows/fuzz.yml",
+      "retained_path": "upstream/.github/workflows/fuzz.yml",
+      "bytes": 331,
+      "sha256": "627f938fabffc67462a3b32e76464b1bb294d786f1cead34e9893348cd8b4fd4",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/workflows/indent.yml",
+      "retained_path": "upstream/.github/workflows/indent.yml",
+      "bytes": 1303,
+      "sha256": "1d87720b76ffebf17a4a729c3d1ad0f510c9c941dde87799d890e13a0b776dab",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/workflows/publish.yml",
+      "retained_path": "upstream/.github/workflows/publish.yml",
+      "bytes": 286,
+      "sha256": "765bdc6e8fdb7a0b227e1e4e1ce8424cd92e760eb71d53ca32db2e3c64598b57",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/workflows/regenerate.yml",
+      "retained_path": "upstream/.github/workflows/regenerate.yml",
+      "bytes": 320,
+      "sha256": "611351073e9a8dc40e603f13c301b600454ec1c017f36387e8baed6988dff55f",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/workflows/release.yml",
+      "retained_path": "upstream/.github/workflows/release.yml",
+      "bytes": 319,
+      "sha256": "845dc10d789a32944de8c73f44160a02f02865f88afef714027e1aea56c6fd33",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".gitignore",
+      "retained_path": "upstream/.gitignore.upstream",
+      "bytes": 397,
+      "sha256": "0e278bc1e46a4958b2706b1ca0017f0ef9c19a3eee316f4ff154b4063df64ced",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "CMakeLists.txt",
+      "retained_path": "upstream/CMakeLists.txt",
+      "bytes": 3489,
+      "sha256": "32ab66f70b5ae2f360ea92cf7b5353f967e28a51e1dc12c79a76c06d4cc101e5",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "Cargo.toml",
+      "retained_path": "upstream/Cargo.toml",
+      "bytes": 696,
+      "sha256": "008634d9379159f8530c7fefc3a42d498cd47d58eb2f60a1b8d01f198cda4001",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "Contributing.md",
+      "retained_path": "upstream/Contributing.md",
+      "bytes": 1293,
+      "sha256": "45d8a610a9be35e02b820d99b0e78bfebe14ed227b343d7a0d41e20cad1d2c83",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "License.md",
+      "retained_path": "upstream/License.md",
+      "bytes": 1077,
+      "sha256": "a9323218abe9aabd3429b76634470b40c3be012600e1f96bd16ca254724fa954",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "Makefile",
+      "retained_path": "upstream/Makefile",
+      "bytes": 4195,
+      "sha256": "e1b962b9dc772a47590eb770b2a3daca119c5409cebf30e7643dd1f663e30cb2",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "Package.swift",
+      "retained_path": "upstream/Package.swift",
+      "bytes": 1165,
+      "sha256": "869bc3f301b36e55edb8411b0c9567251ecc795961e60c7ae698f01439a26e92",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "Readme.md",
+      "retained_path": "upstream/Readme.md",
+      "bytes": 4945,
+      "sha256": "f1226666ec009be03f32968098a3a081b2848f81ddab2000e5165cbec3abc627",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/core.py",
+      "retained_path": "upstream/autogen/core.py",
+      "bytes": 17000,
+      "sha256": "0aa1ee89a75e91b4b7293eaaa58b72bafbb68a57f7d42cf5d3a82dfe4b343adf",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/gen_token_trie.py",
+      "retained_path": "upstream/autogen/gen_token_trie.py",
+      "bytes": 3382,
+      "sha256": "77f7d8b54d6140143ef758bfa1d5739bfb283a4d7f557d391dd5cae38c47ec33",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/ieee/fixed_pkg.py",
+      "retained_path": "upstream/autogen/ieee/fixed_pkg.py",
+      "bytes": 3451,
+      "sha256": "35481e126125ce1b73f14f9ba41b8be42c686ee1e44f5a3506b76b829cd5d1a7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/ieee/float_pkg.py",
+      "retained_path": "upstream/autogen/ieee/float_pkg.py",
+      "bytes": 4138,
+      "sha256": "99eeb017af4edec0d30de49d48c321788faa2c46b0f7b4f11cb7952ac5929004",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/ieee/math_complex.py",
+      "retained_path": "upstream/autogen/ieee/math_complex.py",
+      "bytes": 1327,
+      "sha256": "2cb8424134ea53cb73f25328972153e55673503c8e370d5c05686cc73f225570",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/ieee/math_real.py",
+      "retained_path": "upstream/autogen/ieee/math_real.py",
+      "bytes": 2996,
+      "sha256": "f1826fca7ede4086f919df8db10e0e8713ff976e21763b6e5f5e1206403a48a7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/ieee/numeric_std.py",
+      "retained_path": "upstream/autogen/ieee/numeric_std.py",
+      "bytes": 1747,
+      "sha256": "44b786373c5806de9414fed666b7178637e9812145652ca18c57d032b8d4c4f6",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/ieee/std_logic_1164.py",
+      "retained_path": "upstream/autogen/ieee/std_logic_1164.py",
+      "bytes": 3448,
+      "sha256": "229d5d9766e829619937f0a41b5ede27953f3135e2ddcf06365f837288b4fe61",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/std/env.py",
+      "retained_path": "upstream/autogen/std/env.py",
+      "bytes": 6236,
+      "sha256": "093db24d86cb7e8e421f33a944ff30c8f5088e61f852b0565612052d975f0cb5",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/std/standard.py",
+      "retained_path": "upstream/autogen/std/standard.py",
+      "bytes": 11199,
+      "sha256": "9e8d8c4faf8c0ae64319e02bc908d67ee4658a799772dcf01aad750cfb3eeed3",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "autogen/std/textio.py",
+      "retained_path": "upstream/autogen/std/textio.py",
+      "bytes": 3407,
+      "sha256": "34e02c65fd2c06db42861f247b8aa7a2aae0d1d8d6be4e9e8b6c00fa1734eabe",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "binding.gyp",
+      "retained_path": "upstream/binding.gyp",
+      "bytes": 763,
+      "sha256": "409719f132da20ab265486f4f71e7c0ecc0bef90414ae8c042d6649556e816cf",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/c/tree-sitter-vhdl.pc.in",
+      "retained_path": "upstream/bindings/c/tree-sitter-vhdl.pc.in",
+      "bytes": 293,
+      "sha256": "c115df59dee7aad1a8c2c2548596b27d863de604b8a2abc15458e321b4eeebe7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/c/tree_sitter/tree-sitter-vhdl.h",
+      "retained_path": "upstream/bindings/c/tree_sitter/tree-sitter-vhdl.h",
+      "bytes": 238,
+      "sha256": "bd8b19bf524ac91b783b0f3cabbd688d13d408d17e58f952233cc4b7df1fb867",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/go/binding.go",
+      "retained_path": "upstream/bindings/go/binding.go",
+      "bytes": 337,
+      "sha256": "4985c4cfb402a9f8eaf53312bb2a8a1e6651be1383cb094f4ef3832840cee41a",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/go/binding_test.go",
+      "retained_path": "upstream/bindings/go/binding_test.go",
+      "bytes": 354,
+      "sha256": "bfa3b49d5426a95eb07942bf027d5c0545422e8cd17d96a3995b5c1b903e6492",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/node/binding.cc",
+      "retained_path": "upstream/bindings/node/binding.cc",
+      "bytes": 523,
+      "sha256": "fe925726ffa5ec1ec30e8427212ee95d93b5692a14c0f2f59a79a1f59c6d6708",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/node/binding_test.js",
+      "retained_path": "upstream/bindings/node/binding_test.js",
+      "bytes": 310,
+      "sha256": "d21db69cd974fafa44724a73dd9788d3b393a4d6af68f65a58486548e5b00f58",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/node/index.d.ts",
+      "retained_path": "upstream/bindings/node/index.d.ts",
+      "bytes": 1327,
+      "sha256": "2a941066b0bce05eab4c15bef6f363eed92458128d790d8115767a522d0acb58",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/node/index.js",
+      "retained_path": "upstream/bindings/node/index.js",
+      "bytes": 1174,
+      "sha256": "047debed34ea90342cd6f39be9e9c9d04618bee06ed8dfd0bc77f7ad6b378c41",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/python/tests/test_binding.py",
+      "retained_path": "upstream/bindings/python/tests/test_binding.py",
+      "bytes": 314,
+      "sha256": "2f3297195aed07f38aa9c53865ea1c077eda1447ee8937e5e0863735ce3b06cb",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/python/tree_sitter_vhdl/__init__.py",
+      "retained_path": "upstream/bindings/python/tree_sitter_vhdl/__init__.py",
+      "bytes": 1248,
+      "sha256": "3bd0de4b0f97263a57a079a63fa1174b2d865a35579eee252253555f0d3dad9a",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/python/tree_sitter_vhdl/__init__.pyi",
+      "retained_path": "upstream/bindings/python/tree_sitter_vhdl/__init__.pyi",
+      "bytes": 504,
+      "sha256": "fceb2c08289d035296c8ce9df63df8df2e40cd2bcf72d7d9f601394ce7ff577c",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/python/tree_sitter_vhdl/binding.c",
+      "retained_path": "upstream/bindings/python/tree_sitter_vhdl/binding.c",
+      "bytes": 832,
+      "sha256": "1a4b3586a50de802dce129b50b96d23d4d70e5ec60c1720b08fcff1e43f65657",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/python/tree_sitter_vhdl/py.typed",
+      "retained_path": "upstream/bindings/python/tree_sitter_vhdl/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/rust/build.rs",
+      "retained_path": "upstream/bindings/rust/build.rs",
+      "bytes": 1869,
+      "sha256": "b5afd865a9634b94a7780dd793de31a91932cbb6e9fb671642ff778a99791709",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/rust/lib.rs",
+      "retained_path": "upstream/bindings/rust/lib.rs",
+      "bytes": 2065,
+      "sha256": "b31f2049bb8c83f9e14edce865ea7b7f3f0545f86681a1cee88f6d81216b854e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/swift/TreeSitterVhdl/vhdl.h",
+      "retained_path": "upstream/bindings/swift/TreeSitterVhdl/vhdl.h",
+      "bytes": 238,
+      "sha256": "bd8b19bf524ac91b783b0f3cabbd688d13d408d17e58f952233cc4b7df1fb867",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/swift/TreeSitterVhdlTests/TreeSitterVhdlTests.swift",
+      "retained_path": "upstream/bindings/swift/TreeSitterVhdlTests/TreeSitterVhdlTests.swift",
+      "bytes": 359,
+      "sha256": "8795f3da7cef9c457f93f10a0e5656442e07107f6e4567395826cfa83a635aac",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "examples/Screenshot.png",
+      "retained_path": "upstream/examples/Screenshot.png",
+      "bytes": 208393,
+      "sha256": "9b4e200f172d6ee53cbd70e8e35ddab1cc66bf3fef5f84eb0c17d091a7050f47",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "examples/Screenshot.vhd",
+      "retained_path": "upstream/examples/Screenshot.vhd",
+      "bytes": 2944,
+      "sha256": "2f668d4da0af37c6e5c1110a41810f0782f5eca60725c08d789ef3377beae132",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "examples/Screenshot_OneDark.png",
+      "retained_path": "upstream/examples/Screenshot_OneDark.png",
+      "bytes": 287766,
+      "sha256": "72dac71d8d6a3ca709bf9c8d49ad42102d817ce113dd759aa181f2b1da8de160",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "examples/Screenshot_TokyoNight.png",
+      "retained_path": "upstream/examples/Screenshot_TokyoNight.png",
+      "bytes": 283181,
+      "sha256": "982f0c30474c731f0ee4ffcc68287629ef05e7977c2add653f347353cfe047f4",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "get_queries.sh",
+      "retained_path": "upstream/get_queries.sh",
+      "bytes": 62,
+      "sha256": "61402c864210e65a3ae235c9ee827cf7f9f65d7291a69c4ab0217e2fac4bf07e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "go.mod",
+      "retained_path": "upstream/go.mod",
+      "bytes": 111,
+      "sha256": "fb87241fc710350e9fe0e20e95ab81a47218bc981c22300bf290f6e19aaead6e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "grammar.js",
+      "retained_path": "upstream/grammar.js",
+      "bytes": 74545,
+      "sha256": "1b486487faa5e199318c288c0293a0ef156f731f3f64b5034386d796c29d5f81",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "package-lock.json",
+      "retained_path": "upstream/package-lock.json",
+      "bytes": 12374,
+      "sha256": "c7fc5bec93a43355a50acd7255d9fd061e7c7ad595e065e8fdc6130e245400e0",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "package.json",
+      "retained_path": "upstream/package.json",
+      "bytes": 1367,
+      "sha256": "44e164815fc31ae7cf184e5950de8d17301bc1aa1e36430484d596fe1ae24fc3",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "pyproject.toml",
+      "retained_path": "upstream/pyproject.toml",
+      "bytes": 739,
+      "sha256": "43f2b405a5bca6fccf4ee5aa4188afd9a63604400588f87b11c7583e2b60d8ba",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/Helix/highlights.scm",
+      "retained_path": "upstream/queries/Helix/highlights.scm",
+      "bytes": 5432,
+      "sha256": "38bd50b6298fb644259ff79bd56ac262af3ccc5e539afb5cc37bf54ac775ff5b",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/Neovim/context.scm",
+      "retained_path": "upstream/queries/Neovim/context.scm",
+      "bytes": 1443,
+      "sha256": "b6460f670ff2cf5d810bca5458dcd3057e7479628aff8acd909f6e52261d4757",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/Neovim/folds.scm",
+      "retained_path": "upstream/queries/Neovim/folds.scm",
+      "bytes": 1610,
+      "sha256": "f767c291dd75569d545684533bb07a9340891b201851668b6e329c6b4cb3e67b",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/Neovim/highlights.scm",
+      "retained_path": "upstream/queries/Neovim/highlights.scm",
+      "bytes": 5904,
+      "sha256": "06c798421e37891fd5e76b57087459c6d1d9a2692dd9980bfc0328cdb10901a3",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/Neovim/indents.scm",
+      "retained_path": "upstream/queries/Neovim/indents.scm",
+      "bytes": 2260,
+      "sha256": "f033cf189b93d237bb67f7b65974193bc06c7652e11d917b4e0064496d1780d5",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/Neovim/injections.scm",
+      "retained_path": "upstream/queries/Neovim/injections.scm",
+      "bytes": 544,
+      "sha256": "69873618417e85024d30efee76d8f2f520bbb2ed5af0ad1590a8f488a2db75bf",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/Neovim/textobjects.scm",
+      "retained_path": "upstream/queries/Neovim/textobjects.scm",
+      "bytes": 9284,
+      "sha256": "5c61002abe19bc8e0302fb769118236b6bb4c23e218c168c766db5b7f6fa0103",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "set_queries.sh",
+      "retained_path": "upstream/set_queries.sh",
+      "bytes": 62,
+      "sha256": "cfcc6902d7aca89ace61560a719e917fa3e74bd7b382896075addb32c676369f",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "setup.py",
+      "retained_path": "upstream/setup.py",
+      "bytes": 2391,
+      "sha256": "d54a8763ed2dd6f0765d0c597fd726a53d4ac412c8c9c6a4e9e3b6cd6c7c6286",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/TokenTree.h",
+      "retained_path": "upstream/src/TokenTree.h",
+      "bytes": 1258,
+      "sha256": "35b86315cac1e7c8caf157c6adf12d25bb58fba2fd4e766b43613046fcb67893",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/TokenTree.inc",
+      "retained_path": "upstream/src/TokenTree.inc",
+      "bytes": 845,
+      "sha256": "b58ab34db45a9b0f097f5dd549e375fd3e2e9355d0ef20e27ff8cbecc76ec247",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/TokenType.h",
+      "retained_path": "upstream/src/TokenType.h",
+      "bytes": 4633,
+      "sha256": "b0eacaa21138fa29f06d74946d66017e79684f27fee91b0288745b33d2a03839",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/TokenType.inc",
+      "retained_path": "upstream/src/TokenType.inc",
+      "bytes": 16671,
+      "sha256": "cefde62d6d773164c8a6108420d35327d5b8fac695b6b35bbd5741ff370aa44f",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/debug_macros.h",
+      "retained_path": "upstream/src/debug_macros.h",
+      "bytes": 4377,
+      "sha256": "d67c7d65af0c5a7209a535255d5de74e92fc994e445a8dda36bc5873ffcfad2e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/grammar.json",
+      "retained_path": "upstream/src/grammar.json",
+      "bytes": 283977,
+      "sha256": "da5b1ed4ae959dcf3b2d443c6390fc79924223ad0984daa923b8f907319b46ad",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/node-types.json",
+      "retained_path": "upstream/src/node-types.json",
+      "bytes": 211585,
+      "sha256": "a8fbb248fef42fb912a9f8b5f8fe3e350ded4cbc5ac080ce02c7aaf67399929a",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/parser.c",
+      "retained_path": "upstream/src/parser.c",
+      "bytes": 9145496,
+      "sha256": "1953b218e6f19861094e908f3967f6387d5a72c6b81f41ae0cec8746149671d0",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/scanner.c",
+      "retained_path": "upstream/src/scanner.c",
+      "bytes": 24981,
+      "sha256": "17b9aa0401ce9d80327fdbe7972a2f1e6de54c03e2c897e85acc9d5a7efed80f",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/token_tree_match.inc",
+      "retained_path": "upstream/src/token_tree_match.inc",
+      "bytes": 1246538,
+      "sha256": "1b61902d6ebba726800ca82b39df00e8522b3db804027879df4f54d294840fff",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/tree_sitter/alloc.h",
+      "retained_path": "upstream/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/tree_sitter/array.h",
+      "retained_path": "upstream/src/tree_sitter/array.h",
+      "bytes": 13453,
+      "sha256": "20e6ba85abb9d5b7e2e6dedf675c9424a057a06feee03aa3e2dd48a1cb4bf8a2",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/tree_sitter/parser.h",
+      "retained_path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test.sh",
+      "retained_path": "upstream/test.sh",
+      "bytes": 533,
+      "sha256": "6508453e72ac3a1cd7e5a740fa5887456d3025ad51c6e671525602f58781f6c7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/architecture_basic.vhd",
+      "retained_path": "upstream/test/corpus/architecture_basic.vhd",
+      "bytes": 1452,
+      "sha256": "9d6d3adfa8fdafe7f43466ad0ff78414af0c8d23b3f3f368f6d8802d4cdca849",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/bit_values.vhd",
+      "retained_path": "upstream/test/corpus/bit_values.vhd",
+      "bytes": 3155,
+      "sha256": "71a53e4ff0de27a5b52b16720bd3c9a3750597fb6a708d613b56380a85412c27",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/comments.vhd",
+      "retained_path": "upstream/test/corpus/comments.vhd",
+      "bytes": 980,
+      "sha256": "e605e7b8e7f5df58b4867c1eca7fa064f415c66ac52f57619f94d27e46c3586d",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/entity.vhd",
+      "retained_path": "upstream/test/corpus/entity.vhd",
+      "bytes": 12275,
+      "sha256": "362fc3d8e92cd93dc56329c800108680d5748d9fd191c27296bb5dc57abe993e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/if_generate.vhd",
+      "retained_path": "upstream/test/corpus/if_generate.vhd",
+      "bytes": 2612,
+      "sha256": "1099d9685c187d19d5c5b4a26243c4c0d86522accc4dd104ee6e84bcbe8fcdd7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/if_statement.vhd",
+      "retained_path": "upstream/test/corpus/if_statement.vhd",
+      "bytes": 3556,
+      "sha256": "8ac6d66e59409b525ce85fb73e4b6d6cb9aa7dcc930bcee8849bb92207ee85fc",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/library_constant_as_identifier.vhd",
+      "retained_path": "upstream/test/corpus/library_constant_as_identifier.vhd",
+      "bytes": 119575,
+      "sha256": "d9c3fc84260876c4ce3c18361a80eba6ea1fea75bc7be33136efc99215245acc",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/library_constant_break.vhd",
+      "retained_path": "upstream/test/corpus/library_constant_break.vhd",
+      "bytes": 1307,
+      "sha256": "54fe3ea79cad4c17fa7eec403fd4a0fc5c0ff527909eea0061a0deda3587719e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/literals.vhd",
+      "retained_path": "upstream/test/corpus/literals.vhd",
+      "bytes": 13411,
+      "sha256": "22aec22cfdf118f904b358334cb29f1227e850dadc9573ee6c20bd146789f86a",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/prioritised_if.vhd",
+      "retained_path": "upstream/test/corpus/prioritised_if.vhd",
+      "bytes": 10111,
+      "sha256": "674bf5dedc4014089fe49232ee95668fb2b7a8509e983f72e71b03b4f1a9b3be",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/specification_examples/architecture.vhd",
+      "retained_path": "upstream/test/corpus/specification_examples/architecture.vhd",
+      "bytes": 35107,
+      "sha256": "16ad0d943ea098450c6bab0184504a0b9a8ac8218e40ff075d97df1efb7257a6",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/specification_examples/configuration.vhd",
+      "retained_path": "upstream/test/corpus/specification_examples/configuration.vhd",
+      "bytes": 2172,
+      "sha256": "8fa2b553ce19a93524fbbf7241d9f9313525d402fd3aab87cd749a451a09f27d",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/specification_examples/entity.vhd",
+      "retained_path": "upstream/test/corpus/specification_examples/entity.vhd",
+      "bytes": 15910,
+      "sha256": "449458df02f38d75854585f9cdaa6f5e516b5bc46a84fec820d72a91747db026",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/specification_examples/generate.vhd",
+      "retained_path": "upstream/test/corpus/specification_examples/generate.vhd",
+      "bytes": 29780,
+      "sha256": "9dd59492847b6e9b5ee99f2f136e66c6b05f6c5069e31a8fd86a1594c6b80621",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/specification_examples/literal.vhd",
+      "retained_path": "upstream/test/corpus/specification_examples/literal.vhd",
+      "bytes": 15694,
+      "sha256": "fd5d237631cf7e8f48038201486c0f2288d799fef76d6a4c087cef86bead5df1",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/string_literal_std_logic.vhd",
+      "retained_path": "upstream/test/corpus/string_literal_std_logic.vhd",
+      "bytes": 6030,
+      "sha256": "745bf213d8c110a43f1a69579d8fa1adc983292985428bf09c87aa08010d3819",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/tool_directives.vhd",
+      "retained_path": "upstream/test/corpus/tool_directives.vhd",
+      "bytes": 3098,
+      "sha256": "558558f91e012f1feefb1a3d3d34599aee9f4478d4c4efc6b6a43c8002d07d17",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/corpus/use_clause.vhd",
+      "retained_path": "upstream/test/corpus/use_clause.vhd",
+      "bytes": 1712,
+      "sha256": "d84ca572a2a4395659f6138890347933077f3ece494ab21ab35245595b133f3a",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/highlight/architecture_basic.vhd",
+      "retained_path": "upstream/test/highlight/architecture_basic.vhd",
+      "bytes": 787,
+      "sha256": "d8cc01410e8eba7ee169105937b597b3221c25a69cf445edd135ed6dc7db0ba8",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/highlight/bit_values.vhd",
+      "retained_path": "upstream/test/highlight/bit_values.vhd",
+      "bytes": 742,
+      "sha256": "9616b26513498a5557769d04383b27f713b4bc425b6d50000a4095f26b151af8",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/highlight/multiuse_keywords.vhd",
+      "retained_path": "upstream/test/highlight/multiuse_keywords.vhd",
+      "bytes": 1366,
+      "sha256": "892da898d914330b3f318bfd0d5bd4b1290ed91d35b21ce241521d9e0205d149",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/block_statement.vhd",
+      "retained_path": "upstream/test/indent/block_statement.vhd",
+      "bytes": 295,
+      "sha256": "069d9e32745f34e8c7c92e41a42f5da8f9079636bd9148b9f10ab18a5a92dc43",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/case_generate.vhd",
+      "retained_path": "upstream/test/indent/case_generate.vhd",
+      "bytes": 435,
+      "sha256": "e2f4d47f5f95c036f43154b132f4c49fc77cd987ec513b03737d93e1feb0a2d5",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/case_statement.vhd",
+      "retained_path": "upstream/test/indent/case_statement.vhd",
+      "bytes": 492,
+      "sha256": "59718f9c7a338d8826480623f4251694e643bbb5325b74818de3d1e43b89e018",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/component_instantiation.vhd",
+      "retained_path": "upstream/test/indent/component_instantiation.vhd",
+      "bytes": 504,
+      "sha256": "417655b8a958bbdf7985f1bf4d2efd6a3a3aae5bab2307d21efaf63d34218b65",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/for_generate.vhd",
+      "retained_path": "upstream/test/indent/for_generate.vhd",
+      "bytes": 642,
+      "sha256": "15c6f184ced0272d6be268d5253c32116b1c0bc9f94fdf47e155423812710b9a",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/if_generate.vhd",
+      "retained_path": "upstream/test/indent/if_generate.vhd",
+      "bytes": 422,
+      "sha256": "6955fc39a9cefb36185ad3b32e6ea098c2a72f423f4cd896e95656b945655517",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/if_statement.vhd",
+      "retained_path": "upstream/test/indent/if_statement.vhd",
+      "bytes": 461,
+      "sha256": "9373f42d61fd3ed9558b804f81ac5fea36173ac09227dd9f6bf774e959e47b7b",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/init.lua",
+      "retained_path": "upstream/test/indent/init.lua",
+      "bytes": 1543,
+      "sha256": "8affa083e25a775e6eadc99fc2398f4d811e9a34bb5b332f8210a290a24b08c8",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/interface_list.vhd",
+      "retained_path": "upstream/test/indent/interface_list.vhd",
+      "bytes": 366,
+      "sha256": "04cef3466666c4a9deaccfe11ac40f7602121d5238ed0f8813a34de7115f21aa",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/loop_statement.vhd",
+      "retained_path": "upstream/test/indent/loop_statement.vhd",
+      "bytes": 596,
+      "sha256": "3926aaa3bb3d21aed1f1083ff3b6a097b7a6482c3d34af9b2f9f2a5f11822734",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/package.vhd",
+      "retained_path": "upstream/test/indent/package.vhd",
+      "bytes": 445,
+      "sha256": "6455e33bffd2615e794c1eb25cdfcf067d9f0c3158d72ffd140794a600834eeb",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/parenthesis_group.vhd",
+      "retained_path": "upstream/test/indent/parenthesis_group.vhd",
+      "bytes": 674,
+      "sha256": "8a0bbf2de891d2e1f419fb5e76afd051d286d11db7cd33267d9659e3dc7c4628",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/process_statement.vhd",
+      "retained_path": "upstream/test/indent/process_statement.vhd",
+      "bytes": 574,
+      "sha256": "7bfe9e7a05968dac143d0e77b7c7a099b483b1c1de708f135c40edf4829626c7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/record_type.vhd",
+      "retained_path": "upstream/test/indent/record_type.vhd",
+      "bytes": 303,
+      "sha256": "bfa66224d2610104f82958050756439e632080eceef6e94245934e784d2cb3b8",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "test/indent/run.sh",
+      "retained_path": "upstream/test/indent/run.sh",
+      "bytes": 2074,
+      "sha256": "040619052930a0d0cabdcff971b13652259bf48eef31f9e3f05862df9eb0a775",
+      "archive_mode": 509,
+      "git_executable": true
+    },
+    {
+      "original_path": "test/indent/subprogram.vhd",
+      "retained_path": "upstream/test/indent/subprogram.vhd",
+      "bytes": 655,
+      "sha256": "d29e8a6acabc801f6e6a593e28c113e7922d51d394177d9b5138d441e85619c5",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "tree-sitter.json",
+      "retained_path": "upstream/tree-sitter.json",
+      "bytes": 823,
+      "sha256": "f42c9555348f8cf89ed660759da41bebf566205fda2e9a347fb4cde5a6117926",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "update_bindings.sh",
+      "retained_path": "upstream/update_bindings.sh",
+      "bytes": 346,
+      "sha256": "dcb1bcce576b991f7fb73fd573554b53df1b5b44211ca77c44ad4fc2ab5ff9be",
+      "archive_mode": 436,
+      "git_executable": false
+    }
+  ],
+  "exclusions": [
+    "SOURCE-INVENTORY.json",
+    "SOURCE-PROVENANCE.json"
+  ]
+}

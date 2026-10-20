@@ -1,0 +1,55 @@
+==================
+Line comment with hash
+==================
+
+# this is a comment
+see "Hello"
+
+---
+
+(source_file
+  (comment)
+  (see_statement
+    (string)))
+
+==================
+Line comment with double slash
+==================
+
+// this is a comment
+see "Hello"
+
+---
+
+(source_file
+  (comment)
+  (see_statement
+    (string)))
+
+==================
+Block comment
+==================
+
+/* this is
+   a block comment */
+see "Hello"
+
+---
+
+(source_file
+  (comment)
+  (see_statement
+    (string)))
+
+==================
+Inline comment after statement
+==================
+
+see "Hello" # inline comment
+
+---
+
+(source_file
+  (see_statement
+    (string))
+  (comment))

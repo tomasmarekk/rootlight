@@ -1,0 +1,772 @@
+==================
+Simple list literal
+==================
+
+aList = [1,2,3,4,5]
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (number)
+        (number)
+        (number)
+        (number)
+        (number)))))
+
+==================
+Nested list
+==================
+
+aList = [ 1 , [10,20,30] , 5 , [100,1000,5000] ]
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (number)
+        (list_literal
+          (number)
+          (number)
+          (number))
+        (number)
+        (list_literal
+          (number)
+          (number)
+          (number))))))
+
+==================
+List with string items
+==================
+
+aList = ["one","two","three"]
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (string)
+        (string)
+        (string)))))
+
+==================
+List with hash pairs (symbols)
+==================
+
+aList = ["one",1] , ["two",2]
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (string)
+        (number))))
+  (expression_statement
+    (list_literal
+      (string)
+      (number))))
+
+==================
+Hash pair with symbol keys
+==================
+
+[ :server = "myserver.com" , :port = 80 ]
+
+---
+
+(source_file
+  (expression_statement
+    (list_literal
+      (hash_pair
+        (symbol
+          (identifier))
+        (string))
+      (hash_pair
+        (symbol
+          (identifier))
+        (number)))))
+
+==================
+Range expression
+==================
+
+aList = 1:10
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number)))))
+
+==================
+Subscript expression
+==================
+
+see aList[2]
+
+---
+
+(source_file
+  (see_statement
+    (subscript_expression
+      (identifier)
+      (number))))
+
+==================
+Double subscript
+==================
+
+see aList[4][3] + nl
+
+---
+
+(source_file
+  (see_statement
+    (binary_expression
+      (subscript_expression
+        (subscript_expression
+          (identifier)
+          (number))
+        (number))
+      (identifier))))
+
+==================
+String subscript
+==================
+
+see aList["one"] + nl
+
+---
+
+(source_file
+  (see_statement
+    (binary_expression
+      (subscript_expression
+        (identifier)
+        (string))
+      (identifier))))
+
+==================
+Binary expressions
+==================
+
+see 5 + 3 * 2
+see x = 1 and y = 2
+see a or b
+
+---
+
+(source_file
+  (see_statement
+    (binary_expression
+      (number)
+      (binary_expression
+        (number)
+        (number))))
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (identifier)
+        (number))
+      (binary_expression
+        (identifier)
+        (number))))
+  (see_statement
+    (binary_expression
+      (identifier)
+      (identifier))))
+
+==================
+Unary expression
+==================
+
+x = -5
+y = !true
+z = not x
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (unary_expression
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (unary_expression
+        (boolean))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (unary_expression
+        (identifier)))))
+
+==================
+Postfix increment and decrement
+==================
+
+x++
+y--
+
+---
+
+(source_file
+  (expression_statement
+    (postfix_expression
+      (identifier)))
+  (expression_statement
+    (postfix_expression
+      (identifier))))
+
+==================
+Assignment operators
+==================
+
+x += 5
+y -= 3
+z *= 2
+w /= 4
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number))))
+
+==================
+Power expression
+==================
+
+result = 2 ** 10
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number)))))
+
+==================
+Member expression
+==================
+
+o1.x = 10
+see o1.name
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (member_expression
+        (identifier)
+        (identifier))
+      (number)))
+  (see_statement
+    (member_expression
+      (identifier)
+      (identifier))))
+
+==================
+Call expression with arguments
+==================
+
+myfunc(1, "hello", x)
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (number)
+        (string)
+        (identifier)))))
+
+==================
+Parenthesized expression
+==================
+
+result = (5 + 3) * 2
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (parenthesized_expression
+          (binary_expression
+            (number)
+            (number)))
+        (number)))))
+
+==================
+Number literals
+==================
+
+x = 42
+y = 3.14
+z = 0xFF
+a = 1_000
+b = 1__2
+c = 1.5_0
+d = 00x1
+e = 0Xab
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number))))
+
+==================
+Number separators fall back to identifiers
+==================
+
+f = 1_
+g = 0xFF_
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (identifier))))
+
+==================
+Symbol literal
+==================
+
+x = :mysymbol
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (symbol
+        (identifier)))))
+
+==================
+Anonymous function
+==================
+
+myfunc = func { see "hello" + nl }
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (anonymous_function
+        (see_statement
+          (binary_expression
+            (string)
+            (identifier)))))))
+
+==================
+Anonymous function with parameters
+==================
+
+myfunc = func(x,y) { see x + y }
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (anonymous_function
+        (param_list
+          (identifier)
+          (identifier))
+        (see_statement
+          (binary_expression
+            (identifier)
+            (identifier)))))))
+
+==================
+New expression
+==================
+
+o1 = new Person
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier))))))
+
+==================
+Qualified identifier (dotted)
+==================
+
+o1 = new System.output.console
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)
+          (identifier)
+          (identifier))))))
+
+==================
+Call statement
+==================
+
+call myfunc()
+
+---
+
+(source_file
+  (expression_statement
+    (call_keyword_expression
+      (call_expression
+        (identifier)))))
+
+==================
+Load statement
+==================
+
+load "stdlib.ring"
+
+---
+
+(source_file
+  (load_statement
+    (string)))
+
+==================
+Load again statement
+==================
+
+load again "myfile.ring"
+
+---
+
+(source_file
+  (load_statement
+    (string)))
+
+==================
+Import statement
+==================
+
+import System.output
+
+---
+
+(source_file
+  (import_statement
+    (qualified_identifier
+      (identifier)
+      (identifier))))
+
+==================
+Bye statement
+==================
+
+bye
+
+---
+
+(source_file
+  (bye_statement))
+
+==================
+Return without value
+==================
+
+func novalue
+    see "nothing"
+
+func test
+    return
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (string)))
+  (function_definition
+    name: (identifier)
+    (return_statement)))
+
+==================
+Scanner commands
+==================
+
+changeringkeyword old new
+enablehashcomments
+disablehashcomments
+
+---
+
+(source_file
+  (scanner_command)
+  (scanner_command)
+  (scanner_command))
+
+==================
+Power operators
+==================
+
+x = y ^^ 2
+z = y ^^ (1/2)
+w = 2 ** 3
+v = x
+v ^^= 2
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (parenthesized_expression
+          (binary_expression
+            (number)
+            (number))))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number))))
+
+==================
+Unicode identifiers
+==================
+
+عربي = "مرحبا ياعالم"
+Δ = "Ring"
+see عربي + Δ
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (string)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (string)))
+  (see_statement
+    (binary_expression
+      (identifier)
+      (identifier))))
+
+==================
+Numeric and keyword-like symbols
+==================
+
+? :123
+? :1
+? :test
+aList = [ :1 = "one", :2 = "two" ]
+? aList[:2]
+x = [:if = true]
+
+---
+
+(source_file
+  (see_statement
+    (symbol
+      (number)))
+  (see_statement
+    (symbol
+      (number)))
+  (see_statement
+    (symbol
+      (identifier)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (hash_pair
+          (symbol
+            (number))
+          (string))
+        (hash_pair
+          (symbol
+            (number))
+          (string)))))
+  (see_statement
+    (subscript_expression
+      (identifier)
+      (symbol
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (hash_pair
+          (symbol
+            (identifier))
+          (boolean))))))
+
+==================
+Digit-leading identifiers as arguments
+==================
+
+x = Wrap(3Copies("y"))
+2ndVar = first(3a, 3b)
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (call_expression
+        (identifier)
+        (arguments
+          (call_expression
+            (identifier)
+            (arguments
+              (string)))))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier)
+          (identifier))))))
+
+==================
+Bare exit/loop/break not consuming next func definition
+==================
+
+class foo
+	func funcA
+		exit
+	func funcB
+		loop
+	func funcC
+		break
+	func funcD
+		see "ok"
+
+---
+
+(source_file
+  (class_definition
+    name: (identifier)
+    (function_definition
+      name: (identifier)
+      (exit_statement))
+    (function_definition
+      name: (identifier)
+      (loop_statement))
+    (function_definition
+      name: (identifier)
+      (exit_statement))
+    (function_definition
+      name: (identifier)
+      (see_statement
+        (string)))))

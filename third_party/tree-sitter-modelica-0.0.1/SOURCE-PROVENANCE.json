@@ -1,0 +1,368 @@
+{
+  "repository": "https://github.com/modelicahub/tree-sitter-modelica",
+  "tag": "v0.1.0",
+  "commit": "8c2c1c6f23984f843a43a76a9e44548dbdedff4b",
+  "tree": "b9453ebba4c2daf8be9c52d3615304dab55f35c3",
+  "archive": {
+    "bytes": 181337,
+    "sha256": "6808cea403c5cd2a78307161564ae7cfebcda41274cb072f12d2a7d226e0baca"
+  },
+  "cargo_version": "0.0.1",
+  "npm_version": "0.1.0",
+  "upstream_cargo_repository_metadata": "https://github.com/tree-sitter/tree-sitter-modelica",
+  "local_modifications": "No parser, grammar, wrapper or license changes; upstream ignore/attribute files retained as inert .upstream files.",
+  "original_files": [
+    {
+      "path": ".editorconfig",
+      "mode": "100644",
+      "bytes": 453,
+      "git_blob_sha1": "f363cc55691c1ac09a10268c27e2a5a0ed3b4496",
+      "sha256": "1be48c047c7681d02d72da83c800bf343f05a2dbec6206a2d97317d676ade233",
+      "retained_path": ".editorconfig"
+    },
+    {
+      "path": ".gitattributes",
+      "mode": "100644",
+      "bytes": 355,
+      "git_blob_sha1": "7ad5e3a6716a48b856ea3f7248e2a3ba28de7f29",
+      "sha256": "4a9726b8fd23a2c74cbcc2eee434bd9d455781d8e0f474e5aaac1098ebdd68ed",
+      "retained_path": ".gitattributes.upstream"
+    },
+    {
+      "path": ".github/dependabot.yml",
+      "mode": "100644",
+      "bytes": 156,
+      "git_blob_sha1": "a485a4b2097ae994bfd7028e24df8aaecbb32839",
+      "sha256": "41c59f693e1420d9380a7cdc31073d7ae09bb736bea260458bd0b41c8d36a26d",
+      "retained_path": ".github/dependabot.yml"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "bytes": 1067,
+      "git_blob_sha1": "68c04e5f1bceab6bfdaa0ac585c426f6eac66791",
+      "sha256": "d1ac6083381e1270816c2ba71756557b28ca8c2d3f8a7c04eca3f00218255d54",
+      "retained_path": ".github/workflows/ci.yml"
+    },
+    {
+      "path": ".github/workflows/lint.yml",
+      "mode": "100644",
+      "bytes": 508,
+      "git_blob_sha1": "2aec2719e04598a76bdef1fde5c43908a2d94103",
+      "sha256": "eddec578c58a0351a45412eecc02706da186467369776e710c8d6131a0dd959e",
+      "retained_path": ".github/workflows/lint.yml"
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "mode": "100644",
+      "bytes": 282,
+      "git_blob_sha1": "97ca388e2aee5a54827098f6c64ac26375b564bd",
+      "sha256": "0d9e4f329c22a796b87cea1652889663a9a0e3959c86a3228359ab711794a913",
+      "retained_path": ".github/workflows/publish.yml"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "bytes": 296,
+      "git_blob_sha1": "5ace178f782cbde93a483d8bf900b6772a1e6885",
+      "sha256": "90f026beba20b40a56352c1e84a2664c1433fd4663c7795b2f9c70c754c510d1",
+      "retained_path": ".gitignore.upstream"
+    },
+    {
+      "path": "Cargo.toml",
+      "mode": "100644",
+      "bytes": 628,
+      "git_blob_sha1": "c9c6d66891304a68b0fe57e126b077387e23315f",
+      "sha256": "870c24e7143035b938cdc83fa48d6a96d738605e416c6704633d5126a0e5581a",
+      "retained_path": "Cargo.toml"
+    },
+    {
+      "path": "LICENSE",
+      "mode": "100644",
+      "bytes": 1078,
+      "git_blob_sha1": "8c6fedd1f3aeca8e821e0cac433c9f6596c7e613",
+      "sha256": "99c797f83ed253378889ac2552322bc44ebbd56b0f98be1143c42a6fbd34fa1c",
+      "retained_path": "LICENSE"
+    },
+    {
+      "path": "Makefile",
+      "mode": "100644",
+      "bytes": 3687,
+      "git_blob_sha1": "57cd93bccddd9cfd38c109727611813a67c26da5",
+      "sha256": "1c31128f47c901c7291c8c282bb5818d917b305dd14483e7d8a49df5f063d760",
+      "retained_path": "Makefile"
+    },
+    {
+      "path": "Package.swift",
+      "mode": "100644",
+      "bytes": 1754,
+      "git_blob_sha1": "15ce6bc0b325522e7a52e41fdde73a5b4e14939b",
+      "sha256": "8139d8101b9b99f687ecca8724c39e63476a49cc8d42aa9e306f5ab8b7593b67",
+      "retained_path": "Package.swift"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "bytes": 103,
+      "git_blob_sha1": "9aff6430ba12aa43f3aaa72bb47d8449fd9630d4",
+      "sha256": "ad7bd8ced2f06a2136a7352384d4dda1490e4ea5211ba5aa4fcdfecef421015a",
+      "retained_path": "README.md"
+    },
+    {
+      "path": "binding.gyp",
+      "mode": "100644",
+      "bytes": 649,
+      "git_blob_sha1": "cb0593d13711cb04c2948552f0a4e01a9c8c67c2",
+      "sha256": "7fa2bd86f8939787621ae9e0fe3d40f7ec7c0a405b3f41eb8cef15ddbac0f78e",
+      "retained_path": "binding.gyp"
+    },
+    {
+      "path": "bindings/c/tree-sitter-modelica.h",
+      "mode": "100644",
+      "bytes": 254,
+      "git_blob_sha1": "b6abe05d1a098dc653303248d8a2f434c9bcf939",
+      "sha256": "1fe51bfa0be4342daeae50fd8f02582307bd86cda245b33ee0c9987d38c75989",
+      "retained_path": "bindings/c/tree-sitter-modelica.h"
+    },
+    {
+      "path": "bindings/c/tree-sitter-modelica.pc.in",
+      "mode": "100644",
+      "bytes": 264,
+      "git_blob_sha1": "769928ea64c081cfeb4c66edb28eb7a91885a276",
+      "sha256": "f09074409d521e1e61bcb671390fc5495443c9d31aadfcf5b973a290d1a3f656",
+      "retained_path": "bindings/c/tree-sitter-modelica.pc.in"
+    },
+    {
+      "path": "bindings/go/binding.go",
+      "mode": "100644",
+      "bytes": 324,
+      "git_blob_sha1": "4eab49821689f5a5c952f58aa057bddc1465d6e3",
+      "sha256": "3ca25a4713820ca578f9bb59e656b5b630a42485f49105c4c2155a322e08bcc3",
+      "retained_path": "bindings/go/binding.go"
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "mode": "100644",
+      "bytes": 374,
+      "git_blob_sha1": "6a38325f64c1224a22fa3a7631e1a12838588c07",
+      "sha256": "d2101c8a174d3ec9c48fd60316c494bb8d0453959f878969cfb16b62b175febd",
+      "retained_path": "bindings/go/binding_test.go"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "mode": "100644",
+      "bytes": 593,
+      "git_blob_sha1": "6810c104fb766e93ff7426428d560b0d86a85b4e",
+      "sha256": "1d32f1d2ee34975932451843d9d8ff049228b79de5af2982a2762b27d37707f7",
+      "retained_path": "bindings/node/binding.cc"
+    },
+    {
+      "path": "bindings/node/binding_test.js",
+      "mode": "100644",
+      "bytes": 260,
+      "git_blob_sha1": "afede30a7b262dd5e8793968b8e967b857d8c0d1",
+      "sha256": "74bae919b78d6fadc38898d7937c380c855b9c445b03b2df4cea0d3de95a4f1b",
+      "retained_path": "bindings/node/binding_test.js"
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "mode": "100644",
+      "bytes": 452,
+      "git_blob_sha1": "efe259eed03f0556c577165d98dacc404a6f59ab",
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "retained_path": "bindings/node/index.d.ts"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "mode": "100644",
+      "bytes": 201,
+      "git_blob_sha1": "6657bcf42deccb50fc4675b4cda2c60dca356a56",
+      "sha256": "609bdf22b8fd183025b3c24e8587f6211d50358e8f2e4c526b9217349ed9dbc0",
+      "retained_path": "bindings/node/index.js"
+    },
+    {
+      "path": "bindings/python/tests/test_binding.py",
+      "mode": "100644",
+      "bytes": 302,
+      "git_blob_sha1": "a6f8cc5f1a13a6550476f6d8f891614c52e7739a",
+      "sha256": "755f22b677dc8cee8ce21988d1fcbc8c155c1241b0ebceb82e543b32137f1358",
+      "retained_path": "bindings/python/tests/test_binding.py"
+    },
+    {
+      "path": "bindings/python/tree_sitter_modelica/__init__.py",
+      "mode": "100644",
+      "bytes": 1157,
+      "git_blob_sha1": "98fdb48126e348ba9383ecddfd80d27b08d38882",
+      "sha256": "98a5bcd612f9e453d2e209137784216e17ef8a7750ecdc372daf9c6070d37be2",
+      "retained_path": "bindings/python/tree_sitter_modelica/__init__.py"
+    },
+    {
+      "path": "bindings/python/tree_sitter_modelica/__init__.pyi",
+      "mode": "100644",
+      "bytes": 247,
+      "git_blob_sha1": "abf6633f32670b50af307e8deb2e6ce2109d816f",
+      "sha256": "a22c459bc957b1965661ae5c4708fa6eb6ea877eff7f3376acb13e7665fdfeb0",
+      "retained_path": "bindings/python/tree_sitter_modelica/__init__.pyi"
+    },
+    {
+      "path": "bindings/python/tree_sitter_modelica/binding.c",
+      "mode": "100644",
+      "bytes": 687,
+      "git_blob_sha1": "3886cc8182cd215e27ac6ab6029f7909940ae5e5",
+      "sha256": "8867679a186badc498da4a3192c4e1585678471c63e9083ac11e95e6e3ca7bfd",
+      "retained_path": "bindings/python/tree_sitter_modelica/binding.c"
+    },
+    {
+      "path": "bindings/python/tree_sitter_modelica/py.typed",
+      "mode": "100644",
+      "bytes": 0,
+      "git_blob_sha1": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "retained_path": "bindings/python/tree_sitter_modelica/py.typed"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "mode": "100644",
+      "bytes": 662,
+      "git_blob_sha1": "9b14f245c83705fa799d0be305d4737c321ee040",
+      "sha256": "030abef06b72408898950c54225cedc16072c9f5d5cce490a9b98bbdb1061818",
+      "retained_path": "bindings/rust/build.rs"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "mode": "100644",
+      "bytes": 1979,
+      "git_blob_sha1": "ad63941b0921539cc4b666a857160f9c54960913",
+      "sha256": "288c6ebfa59f142571b4e796b92b1c2b8ef58c654e07994bf583f12db8305b52",
+      "retained_path": "bindings/rust/lib.rs"
+    },
+    {
+      "path": "bindings/swift/TreeSitterModelica/modelica.h",
+      "mode": "100644",
+      "bytes": 254,
+      "git_blob_sha1": "b6abe05d1a098dc653303248d8a2f434c9bcf939",
+      "sha256": "1fe51bfa0be4342daeae50fd8f02582307bd86cda245b33ee0c9987d38c75989",
+      "retained_path": "bindings/swift/TreeSitterModelica/modelica.h"
+    },
+    {
+      "path": "bindings/swift/TreeSitterModelicaTests/TreeSitterModelicaTests.swift",
+      "mode": "100644",
+      "bytes": 375,
+      "git_blob_sha1": "63875b491024dd4f34f1e692dc454654cee90086",
+      "sha256": "6b98f5783dcbb8e9bf26178bafbe8d565527030f28e749eee90a67fccb20b329",
+      "retained_path": "bindings/swift/TreeSitterModelicaTests/TreeSitterModelicaTests.swift"
+    },
+    {
+      "path": "examples/Resistor.mo",
+      "mode": "100644",
+      "bytes": 1846,
+      "git_blob_sha1": "c7ac247ed607b4e226f525774c1efff1a0a4fc3c",
+      "sha256": "0a0f5a8b25289208c5a07414682b331d4376942fa838982d71fa3ad24ddba20e",
+      "retained_path": "examples/Resistor.mo"
+    },
+    {
+      "path": "go.mod",
+      "mode": "100644",
+      "bytes": 113,
+      "git_blob_sha1": "95594188c5f8045a737ca960b3382ebabb198d81",
+      "sha256": "0767f427789d3d135f974ac6238cb445b070df172b27025b06ddf7905e4fb783",
+      "retained_path": "go.mod"
+    },
+    {
+      "path": "grammar.js",
+      "mode": "100644",
+      "bytes": 27121,
+      "git_blob_sha1": "d7022595e45f3deb85499c44f0cdb946c9deb501",
+      "sha256": "6f25dfe19dea642d4e48d86064b8657ccc104ac0503c65fad990d73cac1dcbc2",
+      "retained_path": "grammar.js"
+    },
+    {
+      "path": "package-lock.json",
+      "mode": "100644",
+      "bytes": 30296,
+      "git_blob_sha1": "44b3ce11d044bc65b5ee63a5cb2a6ce98121329f",
+      "sha256": "8b45058b6efa26b38d291cbef273261970ed416eebbd1a49537e0f2df4ff7c2b",
+      "retained_path": "package-lock.json"
+    },
+    {
+      "path": "package.json",
+      "mode": "100644",
+      "bytes": 2198,
+      "git_blob_sha1": "482385029eb5ff05a4081b359be239a30f051a4b",
+      "sha256": "26d285702a2f10841d0feead73e33b27acdd8bc5692f4744f0aa50db6abfc2c1",
+      "retained_path": "package.json"
+    },
+    {
+      "path": "pyproject.toml",
+      "mode": "100644",
+      "bytes": 752,
+      "git_blob_sha1": "c6ae0a230efd5934246a54fe9d56d2a832181655",
+      "sha256": "8009a7fe3dfa42103c455cb4819402cee8e03a7ddf3ac5566fe155027dc19410",
+      "retained_path": "pyproject.toml"
+    },
+    {
+      "path": "setup.py",
+      "mode": "100644",
+      "bytes": 1771,
+      "git_blob_sha1": "f19009b5faaad1337b04c433ae21f5d0de39beb6",
+      "sha256": "7ec983772aa30f40f25aa5e3b776841a1fa1e2b60934d11cec5e7279e2f7a6ab",
+      "retained_path": "setup.py"
+    },
+    {
+      "path": "src/grammar.json",
+      "mode": "100644",
+      "bytes": 153029,
+      "git_blob_sha1": "4549214ecde3b76b1bf0449e6d247a53a516c85f",
+      "sha256": "6b73e1d3098bee9130f44f2da0e798b4fc5089ffd966503a95f965024fefa27e",
+      "retained_path": "src/grammar.json"
+    },
+    {
+      "path": "src/node-types.json",
+      "mode": "100644",
+      "bytes": 72877,
+      "git_blob_sha1": "85bc58f08b7c880461071c17f3a9c0f41a88ecf2",
+      "sha256": "f11702ed9c348ee4a805ded17aa4654acb77d6dd3083f0209adfe7cacabbd479",
+      "retained_path": "src/node-types.json"
+    },
+    {
+      "path": "src/parser.c",
+      "mode": "100644",
+      "bytes": 2104909,
+      "git_blob_sha1": "860ac85ab63281293f16e8f158ceaaf69183f63a",
+      "sha256": "b447c9dcd8ee7b0ffd385e72bab1fea543495724ae583c58d90687a70f7fa2af",
+      "retained_path": "src/parser.c"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "mode": "100644",
+      "bytes": 958,
+      "git_blob_sha1": "1f4466d75c40b6e62728b2de94c82c6398e42151",
+      "sha256": "253b44a7b4313a7afd0c505c2fc6e7ce4b8e78955ebf4be3ea000532ec060673",
+      "retained_path": "src/tree_sitter/alloc.h"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "mode": "100644",
+      "bytes": 10420,
+      "git_blob_sha1": "15a3b233bbb8760a5d87089b259fe0122da75c8a",
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "retained_path": "src/tree_sitter/array.h"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "mode": "100644",
+      "bytes": 7039,
+      "git_blob_sha1": "799f599bd4e292e95565f90733c59fa422899eae",
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "retained_path": "src/tree_sitter/parser.h"
+    },
+    {
+      "path": "test/corpus/definitions.txt",
+      "mode": "100644",
+      "bytes": 254,
+      "git_blob_sha1": "be60884f4d8d3de4b6766f1908c26a425c3a6900",
+      "sha256": "5f1342b86340201078fb884d2a67287d03c3d5fdc2d14132e772d3f45e7a9cf1",
+      "retained_path": "test/corpus/definitions.txt"
+    }
+  ]
+}

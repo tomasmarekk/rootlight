@@ -1,0 +1,536 @@
+================================================================================
+unterminated string
+================================================================================
+"abc
+
+--------------------------------------------------------------------------------
+
+(expressions
+  (string
+    (literal_content)
+    (MISSING """)))
+
+================================================================================
+unterminated symbol
+================================================================================
+:"abc
+
+--------------------------------------------------------------------------------
+
+(expressions
+  (symbol
+    (literal_content)
+    (MISSING """)))
+
+================================================================================
+unterminated regex
+================================================================================
+/foo
+--------------------------------------------------------------------------------
+
+(expressions
+  (ERROR))
+
+================================================================================
+regex with incorrect modifiers
+================================================================================
+/foo/if
+--------------------------------------------------------------------------------
+
+(expressions
+  (regex
+    (literal_content)
+    (regex_modifier))
+  (ERROR
+    (identifier)))
+
+================================================================================
+unterminated percent literal string
+================================================================================
+%(asdf
+--------------------------------------------------------------------------------
+
+(expressions
+  (string
+    (literal_content)
+    (MISSING """)))
+
+================================================================================
+unterminated percent literal array
+================================================================================
+%w(1
+
+--------------------------------------------------------------------------------
+
+(expressions
+  (ERROR
+    (string
+      (literal_content))))
+
+================================================================================
+incorrectly escaped %q string
+================================================================================
+%q[\]]
+--------------------------------------------------------------------------------
+
+(expressions
+  (string
+    (literal_content))
+  (ERROR))
+
+================================================================================
+percent literal nesting too deep
+:error
+================================================================================
+%q(
+((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((
+
+)
+
+%q(
+((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((
+))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+)
+--------------------------------------------------------------------------------
+
+(expressions
+  (string)
+  (string)
+  (ERROR))
+
+================================================================================
+too many nested percent literals
+================================================================================
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+1
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+1
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+--------------------------------------------------------------------------------
+
+(expressions
+  (string
+    (interpolation
+      (string
+        (interpolation
+          (string
+            (interpolation
+              (string
+                (interpolation
+                  (string
+                    (interpolation
+                      (string
+                        (interpolation
+                          (string
+                            (interpolation
+                              (string
+                                (interpolation
+                                  (string
+                                    (interpolation
+                                      (string
+                                        (interpolation
+                                          (string
+                                            (interpolation
+                                              (string
+                                                (interpolation
+                                                  (string
+                                                    (interpolation
+                                                      (string
+                                                        (interpolation
+                                                          (string
+                                                            (interpolation
+                                                              (string
+                                                                (interpolation
+                                                                  (integer)))))))))))))))))))))))))))))))))
+  (string
+    (interpolation
+      (string
+        (interpolation
+          (string
+            (interpolation
+              (string
+                (interpolation
+                  (string
+                    (interpolation
+                      (string
+                        (interpolation
+                          (string
+                            (interpolation
+                              (string
+                                (interpolation
+                                  (string
+                                    (interpolation
+                                      (string
+                                        (interpolation
+                                          (string
+                                            (interpolation
+                                              (string
+                                                (interpolation
+                                                  (string
+                                                    (interpolation
+                                                      (string
+                                                        (interpolation
+                                                          (string
+                                                            (interpolation
+                                                              (string
+                                                                (ERROR)
+                                                                (literal_content)
+                                                                (ERROR)
+                                                                (literal_content)
+                                                                (interpolation
+                                                                  (integer))
+                                                                (literal_content)))))))))))))))))))))))))))))))))
+
+================================================================================
+error recovery of curly brace
+================================================================================
+a {{{{{{{
+--------------------------------------------------------------------------------
+
+(expressions
+  (identifier)
+  (ERROR))
+
+================================================================================
+too many heredocs
+================================================================================
+[<<-a, <<-b, <<-c, <<-d, <<-e, <<-f, <<-g, <<-h, <<-i, <<-j, <<-k, <<-l, <<-m, <<-n, <<-o, <<-p, <<-q]
+1
+a
+2
+b
+3
+c
+4
+d
+5
+e
+6
+f
+7
+g
+8
+h
+9
+i
+10
+j
+11
+k
+12
+l
+13
+m
+14
+n
+15
+o
+16
+p
+17
+q
+--------------------------------------------------------------------------------
+
+(expressions
+  (array
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (heredoc_start)
+    (ERROR)
+    (call
+      method: (operator)
+      receiver: (identifier)))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (integer)
+  (identifier))
+
+================================================================================
+heredoc identifier too long
+================================================================================
+# okay
+a = <<-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+       aaaaaa
+       aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+# too long (256 bytes when encoded as UTF-8)
+b = <<-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb💣
+       bbbbbb
+       bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb💣
+
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (assign
+    lhs: (identifier)
+    rhs: (heredoc_start))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (comment)
+  (call
+    receiver: (identifier)
+    (ERROR)
+    method: (operator)
+    arguments: (argument_list
+      (call
+        method: (operator)
+        receiver: (identifier))))
+  (identifier)
+  (identifier))
+
+================================================================================
+heredoc buffer filled
+================================================================================
+# 25x🔥 + 25x🚨 + 25x💥 + 25x💩 + 25x💢 + 3x💀 = 512 bytes after UTF-8 encoding
+p <<-🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥, <<-🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨, <<-💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥, <<-💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩, <<-💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢, <<-💀💀💀, <<-does_not_fit
+1
+🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+2
+🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+3
+💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥
+4
+💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩💩
+5
+💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢💢
+6
+💀💀💀
+
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (call
+    receiver: (call
+      method: (identifier)
+      arguments: (argument_list
+        (heredoc_start)
+        (heredoc_start)
+        (heredoc_start)
+        (heredoc_start)
+        (heredoc_start)
+        (heredoc_start)))
+    (ERROR)
+    method: (operator)
+    arguments: (argument_list
+      (call
+        method: (operator)
+        receiver: (identifier))))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end)))
+
+================================================================================
+unterminated quoted heredoc
+:error
+================================================================================
+<<-'missing_quote
+missing_quote
+--------------------------------------------------------------------------------
+
+(expressions
+  (call
+    receiver: (MISSING identifier)
+    method: (operator)
+    arguments: (argument_list
+      (call
+        method: (operator)
+        (ERROR)
+        receiver: (identifier))))
+  (identifier))
+
+================================================================================
+only certain things allowed inside enums
+:error
+================================================================================
+
+enum MyEnum
+  alias Hello = World
+
+  abstract def foo
+
+  include MyModule
+
+  if true
+    puts "hello"
+  end
+end
+
+---
+
+(expressions
+  (ERROR
+    (constant))
+  (alias
+    (constant)
+    (constant))
+  (abstract_method_def
+    (identifier))
+  (include
+    (constant))
+  (if
+    (true)
+    (then
+      (call
+        (identifier)
+        (argument_list
+          (string)))))
+  (ERROR))
+
+================================================================================
+can't use a named tuple for hash-like syntax
+================================================================================
+Foo { a: 1 }
+--------------------------------------------------------------------------------
+
+(expressions
+  (array_like
+    name: (constant)
+    values: (tuple
+      (call
+        method: (identifier)
+        (ERROR)
+        arguments: (argument_list
+          (integer))))))

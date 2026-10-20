@@ -1,0 +1,16 @@
+==================
+start
+==================
+(module (start 1))
+(module (start $main))
+---
+
+(root
+  (module
+    (module_field_start
+      (index
+        (uinteger))))
+  (module
+    (module_field_start
+      (index
+        (identifier)))))

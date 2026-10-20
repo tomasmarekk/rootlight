@@ -1,0 +1,79 @@
+==================
+try_table
+==================
+(module
+  (func
+    (try_table)
+    (try_table (result i32) (catch $e0 $h))
+    (try_table (catch_all $h) (unreachable))
+    (try_table (result i32) (catch $e0 $h0) (catch $e1 $h1))
+    (try_table (result f32) (catch_ref $e-f32 $h))
+    (try_table (catch_all 0) (catch_all_ref 0))
+    try_table $t (result) (catch $e0 $h0) (catch_ref $e1 $h1)
+    unreachable
+    end
+  )
+)
+---
+
+(root
+  (module
+    (module_field_func
+      (block_try_table)
+      (block_try_table
+        (result
+          (num_type))
+        (catch
+          (index
+            (identifier))
+          (index
+            (identifier))))
+      (block_try_table
+        (catch
+          (index
+            (identifier)))
+        (plain_instr
+          (instr_name)))
+      (block_try_table
+        (result
+          (num_type))
+        (catch
+          (index
+            (identifier))
+          (index
+            (identifier)))
+        (catch
+          (index
+            (identifier))
+          (index
+            (identifier))))
+      (block_try_table
+        (result
+          (num_type))
+        (catch
+          (index
+            (identifier))
+          (index
+            (identifier))))
+      (block_try_table
+        (catch
+          (index
+            (uinteger)))
+        (catch
+          (index
+            (uinteger))))
+      (block_try_table
+        (identifier)
+        (result)
+        (catch
+          (index
+            (identifier))
+          (index
+            (identifier)))
+        (catch
+          (index
+            (identifier))
+          (index
+            (identifier)))
+        (plain_instr
+          (instr_name))))))

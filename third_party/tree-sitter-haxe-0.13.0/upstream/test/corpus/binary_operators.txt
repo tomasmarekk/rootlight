@@ -1,0 +1,201 @@
+===================
+add two integers (both literals)
+===================
+
+var x = 1 + 2;
+
+---
+(module
+  (variable_declaration (identifier)
+    (operator)
+    (integer) (operator) (integer))
+)
+
+===================
+add two strings (both literals)
+===================
+
+var x = "a" + "b";
+
+---
+(module
+  (variable_declaration (identifier)
+    (operator)
+    (string) (operator) (string))
+)
+
+
+===================
+add three integers (all literals)
+===================
+
+var x = 1 + 2 + 3;
+
+---
+(module
+  (variable_declaration (identifier)
+    (operator)
+    (integer)
+    (operator)
+    (integer)
+    (operator)
+    (integer)
+  )
+)
+
+
+
+===================
+add two integers, one is a variable
+===================
+
+var y = 1;
+var x = 1 + y;
+
+---
+(module
+  (variable_declaration (identifier) (operator) (integer))
+  (variable_declaration (identifier) (operator)
+    (integer) (operator) (identifier)
+  )
+)
+
+
+
+===================
+less than comparison
+===================
+
+var x = a < b;
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+)
+
+===================
+greater than comparison
+===================
+
+var x = a > b;
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+)
+
+===================
+less than or equal comparison
+===================
+
+var x = a <= b;
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+)
+
+===================
+greater than or equal comparison
+===================
+
+var x = a >= b;
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+)
+
+===================
+equality comparison
+===================
+
+var x = a == b;
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+)
+
+===================
+inequality comparison
+===================
+
+var x = a != b;
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+)
+
+===================
+parenthesized sub-expression as a chain tail term
+===================
+
+var x = a + (b);
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+)
+
+===================
+parenthesized sub-expression as a chain head, with a following operator
+===================
+
+var x = (a + b) * c;
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier) (operator) (identifier)
+  )
+)
+
+===================
+range operator with a parenthesized operand
+===================
+
+var x = 0...(10);
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (integer) (operator) (integer)
+  )
+)
+
+===================
+less-than comparison does not get mistaken for a generic call's type params
+===================
+
+var x = a < b;
+var y = Vector<Float>(x);
+
+---
+(module
+  (variable_declaration (identifier) (operator)
+    (identifier) (operator) (identifier)
+  )
+  (variable_declaration (identifier) (operator)
+    (call_expression
+      (identifier)
+      (type_params (type (identifier)))
+      (identifier)
+    )
+  )
+)

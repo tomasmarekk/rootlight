@@ -1,0 +1,3 @@
+onlyBuiltDependencies:
+  - dprint
+  - tree-sitter-cli

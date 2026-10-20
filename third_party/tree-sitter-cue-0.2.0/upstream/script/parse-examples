@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+function clone_repo {
+	owner=$1
+	name=$2
+	sha=$3
+
+	path=$SCRIPT_DIR/examples/$name
+	if [ ! -d "$path" ]; then
+		echo "Cloning $owner/$name"
+		git clone "https://github.com/$owner/$name" "$path"
+	fi
+
+	pushd "$path" >/dev/null
+	actual_sha=$(git rev-parse HEAD)
+	if [ "$actual_sha" != "$sha" ]; then
+		echo "Updating $owner/$name to $sha"
+		git fetch
+		git reset --hard "$sha"
+	fi
+	popd >/dev/null
+}
+
+clone_repo cue-lang cue 7fb7792580ac4aabed124138a9bf7760c314b82b
+
+# cue-lang/cue keeps a cue.mod/module.cue file in some Go testdata
+# directories that holds only a sentence, so that the CUE files there are
+# not part of a CUE module. Such a file is not CUE, so skip it.
+placeholder='Ensure that CUE files in Go testdata dirs are not part of the CUE module.'
+status=0
+find "$SCRIPT_DIR/examples" -type f -name '*.cue' \
+    | while read -r file; do
+        case $file in
+        */cue.mod/module.cue) [ "$(cat "$file")" = "$placeholder" ] && continue ;;
+        esac
+        echo "$file"
+    done \
+    | xargs tree-sitter parse -q -s || status=1
+
+exit $status

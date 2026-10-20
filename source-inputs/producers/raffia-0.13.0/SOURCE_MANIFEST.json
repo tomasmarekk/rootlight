@@ -1,0 +1,411 @@
+{
+  "schema": "rootlight.raffia-source-bundle/1",
+  "upstream": [
+    {
+      "path": "raffia/.cargo_vcs_info.json",
+      "bytes": 100,
+      "sha256": "3238edf9484cb6537d652f859e8f763bd1fb72ec10697b385ba8a0b006e3a6f8",
+      "local_bytes": 100,
+      "local_sha256": "3238edf9484cb6537d652f859e8f763bd1fb72ec10697b385ba8a0b006e3a6f8"
+    },
+    {
+      "path": "raffia/Cargo.lock",
+      "bytes": 10423,
+      "sha256": "f32221b276e433673f1027290e07b116d2bbd940f314c964bc4ff342a2c609ca",
+      "local_bytes": 10423,
+      "local_sha256": "f32221b276e433673f1027290e07b116d2bbd940f314c964bc4ff342a2c609ca"
+    },
+    {
+      "path": "raffia/Cargo.toml",
+      "bytes": 1565,
+      "sha256": "c68a3d4c6b65b87a76560696900410b26361a18f3b180529c6fc22cef9c49c13",
+      "local_bytes": 1590,
+      "local_sha256": "21e85920c775be0c9df45ed4c704d416bd91ded7dad22a49736772411b785ed0"
+    },
+    {
+      "path": "raffia/Cargo.toml.orig",
+      "bytes": 695,
+      "sha256": "5e76178d1d24c036acad4ac1668ef394a73d987cadca484146855a040e5e8333",
+      "local_bytes": 695,
+      "local_sha256": "5e76178d1d24c036acad4ac1668ef394a73d987cadca484146855a040e5e8333"
+    },
+    {
+      "path": "raffia/examples/comments.rs",
+      "bytes": 325,
+      "sha256": "ce58d1d3a1addff2b7cac9d0aa24c836f0ce021dbcc80187e2d02443923e5fa0",
+      "local_bytes": 325,
+      "local_sha256": "ce58d1d3a1addff2b7cac9d0aa24c836f0ce021dbcc80187e2d02443923e5fa0"
+    },
+    {
+      "path": "raffia/examples/json.rs",
+      "bytes": 606,
+      "sha256": "b02c2dac7f56a4689da1a427b345d90ee65e80d2df25a7f34dba5b4fb472802f",
+      "local_bytes": 606,
+      "local_sha256": "b02c2dac7f56a4689da1a427b345d90ee65e80d2df25a7f34dba5b4fb472802f"
+    },
+    {
+      "path": "raffia/examples/print_ast.rs",
+      "bytes": 1685,
+      "sha256": "1eee6990cca3576216ae9a2bd10b395a6278a5147d127ce77a15ebfa9196e9ec",
+      "local_bytes": 1685,
+      "local_sha256": "1eee6990cca3576216ae9a2bd10b395a6278a5147d127ce77a15ebfa9196e9ec"
+    },
+    {
+      "path": "raffia/README.md",
+      "bytes": 1767,
+      "sha256": "d75feb2f3d978d6af8481e462a9654d2eea6ab14666ca13de6c324b966c6dd82",
+      "local_bytes": 1767,
+      "local_sha256": "d75feb2f3d978d6af8481e462a9654d2eea6ab14666ca13de6c324b966c6dd82"
+    },
+    {
+      "path": "raffia/src/ast.rs",
+      "bytes": 105128,
+      "sha256": "4af8801cef6c9f5820a26972d71156208f124c7051c35dcdcb2cfef60e2bc1e5",
+      "local_bytes": 106181,
+      "local_sha256": "ed26dd01b2a47e293f284a3d2dafc8a347030b27c49be67637978d3d694a9e05"
+    },
+    {
+      "path": "raffia/src/config.rs",
+      "bytes": 1138,
+      "sha256": "7f1f54e452cad9ad54b599920c9912809ff769e08768bcaafd0c9e7b70c7669b",
+      "local_bytes": 1138,
+      "local_sha256": "7f1f54e452cad9ad54b599920c9912809ff769e08768bcaafd0c9e7b70c7669b"
+    },
+    {
+      "path": "raffia/src/error.rs",
+      "bytes": 9907,
+      "sha256": "b7fcc0f3cbb3268ee0ac5e0bcd39ba4e5b4ae9e2242952bd2f970c937d6c51d9",
+      "local_bytes": 10120,
+      "local_sha256": "14e710cc3399cf8384b8338158c8b7dbdc2b657767391f7836f1d999daa1c934"
+    },
+    {
+      "path": "raffia/src/lib.rs",
+      "bytes": 5032,
+      "sha256": "6c4c07da3ac9df4af3c6af3eb0b44e5c6cc49acaacf2cbfe70f55bcfc05eb41e",
+      "local_bytes": 5063,
+      "local_sha256": "d2df956a055913de3f8bdcf82b48a6c266d9ad788ea7b6b2d5818aab014bdbdf"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/color_profile.rs",
+      "bytes": 544,
+      "sha256": "4e1fd1ad8083d7d3653ebc8e9c549c13950b3f768748af7c45a2503064260c71",
+      "local_bytes": 544,
+      "local_sha256": "4e1fd1ad8083d7d3653ebc8e9c549c13950b3f768748af7c45a2503064260c71"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/container.rs",
+      "bytes": 13494,
+      "sha256": "cd6ecaaa9fbdd87719e3a40007aefcd6aa0d7417769df5545fa79ae3b0124d8c",
+      "local_bytes": 13494,
+      "local_sha256": "cd6ecaaa9fbdd87719e3a40007aefcd6aa0d7417769df5545fa79ae3b0124d8c"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/counter_style.rs",
+      "bytes": 795,
+      "sha256": "3a1758d2853bede4a5aad91f4ecfdaaf54735f6c5570e0c6e61d1231051f34a8",
+      "local_bytes": 795,
+      "local_sha256": "3a1758d2853bede4a5aad91f4ecfdaaf54735f6c5570e0c6e61d1231051f34a8"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/custom_media.rs",
+      "bytes": 1278,
+      "sha256": "6cc43fa030213ae13614996505589aedd2c661c2d740ba6553fdcb0c1ca00379",
+      "local_bytes": 1278,
+      "local_sha256": "6cc43fa030213ae13614996505589aedd2c661c2d740ba6553fdcb0c1ca00379"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/custom_selector.rs",
+      "bytes": 3123,
+      "sha256": "b19da58b60c4f8e24018006d903d44acdab9e2a6083027e3f7a9abca46e48c71",
+      "local_bytes": 3123,
+      "local_sha256": "b19da58b60c4f8e24018006d903d44acdab9e2a6083027e3f7a9abca46e48c71"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/document.rs",
+      "bytes": 1220,
+      "sha256": "9ea76e1568cd4f1f94d7f181164a9602c7ab3d279c7ccf762da219b5cef5584d",
+      "local_bytes": 1220,
+      "local_sha256": "9ea76e1568cd4f1f94d7f181164a9602c7ab3d279c7ccf762da219b5cef5584d"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/font_feature_values.rs",
+      "bytes": 1098,
+      "sha256": "1bcb92014bd4452c37fcf5dcc4a304c8dce0d16283f9e0ade19f7cd90eb38ec6",
+      "local_bytes": 1098,
+      "local_sha256": "1bcb92014bd4452c37fcf5dcc4a304c8dce0d16283f9e0ade19f7cd90eb38ec6"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/import.rs",
+      "bytes": 3317,
+      "sha256": "d24aa39d8be45848ae45ef964e6fc229f665a73c2aeafd650ffc84ded031a144",
+      "local_bytes": 3317,
+      "local_sha256": "d24aa39d8be45848ae45ef964e6fc229f665a73c2aeafd650ffc84ded031a144"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/keyframes.rs",
+      "bytes": 3383,
+      "sha256": "0dc8655f0ca124ca53d1ace3daf6a4da2229db51f7903bb994f6aa7c7568ff1f",
+      "local_bytes": 3383,
+      "local_sha256": "0dc8655f0ca124ca53d1ace3daf6a4da2229db51f7903bb994f6aa7c7568ff1f"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/layer.rs",
+      "bytes": 2250,
+      "sha256": "53ce3955a19309e31ac2b4bdf015fc4af837edd7382f9f905f38dfc2e4aa8555",
+      "local_bytes": 2250,
+      "local_sha256": "53ce3955a19309e31ac2b4bdf015fc4af837edd7382f9f905f38dfc2e4aa8555"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/media.rs",
+      "bytes": 17860,
+      "sha256": "6fa83dc26bcc1d91d37c7e31ac43e459da10e4d09f265f85fdd6ad678b9c535c",
+      "local_bytes": 17860,
+      "local_sha256": "6fa83dc26bcc1d91d37c7e31ac43e459da10e4d09f265f85fdd6ad678b9c535c"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/mod.rs",
+      "bytes": 22561,
+      "sha256": "efa13f0c3877e0174946999196d1d6288134cd3e5c67652d1359cfaada7ee7a8",
+      "local_bytes": 22561,
+      "local_sha256": "efa13f0c3877e0174946999196d1d6288134cd3e5c67652d1359cfaada7ee7a8"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/namespace.rs",
+      "bytes": 1206,
+      "sha256": "94e39c2257211d68d914116a02bad835f5a4e74f6fb689e2c4c099dc2ac084ea",
+      "local_bytes": 1206,
+      "local_sha256": "94e39c2257211d68d914116a02bad835f5a4e74f6fb689e2c4c099dc2ac084ea"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/page.rs",
+      "bytes": 2599,
+      "sha256": "5100972699e2e4c34513df2126c612815b0b95984b04383084553511cda0fd53",
+      "local_bytes": 2599,
+      "local_sha256": "5100972699e2e4c34513df2126c612815b0b95984b04383084553511cda0fd53"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/scope.rs",
+      "bytes": 2814,
+      "sha256": "8497d7f8242ba17ad9d2dd51854cfbaf800be93f9904da90d0763639493728ea",
+      "local_bytes": 2814,
+      "local_sha256": "8497d7f8242ba17ad9d2dd51854cfbaf800be93f9904da90d0763639493728ea"
+    },
+    {
+      "path": "raffia/src/parser/at_rule/supports.rs",
+      "bytes": 5642,
+      "sha256": "82115e925fea1c1a062804197319464963c2e1444ea3e910d78125e4d7a70ac5",
+      "local_bytes": 5642,
+      "local_sha256": "82115e925fea1c1a062804197319464963c2e1444ea3e910d78125e4d7a70ac5"
+    },
+    {
+      "path": "raffia/src/parser/builder.rs",
+      "bytes": 2190,
+      "sha256": "2239cc4e2f8d4f9ee917eeeacf7421b4d78189bbf24eb9846054d55d68ccbfec",
+      "local_bytes": 2535,
+      "local_sha256": "674dbec1bfb93fbb91b71054a9da195c5cbdb182473621ee41a2d5526d06bfd9"
+    },
+    {
+      "path": "raffia/src/parser/convert.rs",
+      "bytes": 6710,
+      "sha256": "b2dd60b7aa53e4226c7ac1d07f0f56338bc32ac8c9e35827009ca2ed386e5a97",
+      "local_bytes": 6710,
+      "local_sha256": "b2dd60b7aa53e4226c7ac1d07f0f56338bc32ac8c9e35827009ca2ed386e5a97"
+    },
+    {
+      "path": "raffia/src/parser/less.rs",
+      "bytes": 74429,
+      "sha256": "33fd2c74f1f7a1ab81ba5d24fbfa6c822d5b58aa5660a4ffb504d30f2112ef72",
+      "local_bytes": 74429,
+      "local_sha256": "33fd2c74f1f7a1ab81ba5d24fbfa6c822d5b58aa5660a4ffb504d30f2112ef72"
+    },
+    {
+      "path": "raffia/src/parser/macros.rs",
+      "bytes": 3629,
+      "sha256": "100018ba0dd0176b59cca2ab250a45ef421b6b6bc464c27761bcd5e8045ebaa4",
+      "local_bytes": 3629,
+      "local_sha256": "100018ba0dd0176b59cca2ab250a45ef421b6b6bc464c27761bcd5e8045ebaa4"
+    },
+    {
+      "path": "raffia/src/parser/mod.rs",
+      "bytes": 2448,
+      "sha256": "c507802f75f6abcc0c68175766ab94a23cf1b7b8293a972aa0b0f9da7c8e70a8",
+      "local_bytes": 2953,
+      "local_sha256": "b0f7027871d26377ded413319a42e9790f950803e4104f343e8e4d4b29346ff7"
+    },
+    {
+      "path": "raffia/src/parser/sass.rs",
+      "bytes": 61955,
+      "sha256": "be5ee8acca94a76c99cc35b1b3e6a7f4ce166c17bfe01f35548c78c22417cc8a",
+      "local_bytes": 61955,
+      "local_sha256": "be5ee8acca94a76c99cc35b1b3e6a7f4ce166c17bfe01f35548c78c22417cc8a"
+    },
+    {
+      "path": "raffia/src/parser/selector.rs",
+      "bytes": 61879,
+      "sha256": "52c7fed2496d9a94b94ba287ffcaf5a150549f00c448016133b756574e61f7d5",
+      "local_bytes": 61879,
+      "local_sha256": "52c7fed2496d9a94b94ba287ffcaf5a150549f00c448016133b756574e61f7d5"
+    },
+    {
+      "path": "raffia/src/parser/state.rs",
+      "bytes": 1609,
+      "sha256": "b65b0a18cfafbe2eea3ec90e5ff7497053cf468e0847df618cb894b39b88c0d6",
+      "local_bytes": 1609,
+      "local_sha256": "b65b0a18cfafbe2eea3ec90e5ff7497053cf468e0847df618cb894b39b88c0d6"
+    },
+    {
+      "path": "raffia/src/parser/stmt.rs",
+      "bytes": 23559,
+      "sha256": "3bb54ad2da8add63964423e4727785680173fc891646393e9d54bde6a91baa3f",
+      "local_bytes": 26025,
+      "local_sha256": "d10955d7682b2aea8dc57e94ec1890305ad1ebe212e9ff78f75150c659e11a0a"
+    },
+    {
+      "path": "raffia/src/parser/token_seq.rs",
+      "bytes": 1919,
+      "sha256": "8a56fd3e20dfe99661b1047ed4fdec2a8019c20452e2a1cbba5e3bcc58ba6da0",
+      "local_bytes": 1919,
+      "local_sha256": "8a56fd3e20dfe99661b1047ed4fdec2a8019c20452e2a1cbba5e3bcc58ba6da0"
+    },
+    {
+      "path": "raffia/src/parser/value.rs",
+      "bytes": 44425,
+      "sha256": "e2267235a59a3b0d86c94be283decfeb733fab87df7619edb65886dbb25b139b",
+      "local_bytes": 44426,
+      "local_sha256": "48bef4528e665b5d362f8cc8f2df015ffc2bc730febdbcd7a9954080bda5ce7a"
+    },
+    {
+      "path": "raffia/src/pos.rs",
+      "bytes": 429,
+      "sha256": "f171d4cd2182709718facde7798baffb0e54c9776fee7f8abccd9285b391ebd5",
+      "local_bytes": 429,
+      "local_sha256": "f171d4cd2182709718facde7798baffb0e54c9776fee7f8abccd9285b391ebd5"
+    },
+    {
+      "path": "raffia/src/span_ignored_eq.rs",
+      "bytes": 2821,
+      "sha256": "afddef593dfd474bb761d8dc78234c3222dddbaeba823a26ef04267e1215e5aa",
+      "local_bytes": 2821,
+      "local_sha256": "afddef593dfd474bb761d8dc78234c3222dddbaeba823a26ef04267e1215e5aa"
+    },
+    {
+      "path": "raffia/src/tokenizer/convert.rs",
+      "bytes": 530,
+      "sha256": "771f97d539932f69ee149a41193c42512118ac6f075b5406099a1d8d605c83df",
+      "local_bytes": 530,
+      "local_sha256": "771f97d539932f69ee149a41193c42512118ac6f075b5406099a1d8d605c83df"
+    },
+    {
+      "path": "raffia/src/tokenizer/misc.rs",
+      "bytes": 464,
+      "sha256": "fbe894b7cf356aeaf3174ae3f108860db8553b6e2d2be51c03c60ffb52e41dde",
+      "local_bytes": 464,
+      "local_sha256": "fbe894b7cf356aeaf3174ae3f108860db8553b6e2d2be51c03c60ffb52e41dde"
+    },
+    {
+      "path": "raffia/src/tokenizer/mod.rs",
+      "bytes": 54646,
+      "sha256": "a42d96c8ed24edcd7403c98a03e65287ce83181fe0d4d84e7dd7e1f609a029b5",
+      "local_bytes": 59767,
+      "local_sha256": "503f70586f90d91d8e2d011156b8912b0002297254007552d34a7404759da8a7"
+    },
+    {
+      "path": "raffia/src/tokenizer/symbol.rs",
+      "bytes": 8545,
+      "sha256": "17c8a8e12bb04a1f28dd6b637a1daa85de0d33ac73a211a37f3791137d22cf04",
+      "local_bytes": 8545,
+      "local_sha256": "17c8a8e12bb04a1f28dd6b637a1daa85de0d33ac73a211a37f3791137d22cf04"
+    },
+    {
+      "path": "raffia/src/tokenizer/token.rs",
+      "bytes": 14946,
+      "sha256": "f9c35c09db38c30b885c74e4472e5cb7887b374f9ab03346f91b9275ccbdd69b",
+      "local_bytes": 14946,
+      "local_sha256": "f9c35c09db38c30b885c74e4472e5cb7887b374f9ab03346f91b9275ccbdd69b"
+    },
+    {
+      "path": "raffia/src/util.rs",
+      "bytes": 3376,
+      "sha256": "ff3ddf6d3183c7f45c7115aad3fc998cdff6730166f3596a713399c66c194911",
+      "local_bytes": 3376,
+      "local_sha256": "ff3ddf6d3183c7f45c7115aad3fc998cdff6730166f3596a713399c66c194911"
+    },
+    {
+      "path": "raffia_macro/.cargo_vcs_info.json",
+      "bytes": 106,
+      "sha256": "1f071702caacfaf1c54dde90fb5858a927ecaeb4ade046d3851e2f4ea4588d2f",
+      "local_bytes": 106,
+      "local_sha256": "1f071702caacfaf1c54dde90fb5858a927ecaeb4ade046d3851e2f4ea4588d2f"
+    },
+    {
+      "path": "raffia_macro/Cargo.lock",
+      "bytes": 1299,
+      "sha256": "d139f260d01cb8f073057c286bce54db85c76c3042db59165ddc817f54be8293",
+      "local_bytes": 1299,
+      "local_sha256": "d139f260d01cb8f073057c286bce54db85c76c3042db59165ddc817f54be8293"
+    },
+    {
+      "path": "raffia_macro/Cargo.toml",
+      "bytes": 984,
+      "sha256": "9029452ef50e16deaefd9acb465a8e3241d38a040167c92b2a784a8aac4fd536",
+      "local_bytes": 984,
+      "local_sha256": "9029452ef50e16deaefd9acb465a8e3241d38a040167c92b2a784a8aac4fd536"
+    },
+    {
+      "path": "raffia_macro/Cargo.toml.orig",
+      "bytes": 292,
+      "sha256": "a13402741c65fac27489afd100ecc9bdf7726ae898997d83553b1f395271bafd",
+      "local_bytes": 292,
+      "local_sha256": "a13402741c65fac27489afd100ecc9bdf7726ae898997d83553b1f395271bafd"
+    },
+    {
+      "path": "raffia_macro/README.md",
+      "bytes": 171,
+      "sha256": "4f987698b16686c7dcb5c0ef315f7e437cedf02bef15961199a7af08e520e1dc",
+      "local_bytes": 171,
+      "local_sha256": "4f987698b16686c7dcb5c0ef315f7e437cedf02bef15961199a7af08e520e1dc"
+    },
+    {
+      "path": "raffia_macro/src/lib.rs",
+      "bytes": 6442,
+      "sha256": "96301aaace0bb2c31f422d9d4240eba76cf0ba03a641a557299ffc7ca0646acf",
+      "local_bytes": 6442,
+      "local_sha256": "96301aaace0bb2c31f422d9d4240eba76cf0ba03a641a557299ffc7ca0646acf"
+    }
+  ],
+  "local_changes": [
+    "raffia/Cargo.toml",
+    "raffia/src/ast.rs",
+    "raffia/src/error.rs",
+    "raffia/src/lib.rs",
+    "raffia/src/parser/builder.rs",
+    "raffia/src/parser/mod.rs",
+    "raffia/src/parser/stmt.rs",
+    "raffia/src/parser/value.rs",
+    "raffia/src/tokenizer/mod.rs"
+  ],
+  "added_licenses": [
+    {
+      "path": "raffia/LICENSE",
+      "bytes": 1073,
+      "sha256": "586c6ae31e7ead7b33e3644ea8cba231c940c7739d0cbed3d5d14a4f046d82dd"
+    },
+    {
+      "path": "raffia_macro/LICENSE",
+      "bytes": 1073,
+      "sha256": "586c6ae31e7ead7b33e3644ea8cba231c940c7739d0cbed3d5d14a4f046d82dd"
+    }
+  ],
+  "archives": [
+    {
+      "name": "raffia0.13.0",
+      "sha256": "0a83eb5987650fcfc3f2e912d3a718f19b8e87c0d980e12e36edf79fa0221d93",
+      "vcs": "f5cfbbdff33e4c1370940a48a76d26e5202b151d"
+    },
+    {
+      "name": "raffia_macro0.2.0",
+      "sha256": "8ac21f5e4bc6b29ea5d5e691a9aa08b2b9fd8891f48a99157b9f02d8a48e1318",
+      "vcs": "c6cf6c661324f82422d7976ca035f9b5634f768e"
+    }
+  ]
+}

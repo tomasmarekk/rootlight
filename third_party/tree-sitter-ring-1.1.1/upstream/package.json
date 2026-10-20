@@ -1,0 +1,40 @@
+{
+  "name": "tree-sitter-ring",
+  "version": "1.1.1",
+  "description": "Tree-Sitter grammer for the Ring Programming Language",
+  "main": "bindings/node",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ysdragon/tree-sitter-ring.git"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Youssef Saeed",
+    "email": "youssefelkholey@gmail.com",
+    "url": "https://github.com/ysdragon"
+  },
+  "keywords": [
+    "incremental",
+    "parsing",
+    "tree-sitter",
+    "ring"
+  ],
+  "files": [
+    "grammar.js",
+    "tree-sitter.json",
+    "binding.gyp",
+    "prebuilds/**",
+    "bindings/node/*",
+    "queries/*",
+    "src/**",
+    "*.wasm"
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.11"
+  },
+  "scripts": {
+    "build": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  }
+}

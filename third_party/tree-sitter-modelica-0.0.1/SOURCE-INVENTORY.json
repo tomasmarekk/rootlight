@@ -1,0 +1,193 @@
+{
+  "scope": "Complete local native source inputs; only this inventory's own bytes are excluded",
+  "files": {
+    ".editorconfig": {
+      "bytes": 453,
+      "sha256": "1be48c047c7681d02d72da83c800bf343f05a2dbec6206a2d97317d676ade233"
+    },
+    ".gitattributes.upstream": {
+      "bytes": 355,
+      "sha256": "4a9726b8fd23a2c74cbcc2eee434bd9d455781d8e0f474e5aaac1098ebdd68ed"
+    },
+    ".github/dependabot.yml": {
+      "bytes": 156,
+      "sha256": "41c59f693e1420d9380a7cdc31073d7ae09bb736bea260458bd0b41c8d36a26d"
+    },
+    ".github/workflows/ci.yml": {
+      "bytes": 1067,
+      "sha256": "d1ac6083381e1270816c2ba71756557b28ca8c2d3f8a7c04eca3f00218255d54"
+    },
+    ".github/workflows/lint.yml": {
+      "bytes": 508,
+      "sha256": "eddec578c58a0351a45412eecc02706da186467369776e710c8d6131a0dd959e"
+    },
+    ".github/workflows/publish.yml": {
+      "bytes": 282,
+      "sha256": "0d9e4f329c22a796b87cea1652889663a9a0e3959c86a3228359ab711794a913"
+    },
+    ".gitignore.upstream": {
+      "bytes": 296,
+      "sha256": "90f026beba20b40a56352c1e84a2664c1433fd4663c7795b2f9c70c754c510d1"
+    },
+    "binding.gyp": {
+      "bytes": 649,
+      "sha256": "7fa2bd86f8939787621ae9e0fe3d40f7ec7c0a405b3f41eb8cef15ddbac0f78e"
+    },
+    "bindings/c/tree-sitter-modelica.h": {
+      "bytes": 254,
+      "sha256": "1fe51bfa0be4342daeae50fd8f02582307bd86cda245b33ee0c9987d38c75989"
+    },
+    "bindings/c/tree-sitter-modelica.pc.in": {
+      "bytes": 264,
+      "sha256": "f09074409d521e1e61bcb671390fc5495443c9d31aadfcf5b973a290d1a3f656"
+    },
+    "bindings/go/binding.go": {
+      "bytes": 324,
+      "sha256": "3ca25a4713820ca578f9bb59e656b5b630a42485f49105c4c2155a322e08bcc3"
+    },
+    "bindings/go/binding_test.go": {
+      "bytes": 374,
+      "sha256": "d2101c8a174d3ec9c48fd60316c494bb8d0453959f878969cfb16b62b175febd"
+    },
+    "bindings/node/binding.cc": {
+      "bytes": 593,
+      "sha256": "1d32f1d2ee34975932451843d9d8ff049228b79de5af2982a2762b27d37707f7"
+    },
+    "bindings/node/binding_test.js": {
+      "bytes": 260,
+      "sha256": "74bae919b78d6fadc38898d7937c380c855b9c445b03b2df4cea0d3de95a4f1b"
+    },
+    "bindings/node/index.d.ts": {
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd"
+    },
+    "bindings/node/index.js": {
+      "bytes": 201,
+      "sha256": "609bdf22b8fd183025b3c24e8587f6211d50358e8f2e4c526b9217349ed9dbc0"
+    },
+    "bindings/python/tests/test_binding.py": {
+      "bytes": 302,
+      "sha256": "755f22b677dc8cee8ce21988d1fcbc8c155c1241b0ebceb82e543b32137f1358"
+    },
+    "bindings/python/tree_sitter_modelica/__init__.py": {
+      "bytes": 1157,
+      "sha256": "98a5bcd612f9e453d2e209137784216e17ef8a7750ecdc372daf9c6070d37be2"
+    },
+    "bindings/python/tree_sitter_modelica/__init__.pyi": {
+      "bytes": 247,
+      "sha256": "a22c459bc957b1965661ae5c4708fa6eb6ea877eff7f3376acb13e7665fdfeb0"
+    },
+    "bindings/python/tree_sitter_modelica/binding.c": {
+      "bytes": 687,
+      "sha256": "8867679a186badc498da4a3192c4e1585678471c63e9083ac11e95e6e3ca7bfd"
+    },
+    "bindings/python/tree_sitter_modelica/py.typed": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "bindings/rust/build.rs": {
+      "bytes": 662,
+      "sha256": "030abef06b72408898950c54225cedc16072c9f5d5cce490a9b98bbdb1061818"
+    },
+    "bindings/rust/lib.rs": {
+      "bytes": 1979,
+      "sha256": "288c6ebfa59f142571b4e796b92b1c2b8ef58c654e07994bf583f12db8305b52"
+    },
+    "bindings/swift/TreeSitterModelica/modelica.h": {
+      "bytes": 254,
+      "sha256": "1fe51bfa0be4342daeae50fd8f02582307bd86cda245b33ee0c9987d38c75989"
+    },
+    "bindings/swift/TreeSitterModelicaTests/TreeSitterModelicaTests.swift": {
+      "bytes": 375,
+      "sha256": "6b98f5783dcbb8e9bf26178bafbe8d565527030f28e749eee90a67fccb20b329"
+    },
+    "Cargo.toml": {
+      "bytes": 628,
+      "sha256": "870c24e7143035b938cdc83fa48d6a96d738605e416c6704633d5126a0e5581a"
+    },
+    "examples/Resistor.mo": {
+      "bytes": 1846,
+      "sha256": "0a0f5a8b25289208c5a07414682b331d4376942fa838982d71fa3ad24ddba20e"
+    },
+    "go.mod": {
+      "bytes": 113,
+      "sha256": "0767f427789d3d135f974ac6238cb445b070df172b27025b06ddf7905e4fb783"
+    },
+    "grammar.js": {
+      "bytes": 27121,
+      "sha256": "6f25dfe19dea642d4e48d86064b8657ccc104ac0503c65fad990d73cac1dcbc2"
+    },
+    "LICENSE": {
+      "bytes": 1078,
+      "sha256": "99c797f83ed253378889ac2552322bc44ebbd56b0f98be1143c42a6fbd34fa1c"
+    },
+    "Makefile": {
+      "bytes": 3687,
+      "sha256": "1c31128f47c901c7291c8c282bb5818d917b305dd14483e7d8a49df5f063d760"
+    },
+    "package-lock.json": {
+      "bytes": 30296,
+      "sha256": "8b45058b6efa26b38d291cbef273261970ed416eebbd1a49537e0f2df4ff7c2b"
+    },
+    "package.json": {
+      "bytes": 2198,
+      "sha256": "26d285702a2f10841d0feead73e33b27acdd8bc5692f4744f0aa50db6abfc2c1"
+    },
+    "Package.swift": {
+      "bytes": 1754,
+      "sha256": "8139d8101b9b99f687ecca8724c39e63476a49cc8d42aa9e306f5ab8b7593b67"
+    },
+    "pyproject.toml": {
+      "bytes": 752,
+      "sha256": "8009a7fe3dfa42103c455cb4819402cee8e03a7ddf3ac5566fe155027dc19410"
+    },
+    "README.md": {
+      "bytes": 103,
+      "sha256": "ad7bd8ced2f06a2136a7352384d4dda1490e4ea5211ba5aa4fcdfecef421015a"
+    },
+    "setup.py": {
+      "bytes": 1771,
+      "sha256": "7ec983772aa30f40f25aa5e3b776841a1fa1e2b60934d11cec5e7279e2f7a6ab"
+    },
+    "SOURCE-PROVENANCE.json": {
+      "bytes": 13820,
+      "sha256": "be18460483b2df5eea84e516708c8bc916dfd1c5e0954a78d7917caeadf0f6ba"
+    },
+    "SOURCES.md": {
+      "bytes": 997,
+      "sha256": "c7587aa677fc6f020728c5c54ab4b7001a11958fae5e5378ae7a91ba51d5c7fa"
+    },
+    "src/grammar.json": {
+      "bytes": 153029,
+      "sha256": "6b73e1d3098bee9130f44f2da0e798b4fc5089ffd966503a95f965024fefa27e"
+    },
+    "src/node-types.json": {
+      "bytes": 72877,
+      "sha256": "f11702ed9c348ee4a805ded17aa4654acb77d6dd3083f0209adfe7cacabbd479"
+    },
+    "src/parser.c": {
+      "bytes": 2104909,
+      "sha256": "b447c9dcd8ee7b0ffd385e72bab1fea543495724ae583c58d90687a70f7fa2af"
+    },
+    "src/tree_sitter/alloc.h": {
+      "bytes": 958,
+      "sha256": "253b44a7b4313a7afd0c505c2fc6e7ce4b8e78955ebf4be3ea000532ec060673"
+    },
+    "src/tree_sitter/array.h": {
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1"
+    },
+    "src/tree_sitter/parser.h": {
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a"
+    },
+    "test/corpus/definitions.txt": {
+      "bytes": 254,
+      "sha256": "5f1342b86340201078fb884d2a67287d03c3d5fdc2d14132e772d3f45e7a9cf1"
+    },
+    "upstream.tar.gz": {
+      "bytes": 181337,
+      "sha256": "6808cea403c5cd2a78307161564ae7cfebcda41274cb072f12d2a7d226e0baca"
+    }
+  }
+}

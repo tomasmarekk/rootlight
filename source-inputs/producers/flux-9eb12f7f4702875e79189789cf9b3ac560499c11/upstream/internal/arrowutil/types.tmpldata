@@ -1,0 +1,57 @@
+[
+  {
+    "Name": "Int",
+    "Type": "array.Int",
+    "PrimitiveType": "int64",
+    "MonoType": "semantic.BasicInt",
+    "IsNumeric": true,
+    "IsComparable": true,
+    "Value": "Value",
+    "Append": "Append",
+    "NewArray": "NewIntArray"
+  },
+  {
+    "Name": "Uint",
+    "Type": "array.Uint",
+    "PrimitiveType": "uint64",
+    "MonoType": "semantic.BasicUint",
+    "IsNumeric": true,
+    "IsComparable": true,
+    "Value": "Value",
+    "Append": "Append",
+    "NewArray": "NewUintArray"
+  },
+  {
+    "Name": "Float",
+    "Type": "array.Float",
+    "PrimitiveType": "float64",
+    "MonoType": "semantic.BasicFloat",
+    "IsNumeric": true,
+    "IsComparable": true,
+    "Value": "Value",
+    "Append": "Append",
+    "NewArray": "NewFloatArray"
+  },
+  {
+    "Name": "Boolean",
+    "Type": "array.Boolean",
+    "PrimitiveType": "bool",
+    "MonoType": "semantic.BasicBool",
+    "IsNumeric": false,
+    "IsComparable": false,
+    "Value": "Value",
+    "Append": "Append",
+    "NewArray": "NewBooleanArray"
+  },
+  {
+    "Name": "String",
+    "Type": "array.String",
+    "PrimitiveType": "string",
+    "MonoType": "semantic.BasicString",
+    "IsNumeric": false,
+    "IsComparable": true,
+    "Value": "Value",
+    "Append": "Append",
+    "NewArray": "NewStringArray"
+  }
+]

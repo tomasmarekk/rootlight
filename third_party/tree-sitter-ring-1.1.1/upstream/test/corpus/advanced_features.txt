@@ -1,0 +1,531 @@
+==================
+Brace end method
+==================
+
+New Point { See "How are you?" + nl }
+
+Class Point x y z
+    func braceend
+        see "I'm fine, Thank you!" + nl
+
+---
+
+(source_file
+  (expression_statement
+    (new_expression
+      (qualified_identifier
+        (identifier))
+      (see_statement
+        (binary_expression
+          (string)
+          (identifier)))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (function_definition
+      name: (identifier))
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))))
+
+==================
+Call on brace expression result
+==================
+
+o1 = new Point
+
+print( o1 { x=10 y=20 z=30 } )
+
+func print object
+    see object.x + nl
+
+Class Point x y z
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (brace_expression
+          (identifier)
+          (expression_statement
+            (assignment_expression
+              (identifier)
+              (number)))
+          (expression_statement
+            (assignment_expression
+              (identifier)
+              (number)))
+          (expression_statement
+            (assignment_expression
+              (identifier)
+              (number)))))))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (see_statement
+      (binary_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (identifier))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))))
+
+==================
+Print object shorthand
+==================
+
+see new point { x=10 y=20 z=30 }
+class point x y z
+
+---
+
+(source_file
+  (see_statement
+    (new_expression
+      (qualified_identifier
+        (identifier))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))))
+
+==================
+Dynamic attributes with eval
+==================
+
+o1 = new dynamicClass
+see o1.var5 + nl
+
+Class DynamicClass
+    for x = 1 to 10
+        cStr = "var" + x + " = " + x
+        eval(cStr)
+    next
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)))))
+  (see_statement
+    (binary_expression
+      (member_expression
+        (identifier)
+        (identifier))
+      (identifier)))
+  (class_definition
+    name: (identifier)
+    (for_statement
+      variable: (identifier)
+      (number)
+      (number)
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (binary_expression
+            (binary_expression
+              (binary_expression
+                (string)
+                (identifier))
+              (string))
+            (identifier))))
+      (expression_statement
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier)))))))
+
+==================
+Add attribute dynamically
+==================
+
+o1 = new point
+addattribute(o1,"x")
+addattribute(o1,"y")
+o1 { x=10 y=20 }
+
+class point
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (string))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (string))))
+  (expression_statement
+    (brace_expression
+      (identifier)
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))))
+  (class_definition
+    name: (identifier)))
+
+==================
+Add method dynamically
+==================
+
+o1 = new point { x=10 y=20 z=30 }
+
+addmethod(o1,"print", func { see x + nl + y + nl + z + nl } )
+
+o1.print()
+
+Class point
+    x y z
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier))
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (number)))
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (number)))
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (number))))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (string)
+        (anonymous_function
+          (see_statement
+            (binary_expression
+              (binary_expression
+                (binary_expression
+                  (binary_expression
+                    (binary_expression
+                      (identifier)
+                      (identifier))
+                    (identifier))
+                  (identifier))
+                (identifier))
+              (identifier)))))))
+  (expression_statement
+    (call_expression
+      (member_expression
+        (identifier)
+        (identifier))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))))
+
+==================
+Try-catch with method call
+==================
+
+try
+    see o1.salary
+catch
+    see cCatchError + nl
+done
+
+try
+    o1.increasesalary(1000)
+catch
+    see cCatchError + nl
+done
+
+---
+
+(source_file
+  (try_statement
+    (see_statement
+      (member_expression
+        (identifier)
+        (identifier)))
+    (catch_clause
+      (see_statement
+        (binary_expression
+          (identifier)
+          (identifier)))))
+  (try_statement
+    (expression_statement
+      (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (arguments
+          (number))))
+    (catch_clause
+      (see_statement
+        (binary_expression
+          (identifier)
+          (identifier))))))
+
+==================
+Boolean AND expression
+==================
+
+x = 0
+y = 10
+result = x = 0 and y = 10
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (binary_expression
+          (identifier)
+          (number))
+        (binary_expression
+          (identifier)
+          (number))))))
+
+==================
+Bitwise operations
+==================
+
+result = 0xFF & 0x0F
+result = 0xFF | 0x0F
+result = 0xFF ^ 0x0F
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number)))))
+
+==================
+Modulus operator
+==================
+
+remainder = 10 % 3
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number)))))
+
+==================
+Shift operators
+==================
+
+result = 1 << 4
+result = 16 >> 2
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number)))))
+
+==================
+Comparison operators
+==================
+
+result = x < 10
+result = x > 5
+result = x <= 10
+result = x >= 5
+result = x != 0
+result = x = 1
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (number)))))
+
+==================
+Call with brace block
+==================
+
+fCheck = func { see x + nl }
+new point { x=10 call { fCheck() } }
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (anonymous_function
+        (see_statement
+          (binary_expression
+            (identifier)
+            (identifier))))))
+  (expression_statement
+    (new_expression
+      (qualified_identifier
+        (identifier))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (call_keyword_expression
+          (brace_block
+            (expression_statement
+              (call_expression
+                (identifier)))))))))
+
+==================
+ChangeRingKeyword with operator argument
+==================
+
+ChangeRingKeyword see ?
+ChangeRingOperator ? print
+
+---
+
+(source_file
+  (scanner_command)
+  (scanner_command))

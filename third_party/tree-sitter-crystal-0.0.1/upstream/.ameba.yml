@@ -1,0 +1,15 @@
+Excluded:
+  - test/highlight
+
+Metrics/CyclomaticComplexity:
+  Enabled: False
+
+Naming/BlockParameterName:
+  Description: Disallows non-descriptive block parameter names
+  Enabled: false
+
+Style/ParenthesesAroundCondition:
+  AllowSafeAssignment: true
+
+Documentation/DocumentationAdmonition:
+  Enabled: false

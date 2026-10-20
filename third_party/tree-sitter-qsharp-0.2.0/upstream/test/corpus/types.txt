@@ -1,0 +1,176 @@
+================================================================================
+Builtin types
+================================================================================
+
+function Foo(a : Int, b : Double, c : Bool, d : String, e : Qubit, f : Result, g : Pauli, h : Range, i : BigInt, j : Unit) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (typed_param
+        name: (identifier)
+        type: (builtin_type)))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Array type
+================================================================================
+
+function Foo(a : Int[]) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (array_type
+          (builtin_type))))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Tuple type
+================================================================================
+
+function Foo(a : (Int, Double)) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (tuple_type
+          (builtin_type)
+          (builtin_type))))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Callable type function arrow
+================================================================================
+
+function Foo(f : Int -> Bool) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (callable_type
+          (builtin_type)
+          (builtin_type))))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Callable type operation arrow with functors
+================================================================================
+
+function Foo(op : Qubit => Unit is Adj + Ctl) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (callable_type
+          (builtin_type)
+          (builtin_type)
+          (functor_expr
+            (functor_expr)
+            (functor_expr)))))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Generic type parameter with constraint
+================================================================================
+
+function Foo<'T : Eq>(x : 'T) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    (type_params
+      (type_param
+        (apos_ident)
+        (identifier)))
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (apos_ident)))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Nested array of tuple type
+================================================================================
+
+function Foo(a : (Int, Bool)[]) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (array_type
+          (tuple_type
+            (builtin_type)
+            (builtin_type)))))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))

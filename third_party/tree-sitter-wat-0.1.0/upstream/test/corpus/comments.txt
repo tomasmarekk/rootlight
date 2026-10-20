@@ -1,0 +1,31 @@
+==================
+block comment
+==================
+(module
+  (type $t (;;) (func))
+  (;
+  (memory)
+  ;)
+  (func $f)
+  (global (;a;;) f64 (;b(;c(;d;););) f64.const 0)
+  )
+---
+
+(root
+  (module
+    (type_def
+      (identifier)
+      (block_comment)
+      (sub_type
+        (func_type)))
+    (block_comment)
+    (module_field_func
+      (identifier))
+    (module_field_global
+      (block_comment)
+      (global_type
+        (num_type))
+      (block_comment)
+      (plain_instr
+        (instr_name)
+        (integer)))))

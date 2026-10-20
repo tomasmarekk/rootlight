@@ -1,0 +1,10 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -147,6 +147,7 @@
+ 
+     extend: $ => seq(
+       'extend',
++      optional('.'),
+       $.full_ident,
+       $.message_body,
+     ),

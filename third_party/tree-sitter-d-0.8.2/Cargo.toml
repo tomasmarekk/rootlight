@@ -1,0 +1,18 @@
+[package]
+name = "tree-sitter-d"
+version = "0.8.2"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/gdamore/tree-sitter-d"
+description = "Pinned D grammar with local static bindings"
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+[dependencies]
+tree-sitter-language = "=0.1.7"
+[build-dependencies]
+cc = "=1.2.67"
+[dev-dependencies]
+tree-sitter = "=0.26.11"

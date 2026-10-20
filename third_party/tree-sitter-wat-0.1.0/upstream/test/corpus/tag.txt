@@ -1,0 +1,42 @@
+==================
+tag
+==================
+(module
+  (tag)
+  (tag (param i32))
+  (tag (export "t2") (param i32))
+  (tag $t3 (param i32 f32))
+  (export "t3" (tag 3))
+  (import "test" "t3" (tag $t1 (param i32 f32)))
+)
+---
+
+(root
+  (module
+    (module_field_tag)
+    (module_field_tag
+      (param
+        (num_type)))
+    (module_field_tag
+      (export
+        (string))
+      (param
+        (num_type)))
+    (module_field_tag
+      (identifier)
+      (param
+        (num_type)
+        (num_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_tag
+        (identifier)
+        (param
+          (num_type)
+          (num_type))))))

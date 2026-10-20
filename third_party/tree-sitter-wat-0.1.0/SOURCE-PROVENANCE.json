@@ -1,0 +1,20 @@
+{
+  "upstream": "https://github.com/g-plane/tree-sitter-wat",
+  "revision": "e3769473b2d90643d8af500b5cfc2f25a674888a",
+  "archive_sha256": "6903af2aac8c2b8721126ec26a923aa02a98220b5675e0deb10ea1f73c70f9f1",
+  "original_git_blobs": 71,
+  "original_bytes": 2246508,
+  "original_inventory_sha256": "6f3456d061525ad1aa5fb7fa9163be0863ea1c34bbb67059eb0c28bb30ca0a4b",
+  "inert_upstream_names": {
+    ".gitattributes": ".gitattributes.upstream",
+    ".gitignore": ".gitignore.upstream"
+  },
+  "active_parser": "upstream/src/parser.c",
+  "active_parser_sha256": "ba3659413ddfa7acd66d1739ca96ace762e6d08f2c60a43d22670503fac87ec6",
+  "active_scanner": "src/scanner.c",
+  "active_scanner_sha256": "a963e5418419657958662c536901ec2b06b1ef73daaa220294bfac1747c8c1d1",
+  "original_scanner": "upstream/src/scanner.c",
+  "generated_parser_unchanged": true,
+  "build_acquisition_or_generation": false,
+  "native_qualification": "Standalone original source, exact CST/query and scanner boundary evidence; not Rootlight IR qualification."
+}

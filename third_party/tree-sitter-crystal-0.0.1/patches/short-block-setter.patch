@@ -1,0 +1,23 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -2251,9 +2251,20 @@
+       choice(
+         $.implicit_object_call_chainable,
+         $.implicit_object_call_unchainable,
++        $.implicit_object_setter_call,
+       ),
+       $.implicit_object_call,
+     ),
++
++    implicit_object_setter_identifier: $ => token(seq(
++      '.', repeat(/\s/), ident_start, repeat(ident_part), '=',
++    )),
++
++    implicit_object_setter_call: $ => prec('assignment_operator', seq(
++      optional(field('receiver', alias($.implicit_object_call_chainable, $.implicit_object_call))),
++      field('method', alias($.implicit_object_setter_identifier, $.identifier)),
++      field('arguments', alias($._expression, $.argument_list)),
++    )),
+ 
+     // An implicit object call that may not be chained
+     // E.g. `&.foo 5`

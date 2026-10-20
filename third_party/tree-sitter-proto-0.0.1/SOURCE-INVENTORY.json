@@ -1,0 +1,504 @@
+{
+  "schema": "rootlight.schema-static-source-inventory/1",
+  "files": [
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 353,
+      "sha256": "007f7134006e8e84ba2a7ccbbc29a8f1cacb2cb4f4b651232eca368a25492a59"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 698,
+      "sha256": "894dde20f7e54715586db835f3ac9c68feaa44daf26beb9f66183c021538098f"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 492,
+      "sha256": "61baefbe31e388ba3f11c1278eac8a88ceae5bb619a094a2b9147f90efe53982"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 11184,
+      "sha256": "117daebb63bb7bb2bb5e4301153c6d72029ff6f494f973756a3a187ff27be4ef"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1075,
+      "sha256": "8c04a7e702d454741b3fd014c51ca1912bdd6facc648d94c46cbcec4d8102610"
+    },
+    {
+      "path": "patches/absolute-extendee.patch",
+      "bytes": 170,
+      "sha256": "df6f3420fcb329c53f4df3ab55b0ff5205d5d6bafde30c9b8aa86ac627324701"
+    },
+    {
+      "path": "PATCHES.md",
+      "bytes": 2528,
+      "sha256": "ab1a84e629bc796a597c03abdf668edff090c8a7d1cb79a30dc889f340e04236"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 47768,
+      "sha256": "d73379d3067d33f9401a661e1898c5adfe0621f9203544824fbfb2ab65f793a9"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 17178,
+      "sha256": "4429433ea14715e538b7ca82307da68af6415501d838d176d486e6b8b688aa40"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 255492,
+      "sha256": "0c8fd7157103b28da28f6c63afc321ca434a835ae61ebaa2ae1847e07e5bddf4"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "path": "test/corpus/absolute_extendee.txt",
+      "bytes": 3950,
+      "sha256": "43ef2fe68493ed4dd94d0a8a3343a60f59523ae7554be52c922196b147c0d670"
+    },
+    {
+      "path": "test/rejected/absolute_package.proto",
+      "bytes": 17,
+      "sha256": "585710b91c5925294045c295a782307f151512c76b7c8b68d8cf449ac7185c0d"
+    },
+    {
+      "path": "test/rejected/double_dot_extendee.proto",
+      "bytes": 56,
+      "sha256": "90e96a894f38ac2fb9c7fcb05efc62892519430ec480717106acbce0211bd6e5"
+    },
+    {
+      "path": "test/rejected/missing_extendee.proto",
+      "bytes": 40,
+      "sha256": "17339799e6992f5e6ba89737750f35ea27685130092d71e167503375b46e1150"
+    },
+    {
+      "path": "upstream/.envrc",
+      "bytes": 159,
+      "sha256": "7ec0d7d406d6f0565a6707275da733cdb8444a6acd82a2d130f7ee2890f6ff00"
+    },
+    {
+      "path": "upstream/.github/workflows/ci.yml",
+      "bytes": 593,
+      "sha256": "94c6d3fa7044dfc20e0181875dbf8a80d0c600bf7426fc9befaf09e6dae2d6f0"
+    },
+    {
+      "path": "upstream/.gitignore.upstream",
+      "bytes": 55,
+      "sha256": "f07951e5fddd19432cf9062ac6f9f55c97dfe640f8ab8cea523293c8ffc2f339"
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 376,
+      "sha256": "7c67caa330eee06701ba9a9293431c072482a830d895b2dffb54194bb09e5ce5"
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 865,
+      "sha256": "6155161255661f54dfe0df313939ef9799d40807b9058cbe4a31d9080dcb1e07"
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 461,
+      "sha256": "5aeeb4e22fda3a07a55708543eb7c3be73bd037fad3a356b3ae54d11e933e91e"
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 1319,
+      "sha256": "44d8d49d7e8b45571e7d221c7b4d8d3100d18a0d8889aba360931fd7caf402fd"
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 1943,
+      "sha256": "6638ff9b43779e5f54ea3dbb8ef1226e26c9d053f6dc7a3e07042dc9efdb5200"
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 531,
+      "sha256": "ff49e67559ba52d47ecf4bfde22936bed68d61d9678725a25b612252991bb4dd"
+    },
+    {
+      "path": "upstream/corpus/a_bit_of_everything.txt",
+      "bytes": 73663,
+      "sha256": "1cde19e888e554e28ce2f8e597b77ae88482beba42fa69abdd11134d7bb6d906"
+    },
+    {
+      "path": "upstream/corpus/enum.txt",
+      "bytes": 1118,
+      "sha256": "226b69bbcdfaf6252b06c8ed28c882f50c0a661e915eda05e1625e4f3001af1b"
+    },
+    {
+      "path": "upstream/corpus/import.txt",
+      "bytes": 1511,
+      "sha256": "3007bfa531865100557173fd91b43605ea701dac9e43bc45b51c8f4b072b69cd"
+    },
+    {
+      "path": "upstream/corpus/message.txt",
+      "bytes": 2909,
+      "sha256": "9fb7e7e3a2b3b96797deac9a3ced8dc63b55db3e043b4c529d0814c187b172b3"
+    },
+    {
+      "path": "upstream/corpus/option.txt",
+      "bytes": 1132,
+      "sha256": "0b847382bf9e0ff14417575f98dcd68a756366ac9d27a16c8437ccdbab218f8e"
+    },
+    {
+      "path": "upstream/corpus/package.txt",
+      "bytes": 765,
+      "sha256": "22af6c20a4d2778f767b2b92bdc8e57c7af47c6eec8496e369823cde1231406c"
+    },
+    {
+      "path": "upstream/corpus/service.txt",
+      "bytes": 1626,
+      "sha256": "012f1bd26276bee8e978d40beebd2ee741dc96bdae479cc249f1b68928f650d1"
+    },
+    {
+      "path": "upstream/corpus/syntax.txt",
+      "bytes": 1310,
+      "sha256": "5c005e9fb0143fc67670d32d3aa62056981a1b220904d45f1849c0d4cba9aee7"
+    },
+    {
+      "path": "upstream/flake.lock",
+      "bytes": 992,
+      "sha256": "19f306b6314d03a2b7b04981c530a6fa000f528d40fa0e984f3c50ef203eb121"
+    },
+    {
+      "path": "upstream/flake.nix",
+      "bytes": 478,
+      "sha256": "662fa5a4564dc35c0d32354f79e433adf41908caa8c99777b1c6197ddddc1bcd"
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 11163,
+      "sha256": "d14600c4784ec5f98287868569085648b0873710157981ca57c8252eb22a13fd"
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1075,
+      "sha256": "8c04a7e702d454741b3fd014c51ca1912bdd6facc648d94c46cbcec4d8102610"
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 647,
+      "sha256": "b30673b711ef66a6c1f0f5be5a8e8b135f20d83c549cb5f70f61b042d26261e9"
+    },
+    {
+      "path": "upstream/project.nix",
+      "bytes": 251,
+      "sha256": "9cbda66666e3b030e36b061ea7ceca2dd9cbb66fae389f198c9fc6c235f8b362"
+    },
+    {
+      "path": "upstream/queries/folds.scm",
+      "bytes": 43,
+      "sha256": "dddbc42f061ff7e36d1497c3ef204b9f0b8d4417719b9b6f413a877cbf0f66ae"
+    },
+    {
+      "path": "upstream/queries/highlights.scm",
+      "bytes": 430,
+      "sha256": "6d5c47bdfeccf1f3c2c815151987674703c5b69a2fe6575650ac8c8939ea3b55"
+    },
+    {
+      "path": "upstream/README.md",
+      "bytes": 344,
+      "sha256": "6b6206a040d28cc6aa58efeb80e586c4d0e769107084585744e47246242111f7"
+    },
+    {
+      "path": "upstream/shell.nix",
+      "bytes": 139,
+      "sha256": "b03135ea8ae01b2ed1aef8c9dd757a7033002f380207efe0878daf5fef5a58ac"
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 47429,
+      "sha256": "94eb51d6f374d6e1ad901e8243fd2e69347c22358bc9c0976ee420fce095bcf0"
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 17142,
+      "sha256": "d0a84f57dea628e814579cbea98a8d043f036d38e799b2f400425b9167e239f9"
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 262758,
+      "sha256": "148d8d3e85d09e04e71c55ca519c689d090df13c07e5cb54c6da952e081be3cb"
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 5378,
+      "sha256": "ab104936984904469572a4e868149f7a22fb2929347f837ae6a1f9b790f1b173"
+    },
+    {
+      "path": "upstream/tree-sitter-proto-e9f6b43f6844bd2189b50a422d4e2094313f6aa3.tar.gz",
+      "bytes": 45120,
+      "sha256": "7839f34f7e701b117385cbf2eb577ed551bc39b07df7d99c6a41b734d96b71c9"
+    }
+  ],
+  "authored_members": [
+    {
+      "original_path": ".envrc",
+      "retained_path": "upstream/.envrc",
+      "bytes": 159,
+      "sha256": "7ec0d7d406d6f0565a6707275da733cdb8444a6acd82a2d130f7ee2890f6ff00",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".github/workflows/ci.yml",
+      "retained_path": "upstream/.github/workflows/ci.yml",
+      "bytes": 593,
+      "sha256": "94c6d3fa7044dfc20e0181875dbf8a80d0c600bf7426fc9befaf09e6dae2d6f0",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": ".gitignore",
+      "retained_path": "upstream/.gitignore.upstream",
+      "bytes": 55,
+      "sha256": "f07951e5fddd19432cf9062ac6f9f55c97dfe640f8ab8cea523293c8ffc2f339",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "Cargo.toml",
+      "retained_path": "upstream/Cargo.toml",
+      "bytes": 531,
+      "sha256": "ff49e67559ba52d47ecf4bfde22936bed68d61d9678725a25b612252991bb4dd",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "LICENSE",
+      "retained_path": "upstream/LICENSE",
+      "bytes": 1075,
+      "sha256": "8c04a7e702d454741b3fd014c51ca1912bdd6facc648d94c46cbcec4d8102610",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "README.md",
+      "retained_path": "upstream/README.md",
+      "bytes": 344,
+      "sha256": "6b6206a040d28cc6aa58efeb80e586c4d0e769107084585744e47246242111f7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "binding.gyp",
+      "retained_path": "upstream/binding.gyp",
+      "bytes": 376,
+      "sha256": "7c67caa330eee06701ba9a9293431c072482a830d895b2dffb54194bb09e5ce5",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/node/binding.cc",
+      "retained_path": "upstream/bindings/node/binding.cc",
+      "bytes": 865,
+      "sha256": "6155161255661f54dfe0df313939ef9799d40807b9058cbe4a31d9080dcb1e07",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/node/index.js",
+      "retained_path": "upstream/bindings/node/index.js",
+      "bytes": 461,
+      "sha256": "5aeeb4e22fda3a07a55708543eb7c3be73bd037fad3a356b3ae54d11e933e91e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/rust/build.rs",
+      "retained_path": "upstream/bindings/rust/build.rs",
+      "bytes": 1319,
+      "sha256": "44d8d49d7e8b45571e7d221c7b4d8d3100d18a0d8889aba360931fd7caf402fd",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "bindings/rust/lib.rs",
+      "retained_path": "upstream/bindings/rust/lib.rs",
+      "bytes": 1943,
+      "sha256": "6638ff9b43779e5f54ea3dbb8ef1226e26c9d053f6dc7a3e07042dc9efdb5200",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/a_bit_of_everything.txt",
+      "retained_path": "upstream/corpus/a_bit_of_everything.txt",
+      "bytes": 73663,
+      "sha256": "1cde19e888e554e28ce2f8e597b77ae88482beba42fa69abdd11134d7bb6d906",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/enum.txt",
+      "retained_path": "upstream/corpus/enum.txt",
+      "bytes": 1118,
+      "sha256": "226b69bbcdfaf6252b06c8ed28c882f50c0a661e915eda05e1625e4f3001af1b",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/import.txt",
+      "retained_path": "upstream/corpus/import.txt",
+      "bytes": 1511,
+      "sha256": "3007bfa531865100557173fd91b43605ea701dac9e43bc45b51c8f4b072b69cd",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/message.txt",
+      "retained_path": "upstream/corpus/message.txt",
+      "bytes": 2909,
+      "sha256": "9fb7e7e3a2b3b96797deac9a3ced8dc63b55db3e043b4c529d0814c187b172b3",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/option.txt",
+      "retained_path": "upstream/corpus/option.txt",
+      "bytes": 1132,
+      "sha256": "0b847382bf9e0ff14417575f98dcd68a756366ac9d27a16c8437ccdbab218f8e",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/package.txt",
+      "retained_path": "upstream/corpus/package.txt",
+      "bytes": 765,
+      "sha256": "22af6c20a4d2778f767b2b92bdc8e57c7af47c6eec8496e369823cde1231406c",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/service.txt",
+      "retained_path": "upstream/corpus/service.txt",
+      "bytes": 1626,
+      "sha256": "012f1bd26276bee8e978d40beebd2ee741dc96bdae479cc249f1b68928f650d1",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "corpus/syntax.txt",
+      "retained_path": "upstream/corpus/syntax.txt",
+      "bytes": 1310,
+      "sha256": "5c005e9fb0143fc67670d32d3aa62056981a1b220904d45f1849c0d4cba9aee7",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "flake.lock",
+      "retained_path": "upstream/flake.lock",
+      "bytes": 992,
+      "sha256": "19f306b6314d03a2b7b04981c530a6fa000f528d40fa0e984f3c50ef203eb121",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "flake.nix",
+      "retained_path": "upstream/flake.nix",
+      "bytes": 478,
+      "sha256": "662fa5a4564dc35c0d32354f79e433adf41908caa8c99777b1c6197ddddc1bcd",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "grammar.js",
+      "retained_path": "upstream/grammar.js",
+      "bytes": 11163,
+      "sha256": "d14600c4784ec5f98287868569085648b0873710157981ca57c8252eb22a13fd",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "package.json",
+      "retained_path": "upstream/package.json",
+      "bytes": 647,
+      "sha256": "b30673b711ef66a6c1f0f5be5a8e8b135f20d83c549cb5f70f61b042d26261e9",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "project.nix",
+      "retained_path": "upstream/project.nix",
+      "bytes": 251,
+      "sha256": "9cbda66666e3b030e36b061ea7ceca2dd9cbb66fae389f198c9fc6c235f8b362",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/folds.scm",
+      "retained_path": "upstream/queries/folds.scm",
+      "bytes": 43,
+      "sha256": "dddbc42f061ff7e36d1497c3ef204b9f0b8d4417719b9b6f413a877cbf0f66ae",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "queries/highlights.scm",
+      "retained_path": "upstream/queries/highlights.scm",
+      "bytes": 430,
+      "sha256": "6d5c47bdfeccf1f3c2c815151987674703c5b69a2fe6575650ac8c8939ea3b55",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "shell.nix",
+      "retained_path": "upstream/shell.nix",
+      "bytes": 139,
+      "sha256": "b03135ea8ae01b2ed1aef8c9dd757a7033002f380207efe0878daf5fef5a58ac",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/grammar.json",
+      "retained_path": "upstream/src/grammar.json",
+      "bytes": 47429,
+      "sha256": "94eb51d6f374d6e1ad901e8243fd2e69347c22358bc9c0976ee420fce095bcf0",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/node-types.json",
+      "retained_path": "upstream/src/node-types.json",
+      "bytes": 17142,
+      "sha256": "d0a84f57dea628e814579cbea98a8d043f036d38e799b2f400425b9167e239f9",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/parser.c",
+      "retained_path": "upstream/src/parser.c",
+      "bytes": 262758,
+      "sha256": "148d8d3e85d09e04e71c55ca519c689d090df13c07e5cb54c6da952e081be3cb",
+      "archive_mode": 436,
+      "git_executable": false
+    },
+    {
+      "original_path": "src/tree_sitter/parser.h",
+      "retained_path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 5378,
+      "sha256": "ab104936984904469572a4e868149f7a22fb2929347f837ae6a1f9b790f1b173",
+      "archive_mode": 436,
+      "git_executable": false
+    }
+  ],
+  "exclusions": [
+    "SOURCE-INVENTORY.json",
+    "SOURCE-PROVENANCE.json"
+  ]
+}

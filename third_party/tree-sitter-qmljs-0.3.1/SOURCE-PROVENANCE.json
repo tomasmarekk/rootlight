@@ -1,0 +1,428 @@
+{
+  "repository": "https://github.com/yuja/tree-sitter-qmljs",
+  "tag": "0.3.1",
+  "commit": "de96ed62abded51fcdfcbeaaa120e0dd0d20c697",
+  "archive": {
+    "bytes": 536602,
+    "sha256": "740bdbbdef7e4f09860afb43a14d43de370ff20ebec632695076cde071f34de0"
+  },
+  "cargo_version": "0.3.1",
+  "local_modifications": "No parser, grammar, scanner, wrapper, manifest or license changes; upstream ignore/attribute files retained as inert .upstream data.",
+  "typescript_scanner_header": {
+    "path": "src/typescript-scanner.h",
+    "source_version": "0.23.2",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2017 Max Brunsfeld",
+    "sha256": "2702a6254b6481db350ac077bf8c45aeb3da7c26330c38b490271d319e6a8c15"
+  },
+  "original_files": [
+    {
+      "path": ".editorconfig",
+      "bytes": 502,
+      "sha256": "9b6da2df3a325dbed2f93e1909dccdda3efa2eba84565b6ef7f0295c5551b770",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": ".editorconfig"
+    },
+    {
+      "path": ".gitattributes",
+      "bytes": 238,
+      "sha256": "70330edebe93b22b47bf2e3964e34b6427e82bc7a6f987fcdad705482badb378",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": ".gitattributes.upstream"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 666,
+      "sha256": "97c2194025b2ff0bd2aa68882abaf5a05d7b19994f12cf14b2e4ba38cce15500",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": ".github/workflows/ci.yml"
+    },
+    {
+      "path": ".github/workflows/package.yml",
+      "bytes": 800,
+      "sha256": "edeb8620045c1ff155f422b3cb53f850cd68158751b3b80adacd00000dd089f3",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": ".github/workflows/package.yml"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 117,
+      "sha256": "361bdd201d8c473eb40b1311d870e6a9b9cf02927fc60219ccd23dc3f4745653",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": ".gitignore.upstream"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 688,
+      "sha256": "0eed4cc8873f84d755a0ad86501641b57cb996024f87726d5baa96714e169273",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "Cargo.toml"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1058,
+      "sha256": "a8fb3a7df5ba9ef3b6511a1d65ad69869de66828fe2d690b7b65913678739738",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "LICENSE"
+    },
+    {
+      "path": "MANIFEST.in",
+      "bytes": 83,
+      "sha256": "83a74c46f7f69a02722d2ae0826eb4b787f67f84eb2592e17aeef8e7d8d5fb96",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "MANIFEST.in"
+    },
+    {
+      "path": "Makefile",
+      "bytes": 1295,
+      "sha256": "8a62f61f8d1c83541a0826eca0959f748f665bc95893b5db4cd94d5eb7a4d3dc",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "Makefile"
+    },
+    {
+      "path": "Package.swift",
+      "bytes": 1481,
+      "sha256": "2f78822dfbb1207cb913432874040f9af48e4f06b66c6e715fe996dcfaca135d",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "Package.swift"
+    },
+    {
+      "path": "README.md",
+      "bytes": 1095,
+      "sha256": "8caf6f7e0ca93e5097fecbe9aaba7a09affe3b3cffb5152ab35440e9b8d1f472",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "README.md"
+    },
+    {
+      "path": "binding.gyp",
+      "bytes": 600,
+      "sha256": "fe1cd34f8d5806eb2a16ccec252766a93166fc714eef4e51fdd05ef495edc795",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "binding.gyp"
+    },
+    {
+      "path": "bindings/c/tree-sitter-qmljs.h",
+      "bytes": 242,
+      "sha256": "4c038d01c9eb3c519008868123125c8c8dd547dd9fb65eeaea9898d01cdac12c",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/c/tree-sitter-qmljs.h"
+    },
+    {
+      "path": "bindings/c/tree-sitter-qmljs.pc.in",
+      "bytes": 255,
+      "sha256": "25fe9e0fa2755cae000bdf7570d4a760a145667be2250f9119047dba5e83b05a",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/c/tree-sitter-qmljs.pc.in"
+    },
+    {
+      "path": "bindings/go/binding.go",
+      "bytes": 318,
+      "sha256": "ba0231ef3ad1243e81fb46d1c9dc5fa336c96ec7dd210e6e0a2f170845c822b0",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/go/binding.go"
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "bytes": 325,
+      "sha256": "c045c6ad1aa3110d77232c6a7028f7e1e19afc2fcf61a3fc63739f16d7d76dff",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/go/binding_test.go"
+    },
+    {
+      "path": "bindings/go/go.mod",
+      "bytes": 135,
+      "sha256": "9ba73c5498205fa74db2809b6e78a00560fc8d76ca4a8654eeffe6b008882127",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/go/go.mod"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 579,
+      "sha256": "da46197eea0259781f3966f165cda234a26b1e642cd2dfa09936f5edc5b47f54",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/node/binding.cc"
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/node/index.d.ts"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 201,
+      "sha256": "609bdf22b8fd183025b3c24e8587f6211d50358e8f2e4c526b9217349ed9dbc0",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/node/index.js"
+    },
+    {
+      "path": "bindings/python/tree_sitter_qmljs/__init__.py",
+      "bytes": 88,
+      "sha256": "aed1aea5742650f779a47bf56cb0223c3cfe0ca897aba004f02a3ae448254f96",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/python/tree_sitter_qmljs/__init__.py"
+    },
+    {
+      "path": "bindings/python/tree_sitter_qmljs/__init__.pyi",
+      "bytes": 27,
+      "sha256": "f317fb6d8d6cce00d8f47449ec5277dba4a8e121603224917c20782c00e44e95",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/python/tree_sitter_qmljs/__init__.pyi"
+    },
+    {
+      "path": "bindings/python/tree_sitter_qmljs/binding.c",
+      "bytes": 634,
+      "sha256": "acf6b22d4225ce2ab9dd29c8264fcd4e01d0f3d235cb7a622749e5e29c373e6b",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/python/tree_sitter_qmljs/binding.c"
+    },
+    {
+      "path": "bindings/python/tree_sitter_qmljs/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/python/tree_sitter_qmljs/py.typed"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 688,
+      "sha256": "3e8405edeecef72d6dcffbff014755390927171ea7caeec8f064340624880ee3",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/rust/build.rs"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 1971,
+      "sha256": "198ba0b0cbbca75e2290f46eb1dfa3edec1e1edcff7b3b32738048c64434b84d",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/rust/lib.rs"
+    },
+    {
+      "path": "bindings/swift/TreeSitterQmljs/qmljs.h",
+      "bytes": 242,
+      "sha256": "4c038d01c9eb3c519008868123125c8c8dd547dd9fb65eeaea9898d01cdac12c",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "bindings/swift/TreeSitterQmljs/qmljs.h"
+    },
+    {
+      "path": "examples/Makefile",
+      "bytes": 508,
+      "sha256": "2839e3007af31a13e7e58c43868677e4a1ac463853edc4aa185acf6f56b6a234",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "examples/Makefile"
+    },
+    {
+      "path": "examples/known-failures.txt",
+      "bytes": 3785,
+      "sha256": "6673b4140be26af2bf5eb6db5a5850315af69d611ff48037dff199ab23ded8c7",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "examples/known-failures.txt"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 9432,
+      "sha256": "a54ca45262f9779c79d926b560cefae7c40d1cda5044707152c910308fd47df7",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "grammar.js"
+    },
+    {
+      "path": "package-lock.json",
+      "bytes": 14271,
+      "sha256": "1fd1fd9f16041a4e9fcc5614b3a79a4ae86d4323d455dc33efd5b8f6bd1ac5bb",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "package-lock.json"
+    },
+    {
+      "path": "package.json",
+      "bytes": 1205,
+      "sha256": "2ca073d5683dd429bf286eda0f3d5c06abae76140356d53efc4119b6d8648084",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "package.json"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 729,
+      "sha256": "2bf56bc80052640a8441f0ba1a205adc71afa549c6e548dc1c7d9d77a20558fa",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "pyproject.toml"
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 1035,
+      "sha256": "49fd83827c6eaf4a59b105afe24bd3c1cc81d998cee302c76e39f4b2c4757327",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "queries/highlights.scm"
+    },
+    {
+      "path": "queries/locals.scm",
+      "bytes": 148,
+      "sha256": "e406a9ce72569e7a860af7d6cf3e64bbf5fad471354961e9d4d4ce7d55a24563",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "queries/locals.scm"
+    },
+    {
+      "path": "setup.py",
+      "bytes": 1617,
+      "sha256": "77d9736f1b5bfdb9349c07c619efdc419038a8d0c447a0b3f45d1254b010ac04",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "setup.py"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 312577,
+      "sha256": "08896990666cb81eab5664032b13147f7e00587251956c306925b5b1be24464e",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/grammar.json"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 121409,
+      "sha256": "169d576a492ef3244b78ba1f746cd831d029a8cd2cf328b8849442a3b481bc77",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/node-types.json"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 9844381,
+      "sha256": "da82f082ad20cba807cd4fd543bb66de82f0203b4a249c1da763e0f22defaaa5",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/parser.c"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 545,
+      "sha256": "bfb77d967596144bd1b69b8c418b671ed0885d4fb78ca648c4feb93ff80ef558",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/scanner.c"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/tree_sitter/alloc.h"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/tree_sitter/array.h"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/tree_sitter/parser.h"
+    },
+    {
+      "path": "src/typescript-scanner.h",
+      "bytes": 11200,
+      "sha256": "2702a6254b6481db350ac077bf8c45aeb3da7c26330c38b490271d319e6a8c15",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "src/typescript-scanner.h"
+    },
+    {
+      "path": "test/corpus/compatibility.txt",
+      "bytes": 6106,
+      "sha256": "c18d76abcf5f280d2f9a5d1649270fd030a3df889bdfe99f94667dddba76fb60",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "test/corpus/compatibility.txt"
+    },
+    {
+      "path": "test/corpus/declarative-ui.txt",
+      "bytes": 24152,
+      "sha256": "13705f5565ccf9c1f8afbc5196912c8d47bb2457b459b889b09cb85aeb4e198b",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "test/corpus/declarative-ui.txt"
+    },
+    {
+      "path": "test/corpus/identifiers.txt",
+      "bytes": 27026,
+      "sha256": "c99fc59cb2878eb14e6c52c6cae3a8e54f32c1376de24690c0161bb2d9b005d8",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "test/corpus/identifiers.txt"
+    },
+    {
+      "path": "test/highlight/components.qml",
+      "bytes": 312,
+      "sha256": "2afa88700b20125b78dfaee936ad0783129e7bcd8eab4c5e21d34117a6240b81",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "test/highlight/components.qml"
+    },
+    {
+      "path": "test/highlight/functions.qml",
+      "bytes": 473,
+      "sha256": "68648ac152ab142d6f62d540f6f25ec93a4c1df81ca98df7e0bf0f675f28b4de",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "test/highlight/functions.qml"
+    },
+    {
+      "path": "test/highlight/properties.qml",
+      "bytes": 1734,
+      "sha256": "ca81ee148313096320043622c987f4c114b2462ee3a3d5ad13f272713110764d",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "test/highlight/properties.qml"
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 1152,
+      "sha256": "534c19d7eb22a88cd4f3019fc044864337e5aec0f6ec3c8d4ab7bf24ce19c3ae",
+      "archive_mode": 436,
+      "archive_mtime": 1783769726,
+      "retained_path": "tree-sitter.json"
+    }
+  ]
+}

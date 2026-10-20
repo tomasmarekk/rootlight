@@ -1,0 +1,106 @@
+{
+  "input_patch": {
+    "path": "patches/grammar.patch",
+    "sha256": "e9258d89e9b231329e9eaa088468dcb113196a93711d2ab3b914a82efc27d0d1"
+  },
+  "generator": "Tree-sitter CLI0.26.8",
+  "generator_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+  "javascript_runtime": "Preinstalled Node.js prerequisite",
+  "javascript_runtime_sha256": "96f768b95e8e9d443f5eead1cb2d199744923320bb8240d2c3129362e7ae2a5d",
+  "abi": 15,
+  "generated_C_hand_edited": false,
+  "scanner_changed": false,
+  "active_inputs": [
+    {
+      "path": "grammar-builtins.js",
+      "bytes": 59,
+      "sha256": "e00685ced7ce75325f97068f55e4bd063984b802369e4db5ffb6dabbc2828555",
+      "role": "unchanged upstream input"
+    },
+    {
+      "path": "grammar-declarations.js",
+      "bytes": 6890,
+      "sha256": "3948ce952a85fe808b1da86f232a530d61b76fa20d5fab95c7139359ca08fb09",
+      "role": "unchanged upstream input"
+    },
+    {
+      "path": "grammar-literals.js",
+      "bytes": 6181,
+      "sha256": "3268dc7118778f1c1302aa5fa91427ec03b25b1e17bd83676c2c1aefa37037c7",
+      "role": "unchanged upstream input"
+    },
+    {
+      "path": "grammar-operators.js",
+      "bytes": 1352,
+      "sha256": "46cf3b04b4fbcf8c546c4dfd810c29ec17ca06ef5fcfb432d1e78a0fc3918e86",
+      "role": "unchanged upstream input"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 28978,
+      "sha256": "5220e17b8d6cc1c2ebeb4aaf261970ca683c3c7861d542c396b99bda263cf645",
+      "role": "modified grammar input"
+    },
+    {
+      "path": "LICENSE.md",
+      "bytes": 1099,
+      "sha256": "8822458763cc613b74072be333aae35aff390f211eaba884754bb32f5828e24c",
+      "role": "unchanged upstream input"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 115511,
+      "sha256": "5e2cfa9c32e200874936782fe5f44dd7ffbe090b9b4b99da3726d64a0f597f0e",
+      "role": "generated artifact"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 121217,
+      "sha256": "937705c3f07312c82ecccf3122a6513ec06f899baf78230272f619db8281edf2",
+      "role": "generated artifact"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 34357592,
+      "sha256": "a64fdefc7de96de0d23ab45ee3fd4f90b61db13909abb9c5b466a4f27e772852",
+      "role": "generated artifact"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 2150,
+      "sha256": "2eee9efa0cfbcd6cf8c69e638a059ddf3f1abf47540a1e9460f1b9c805374277",
+      "role": "unchanged upstream input"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "role": "generated artifact"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "role": "generated artifact"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "role": "generated artifact"
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 870,
+      "sha256": "d90ba6ddfd0418cf30eac58cb30388febbd84e94745c5dca108bd592685894cf",
+      "role": "unchanged upstream input"
+    },
+    {
+      "path": "utils.js",
+      "bytes": 1097,
+      "sha256": "eb12f452e04dbb29ea33e5878db4b5c3674c8c7978ea2957e5f20c2f87657d06",
+      "role": "unchanged upstream input"
+    }
+  ],
+  "build_boundary": "Compile retained C11 parser/scanner and headers only; no generation, Node, package manager or acquisition during compilation."
+}

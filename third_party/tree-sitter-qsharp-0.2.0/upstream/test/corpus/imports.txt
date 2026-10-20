@@ -1,0 +1,114 @@
+================================================================================
+Import with wildcard
+================================================================================
+
+import Std.Math.*;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    (import_item (import_path (identifier) (identifier)))))
+
+================================================================================
+Import specific item
+================================================================================
+
+import Std.Diagnostics.Fact;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    (import_item (import_path (identifier) (identifier) (identifier)))))
+
+================================================================================
+Import with alias
+================================================================================
+
+import Std.Arrays.* as Array;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    (import_item (import_path (identifier) (identifier)) (identifier))))
+
+================================================================================
+Import multiple items
+================================================================================
+
+import
+    Std.Math.*,
+    Std.Arrays.IndexRange,
+    Std.Diagnostics.Fact;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    (import_item (import_path (identifier) (identifier)))
+    (import_item (import_path (identifier) (identifier) (identifier)))
+    (import_item (import_path (identifier) (identifier) (identifier)))))
+
+================================================================================
+Import inside block
+================================================================================
+
+operation Main() : Unit {
+    import Std.Math.*;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (import_decl
+          (import_item (import_path (identifier) (identifier))))))))
+
+================================================================================
+Export declaration
+================================================================================
+
+export Foo, Bar;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (export_decl
+    (export_item (path_or_identifier (identifier)))
+    (export_item (path_or_identifier (identifier)))))
+
+================================================================================
+Export with attribute
+================================================================================
+
+@Config(Unrestricted)
+export Foo;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (export_decl
+    (attribute (path_or_identifier (identifier)) (identifier))
+    (export_item (path_or_identifier (identifier)))))
+
+================================================================================
+Open declaration
+================================================================================
+
+namespace Foo {
+    open Std.Math;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (namespace
+    name: (path_or_identifier (identifier))
+    (open_decl (path_or_identifier (path (identifier) (identifier))))))

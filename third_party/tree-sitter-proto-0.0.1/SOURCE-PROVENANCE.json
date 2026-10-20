@@ -1,0 +1,135 @@
+{
+  "schema": "rootlight.schema-static-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-proto",
+    "version": "0.0.1",
+    "unpublished_local_binding": true
+  },
+  "language": "protobuf",
+  "upstream": {
+    "repository": "treywood/tree-sitter-proto",
+    "revision": "e9f6b43f6844bd2189b50a422d4e2094313f6aa3",
+    "archive": {
+      "path": "upstream/tree-sitter-proto-e9f6b43f6844bd2189b50a422d4e2094313f6aa3.tar.gz",
+      "bytes": 45120,
+      "sha256": "7839f34f7e701b117385cbf2eb577ed551bc39b07df7d99c6a41b734d96b71c9"
+    },
+    "original_regular_files": 31,
+    "original_lifecycle_executed": false
+  },
+  "native_inputs": [
+    {
+      "path": "src/parser.c",
+      "bytes": 255492,
+      "sha256": "0c8fd7157103b28da28f6c63afc321ca434a835ae61ebaa2ae1847e07e5bddf4"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ],
+  "native_abi": 14,
+  "external_tokens": 0,
+  "generated_parser_changed": true,
+  "generated_sources_regenerated": true,
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 16352,
+    "sha256": "81512bf386cb74cd132cb8152cc0d0addbb5ac6b69a66a21ecda12dd23d11efb"
+  },
+  "qualification": {
+    "compiler_or_parser_executed": true,
+    "discovered_or_registered": false,
+    "structural_or_semantic_analysis": false,
+    "whole_language": false,
+    "installed_package": false,
+    "empty_cache_network_denied_build": false
+  },
+  "local_repair": {
+    "scope": "Optional leading dot in extend target only; existing full_ident named CST retained",
+    "patch": {
+      "path": "patches/absolute-extendee.patch",
+      "bytes": 170,
+      "sha256": "df6f3420fcb329c53f4df3ab55b0ff5205d5d6bafde30c9b8aa86ac627324701"
+    },
+    "notes": {
+      "path": "PATCHES.md",
+      "bytes": 2528,
+      "sha256": "ab1a84e629bc796a597c03abdf668edff090c8a7d1cb79a30dc889f340e04236"
+    },
+    "specification": "https://protobuf.dev/reference/protobuf/proto2-spec/#extend",
+    "upstream_mirror_changed": false,
+    "upstream_archive_changed": false,
+    "license_changed": false,
+    "generator": {
+      "version": "tree-sitter 0.26.8",
+      "bytes": 9720320,
+      "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0"
+    },
+    "javascript_runtime": {
+      "version": "v26.2.0",
+      "bytes": 99035464,
+      "sha256": "96f768b95e8e9d443f5eead1cb2d199744923320bb8240d2c3129362e7ae2a5d"
+    },
+    "abi": 14,
+    "generation_command": [
+      "tree-sitter",
+      "generate",
+      "--abi",
+      "14",
+      "--js-runtime",
+      "node",
+      "grammar.js"
+    ],
+    "exact_generated_outputs": [
+      {
+        "path": "src/grammar.json",
+        "bytes": 47768,
+        "sha256": "d73379d3067d33f9401a661e1898c5adfe0621f9203544824fbfb2ab65f793a9"
+      },
+      {
+        "path": "src/node-types.json",
+        "bytes": 17178,
+        "sha256": "4429433ea14715e538b7ca82307da68af6415501d838d176d486e6b8b688aa40"
+      },
+      {
+        "path": "src/parser.c",
+        "bytes": 255492,
+        "sha256": "0c8fd7157103b28da28f6c63afc321ca434a835ae61ebaa2ae1847e07e5bddf4"
+      },
+      {
+        "path": "src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      {
+        "path": "src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      {
+        "path": "src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      }
+    ],
+    "native_checks": {
+      "independent_case_processes": true,
+      "new_cases": 6,
+      "inherited_cases": 15,
+      "patched_cases_passed": 21,
+      "original_cases_passed": 17,
+      "original_absolute_extension_failures": 4,
+      "malformed_controls_rejected_before_and_after": 3,
+      "original_source_files_parsed": 3,
+      "original_source_files_with_errors_before": 3,
+      "original_source_files_with_errors_after": 0
+    },
+    "limitations": [
+      "Native CLI grammar checks only; Rust/provider/lowering and installed package replay remain required",
+      "No descriptor/import/option/extension binding or wire validation qualification",
+      "Authentic generator execution is recorded; independent producer reproducibility is not established"
+    ]
+  }
+}

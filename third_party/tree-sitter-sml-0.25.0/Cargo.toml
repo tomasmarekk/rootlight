@@ -1,0 +1,18 @@
+[package]
+name = "tree-sitter-sml"
+version = "0.25.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/MatthewFluet/tree-sitter-sml"
+description = "Pinned local standard-ml native grammar"
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

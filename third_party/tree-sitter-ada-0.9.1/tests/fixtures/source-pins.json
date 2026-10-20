@@ -1,0 +1,32 @@
+{
+  "source_files": [
+    {
+      "path": "eepers.adb",
+      "bytes": 83043,
+      "sha256": "1928a34c1621b2ffc20561a998277b819e5bffa2907d90af8dbd6a54b83d1853"
+    },
+    {
+      "path": "raylib.adb",
+      "bytes": 407,
+      "sha256": "907061d18f6e7152ed2ff0898c5b5a15fafcfdbd37cdf68425f36db6eff81812"
+    },
+    {
+      "path": "raylib.ads",
+      "bytes": 12458,
+      "sha256": "369fa8d7999d4d70ff31dc43756156f26efe06bf3ae999a63201745815da7a6d"
+    },
+    {
+      "path": "raymath.ads",
+      "bytes": 1613,
+      "sha256": "10c74ce17f691e5627f3617247a373dcf502bda2bf0d9f8cd9431a9189b33296"
+    },
+    {
+      "path": "test.adb",
+      "bytes": 73,
+      "sha256": "56920b88624a8b87c1e51f9872c59a9df6322cef18537b2b7355a14fe071e14f"
+    }
+  ],
+  "source_repository": "https://github.com/tsoding/eepers",
+  "source_license": "LICENSE.txt",
+  "source_expectations": "independently authored; no observed product facts"
+}

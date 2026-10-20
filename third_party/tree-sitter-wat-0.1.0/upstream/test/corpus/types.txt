@@ -1,0 +1,386 @@
+==================
+rec types
+==================
+(module
+  (rec)
+  (rec
+    (type $s0 (struct (field (ref 0))))
+    (type $s1 (struct (field (ref 0))))
+  )
+  (rec (type $r (sub $t (struct (field (ref $r))))))
+  (rec
+    (type $t1 (sub (func (param i32 (ref $t3)))))
+    (type $t2 (sub $t1 (func (param i32 (ref $t2)))))
+  )
+)
+---
+
+(root
+  (module
+    (rec_type)
+    (rec_type
+      (type_def
+        (identifier)
+        (sub_type
+          (struct_type
+            (field
+              (field_type
+                (ref_type
+                  (heap_type
+                    (index
+                      (uinteger)))))))))
+      (type_def
+        (identifier)
+        (sub_type
+          (struct_type
+            (field
+              (field_type
+                (ref_type
+                  (heap_type
+                    (index
+                      (uinteger))))))))))
+    (rec_type
+      (type_def
+        (identifier)
+        (sub_type
+          (index
+            (identifier))
+          (struct_type
+            (field
+              (field_type
+                (ref_type
+                  (heap_type
+                    (index
+                      (identifier))))))))))
+    (rec_type
+      (type_def
+        (identifier)
+        (sub_type
+          (func_type
+            (param
+              (num_type)
+              (ref_type
+                (heap_type
+                  (index
+                    (identifier))))))))
+      (type_def
+        (identifier)
+        (sub_type
+          (index
+            (identifier))
+          (func_type
+            (param
+              (num_type)
+              (ref_type
+                (heap_type
+                  (index
+                    (identifier)))))))))))
+
+==================
+type defs
+==================
+(module
+  (type (func))
+  (type $t (func))
+
+  (type (func (param i32)))
+  (type (func (param $x i32)))
+  (type (func (result i32)))
+  (type (func (param i32) (result i32)))
+  (type (func (param $x i32) (result i32)))
+
+  (type (func (param f32 f64)))
+  (type (func (result i64 f32)))
+  (type (func (param i32 i64) (result f32 f64)))
+
+  (type (func (param f32) (param f64)))
+  (type (func (param $x f32) (param f64)))
+  (type (func (param f32) (param $y f64)))
+  (type (func (param $x f32) (param $y f64)))
+  (type (func (result i64) (result f32)))
+  (type (func (param i32) (param i64) (result f32) (result f64)))
+  (type (func (param $x i32) (param $y i64) (result f32) (result f64)))
+
+  (type (func (param f32 f64) (param $x i32) (param f64 i32 i32)))
+  (type (func (result i64 i64 f32) (result f32 i32)))
+  (type
+    (func (param i32 i32) (param i64 i32) (result f32 f64) (result f64 i32))
+  )
+
+  (type (func (param) (param $x f32) (param) (param) (param f64 i32) (param)))
+  (type
+    (func (result) (result) (result i64 i64) (result) (result f32) (result))
+  )
+  (type
+    (func
+      (param i32 i32) (param i64 i32) (param) (param $x i32) (param)
+      (result) (result f32 f64) (result f64 i32) (result)
+    )
+  )
+)
+---
+
+(root
+  (module
+    (type_def
+      (sub_type
+        (func_type)))
+    (type_def
+      (identifier)
+      (sub_type
+        (func_type)))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (identifier)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (result
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type))
+          (result
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (identifier)
+            (num_type))
+          (result
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (result
+            (num_type)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type)
+            (num_type))
+          (result
+            (num_type)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type))
+          (param
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (identifier)
+            (num_type))
+          (param
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type))
+          (param
+            (identifier)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (identifier)
+            (num_type))
+          (param
+            (identifier)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (result
+            (num_type))
+          (result
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type))
+          (param
+            (num_type))
+          (result
+            (num_type))
+          (result
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (identifier)
+            (num_type))
+          (param
+            (identifier)
+            (num_type))
+          (result
+            (num_type))
+          (result
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type)
+            (num_type))
+          (param
+            (identifier)
+            (num_type))
+          (param
+            (num_type)
+            (num_type)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (result
+            (num_type)
+            (num_type)
+            (num_type))
+          (result
+            (num_type)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type)
+            (num_type))
+          (param
+            (num_type)
+            (num_type))
+          (result
+            (num_type)
+            (num_type))
+          (result
+            (num_type)
+            (num_type)))))
+    (type_def
+      (sub_type
+        (func_type
+          (param)
+          (param
+            (identifier)
+            (num_type))
+          (param)
+          (param)
+          (param
+            (num_type)
+            (num_type))
+          (param))))
+    (type_def
+      (sub_type
+        (func_type
+          (result)
+          (result)
+          (result
+            (num_type)
+            (num_type))
+          (result)
+          (result
+            (num_type))
+          (result))))
+    (type_def
+      (sub_type
+        (func_type
+          (param
+            (num_type)
+            (num_type))
+          (param
+            (num_type)
+            (num_type))
+          (param)
+          (param
+            (identifier)
+            (num_type))
+          (param)
+          (result)
+          (result
+            (num_type)
+            (num_type))
+          (result
+            (num_type)
+            (num_type))
+          (result))))))
+
+==================
+subtyping
+==================
+(module
+  (type $e0 (sub (array i32)))
+  (type $e1 (sub $e0 (array i32)))
+
+  (type $e0 (sub (struct)))
+  (type $e1 (sub $e0 (struct)))
+  (type $e2 (sub $e1 (struct (field i32))))
+
+  (type $t2 (sub final (func)))
+)
+---
+
+(root
+  (module
+    (type_def
+      (identifier)
+      (sub_type
+        (array_type
+          (field_type
+            (num_type)))))
+    (type_def
+      (identifier)
+      (sub_type
+        (index
+          (identifier))
+        (array_type
+          (field_type
+            (num_type)))))
+    (type_def
+      (identifier)
+      (sub_type
+        (struct_type)))
+    (type_def
+      (identifier)
+      (sub_type
+        (index
+          (identifier))
+        (struct_type)))
+    (type_def
+      (identifier)
+      (sub_type
+        (index
+          (identifier))
+        (struct_type
+          (field
+            (field_type
+              (num_type))))))
+    (type_def
+      (identifier)
+      (sub_type
+        (func_type)))))

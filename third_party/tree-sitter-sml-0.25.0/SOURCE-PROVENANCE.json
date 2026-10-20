@@ -1,0 +1,20 @@
+{
+  "upstream": "https://github.com/MatthewFluet/tree-sitter-sml",
+  "revision": "fd4b4955bb998262840ab8119885b3edf20ea75a",
+  "archive_sha256": "523800dca31b6ab41e88945e86b28760029f51abaf752ccafa64c1b4245da979",
+  "original_git_blobs": 41,
+  "original_bytes": 1960270,
+  "original_inventory_sha256": "aab3fbab71db108b0e32d0e46c393fa7303fd51b9cb3ecc6b73dc3afd64bc127",
+  "inert_upstream_names": {
+    ".gitattributes": ".gitattributes.upstream",
+    ".gitignore": ".gitignore.upstream"
+  },
+  "active_parser": "upstream/src/parser.c",
+  "active_parser_sha256": "303199534db6b4f422182b84fdcdededb5162e1fa7a582f1a664fac55f7c0e08",
+  "active_scanner": "src/scanner.c",
+  "active_scanner_sha256": "6a68dd28fabd46be6199c3ff0e5c7a36cc592948cd0e202c04fd44b8a1d8d587",
+  "original_scanner": "upstream/src/scanner.c",
+  "generated_parser_unchanged": true,
+  "build_acquisition_or_generation": false,
+  "native_qualification": "Standalone original source, exact CST/query and scanner boundary evidence; not Rootlight IR qualification."
+}

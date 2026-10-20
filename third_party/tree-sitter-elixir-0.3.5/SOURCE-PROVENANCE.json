@@ -1,0 +1,33 @@
+{
+  "schema": "rootlight.retained-published-grammar-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-elixir",
+    "version": "0.3.5",
+    "license": "Apache-2.0"
+  },
+  "upstream": {
+    "repository": "https://github.com/elixir-lang/tree-sitter-elixir",
+    "revision": "e2d9e6e0e76b0c436fa48a0b8c32a031d0cbdf49",
+    "archive": "upstream/tree-sitter-elixir-0.3.5.crate",
+    "archive_sha256": "66dd064a762ed95bfc29857fa3cb7403bb1e5cb88112de0f6341b7e47284ba40",
+    "checksum_authority": "https://crates.io/api/v1/crates/tree-sitter-elixir/0.3.5"
+  },
+  "retention": {
+    "published_member_count": 19,
+    "member_bytes_unchanged": true,
+    "links": false
+  },
+  "source_review": {
+    "native_abi": 14,
+    "scanner_state": "stateless; null payload; serialization returns zero; deserialization ignores supplied bytes",
+    "build": "cc compiles only retained parser.c and scanner.c; no acquisition or lifecycle command",
+    "dependencies": [
+      "cc",
+      "tree-sitter-language"
+    ],
+    "parser_regenerated": false,
+    "upstream_tests_executed": false
+  },
+  "modifications": [],
+  "analysis_scope": "written source structure; macros, arity binding, compiler and runtime behavior remain unqualified"
+}

@@ -1,0 +1,33 @@
+name: Test
+on:
+  push:
+    branches:
+      - main
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up tree sitter
+        uses: tree-sitter/setup-action/cli@v2
+        with:
+          tree-sitter-ref: v0.26.12
+      - name: Generate corpus tests
+        run: node test/scripts/gen-corpus.mjs
+      - name: Run tests
+        run: tree-sitter test
+
+  racket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up tree sitter
+        uses: tree-sitter/setup-action/cli@v2
+        with:
+          tree-sitter-ref: v0.26.12
+      - run: git clone https://github.com/racket/racket --depth 1
+      - name: parse racket repo
+        run: tree-sitter parse $(find racket -name '*.rkt' -type f -not -exec grep -q '#lang at-exp' {} \; -print) -qt

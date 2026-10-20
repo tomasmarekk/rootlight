@@ -76,3 +76,22 @@ licenses/tree-sitter-ocaml-0.25.0-LICENSE. The local scanner-state repair and
 manifest changes are recorded with original inputs and provenance in the
 versioned source package; retention does not establish original authorship,
 registry-distribution equivalence or complete OCaml compiler semantics.
+
+The local tree-sitter-ring 1.1.1 wrapper retains the complete upstream Git
+source at b44d254e571ecba248eee803bdc5d70d00ec677f and the exact MIT notice,
+Copyright (c) 2026 Youssef Saeed, bundled as licenses/tree-sitter-ring-1.1.1-LICENSE.
+The scanner reset patch and authored local binding are recorded separately;
+the generated parser is unchanged and no upstream release tag is asserted.
+
+The controlled Flux parser retains the official Flux source revision
+9eb12f7f4702875e79189789cf9b3ac560499c11 and its MIT notice, Copyright (c)
+2013-2018 InfluxData Inc., bundled as licenses/flux-source-parser-0.1.0-LICENSE.
+The local control/Result migration and complete original source/provenance
+remain separately recorded; retention does not imply original authorship,
+full Flux execution semantics or independently verified package acceptance.
+
+The local tree-sitter-hare 1.0.0 package retains the complete upstream Git
+source at eed7ddf6a66b596906aa8ca3d40521b8278adc6f and the exact MIT notice,
+Copyright (c) 2023 Amaan Qureshi, bundled as licenses/tree-sitter-hare-1.0.0-LICENSE.
+The ordinary foreach grammar correction, generated tables and current local
+Rust binding are disclosed separately in the retained source provenance.

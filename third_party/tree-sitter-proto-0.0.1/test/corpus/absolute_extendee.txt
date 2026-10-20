@@ -1,0 +1,70 @@
+================================================================================
+absolute enum-value option extendee
+================================================================================
+
+syntax = "proto2";
+extend .google.protobuf.EnumValueOptions { optional string description = 50000; }
+
+--------------------------------------------------------------------------------
+
+(source_file (syntax) (extend (full_ident (identifier) (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))))
+
+================================================================================
+absolute field and message option extendees
+================================================================================
+
+syntax = "proto2";
+extend .google.protobuf.FieldOptions { optional string description = 50000; }
+extend .google.protobuf.MessageOptions { optional string description = 50000; }
+
+--------------------------------------------------------------------------------
+
+(source_file (syntax) (extend (full_ident (identifier) (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))) (extend (full_ident (identifier) (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))))
+
+================================================================================
+absolute service method and enum option extendees
+================================================================================
+
+syntax = "proto2";
+extend .google.protobuf.ServiceOptions { optional string description = 50000; }
+extend .google.protobuf.MethodOptions { optional string description = 50000; }
+extend .google.protobuf.EnumOptions { optional string description = 50000; }
+
+--------------------------------------------------------------------------------
+
+(source_file (syntax) (extend (full_ident (identifier) (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))) (extend (full_ident (identifier) (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))) (extend (full_ident (identifier) (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))))
+
+================================================================================
+relative qualified extendee remains unchanged
+================================================================================
+
+syntax = "proto2";
+extend sample.External { optional string description = 50000; }
+
+--------------------------------------------------------------------------------
+
+(source_file (syntax) (extend (full_ident (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))))
+
+================================================================================
+relative unqualified extendee remains unchanged
+================================================================================
+
+syntax = "proto2";
+extend External { optional string description = 50000; }
+
+--------------------------------------------------------------------------------
+
+(source_file (syntax) (extend (full_ident (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))))
+
+================================================================================
+nested absolute extendee
+================================================================================
+
+syntax = "proto2";
+message Local {
+extend .sample.External { optional string description = 50000; }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file (syntax) (message (message_name (identifier)) (message_body (extend (full_ident (identifier) (identifier)) (message_body (field (type) (identifier) (field_number (int_lit (decimal_lit)))))))))

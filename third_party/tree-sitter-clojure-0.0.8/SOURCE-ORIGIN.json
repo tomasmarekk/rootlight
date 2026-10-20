@@ -1,0 +1,95 @@
+{
+  "repository": "https://github.com/theHamsta/tree-sitter-clojure",
+  "commit": "95c7959c461406381b42113dcf4591008c663d21",
+  "upstream_version": "0.0.8",
+  "archive": {
+    "path": "upstream.tar.gz",
+    "bytes": 47548,
+    "sha256": "2008d63049215d63920bd11290a83061d4efe0718a3009826479f3926464b6a4"
+  },
+  "original_files": [
+    {
+      "path": ".gitignore",
+      "bytes": 41,
+      "sha256": "95d4735660d626f9ad5d39c8cd7698441de759baa3ada9adf08ca77b68c40c29"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 873,
+      "sha256": "bada0b5d6434ab91b7947f890eec3f9896653146a9a89626916fbf85c2984a4a"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 465,
+      "sha256": "fa08c348bea6759e197af9085fdb1dc94f3ab0d9405742aadad776cbca46d383"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 1319,
+      "sha256": "949c88a2b24de7d814889b059992583409c316ebdfd0da30545540fb20efe2d1"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 1958,
+      "sha256": "42f7c6d8f3f33b2a913d60579d267137bcf5a47ae4a5c1f9784d9dca6515452f"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 513,
+      "sha256": "97a4ff32a655ebb95d1cc0cbcc35287f58cf91c58e3a87d104250ea391f889bc"
+    },
+    {
+      "path": "COPYING.txt",
+      "bytes": 7048,
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 11868,
+      "sha256": "e342724c7ec05b75bdb37709364265686150dda298ef02e2bfbcc0421126578e"
+    },
+    {
+      "path": "notes.txt",
+      "bytes": 11572,
+      "sha256": "a227548a2ddce3f7ca90e241cd64fa689c324940ea845416455f3fb2d175e138"
+    },
+    {
+      "path": "package-lock.json",
+      "bytes": 916,
+      "sha256": "c85c78a83b95cbb81f7c2d1d1a6817820785231d492d1c2e382ff13883dee9fc"
+    },
+    {
+      "path": "package.json",
+      "bytes": 585,
+      "sha256": "22a1340cbd2bf395d1ad6a32ed14b5959c81df82c74ed15bf217b50013c66899"
+    },
+    {
+      "path": "README.md",
+      "bytes": 5187,
+      "sha256": "144f7d3fec0bbc2dee3ebcbe4eaa02bac16553ce0d295549903d118527cede44"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 39729,
+      "sha256": "9a7c8bc61a3cda5bc64be3c7209631f768684aa83f0d1d4e349b859073817b25"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 61414,
+      "sha256": "245e3a1e33383d33922d0541e8ab06f157987e331b3b785de7f41435b8f44366"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 439282,
+      "sha256": "5607db8cc468e6d665cfe392c2a8ad1c9b419e9f2945f1d83eed9a6eaebcedd7"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 5326,
+      "sha256": "05729ff0c43ba3aebd8429a71e13c25a5dc7944e0eb725438bc98fda44573285"
+    }
+  ],
+  "originals_unchanged": true,
+  "generated_parser_unchanged": true,
+  "external_scanner": false
+}

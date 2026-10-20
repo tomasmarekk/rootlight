@@ -1,0 +1,1909 @@
+================================================================================
+blank file
+================================================================================
+
+
+
+--------------------------------------------------------------------------------
+
+(expressions)
+
+================================================================================
+blank lines
+================================================================================
+
+
+
+
+
+
+true
+
+
+
+
+
+def foo
+
+
+
+
+end
+
+
+
+
+
+--------------------------------------------------------------------------------
+
+(expressions
+  (true)
+  (method_def
+    name: (identifier)))
+
+================================================================================
+comments
+================================================================================
+# this is a comment
+
+a + # asdf
+2
+
+1 #
++ #
+2 #
+
+##
+##
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (call
+    receiver: (identifier)
+    method: (operator)
+    (comment)
+    arguments: (argument_list
+      (integer)))
+  (integer)
+  (comment)
+  (call
+    method: (operator)
+    (comment)
+    receiver: (integer))
+  (comment)
+  (comment)
+  (comment))
+
+================================================================================
+require
+================================================================================
+require "colorize"
+require "#{__DIR__}/relative_file"
+--------------------------------------------------------------------------------
+
+(expressions
+  (require
+    (string
+      (literal_content)))
+  (require
+    (string
+      (interpolation
+        (pseudo_constant))
+      (literal_content))))
+
+================================================================================
+compound statements
+================================================================================
+;;;nil;;;
+;nil;nil;
+  ;;;;;
+
+nil
+
+nil;
+
+nil; nil
+
+nil; (nil;nil)
+
+((()))
+()
+
+(nil)
+
+(nil;)
+
+(nil; nil)
+
+(nil; (nil;nil))
+--------------------------------------------------------------------------------
+
+(expressions
+  (nil)
+  (nil)
+  (nil)
+  (nil)
+  (nil)
+  (nil)
+  (nil)
+  (nil)
+  (expressions
+    (nil)
+    (nil))
+  (expressions
+    (expressions
+      (nil)))
+  (nil)
+  (expressions
+    (nil))
+  (expressions
+    (nil))
+  (expressions
+    (nil)
+    (nil))
+  (expressions
+    (nil)
+    (expressions
+      (nil)
+      (nil))))
+
+================================================================================
+aliases
+================================================================================
+alias Foo = Bar::Baz
+--------------------------------------------------------------------------------
+
+(expressions
+  (alias
+    name: (constant)
+    type: (constant)))
+
+================================================================================
+modules
+================================================================================
+module A; end
+module A
+;;;;
+end
+
+module
+M end
+
+module M2 C=2;D=3 end
+
+module ::A1::B2::C::D; end
+
+module ::Outer
+  module Inner
+    true
+    false
+  end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (module_def
+    name: (constant)
+    body: (expressions))
+  (module_def
+    name: (constant)
+    body: (expressions))
+  (module_def
+    name: (constant))
+  (module_def
+    name: (constant)
+    body: (expressions
+      (const_assign
+        lhs: (constant)
+        rhs: (integer))
+      (const_assign
+        lhs: (constant)
+        rhs: (integer))))
+  (module_def
+    name: (constant)
+    body: (expressions))
+  (module_def
+    name: (constant)
+    body: (expressions
+      (module_def
+        name: (constant)
+        body: (expressions
+          (true)
+          (false))))))
+
+================================================================================
+classes
+================================================================================
+abstract class A < Super; end
+
+class B <
+A
+;;;;
+end
+
+class
+MM end
+
+class C2 C=2;D=3 end
+
+class ::A1::B2::C::D < ::E::F::G; end
+
+class ::Outer
+  module Middle
+    class Inner
+      self
+      nil
+    end
+  end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (class_def
+    name: (constant)
+    superclass: (constant)
+    body: (expressions))
+  (class_def
+    name: (constant)
+    superclass: (constant)
+    body: (expressions))
+  (class_def
+    name: (constant))
+  (class_def
+    name: (constant)
+    body: (expressions
+      (const_assign
+        lhs: (constant)
+        rhs: (integer))
+      (const_assign
+        lhs: (constant)
+        rhs: (integer))))
+  (class_def
+    name: (constant)
+    superclass: (constant)
+    body: (expressions))
+  (class_def
+    name: (constant)
+    body: (expressions
+      (module_def
+        name: (constant)
+        body: (expressions
+          (class_def
+            name: (constant)
+            body: (expressions
+              (self)
+              (nil))))))))
+
+================================================================================
+structs
+================================================================================
+abstract struct X(U)
+  property x
+
+  def initialize(@x : U) end
+
+  abstract def foo ( a : String) : String
+end
+
+struct Y < X(Int32)
+  property y
+
+  def initialize(@x, @y : Int32) end
+
+  def foo ( a ) : String "a" end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (struct_def
+    name: (generic_type
+      (constant)
+      params: (param_list
+        (constant)))
+    body: (expressions
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (identifier)))
+      (method_def
+        name: (identifier)
+        params: (param_list
+          (param
+            name: (instance_var)
+            type: (constant))))
+      (abstract_method_def
+        name: (identifier)
+        params: (param_list
+          (param
+            name: (identifier)
+            type: (constant)))
+        type: (constant))))
+  (struct_def
+    name: (constant)
+    superclass: (generic_instance_type
+      (constant)
+      params: (param_list
+        (constant)))
+    body: (expressions
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (identifier)))
+      (method_def
+        name: (identifier)
+        params: (param_list
+          (param
+            name: (instance_var))
+          (param
+            name: (instance_var)
+            type: (constant))))
+      (method_def
+        name: (identifier)
+        params: (param_list
+          (param
+            name: (identifier)))
+        type: (constant)
+        body: (expressions
+          (string
+            (literal_content)))))))
+
+================================================================================
+method definitions
+:language(crystal)
+================================================================================
+def foo
+  a = 1 + 2
+  return a
+end
+
+def bar; end
+def
+baz
+end
+
+def fizz() : Bool return true end
+
+def qux(a, b	: Bool, c : Int32 = 7, d = nil) : Stuff
+end
+
+def buzz(
+  outerx x = 2,
+  outery y = 3,
+)
+  puts x, y
+  puts x + y
+end
+
+def blam
+  (a || b) && c
+end
+
+def foo; () end
+
+def foo
+  (1;1)
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (method_def
+    name: (identifier)
+    body: (expressions
+      (assign
+        lhs: (identifier)
+        rhs: (call
+          receiver: (integer)
+          method: (operator)
+          arguments: (argument_list
+            (integer))))
+      (return
+        (argument_list
+          (identifier)))))
+  (method_def
+    name: (identifier))
+  (method_def
+    name: (identifier))
+  (method_def
+    name: (identifier)
+    type: (constant)
+    body: (expressions
+      (return
+        (argument_list
+          (true)))))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier))
+      (param
+        name: (identifier)
+        type: (constant))
+      (param
+        name: (identifier)
+        type: (constant)
+        default: (integer))
+      (param
+        name: (identifier)
+        default: (nil)))
+    type: (constant))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        extern_name: (identifier)
+        name: (identifier)
+        default: (integer))
+      (param
+        extern_name: (identifier)
+        name: (identifier)
+        default: (integer)))
+    body: (expressions
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (identifier)
+          (identifier)))
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (call
+            receiver: (identifier)
+            method: (operator)
+            arguments: (argument_list
+              (identifier)))))))
+  (method_def
+    name: (identifier)
+    body: (expressions
+      (and
+        (expressions
+          (or
+            (identifier)
+            (operator)
+            (identifier)))
+        (operator)
+        (identifier))))
+  (method_def
+    name: (identifier)
+    body: (expressions
+      (nil)))
+  (method_def
+    name: (identifier)
+    body: (expressions
+      (expressions
+        (integer)
+        (integer)))))
+
+================================================================================
+method definitions with special characters
+================================================================================
+def foo! ; end
+
+def foo2!(*args : _)
+end
+
+def bar? ; end
+
+def bar2? (foo)
+  foo
+end
+
+abstract def fizz_buzz?(n) : Array(String)
+
+def baz= ; end
+
+def _baz2=(more_baz : Baz) ; end
+
+def global_assign=(s)
+end
+::global_assign=("a")
+--------------------------------------------------------------------------------
+
+(expressions
+  (method_def
+    name: (identifier))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (splat_param
+        name: (identifier)
+        type: (underscore))))
+  (method_def
+    name: (identifier))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier)))
+    body: (expressions
+      (identifier)))
+  (abstract_method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier)))
+    type: (generic_instance_type
+      (constant)
+      params: (param_list
+        (constant))))
+  (method_def
+    name: (identifier))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier)
+        type: (constant))))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier))))
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (string
+        (literal_content)))))
+
+================================================================================
+method definitions with block parameters
+================================================================================
+def foo(&);end
+
+def bar(&thingy); end
+
+def baz(&asdf : Proc(Nil))
+end
+
+def qux(& : -> String | Int32)
+end
+
+
+def worst_syntax(b, &:
+->);end
+--------------------------------------------------------------------------------
+
+(expressions
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (block_param)))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (block_param
+        name: (identifier))))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (block_param
+        name: (identifier)
+        type: (generic_instance_type
+          (constant)
+          params: (param_list
+            (constant))))))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (block_param
+        type: (proc_type
+          return: (union_type
+            (constant)
+            (constant))))))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier))
+      (block_param
+        type: (proc_type)))))
+
+================================================================================
+method definitions with splat parameters
+================================================================================
+def foo(*); end
+
+def bar(a, *b : Int32, c, **d : Bool); end
+
+def baz(*a, **b, &c); end
+--------------------------------------------------------------------------------
+
+(expressions
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (splat_param)))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier))
+      (splat_param
+        name: (identifier)
+        type: (constant))
+      (param
+        name: (identifier))
+      (double_splat_param
+        name: (identifier)
+        type: (constant))))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (splat_param
+        name: (identifier))
+      (double_splat_param
+        name: (identifier))
+      (block_param
+        name: (identifier)))))
+
+================================================================================
+method definitions with free variables
+================================================================================
+abstract def f(a : {T} | T) forall T
+
+def foo(x : T.class, y : U) : Array(T | U).class forall T, U
+  Array(T | U)
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (abstract_method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier)
+        type: (union_type
+          (tuple_type
+            (constant))
+          (constant))))
+    forall: (forall
+      (constant)))
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier)
+        type: (class_type
+          (constant)))
+      (param
+        name: (identifier)
+        type: (constant)))
+    type: (class_type
+      (generic_instance_type
+        (constant)
+        params: (param_list
+          (union_type
+            (constant)
+            (constant)))))
+    forall: (forall
+      (constant)
+      (constant))
+    body: (expressions
+      (generic_instance_type
+        (constant)
+        params: (param_list
+          (union_type
+            (constant)
+            (constant)))))))
+
+================================================================================
+operator method definitions
+================================================================================
+class Operators
+  def ~ : self
+  end
+
+  def self.+(other)
+  end
+
+  def ===(other)
+  false
+  end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (class_def
+    name: (constant)
+    body: (expressions
+      (method_def
+        name: (operator)
+        type: (self))
+      (method_def
+        class: (self)
+        name: (operator)
+        params: (param_list
+          (param
+            name: (identifier))))
+      (method_def
+        name: (operator)
+        params: (param_list
+          (param
+            name: (identifier)))
+        body: (expressions
+          (false))))))
+
+================================================================================
+class method definitions
+================================================================================
+class A::B(U); end
+
+class D
+  def self.thing
+    "a"
+  end
+
+  def A::B . c (x)
+    puts U,x
+  end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (class_def
+    name: (generic_type
+      (constant)
+      params: (param_list
+        (constant)))
+    body: (expressions))
+  (class_def
+    name: (constant)
+    body: (expressions
+      (method_def
+        class: (self)
+        name: (identifier)
+        body: (expressions
+          (string
+            (literal_content))))
+      (method_def
+        class: (constant)
+        name: (identifier)
+        params: (param_list
+          (param
+            name: (identifier)))
+        body: (expressions
+          (call
+            method: (identifier)
+            arguments: (argument_list
+              (constant)
+              (identifier))))))))
+
+================================================================================
+method definitions with rescue, else, and ensure
+:language(crystal)
+================================================================================
+def foo
+rescue e1 : SpecificError | OtherError
+rescue e2 : GeneralError
+else
+ensure
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (method_def
+    name: (identifier)
+    rescue: (rescue
+      variable: (identifier)
+      type: (union_type
+        (constant)
+        (constant)))
+    rescue: (rescue
+      variable: (identifier)
+      type: (constant))
+    else: (else)
+    ensure: (ensure)))
+
+================================================================================
+abstract method definitions
+================================================================================
+
+class A
+  abstract def a; abstract def b
+  abstract def c
+  abstract def d : Type
+end
+
+---
+
+(expressions
+  (class_def
+    name: (constant)
+    body: (expressions
+      (abstract_method_def
+        name: (identifier))
+      (abstract_method_def
+        name: (identifier))
+      (abstract_method_def
+        name: (identifier))
+      (abstract_method_def
+        name: (identifier)
+        type: (constant)))))
+
+================================================================================
+next/break/return
+================================================================================
+loop do
+  if a
+    next 1, *splat, 3, **d_splat, e: :e
+  elsif b
+    next(1, *splat, 3, **d_splat, e: :e)
+  else
+    break(**kwargs, f: :f)
+  end
+
+  return()
+  return(*a, *b)
+  return *a,
+    **b,
+    named:
+    nil
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (call
+    method: (identifier)
+    block: (block
+      body: (expressions
+        (if
+          cond: (identifier)
+          then: (then
+            (next
+              (argument_list
+                (integer)
+                (splat
+                  (identifier))
+                (integer)
+                (double_splat
+                  (identifier))
+                (named_expr
+                  name: (identifier)
+                  (symbol
+                    (literal_content))))))
+          else: (elsif
+            cond: (identifier)
+            then: (then
+              (next
+                (argument_list
+                  (integer)
+                  (splat
+                    (identifier))
+                  (integer)
+                  (double_splat
+                    (identifier))
+                  (named_expr
+                    name: (identifier)
+                    (symbol
+                      (literal_content))))))
+            else: (else
+              body: (expressions
+                (break
+                  (argument_list
+                    (double_splat
+                      (identifier))
+                    (named_expr
+                      name: (identifier)
+                      (symbol
+                        (literal_content)))))))))
+        (return
+          (argument_list))
+        (return
+          (argument_list
+            (splat
+              (identifier))
+            (splat
+              (identifier))))
+        (return
+          (argument_list
+            (splat
+              (identifier))
+            (double_splat
+              (identifier))
+            (named_expr
+              name: (identifier)
+              (nil))))))))
+
+================================================================================
+annotations
+================================================================================
+annotation Thing
+end
+
+annotation Foo::Thing2;;;;end
+
+@[Thing]
+@[Thing(  )]
+@[ Foo:: Thing2 (
+  1, *baz, foo: 2,
+  "a": 3, Z: 4, %q(q): 5, _6a?: 6
+) ]
+class Asdf
+  @[Foo("on def")]
+  def c2(_, @[Foo("on param")] @[Foo2::Thing2] *arg, @[ Foo(1) ] **kwarg, @[Foo("on block")] &blk : Int32 ->)
+  end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (annotation_def
+    name: (constant))
+  (annotation_def
+    name: (constant))
+  (annotation
+    (constant))
+  (annotation
+    (constant)
+    arguments: (argument_list))
+  (annotation
+    (constant)
+    arguments: (argument_list
+      (integer)
+      (splat
+        (identifier))
+      (named_expr
+        name: (identifier)
+        (integer))
+      (named_expr
+        name: (string
+          (literal_content))
+        (integer))
+      (named_expr
+        name: (identifier)
+        (integer))
+      (named_expr
+        name: (string
+          (literal_content))
+        (integer))
+      (named_expr
+        name: (identifier)
+        (integer))))
+  (class_def
+    name: (constant)
+    body: (expressions
+      (annotation
+        (constant)
+        arguments: (argument_list
+          (string
+            (literal_content))))
+      (method_def
+        name: (identifier)
+        params: (param_list
+          (param
+            name: (identifier))
+          (splat_param
+            (annotation
+              (constant)
+              arguments: (argument_list
+                (string
+                  (literal_content))))
+            (annotation
+              (constant))
+            name: (identifier))
+          (double_splat_param
+            (annotation
+              (constant)
+              arguments: (argument_list
+                (integer)))
+            name: (identifier))
+          (block_param
+            (annotation
+              (constant)
+              arguments: (argument_list
+                (string
+                  (literal_content))))
+            name: (identifier)
+            type: (proc_type
+              (constant))))))))
+
+================================================================================
+method and type visibility
+:language(crystal)
+================================================================================
+private def foo; end
+
+private module Foo
+  private class Bar
+    private struct Baz
+      private CONST = 1
+    end
+
+    private alias Buzz = Baz
+
+    protected def bar; end
+
+  end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (visibility_modifier
+    visibility: (private)
+    (method_def
+      name: (identifier)))
+  (visibility_modifier
+    visibility: (private)
+    (module_def
+      name: (constant)
+      body: (expressions
+        (visibility_modifier
+          visibility: (private)
+          (class_def
+            name: (constant)
+            body: (expressions
+              (visibility_modifier
+                visibility: (private)
+                (struct_def
+                  name: (constant)
+                  body: (expressions
+                    (visibility_modifier
+                      visibility: (private)
+                      (const_assign
+                        lhs: (constant)
+                        rhs: (integer))))))
+              (visibility_modifier
+                visibility: (private)
+                (alias
+                  name: (constant)
+                  type: (constant)))
+              (visibility_modifier
+                visibility: (protected)
+                (method_def
+                  name: (identifier))))))))))
+
+================================================================================
+enum definitions
+:language(crystal)
+================================================================================
+enum Nums
+  One
+  Two
+  Three = 3
+
+  @@my_cvar = 4
+end
+
+alias Bar = Int8
+enum Foo:	Bar Red; Blue; Green end
+enum Foo2; Thing end
+
+@[Flags]
+enum Bar : UInt8
+  Red
+  Green
+  Blue
+
+  def thingy
+    "asdf"
+  end
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (enum_def
+    name: (constant)
+    body: (expressions
+      (constant)
+      (constant)
+      (const_assign
+        lhs: (constant)
+        rhs: (integer))
+      (assign
+        lhs: (class_var)
+        rhs: (integer))))
+  (alias
+    name: (constant)
+    type: (constant))
+  (enum_def
+    name: (constant)
+    type: (constant)
+    body: (expressions
+      (constant)
+      (constant)
+      (constant)))
+  (enum_def
+    name: (constant)
+    body: (expressions
+      (constant)))
+  (annotation
+    (constant))
+  (enum_def
+    name: (constant)
+    type: (constant)
+    body: (expressions
+      (constant)
+      (constant)
+      (constant)
+      (method_def
+        name: (identifier)
+        body: (expressions
+          (string
+            (literal_content)))))))
+
+=============
+private enums
+:language(crystal)
+=============
+
+module MyModule
+  private enum MyEnum
+    Member1
+    Member2
+  end
+end
+
+---
+
+(expressions
+  (module_def
+    name: (constant)
+    body: (expressions
+      (visibility_modifier
+        visibility: (private)
+        (enum_def
+          name: (constant)
+          body: (expressions
+            (constant)
+            (constant)))))))
+
+================================================================================
+line continuations
+================================================================================
+a, b, \
+\
+c, d = :a, <<-B,  \
+:c,
+  b
+  B
+  "d"
+
+def\
+foo;\
+puts\
+"hello"\
+,\
+"world"\
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (assign
+    lhs: (identifier)
+    lhs: (identifier)
+    lhs: (identifier)
+    lhs: (identifier)
+    rhs: (symbol
+      (literal_content))
+    rhs: (heredoc_start)
+    rhs: (symbol
+      (literal_content))
+    (heredoc_body
+      (literal_content)
+      (heredoc_end))
+    rhs: (string
+      (literal_content)))
+  (method_def
+    name: (identifier)
+    body: (expressions
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (string
+            (literal_content))
+          (string
+            (literal_content)))))))
+
+================
+include + extend
+================
+
+class MyClass
+  include MyModule(Int32)
+  extend MyModule
+  extend Enumerable({String, String})
+end
+
+---
+
+(expressions
+  (class_def
+    (constant)
+    (expressions
+      (include
+        (generic_instance_type
+          (constant)
+          (param_list
+            (constant))))
+      (extend
+        (constant))
+      (extend
+        (generic_instance_type
+          (constant)
+          (param_list
+            (tuple_type
+              (constant)
+              (constant))))))))
+
+================
+lib external var
+================
+
+lib C
+  $errno : Int32
+end
+
+---
+
+(expressions
+  (lib_def
+    (constant)
+    (expressions
+      (global_var
+        (identifier)
+        (constant)))))
+
+=========
+empty lib
+=========
+
+lib C
+end
+
+---
+
+(expressions
+  (lib_def
+    (constant)))
+
+=============
+top-level fun
+=============
+
+fun my_fun_name(param1 : Type, param2 : Type) : ReturnType
+  puts "hello"
+end
+
+---
+
+(expressions
+  (fun_def
+    name: (identifier)
+    params: (param_list
+      (fun_param
+        name: (identifier)
+        type: (constant))
+      (fun_param
+        name: (identifier)
+        type: (constant)))
+    type: (constant)
+    body: (expressions
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (string
+            (literal_content)))))))
+
+================================================================================
+top level fun def with special characters
+================================================================================
+fun main!(args : Array(String))
+end
+
+fun main?(args : Array(String))
+end
+
+fun fake_main! = NOT_MAIN()
+end
+
+# `fun main=` doesn't work
+--------------------------------------------------------------------------------
+
+(expressions
+  (fun_def
+    name: (identifier)
+    params: (param_list
+      (fun_param
+        name: (identifier)
+        type: (generic_instance_type
+          (constant)
+          params: (param_list
+            (constant))))))
+  (fun_def
+    name: (identifier)
+    params: (param_list
+      (fun_param
+        name: (identifier)
+        type: (generic_instance_type
+          (constant)
+          params: (param_list
+            (constant))))))
+  (fun_def
+    name: (identifier)
+    real_name: (constant))
+  (comment))
+
+================================================================================
+lib fun def with special characters
+================================================================================
+lib C
+  fun main!(args : Int32*)
+
+  fun main?(args : Int32)
+
+  fun main2! = NOT_MAIN()
+
+  # `fun main=` doesn't work
+end
+--------------------------------------------------------------------------------
+
+(expressions
+  (lib_def
+    name: (constant)
+    body: (expressions
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (fun_param
+            name: (identifier)
+            type: (pointer_type
+              (constant)))))
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (fun_param
+            name: (identifier)
+            type: (constant))))
+      (fun_def
+        name: (identifier)
+        real_name: (constant))
+      (comment))))
+
+=================
+lib def + objects
+=================
+
+lib MyLib
+  $external = Name : Int32?
+
+  fun name = Name : Void
+
+  fun cos(value : Float64) : Float64
+
+  union IntOrFloat
+    some_int : Int32
+    some_float : Float64
+  end
+
+  struct TimeZone
+    minutes_west, dst_time : Int32
+    tz_name : String
+  end
+
+  enum SomeEnum
+    Zero
+    One
+    Two
+    Three
+  end
+
+  type MyInt = Int32
+end
+
+---
+
+(expressions
+  (lib_def
+    name: (constant)
+    body: (expressions
+      (global_var
+        name: (identifier)
+        real_name: (constant)
+        type: (nilable_type
+          (constant)))
+      (fun_def
+        name: (identifier)
+        real_name: (constant)
+        type: (constant))
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (fun_param
+            name: (identifier)
+            type: (constant)))
+        type: (constant))
+      (union_def
+        name: (constant)
+        body: (expressions
+          (union_fields
+            name: (identifier)
+            type: (constant))
+          (union_fields
+            name: (identifier)
+            type: (constant))))
+      (c_struct_def
+        name: (constant)
+        body: (expressions
+          (c_struct_fields
+            name: (identifier)
+            name: (identifier)
+            type: (constant))
+          (c_struct_fields
+            name: (identifier)
+            type: (constant))))
+      (enum_def
+        name: (constant)
+        body: (expressions
+          (constant)
+          (constant)
+          (constant)
+          (constant)))
+      (type_def
+        name: (constant)
+        type: (constant)))))
+
+=============
+fun with dots
+=============
+
+lib LibC
+  fun fcntl(__fd : Int, __cmd : Int, ...) : Int
+  fun open(__path : Char*, __flags : Int, ...) : Int
+end
+
+---
+
+(expressions
+  (lib_def
+    name: (constant)
+    body: (expressions
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (fun_param
+            name: (identifier)
+            type: (constant))
+          (fun_param
+            name: (identifier)
+            type: (constant)))
+        type: (constant))
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (fun_param
+            name: (identifier)
+            type: (pointer_type
+              (constant)))
+          (fun_param
+            name: (identifier)
+            type: (constant)))
+        type: (constant)))))
+
+=================
+fun pointer param
+=================
+
+lib LibC
+  fun strerror(Int, Char*, SizeT) : Int
+end
+
+---
+
+(expressions
+  (lib_def
+    name: (constant)
+    body: (expressions
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (constant)
+          (pointer_type
+            (constant))
+          (constant))
+        type: (constant)))))
+
+========================================
+fun def parenthesized expression in body
+========================================
+
+# equivalent to a_little_fun()
+fun a_little_fun;
+(a : Int32)
+end
+
+# equivalent to more_fun(a : Int32)
+fun more_fun
+(a : Int32)
+end
+
+---
+
+(expressions
+  (comment)
+  (fun_def
+    name: (identifier)
+    body: (expressions
+      (expressions
+        (type_declaration
+          var: (identifier)
+          type: (constant)))))
+  (comment)
+  (fun_def
+    name: (identifier)
+    params: (param_list
+      (fun_param
+        name: (identifier)
+        type: (constant)))))
+
+===============================
+fun empty params on single line
+===============================
+
+fun bar() end
+
+---
+
+(expressions
+  (fun_def
+    name: (identifier)))
+
+===================================
+mix of named and unnamed fun params
+===================================
+
+lib MyLib
+  fun my_fun(arg1 : Int32*, arg2 : Int32*, arg3 : Void* -> Void*, Void*) : Int32
+end
+
+---
+
+(expressions
+  (lib_def
+    name: (constant)
+    body: (expressions
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (fun_param
+            name: (identifier)
+            type: (pointer_type
+              (constant)))
+          (fun_param
+            name: (identifier)
+            type: (pointer_type
+              (constant)))
+          (fun_param
+            name: (identifier)
+            type: (proc_type
+              (pointer_type
+                (constant))
+              return: (pointer_type
+                (constant))))
+          (pointer_type
+            (constant)))
+        type: (constant)))))
+
+======================
+fun def with newlines
+:language(crystal)
+======================
+fun
+extreme_fun
+(
+param1
+:
+Type
+,
+param2
+:
+Type
+)
+:
+ReturnType
+  puts "hello"
+end
+
+----------------------
+
+(expressions
+  (fun_def
+    name: (identifier)
+    params: (param_list
+      (fun_param
+        name: (identifier)
+        type: (constant))
+      (fun_param
+        name: (identifier)
+        type: (constant)))
+    type: (constant)
+    body: (expressions
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (string
+            (literal_content)))))))
+
+==========================
+lib fun def with newlines
+:language(crystal)
+==========================
+lib Foo
+fun
+asdf
+(
+param1
+:
+Type
+)
+:
+UInt8
+fun asdf2
+fun asdf3
+()
+end
+----
+
+(expressions
+  (lib_def
+    name: (constant)
+    body: (expressions
+      (fun_def
+        name: (identifier)
+        params: (param_list
+          (fun_param
+            name: (identifier)
+            type: (constant)))
+        type: (constant))
+      (fun_def
+        name: (identifier))
+      (fun_def
+        name: (identifier)))))
+
+=======================================
+empty fun params are not treated as nil
+:language(crystal)
+=======================================
+fun foo() /a/ end
+fun bar() + 1 end
+---
+
+(expressions
+  (fun_def
+    name: (identifier)
+    body: (expressions
+      (regex
+        (literal_content))))
+  (fun_def
+    name: (identifier)
+    body: (expressions
+      (call
+        method: (operator)
+        receiver: (integer)))))
+
+=================================
+private and protected macro calls
+=================================
+
+class Foo
+  private getter foo
+  protected property bar : Baz
+
+  def method
+    private some_macro().foo
+  end
+end
+
+---
+
+(expressions
+  (class_def
+    name: (constant)
+    body: (expressions
+      (visibility_modifier
+        visibility: (private)
+        (call
+          method: (identifier)
+          arguments: (argument_list
+            (identifier))))
+      (visibility_modifier
+        visibility: (protected)
+        (call
+          method: (identifier)
+          arguments: (argument_list
+            (type_declaration
+              var: (identifier)
+              type: (constant)))))
+      (method_def
+        name: (identifier)
+        body: (expressions
+          (visibility_modifier
+            visibility: (private)
+            (call
+              receiver: (call
+                method: (identifier)
+                arguments: (argument_list))
+              method: (identifier))))))))
+
+==========
+grave defs
+==========
+
+def `(command) : String
+end
+
+macro `(command)
+end
+
+---
+
+(expressions
+  (method_def
+    name: (operator)
+    params: (param_list
+      (param
+        name: (identifier)))
+    type: (constant))
+  (macro_def
+    name: (operator)
+    params: (param_list
+      (param
+        name: (identifier)))
+    body: (expressions
+      (macro_content))))
+
+========================
+method in private module
+:language(crystal)
+========================
+
+private module MyMod
+  def my_method
+    puts "hello"
+  end
+end
+
+---
+
+(expressions
+  (visibility_modifier
+    visibility: (private)
+    (module_def
+      name: (constant)
+      body: (expressions
+        (method_def
+          name: (identifier)
+          body: (expressions
+            (call
+              method: (identifier)
+              arguments: (argument_list
+                (string
+                  (literal_content))))))))))
+
+===================
+if then expressions
+:language(crystal)
+===================
+
+def self.init(load_defaults : Bool = true) : Nil
+  @@initialized = true
+
+  if load_defaults
+    DEFAULT_TYPES.each do |ext, type|
+      register ext, type
+    end
+
+    Crystal::System::MIME.load
+  end
+end
+
+---
+
+(expressions
+  (method_def
+    class: (self)
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier)
+        type: (constant)
+        default: (true)))
+    type: (constant)
+    body: (expressions
+      (assign
+        lhs: (class_var)
+        rhs: (true))
+      (if
+        cond: (identifier)
+        then: (then
+          (call
+            receiver: (constant)
+            method: (identifier)
+            block: (block
+              params: (param_list
+                (param
+                  name: (identifier))
+                (param
+                  name: (identifier)))
+              body: (expressions
+                (call
+                  method: (identifier)
+                  arguments: (argument_list
+                    (identifier)
+                    (identifier))))))
+          (call
+            receiver: (constant)
+            method: (identifier)))))))
+
+======================================
+inline statements inside interpolation
+:language(crystal)
+======================================
+"hello #{"world" if true}"
+s1 = "{#{a unless b}}"
+
+def foo
+  bar = "#{return 7}"
+end
+---
+
+(expressions
+  (string
+    (literal_content)
+    (interpolation
+      (modifier_if
+        then: (string
+          (literal_content))
+        cond: (true))))
+  (assign
+    lhs: (identifier)
+    rhs: (string
+      (literal_content)
+      (interpolation
+        (modifier_unless
+          then: (identifier)
+          cond: (identifier)))
+      (literal_content)))
+  (method_def
+    name: (identifier)
+    body: (expressions
+      (assign
+        lhs: (identifier)
+        rhs: (string
+          (interpolation
+            (return
+              (argument_list
+                (integer)))))))))
+
+=====================================
+macro, method, and fun params can end with ?!
+:language(crystal)
+=====================================
+def hello(world?)
+end
+
+fun foo(bar! : String)
+end
+
+macro qux(z!)
+  #
+end
+---
+
+(expressions
+  (method_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier))))
+  (fun_def
+    name: (identifier)
+    params: (param_list
+      (fun_param
+        name: (identifier)
+        type: (constant))))
+  (macro_def
+    name: (identifier)
+    params: (param_list
+      (param
+        name: (identifier)))
+    body: (expressions
+      (macro_content))))

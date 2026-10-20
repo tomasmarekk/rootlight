@@ -1,0 +1,298 @@
+==================
+String copy function
+==================
+
+see copy("***hello***",3)
+
+---
+
+(source_file
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (string)
+        (number)))))
+
+==================
+String find substring
+==================
+
+cStr = "Welcome to the Ring programming language"
+see substr(cStr,"Ring")
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (string)))
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (string)))))
+
+==================
+String left function
+==================
+
+see left("Hello World!",5)
+
+---
+
+(source_file
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (string)
+        (number)))))
+
+==================
+String right function
+==================
+
+see Right("Hello World!",6)
+
+---
+
+(source_file
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (string)
+        (number)))))
+
+==================
+String length
+==================
+
+cStr = "How are you?"
+see len(cStr)
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (string)))
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)))))
+
+==================
+String comparison
+==================
+
+see strcmp("hello","hello")
+
+---
+
+(source_file
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (string)
+        (string)))))
+
+==================
+String lines function
+==================
+
+cStr = "Hello
+How are you?
+are you fine?"
+see lines(cStr)
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (string)))
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)))))
+
+==================
+For in string iteration
+==================
+
+for x in cName
+    see nl + x
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (identifier)
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+String upper/lower
+==================
+
+cName[1] = upper(cName[1])
+see "Hello " + cName
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (subscript_expression
+        (identifier)
+        (number))
+      (call_expression
+        (identifier)
+        (arguments
+          (subscript_expression
+            (identifier)
+            (number))))))
+  (see_statement
+    (binary_expression
+      (string)
+      (identifier))))
+
+==================
+String character by index
+==================
+
+for x = 1 to len(cName)
+    see nl + cName[x]
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)))
+    (see_statement
+      (binary_expression
+        (identifier)
+        (subscript_expression
+          (identifier)
+          (identifier))))))
+
+==================
+Hex conversion
+==================
+
+See hex(10) + nl
+
+---
+
+(source_file
+  (see_statement
+    (binary_expression
+      (call_expression
+        (identifier)
+        (arguments
+          (number)))
+      (identifier))))
+
+==================
+Number conversion
+==================
+
+see number("5") + 5 + nl
+
+---
+
+(source_file
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (call_expression
+          (identifier)
+          (arguments
+            (string)))
+        (number))
+      (identifier))))
+
+==================
+Decimals function
+==================
+
+x = 1.1234567890123
+for d = 0 to 14
+    decimals(d)
+    see x + nl
+next
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (expression_statement
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier))))
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+Str2list and list2str
+==================
+
+mylist = str2list(mystr)
+see "Items : " + len(mylist) + nl
+newstr = list2str(mylist)
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier)))))
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (string)
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier))))
+      (identifier)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier))))))

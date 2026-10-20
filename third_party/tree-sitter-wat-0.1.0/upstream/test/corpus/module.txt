@@ -1,0 +1,11 @@
+==================
+implicit
+==================
+  (func $f ( param i32 ) )
+---
+
+(root
+  (module_field_func
+    (identifier)
+    (param
+      (num_type))))

@@ -1,0 +1,27 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -63,7 +63,7 @@
+     ],
+     word: ($) => $.word,
+     rules: {
+-        program: $ => repeat(seq(optional($._statement), $._terminator)),
++        program: $ => seq(repeat(seq(optional($._statement), $._terminator)), optional($._statement)),
+         conditional_execution: $ => choice(prec.right(-1, seq(choice('and', 'or'), $._statement)), prec.right(-1, seq($._statement, choice('||', '&&'), $._statement))),
+         pipe: $ => prec.left(seq($._statement, choice('&|', '2>|', '|'), $._statement)),
+         redirect_statement: $ => seq($._statement, choice($.file_redirect, $.stream_redirect)),
+--- a/grammar.ts
++++ b/grammar.ts
+@@ -73,10 +73,10 @@
+     word: ($) => $.word,
+ 
+     rules: {
+-        program: $ => repeat(seq(
++        program: $ => seq(
++            repeat(seq(optional($._statement), $._terminator)),
+             optional($._statement),
+-            $._terminator,
+-        )),
++        ),
+ 
+         conditional_execution: $ => choice(
+             prec.right(-1, seq(choice('and', 'or'), $._statement)),

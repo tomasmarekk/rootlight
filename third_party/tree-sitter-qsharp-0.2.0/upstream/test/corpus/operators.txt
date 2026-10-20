@@ -1,0 +1,453 @@
+================================================================================
+Arithmetic operators
+================================================================================
+
+operation Main() : Unit {
+    let a = 1 + 2;
+    let b = 3 - 4;
+    let c = 5 * 6;
+    let d = 7 / 8;
+    let e = 9 % 10;
+    let f = 2 ^ 3;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+Comparison and equality operators
+================================================================================
+
+operation Main() : Unit {
+    let a = 1 == 2;
+    let b = 1 != 2;
+    let c = 1 < 2;
+    let d = 1 <= 2;
+    let e = 1 > 2;
+    let f = 1 >= 2;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+Logical operators
+================================================================================
+
+operation Main() : Unit {
+    let a = true and false;
+    let b = true or false;
+    let c = not true;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (bool_literal)
+            (bool_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (bool_literal)
+            (bool_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (unary_expression
+            (bool_literal)))))))
+
+================================================================================
+Bitwise operators
+================================================================================
+
+operation Main() : Unit {
+    let a = 5 &&& 3;
+    let b = 5 ||| 3;
+    let c = 5 ^^^ 3;
+    let d = ~~~5;
+    let e = 1 <<< 2;
+    let f = 8 >>> 2;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (unary_expression
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+Ternary expression
+================================================================================
+
+operation Main() : Unit {
+    let x = true ? 1 | 0;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (ternary_expression
+            (bool_literal)
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+Copy and update expression
+================================================================================
+
+operation Main() : Unit {
+    let a = [1, 2, 3];
+    let b = a w/ 0 <- 99;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (array_expression
+            (integer_literal)
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (update_expression
+            (identifier)
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+Assignment and compound assignment
+================================================================================
+
+operation Main() : Unit {
+    mutable x = 0;
+    set x = 5;
+    set x += 1;
+    set x -= 1;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (mutable_statement
+          (pattern
+            (identifier))
+          (integer_literal))
+        (set_statement
+          (assignment_expression
+            (identifier)
+            (integer_literal)))
+        (set_statement
+          (compound_assignment_expression
+            (identifier)
+            (integer_literal)))
+        (set_statement
+          (compound_assignment_expression
+            (identifier)
+            (integer_literal)))))))
+
+================================================================================
+Unwrap expression
+================================================================================
+
+operation Main() : Unit {
+    let x = myValue!;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (unwrap_expression
+            (identifier)))))))
+
+================================================================================
+Lambda expressions
+================================================================================
+
+operation Main() : Unit {
+    let f = (x) -> x + 1;
+    let g = (q) => H(q);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (lambda_expression
+              (parenthesized_expression
+                (identifier))
+              (identifier))
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (call_expression
+            (lambda_expression
+              (parenthesized_expression
+                (identifier))
+              (identifier))
+            (identifier)))))))
+
+================================================================================
+Range expressions
+================================================================================
+
+operation Main() : Unit {
+    let a = 0..5;
+    let b = 0..2..10;
+    let c = arr[...];
+    let d = arr[1...];
+    let e = arr[...3];
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (range_expression
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (step_range_expression
+            (integer_literal)
+            (integer_literal)
+            (integer_literal)))
+        (let_statement
+          (pattern
+            (identifier))
+          (index_expression
+            (identifier)
+            (full_range)))
+        (let_statement
+          (pattern
+            (identifier))
+          (index_expression
+            (identifier)
+            (open_range_start
+              (integer_literal))))
+        (let_statement
+          (pattern
+            (identifier))
+          (index_expression
+            (identifier)
+            (open_range_end
+              (integer_literal))))))))
+
+================================================================================
+Field and index access
+================================================================================
+
+operation Main() : Unit {
+    let a = point.X;
+    let b = arr[0];
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (field_expression
+            (identifier)
+            field: (identifier)))
+        (let_statement
+          (pattern
+            (identifier))
+          (index_expression
+            (identifier)
+            (integer_literal)))))))

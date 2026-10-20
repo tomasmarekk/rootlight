@@ -1,0 +1,11 @@
+--- upstream/grammar.js
++++ candidate/grammar.js
+@@ -157,7 +157,7 @@
+       ),
+ 
+     spec_name: ($) =>
+-      choice("body", "adjoint", seq("controlled", optional("adjoint"))),
++      choice("body", seq("adjoint", optional("controlled")), seq("controlled", optional("adjoint"))),
+ 
+     spec_generator: ($) =>
+       choice("auto", "distribute", "intrinsic", "invert", "self"),

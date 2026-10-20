@@ -1,0 +1,213 @@
+================================================================================
+to/in/from/step as identifiers (Ring's keyword demotion: these keywords are
+always demoted at identifier positions — ring_parser_processkeywords)
+================================================================================
+
+from = 1
+to = 10
+step = 2
+? from
+? to
+? step
+x = from + to * step
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (see_statement
+    (identifier))
+  (see_statement
+    (identifier))
+  (see_statement
+    (identifier))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (identifier)
+        (binary_expression
+          (identifier)
+          (identifier))))))
+
+================================================================================
+demoted keywords in for-loop bound expressions (oop161 pattern)
+================================================================================
+
+for t = from to to step step
+    ? t
+next
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (identifier)
+    (identifier)
+    (identifier)
+    (see_statement
+      (identifier))))
+
+================================================================================
+demoted keywords as object attributes (oop160 class-body pattern)
+================================================================================
+
+class MyTest
+    From = 100
+    To = 110
+
+new MyTest { test() }
+
+func use o
+    ? o.from
+    o.to = 5
+    o.step()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (number)))
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (number)))
+    (expression_statement
+      (new_expression
+        (qualified_identifier
+          (identifier))
+        (expression_statement
+          (call_expression
+            (identifier)))))
+    (function_definition
+      name: (identifier)
+      parameters: (param_list
+        (identifier))
+      (see_statement
+        (member_expression
+          (identifier)
+          (identifier)))
+      (expression_statement
+        (assignment_expression
+          (member_expression
+            (identifier)
+            (identifier))
+          (number)))
+      (expression_statement
+        (call_expression
+          (member_expression
+            (identifier)
+            (identifier)))))))
+
+================================================================================
+demoted keywords as function definition names and parameters
+================================================================================
+
+func from(to, in)
+    return to + in
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier)
+      (identifier))
+    (return_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+================================================================================
+keywords stay keywords in their construct positions (regression: the demotion
+must not raid `for`, `foreach`, or `class ... from`)
+================================================================================
+
+for i = 1 to 10 step 2
+    ? i
+next
+
+for x in aList
+    ? x
+next
+
+class B from A
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (number)
+    (see_statement
+      (identifier)))
+  (for_statement
+    variable: (identifier)
+    (identifier)
+    (see_statement
+      (identifier)))
+  (class_definition
+    name: (identifier)
+    parent: (class_parent
+      (qualified_identifier
+        (identifier)))))
+
+================================================================================
+prefix theft guard: identifiers starting with a demotable keyword are not split
+================================================================================
+
+fromR = 1
+toDo = 2
+index = 3
+stepper = 4
+? fromR
+? toDo
+? index
+? stepper
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (see_statement
+    (identifier))
+  (see_statement
+    (identifier))
+  (see_statement
+    (identifier))
+  (see_statement
+    (identifier)))

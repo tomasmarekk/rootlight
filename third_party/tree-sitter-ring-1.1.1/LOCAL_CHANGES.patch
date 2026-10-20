@@ -1,0 +1,10 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -151,6 +151,7 @@
+                                                    const char *buffer,
+                                                    unsigned length) {
+   ScannerState *s = payload;
++  s->last = LAST_NONE;
+   if (length >= 1) {
+     s->last = (unsigned char)buffer[0];
+   }

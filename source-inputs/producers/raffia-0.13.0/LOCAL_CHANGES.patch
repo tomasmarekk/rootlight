@@ -1,0 +1,741 @@
+--- a/raffia/Cargo.toml
++++ b/raffia/Cargo.toml
+@@ -53,6 +53,7 @@
+ 
+ [dependencies.raffia_macro]
+ version = "0.2"
++path = "../raffia_macro"
+ 
+ [dependencies.serde]
+ version = "1.0"
+--- a/raffia/src/ast.rs
++++ b/raffia/src/ast.rs
+@@ -2528,6 +2528,30 @@
+     SassPlaceholder(SassPlaceholderSelector<'s>),
+ }
+ 
++/// An indented-Sass include with its written `+` and optional content block.
++#[derive(Clone, Debug, Spanned, PartialEq)]
++#[cfg_attr(feature = "serialize", derive(Serialize))]
++#[cfg_attr(feature = "serialize", serde(tag = "type", rename_all = "camelCase"))]
++#[cfg_attr(feature = "span_ignored_eq", derive(SpanIgnoredEq))]
++pub struct SassIncludeStatement<'s> {
++    pub plus_span: Span,
++    pub prelude: SassInclude<'s>,
++    pub block: Option<SimpleBlock<'s>>,
++    pub span: Span,
++}
++
++/// An indented-Sass mixin definition with its written `=` and authored body.
++#[derive(Clone, Debug, Spanned, PartialEq)]
++#[cfg_attr(feature = "serialize", derive(Serialize))]
++#[cfg_attr(feature = "serialize", serde(tag = "type", rename_all = "camelCase"))]
++#[cfg_attr(feature = "span_ignored_eq", derive(SpanIgnoredEq))]
++pub struct SassMixinStatement<'s> {
++    pub equal_span: Span,
++    pub prelude: SassMixin<'s>,
++    pub block: SimpleBlock<'s>,
++    pub span: Span,
++}
++
+ #[derive(Clone, Debug, Spanned, PartialEq)]
+ #[cfg_attr(feature = "serialize", derive(Serialize))]
+ #[cfg_attr(feature = "serialize", serde(untagged))]
+@@ -2546,6 +2570,8 @@
+     LessVariableDeclaration(LessVariableDeclaration<'s>),
+     QualifiedRule(QualifiedRule<'s>),
+     SassIfAtRule(SassIfAtRule<'s>),
++    SassIncludeStatement(SassIncludeStatement<'s>),
++    SassMixinStatement(SassMixinStatement<'s>),
+     SassVariableDeclaration(SassVariableDeclaration<'s>),
+     UnknownSassAtRule(Box<UnknownSassAtRule<'s>>),
+ }
+--- a/raffia/src/error.rs
++++ b/raffia/src/error.rs
+@@ -31,6 +31,8 @@
+     ExpectRightBraceForLessVar,
+     UnexpectedLinebreak,
+     UnexpectedEof,
++    ControlledStop,
++    InvalidSassIndentation,
+     UnterminatedString,
+ 
+     ExpectRule,
+@@ -126,6 +128,8 @@
+             Self::ExpectRightBraceForLessVar => write!(f, "`}}` for Less variable is expected"),
+             Self::UnexpectedLinebreak => write!(f, "unexpected linebreak"),
+             Self::UnexpectedEof => write!(f, "unexpected end of file"),
++            Self::ControlledStop => write!(f, "parser control stopped analysis"),
++            Self::InvalidSassIndentation => write!(f, "invalid Sass indentation"),
+             Self::UnterminatedString => write!(f, "unterminated string"),
+ 
+             Self::ExpectRule => write!(f, "CSS rule is expected"),
+--- a/raffia/src/lib.rs
++++ b/raffia/src/lib.rs
+@@ -150,7 +150,7 @@
+ //! Note that Raffia only supports serialization. Deserialization isn't supported.
+ 
+ pub use config::{ParserOptions, Syntax};
+-pub use parser::{Parse, Parser, ParserBuilder};
++pub use parser::{Parse, ParseCheckpoint, ParseControl, Parser, ParserBuilder};
+ pub use pos::{Span, Spanned};
+ pub use span_ignored_eq::SpanIgnoredEq;
+ pub use tokenizer::token;
+--- a/raffia/src/parser/builder.rs
++++ b/raffia/src/parser/builder.rs
+@@ -1,4 +1,4 @@
+-use super::Parser;
++use super::{ParseControl, Parser};
+ use crate::{
+     ParserOptions, Syntax,
+     tokenizer::{Tokenizer, token::Comment},
+@@ -14,6 +14,7 @@
+     source: &'s str,
+     syntax: Syntax,
+     options: Option<ParserOptions>,
++    control: Option<ParseControl>,
+     comments: Option<&'cmt mut Vec<Comment<'s>>>,
+ }
+ 
+@@ -24,6 +25,7 @@
+         ParserBuilder {
+             source,
+             options: None,
++            control: None,
+             syntax: Syntax::default(),
+             comments: None,
+         }
+@@ -38,6 +40,12 @@
+     /// Customize parser options.
+     pub fn options(mut self, options: ParserOptions) -> Self {
+         self.options = Some(options);
++        self
++    }
++
++    /// Install a synchronous guard shared across speculative parser states.
++    pub fn control(mut self, control: ParseControl) -> Self {
++        self.control = Some(control);
+         self
+     }
+ 
+@@ -58,11 +66,13 @@
+ 
+     /// Build a parser.
+     pub fn build(self) -> Parser<'cmt, 's> {
++        let mut tokenizer = Tokenizer::new(self.source, self.syntax, self.comments);
++        tokenizer.control = self.control;
+         Parser {
+             source: self.source,
+             syntax: self.syntax,
+             options: self.options.unwrap_or_default(),
+-            tokenizer: Tokenizer::new(self.source, self.syntax, self.comments),
++            tokenizer,
+             state: Default::default(),
+             recoverable_errors: vec![],
+             cached_token: None,
+--- a/raffia/src/parser/mod.rs
++++ b/raffia/src/parser/mod.rs
+@@ -6,6 +6,20 @@
+     tokenizer::{Tokenizer, token::TokenWithSpan},
+ };
+ pub use builder::ParserBuilder;
++
++use std::sync::Arc;
++
++/// A cooperative checkpoint in parser construction or scanner work.
++#[derive(Clone, Copy, Debug)]
++pub enum ParseCheckpoint {
++    Scan,
++    Token,
++    Enter,
++    Leave,
++}
++
++/// A synchronous, non-rollback parser guard; false aborts with ControlledStop.
++pub type ParseControl = Arc<dyn Fn(ParseCheckpoint) -> bool + Send + Sync>;
+ 
+ mod at_rule;
+ mod builder;
+@@ -55,7 +69,10 @@
+     where
+         T: Parse<'cmt, 's>,
+     {
+-        T::parse(self)
++        self.tokenizer.check_control(ParseCheckpoint::Enter)?;
++        let result = T::parse(self);
++        self.tokenizer.check_control(ParseCheckpoint::Leave)?;
++        result
+     }
+ 
+     /// Retrieve recoverable errors.
+--- a/raffia/src/parser/stmt.rs
++++ b/raffia/src/parser/stmt.rs
+@@ -466,6 +466,19 @@
+                 Token::DollarVar(..) if matches!(self.syntax, Syntax::Scss | Syntax::Sass) => {
+                     statements.push(Statement::SassVariableDeclaration(self.parse()?));
+                 }
++                // Indented Sass reserves an adjacent identifier after `+` for includes.
++                // Whitespace and non-identifier starts remain relative CSS selectors.
++                Token::Plus(..)
++                    if self.syntax == Syntax::Sass && self.tokenizer.is_start_of_ident() =>
++                {
++                    let include = self.parse::<SassIncludeStatement>()?;
++                    is_block_element = include.block.is_some();
++                    statements.push(Statement::SassIncludeStatement(include));
++                }
++                Token::Equal(..) if self.syntax == Syntax::Sass => {
++                    statements.push(Statement::SassMixinStatement(self.parse()?));
++                    is_block_element = true;
++                }
+                 Token::GreaterThan(..) | Token::Plus(..) | Token::Tilde(..) | Token::BarBar(..) => {
+                     if self.syntax == Syntax::Less {
+                         statements.push(self.parse_less_qualified_rule()?);
+@@ -539,3 +552,54 @@
+         Ok(statements)
+     }
+ }
++
++impl<'cmt, 's: 'cmt> Parse<'cmt, 's> for SassIncludeStatement<'s> {
++    fn parse(input: &mut Parser<'cmt, 's>) -> PResult<Self> {
++        let (_, plus_span) = expect!(input, Plus);
++        let prelude = input.parse::<SassInclude>()?;
++        let block = if matches!(peek!(input).token, Token::Indent(..)) {
++            Some(
++                input
++                    .with_state(ParserState {
++                        sass_ctx: input.state.sass_ctx
++                            | super::state::SASS_CTX_ALLOW_KEYFRAME_BLOCK,
++                        ..input.state.clone()
++                    })
++                    .parse::<SimpleBlock>()?,
++            )
++        } else {
++            None
++        };
++        let end = block
++            .as_ref()
++            .map_or(prelude.span.end, |block| block.span.end);
++        let start = plus_span.start;
++        Ok(Self {
++            plus_span,
++            prelude,
++            block,
++            span: Span { start, end },
++        })
++    }
++}
++
++impl<'cmt, 's: 'cmt> Parse<'cmt, 's> for SassMixinStatement<'s> {
++    fn parse(input: &mut Parser<'cmt, 's>) -> PResult<Self> {
++        let (_, equal_span) = expect!(input, Equal);
++        let prelude = input.parse::<SassMixin>()?;
++        let block = input
++            .with_state(ParserState {
++                sass_ctx: input.state.sass_ctx | super::state::SASS_CTX_ALLOW_KEYFRAME_BLOCK,
++                ..input.state.clone()
++            })
++            .parse::<SimpleBlock>()?;
++        let start = equal_span.start;
++        let end = block.span.end.max(prelude.span.end);
++        Ok(Self {
++            equal_span,
++            prelude,
++            block,
++            span: Span { start, end },
++        })
++    }
++}
+--- a/raffia/src/parser/value.rs
++++ b/raffia/src/parser/value.rs
+@@ -1002,7 +1002,7 @@
+             }
+         }
+ 
+-        if input.tokenizer.is_start_of_url_string() {
++        if input.tokenizer.is_start_of_url_string()? {
+             let value = input.parse()?;
+             let modifiers = match &peek!(input).token {
+                 Token::Ident(..) | Token::HashLBrace(..) | Token::AtLBraceVar(..) => {
+--- a/raffia/src/tokenizer/mod.rs
++++ b/raffia/src/tokenizer/mod.rs
+@@ -1,6 +1,7 @@
+ use crate::{
+     config::Syntax,
+     error::{Error, ErrorKind, PResult},
++    parser::{ParseCheckpoint, ParseControl},
+     pos::Span,
+ };
+ use std::{cmp::Ordering, iter::Peekable, str::CharIndices};
+@@ -18,11 +19,13 @@
+     chars: Peekable<CharIndices<'s>>,
+     current_indent: u16,
+     indents: Vec<u16>,
++    indent_character: Option<char>,
+ }
+ 
+ pub struct Tokenizer<'cmt, 's: 'cmt> {
+     source: &'s str,
+     syntax: Syntax,
++    pub(crate) control: Option<ParseControl>,
+     pub(crate) comments: Option<&'cmt mut Vec<Comment<'s>>>,
+     pub(crate) state: TokenizerState<'s>,
+ }
+@@ -33,17 +36,16 @@
+         syntax: Syntax,
+         comments: Option<&'cmt mut Vec<Comment<'s>>>,
+     ) -> Self {
+-        let mut chars = source.char_indices().peekable();
+-        if syntax == Syntax::Sass {
+-            while chars.next_if(|(_, c)| matches!(c, '\n' | '\r')).is_some() {}
+-        }
++        let chars = source.char_indices().peekable();
+         Self {
+             source,
+             syntax,
++            control: None,
+             comments,
+             state: TokenizerState {
+                 chars,
+                 current_indent: 0,
++                indent_character: None,
+                 indents: if syntax == Syntax::Sass {
+                     vec![0]
+                 } else {
+@@ -53,9 +55,31 @@
+         }
+     }
+ 
++    pub(crate) fn check_control(&self, checkpoint: ParseCheckpoint) -> PResult<()> {
++        Self::check_control_value(&self.control, checkpoint, self.source.len())
++    }
++
++    fn check_control_value(
++        control: &Option<ParseControl>,
++        checkpoint: ParseCheckpoint,
++        offset: usize,
++    ) -> PResult<()> {
++        if control.as_ref().is_none_or(|control| control(checkpoint)) {
++            return Ok(());
++        }
++        Err(Error {
++            kind: ErrorKind::ControlledStop,
++            span: Span {
++                start: offset,
++                end: offset,
++            },
++        })
++    }
++
+     #[inline]
+     pub fn bump(&mut self) -> PResult<TokenWithSpan<'s>> {
+-        if let Some(indent) = self.skip_ws_or_comment() {
++        self.check_control(ParseCheckpoint::Token)?;
++        if let Some(indent) = self.skip_ws_or_comment()? {
+             Ok(indent)
+         } else {
+             self.next()
+@@ -64,6 +88,7 @@
+ 
+     #[inline]
+     pub fn bump_without_ws_or_comments(&mut self) -> PResult<TokenWithSpan<'s>> {
++        self.check_control(ParseCheckpoint::Token)?;
+         self.next()
+     }
+ 
+@@ -174,7 +199,7 @@
+         }
+     }
+ 
+-    fn skip_ws_or_comment(&mut self) -> Option<TokenWithSpan<'s>> {
++    fn skip_ws_or_comment(&mut self) -> PResult<Option<TokenWithSpan<'s>>> {
+         // Sass can dedent more than one level at a time,
+         // so we need to produce a dedent token for each level.
+         if self.syntax == Syntax::Sass
+@@ -186,27 +211,30 @@
+             && let Some((i, _)) = self.state.chars.peek()
+         {
+             self.state.indents.pop();
+-            return Some(TokenWithSpan {
++            return Ok(Some(TokenWithSpan {
+                 token: Token::Dedent(Dedent {}),
+                 span: Span { start: *i, end: *i },
+-            });
++            }));
+         }
+         let mut indent = None;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.peek() {
+                 Some((_, c)) if c.is_ascii_whitespace() => {
+                     if self.syntax == Syntax::Sass {
+-                        indent = self.scan_indent();
++                        if let Some(span) = self.scan_indent()? {
++                            indent = Some(span);
++                        }
+                     } else {
+-                        self.skip_ws();
++                        self.skip_ws()?;
+                     }
+                 }
+                 Some((_, '/')) => {
+                     let mut chars = self.state.chars.clone();
+                     chars.next();
+                     match chars.next() {
+-                        Some((_, '*')) => self.scan_block_comment(),
+-                        Some((_, '/')) if self.syntax != Syntax::Css => self.scan_line_comment(),
++                        Some((_, '*')) => self.scan_block_comment()?,
++                        Some((_, '/')) if self.syntax != Syntax::Css => self.scan_line_comment()?,
+                         _ => break,
+                     }
+                 }
+@@ -214,68 +242,113 @@
+             }
+         }
+         indent
+-    }
+-
+-    fn skip_ws(&mut self) {
++            .map(|span| -> PResult<_> {
++                // Comment-only lines do not alter Sass block ownership. Apply only
++                // the indentation belonging to the next substantive source token.
++                if self.state.chars.peek().is_none() {
++                    let offset = self.current_offset();
++                    return Ok(TokenWithSpan {
++                        token: Token::Eof(Eof {}),
++                        span: Span {
++                            start: offset,
++                            end: offset,
++                        },
++                    });
++                }
++                let width = span.end - span.start;
++                let len = u16::try_from(width).map_err(|_| Error {
++                    kind: ErrorKind::InvalidSassIndentation,
++                    span: span.clone(),
++                })?;
++                let mut character = None;
++                for value in self.source[span.start..span.end].chars() {
++                    Self::check_control_value(
++                        &self.control,
++                        ParseCheckpoint::Scan,
++                        self.source.len(),
++                    )?;
++                    if !matches!(value, ' ' | '\t')
++                        || character.is_some_and(|previous| previous != value)
++                    {
++                        return Err(Error {
++                            kind: ErrorKind::InvalidSassIndentation,
++                            span: span.clone(),
++                        });
++                    }
++                    character = Some(value);
++                }
++                if let Some(character) = character {
++                    if self
++                        .state
++                        .indent_character
++                        .is_some_and(|previous| previous != character)
++                    {
++                        return Err(Error {
++                            kind: ErrorKind::InvalidSassIndentation,
++                            span: span.clone(),
++                        });
++                    }
++                    self.state.indent_character = Some(character);
++                }
++                if len < self.state.indents.last().copied().unwrap_or_default()
++                    && !self.state.indents.contains(&len)
++                {
++                    return Err(Error {
++                        kind: ErrorKind::InvalidSassIndentation,
++                        span: span.clone(),
++                    });
++                }
++                self.state.current_indent = len;
++                let token = match len.cmp(&self.state.indents.last().copied().unwrap_or_default()) {
++                    Ordering::Greater => {
++                        self.state.indents.push(len);
++                        Token::Indent(Indent {})
++                    }
++                    Ordering::Less => {
++                        self.state.indents.pop();
++                        Token::Dedent(Dedent {})
++                    }
++                    Ordering::Equal => Token::Linebreak(Linebreak {}),
++                };
++                Ok(TokenWithSpan { token, span })
++            })
++            .transpose()
++    }
++
++    fn skip_ws(&mut self) -> PResult<()> {
+         while let Some((_, c)) = self.state.chars.peek() {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             if c.is_ascii_whitespace() {
+                 self.state.chars.next();
+             } else {
+                 break;
+             }
+         }
+-    }
+-
+-    fn scan_indent(&mut self) -> Option<TokenWithSpan<'s>> {
++        Ok(())
++    }
++
++    fn scan_indent(&mut self) -> PResult<Option<Span>> {
+         debug_assert_eq!(self.syntax, Syntax::Sass);
+         let mut start = None;
+         while let Some((i, c)) = self.state.chars.peek() {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             if c.is_ascii_whitespace() {
+-                let (i, c) = self.state.chars.next()?;
++                let (i, c) = self.state.chars.next().ok_or_else(|| Error {
++                    kind: ErrorKind::UnexpectedEof,
++                    span: Span { start: 0, end: 0 },
++                })?;
+                 if c == '\n' || c == '\r' && matches!(self.state.chars.peek(), Some((_, '\n'))) {
+                     start = Some(i + 1);
+                 }
+             } else {
+-                return start.map(|start| {
+-                    let end = *i;
+-                    let len = (end - start) as u16;
+-                    let span = Span { start, end };
+-                    self.state.current_indent = len;
+-                    match len.cmp(&self.state.indents.last().copied().unwrap_or_default()) {
+-                        Ordering::Greater => {
+-                            self.state.indents.push(len);
+-                            TokenWithSpan {
+-                                token: Token::Indent(Indent {}),
+-                                span,
+-                            }
+-                        }
+-                        Ordering::Less => {
+-                            self.state.indents.pop();
+-                            TokenWithSpan {
+-                                token: Token::Dedent(Dedent {}),
+-                                span,
+-                            }
+-                        }
+-                        Ordering::Equal => TokenWithSpan {
+-                            token: Token::Linebreak(Linebreak {}),
+-                            span,
+-                        },
+-                    }
+-                });
+-            }
+-        }
+-
+-        let offset = self.current_offset();
+-        Some(TokenWithSpan {
+-            token: Token::Eof(Eof {}),
+-            span: Span {
+-                start: offset,
+-                end: offset,
+-            },
+-        })
+-    }
+-
+-    fn scan_block_comment(&mut self) {
++                return Ok(start.map(|start| Span { start, end: *i }));
++            }
++        }
++        let end = self.current_offset();
++        Ok(start.map(|start| Span { start, end }))
++    }
++
++    fn scan_block_comment(&mut self) -> PResult<()> {
+         let (start, c) = self.state.chars.next().unwrap();
+         debug_assert_eq!(c, '/');
+         self.state.chars.next();
+@@ -283,6 +356,7 @@
+         let content_end;
+         let end;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.next() {
+                 Some((_, '*')) => {
+                     if let Some((i, '/')) = self.state.chars.peek() {
+@@ -309,15 +383,17 @@
+                 span: Span { start, end },
+             });
+         }
+-    }
+-
+-    fn scan_line_comment(&mut self) {
++        Ok(())
++    }
++
++    fn scan_line_comment(&mut self) -> PResult<()> {
+         let (start, c) = self.state.chars.next().unwrap();
+         debug_assert_eq!(c, '/');
+         self.state.chars.next();
+ 
+         let end;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.peek() {
+                 Some((_, '\r')) => {
+                     self.state.chars.next();
+@@ -354,6 +430,7 @@
+                 span: Span { start, end },
+             });
+         }
++        Ok(())
+     }
+ 
+     pub(crate) fn scan_ident_sequence(&mut self) -> PResult<(Ident<'s>, Span)> {
+@@ -383,6 +460,7 @@
+         }
+ 
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.peek() {
+                 Some((_, c))
+                     if c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || !c.is_ascii() =>
+@@ -418,6 +496,11 @@
+                 let mut count: usize = 1;
+                 let mut end = i + 1;
+                 while let Some((i, c)) = self.state.chars.peek() {
++                    Self::check_control_value(
++                        &self.control,
++                        ParseCheckpoint::Scan,
++                        self.source.len(),
++                    )?;
+                     if c.is_ascii_hexdigit() && count < 6 {
+                         count += 1;
+                         self.state.chars.next();
+@@ -462,6 +545,7 @@
+         }
+ 
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.peek() {
+                 Some((_, c)) if c.is_ascii_digit() => {
+                     self.state.chars.next();
+@@ -484,6 +568,11 @@
+                     // bump '.'
+                     self.state.chars.next();
+                     loop {
++                        Self::check_control_value(
++                            &self.control,
++                            ParseCheckpoint::Scan,
++                            self.source.len(),
++                        )?;
+                         match self.state.chars.peek() {
+                             Some((_, c)) if c.is_ascii_digit() => {
+                                 self.state.chars.next();
+@@ -514,6 +603,11 @@
+                 }
+ 
+                 loop {
++                    Self::check_control_value(
++                        &self.control,
++                        ParseCheckpoint::Scan,
++                        self.source.len(),
++                    )?;
+                     match self.state.chars.clone().peek() {
+                         Some((_, c)) if c.is_ascii_digit() => {
+                             self.state.chars.next();
+@@ -602,6 +696,7 @@
+         let end;
+         let mut escaped = false;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.next() {
+                 Some((_, '\\')) => {
+                     escaped = true;
+@@ -642,6 +737,7 @@
+         let end;
+         let mut escaped = false;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.next() {
+                 Some((_, '\\')) => {
+                     escaped = true;
+@@ -698,6 +794,7 @@
+         let end;
+         let mut escaped = false;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.next() {
+                 Some((i, '\n')) => {
+                     return Err(Error {
+@@ -776,6 +873,7 @@
+ 
+         let end;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.peek() {
+                 Some((_, c))
+                     if c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || !c.is_ascii() =>
+@@ -825,11 +923,12 @@
+     }
+ 
+     pub(crate) fn scan_url_raw_or_template(&mut self) -> PResult<TokenWithSpan<'s>> {
+-        self.skip_ws();
++        self.skip_ws()?;
+         let start = self.current_offset();
+         let end;
+         let mut escaped = false;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.next() {
+                 Some((_, '\\')) => {
+                     escaped = true;
+@@ -852,7 +951,7 @@
+                     });
+                 }
+                 Some((i, c)) if c.is_ascii_whitespace() => {
+-                    self.skip_ws();
++                    self.skip_ws()?;
+                     match self.state.chars.next() {
+                         Some((_, ')')) => {
+                             end = i;
+@@ -897,6 +996,7 @@
+         let start = self.current_offset();
+         let mut escaped = false;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.next() {
+                 Some((_, '\\')) => {
+                     escaped = true;
+@@ -929,7 +1029,7 @@
+                     ));
+                 }
+                 Some((end, c)) if c.is_ascii_whitespace() => {
+-                    self.skip_ws();
++                    self.skip_ws()?;
+                     match self.state.chars.next() {
+                         Some((_, ')')) => {
+                             return Ok((
+@@ -1001,6 +1101,7 @@
+             }
+         }
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.peek() {
+                 Some((_, c))
+                     if c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || !c.is_ascii() =>
+@@ -1097,6 +1198,7 @@
+ 
+         let end;
+         loop {
++            Self::check_control_value(&self.control, ParseCheckpoint::Scan, self.source.len())?;
+             match self.state.chars.next() {
+                 Some((i, '`')) => {
+                     end = i + 1;
+@@ -1560,9 +1662,9 @@
+         }
+     }
+ 
+-    pub(crate) fn is_start_of_url_string(&mut self) -> bool {
+-        self.skip_ws();
+-        matches!(self.state.chars.peek(), Some((_, '"' | '\'')))
++    pub(crate) fn is_start_of_url_string(&mut self) -> PResult<bool> {
++        self.skip_ws()?;
++        Ok(matches!(self.state.chars.peek(), Some((_, '"' | '\''))))
+     }
+ }
+ 

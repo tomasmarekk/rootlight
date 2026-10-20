@@ -1,0 +1,34 @@
+{
+  "name": "tree-sitter-wat",
+  "version": "0.1.0",
+  "description": "Tree-sitter parser for WebAssembly Text Format",
+  "author": "Pig Fang <g-plane@hotmail.com>",
+  "license": "MIT",
+  "keywords": [
+    "tree-sitter",
+    "treesitter",
+    "parser",
+    "wat",
+    "wasm"
+  ],
+  "type": "module",
+  "files": [
+    "bindings/node",
+    "queries",
+    "src",
+    "binding.gyp",
+    "grammar.js",
+    "tree-sitter.json"
+  ],
+  "scripts": {
+    "build": "tree-sitter build",
+    "test": "tree-sitter test",
+    "generate": "tree-sitter generate"
+  },
+  "devDependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20251231.1",
+    "dprint": "^0.51.1",
+    "node-addon-api": "^8.5.0",
+    "tree-sitter-cli": "^0.26.3"
+  }
+}

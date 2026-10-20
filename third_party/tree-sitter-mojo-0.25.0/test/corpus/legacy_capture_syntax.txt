@@ -1,0 +1,38 @@
+================================================================================
+Default mutable unified capture
+================================================================================
+fn owned() unified {mut}:
+    pass
+--------------------------------------------------------------------------------
+(module (function_definition name: (identifier) parameters: (parameters) (unified_clause) body: (block (pass_statement))))
+
+================================================================================
+Exact parameter directive before a for loop
+================================================================================
+fn owned():
+    @parameter
+    for i in range(4):
+        use(i)
+--------------------------------------------------------------------------------
+(module (function_definition name: (identifier) parameters: (parameters) body: (block (parameter_for_statement (for_statement left: (identifier) right: (call function: (identifier) arguments: (argument_list (integer))) body: (block (call function: (identifier) arguments: (argument_list (identifier)))))))))
+
+================================================================================
+Parameter function decorator remains distinct from a parameter loop
+================================================================================
+fn owned():
+    @parameter
+    fn nested():
+        pass
+    @parameter
+    for i in range(4):
+        nested()
+--------------------------------------------------------------------------------
+(module (function_definition name: (identifier) parameters: (parameters) body: (block (decorated_definition (decorator (identifier)) definition: (function_definition name: (identifier) parameters: (parameters) body: (block (pass_statement)))) (parameter_for_statement (for_statement left: (identifier) right: (call function: (identifier) arguments: (argument_list (integer))) body: (block (call function: (identifier) arguments: (argument_list))))))))
+
+================================================================================
+Parameter remains an ordinary function and argument name
+================================================================================
+fn parameter(parameter: Int) -> Int:
+    return parameter
+--------------------------------------------------------------------------------
+(module (function_definition name: (identifier) parameters: (parameters (typed_parameter (identifier) type: (type (identifier)))) return_type: (type (identifier)) body: (block (return_statement (identifier)))))

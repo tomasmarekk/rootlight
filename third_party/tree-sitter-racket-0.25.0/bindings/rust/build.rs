@@ -1,0 +1,14 @@
+//! Compile retained C11 parser and scanner inputs without generation or fetching.
+//! The package's optional upstream build systems are inert provenance inputs.
+
+fn main() {
+    cc::Build::new()
+        .std("c11")
+        .include("src")
+        .file("src/parser.c")
+        .file("src/scanner.c")
+        .compile("tree-sitter-racket");
+    for source in ["src/parser.c", "src/scanner.c", "src/tree_sitter/parser.h"] {
+        println!("cargo:rerun-if-changed={source}");
+    }
+}

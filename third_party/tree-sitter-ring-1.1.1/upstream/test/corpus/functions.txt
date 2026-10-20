@@ -1,0 +1,499 @@
+==================
+Simple function definition
+==================
+
+func hello
+    see "Hello from function" + nl
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))))
+
+==================
+Function with parentheses call
+==================
+
+hello()
+
+func hello
+    see "Hello from function" + nl
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (identifier)))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))))
+
+==================
+Function with parameters (no parens)
+==================
+
+func sum x,y
+    see x+y+nl
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier)
+      (identifier))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (identifier)
+          (identifier))
+        (identifier)))))
+
+==================
+Function with parenthesized single parameter
+==================
+
+func lol(h)
+    return 1
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (return_statement
+      (number))))
+
+==================
+Function with empty parentheses
+==================
+
+func lol()
+    return 1
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    (return_statement
+      (number))))
+
+==================
+Function call with arguments
+==================
+
+sum(3,5) sum(1000,2000)
+
+func sum x,y see x+y+nl
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (number)
+        (number))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (number)
+        (number))))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier)
+      (identifier))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (identifier)
+          (identifier))
+        (identifier)))))
+
+==================
+Main function
+==================
+
+See "Hello World!" + nl
+
+func main
+    see "Message from the main function" + nl
+
+---
+
+(source_file
+  (see_statement
+    (binary_expression
+      (string)
+      (identifier)))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))))
+
+==================
+Function return value
+==================
+
+see fact(5)
+
+func fact x if x = 1 return 1 else return x * fact(x-1) ok
+
+---
+
+(source_file
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (number))))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (if_statement
+      condition: (binary_expression
+        (identifier)
+        (number))
+      (return_statement
+        (number))
+      (else_clause
+        (return_statement
+          (binary_expression
+            (identifier)
+            (call_expression
+              (identifier)
+              (arguments
+                (binary_expression
+                  (identifier)
+                  (number))))))))))
+
+==================
+Multiple functions
+==================
+
+first()  second()
+
+func first   see "message from the first function" + nl
+
+func second  see "message from the second function" + nl
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (identifier)))
+  (expression_statement
+    (call_expression
+      (identifier)))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier))))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))))
+
+==================
+First class functions
+==================
+
+Func Main
+    f = Test2(:Test)
+    call f()
+
+Func Test
+    see "Message from test!" + nl
+
+Func Test2 f1
+    call f1()
+    return f1
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (call_expression
+          (identifier)
+          (arguments
+            (symbol
+              (identifier))))))
+    (expression_statement
+      (call_keyword_expression
+        (call_expression
+          (identifier)))))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier))))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (expression_statement
+      (call_keyword_expression
+        (call_expression
+          (identifier))))
+    (return_statement
+      (identifier))))
+
+==================
+Higher order functions
+==================
+
+Func Main
+    times(5,:test)
+
+Func Test
+    see "Message from the test function!" + nl
+
+Func Times nCount,F
+    for x = 1 to nCount
+        Call F()
+    next
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    (expression_statement
+      (call_expression
+        (identifier)
+        (arguments
+          (number)
+          (symbol
+            (identifier))))))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier))))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier)
+      (identifier))
+    (for_statement
+      variable: (identifier)
+      (number)
+      (identifier)
+      (expression_statement
+        (call_keyword_expression
+          (call_expression
+            (identifier)))))))
+
+==================
+Pass parameters using lists
+==================
+
+myconnect (  [ :server = "myserver.com" , :port = 80 ,
+               :username = "mahmoud" , :password = "password" ] )
+
+func myconnect mypara
+    see "User Name : " + mypara[:username] + nl
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (list_literal
+          (hash_pair
+            (symbol
+              (identifier))
+            (string))
+          (hash_pair
+            (symbol
+              (identifier))
+            (number))
+          (hash_pair
+            (symbol
+              (identifier))
+            (string))
+          (hash_pair
+            (symbol
+              (identifier))
+            (string))))))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (string)
+          (subscript_expression
+            (identifier)
+            (symbol
+              (identifier))))
+        (identifier)))))
+
+==================
+Pass lists to function by reference
+==================
+
+func main
+    aList = [1,2,3,4,5]
+    myfunc(aList)
+    see aList
+
+func myfunc list
+    list + [6,7,8,9,10]
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (list_literal
+          (number)
+          (number)
+          (number)
+          (number)
+          (number))))
+    (expression_statement
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier))))
+    (see_statement
+      (identifier)))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (expression_statement
+      (binary_expression
+        (identifier)
+        (list_literal
+          (number)
+          (number)
+          (number)
+          (number)
+          (number))))))
+
+==================
+Empty function definitions
+==================
+
+func alpha
+
+func beta
+
+x = 1
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier))
+  (function_definition
+    name: (identifier)
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (number)))))
+
+==================
+Method named @
+==================
+
+func @ cString
+    return runstring(cString)
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (return_statement
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier))))))
+
+==================
+Unicode identifiers and Arabic parameters
+==================
+
+func أهلا اسم
+    see "مرحبا " + اسم
+    return true
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))
+    (return_statement
+      (boolean))))
+
+==================
+Typed parameters
+==================
+
+func sum(int x, int y) {
+    return x + y
+}
+
+---
+
+(source_file
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (typed_parameter
+        type: (identifier)
+        name: (identifier))
+      (typed_parameter
+        type: (identifier)
+        name: (identifier)))
+    (return_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))

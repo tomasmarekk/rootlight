@@ -1,0 +1,51 @@
+{
+  "schema": "rootlight.zig-source-fixtures/1",
+  "origin": "https://github.com/ghostty-org/ghostty",
+  "license": "MIT",
+  "license_bytes": 1118,
+  "license_sha256": "3129de97bc7769d683e52ce02cb4eaecd2b0aab144b09d6325a1b135bdc87cc0",
+  "files": [
+    {
+      "original_path": "src/os/pipe.zig",
+      "path": "pipe.zig",
+      "bytes": 772,
+      "sha256": "a1675327f796a7efc5841819c69dd85401bfa3fd0f36221768b5b0413d21b289"
+    },
+    {
+      "original_path": "pkg/highway/src/detect/x86.zig",
+      "path": "recovery/pkg/highway/src/detect/x86.zig",
+      "bytes": 5446,
+      "sha256": "351d231fc4206083b22fb3c84fa7a23d29d7891cc4b259ec06694738b5dd968a"
+    },
+    {
+      "original_path": "src/Command.zig",
+      "path": "recovery/src/Command.zig",
+      "bytes": 37939,
+      "sha256": "4f3d9c2c8fcbe35d7fc8cec1b04f550b08b37e60265924b5d32677d4bc8536ae"
+    },
+    {
+      "original_path": "src/Surface.zig",
+      "path": "recovery/src/Surface.zig",
+      "bytes": 223407,
+      "sha256": "d40ad8c1492ea2e4759955e4e67505aee174df8cca4ce38f0d073783eab7310a"
+    },
+    {
+      "original_path": "src/global.zig",
+      "path": "recovery/src/global.zig",
+      "bytes": 16118,
+      "sha256": "dd9e590c2ed3377add0adb1d3028745c511a7ef6aa1ec38045c2844f4b1b29da"
+    },
+    {
+      "original_path": "src/main_c.zig",
+      "path": "recovery/src/main_c.zig",
+      "bytes": 9717,
+      "sha256": "3faf03846ca86a919a30e392cde1fc4aaf95f84aaba028ae4a57cc71aa288b3a"
+    },
+    {
+      "original_path": "src/quirks_memset.zig",
+      "path": "recovery/src/quirks_memset.zig",
+      "bytes": 13476,
+      "sha256": "6ece1baf7ab3cbbf9663425fe5a4da74abbf7af0deca149e196e6af88eb5f270"
+    }
+  ]
+}

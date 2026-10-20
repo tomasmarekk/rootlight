@@ -1,0 +1,117 @@
+==================
+struct
+==================
+(module
+  (type (struct))
+  (type (struct (field)))
+  (type (struct (field i8)))
+  (type (struct (field i8 i8 i8 i8)))
+  (type (struct (field $x1 i32) (field $y1 i32)))
+  (type (struct (field i8 i16 i32 i64 f32 f64 anyref funcref (ref 0) (ref null 1))))
+  (type (struct (field i32 i64 i8) (field) (field) (field (ref null i31) anyref)))
+  (type (struct (field $x2 i32) (field f32 f64) (field $y2 i32)))
+)
+---
+
+(root
+  (module
+    (type_def
+      (sub_type
+        (struct_type)))
+    (type_def
+      (sub_type
+        (struct_type
+          (field))))
+    (type_def
+      (sub_type
+        (struct_type
+          (field
+            (field_type
+              (packed_type))))))
+    (type_def
+      (sub_type
+        (struct_type
+          (field
+            (field_type
+              (packed_type))
+            (field_type
+              (packed_type))
+            (field_type
+              (packed_type))
+            (field_type
+              (packed_type))))))
+    (type_def
+      (sub_type
+        (struct_type
+          (field
+            (identifier)
+            (field_type
+              (num_type)))
+          (field
+            (identifier)
+            (field_type
+              (num_type))))))
+    (type_def
+      (sub_type
+        (struct_type
+          (field
+            (field_type
+              (packed_type))
+            (field_type
+              (packed_type))
+            (field_type
+              (num_type))
+            (field_type
+              (num_type))
+            (field_type
+              (num_type))
+            (field_type
+              (num_type))
+            (field_type
+              (ref_type))
+            (field_type
+              (ref_type))
+            (field_type
+              (ref_type
+                (heap_type
+                  (index
+                    (uinteger)))))
+            (field_type
+              (ref_type
+                (heap_type
+                  (index
+                    (uinteger)))))))))
+    (type_def
+      (sub_type
+        (struct_type
+          (field
+            (field_type
+              (num_type))
+            (field_type
+              (num_type))
+            (field_type
+              (packed_type)))
+          (field)
+          (field)
+          (field
+            (field_type
+              (ref_type
+                (heap_type)))
+            (field_type
+              (ref_type))))))
+    (type_def
+      (sub_type
+        (struct_type
+          (field
+            (identifier)
+            (field_type
+              (num_type)))
+          (field
+            (field_type
+              (num_type))
+            (field_type
+              (num_type)))
+          (field
+            (identifier)
+            (field_type
+              (num_type))))))))

@@ -1,0 +1,68 @@
+==================
+memory
+==================
+(module (memory 0))
+(module (memory 0 0))
+(module (memory (data)))
+(module (memory (data "x")))
+(module (memory i32 0))
+(module (memory i64 0 1))
+(module (memory 0 (pagesize 1)))
+(module (memory 0 1 (pagesize 65536)))
+(module (memory 0 1 shared) (memory 0 1 unshared (pagesize 1)))
+---
+
+(root
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger))))
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)
+        (uinteger))))
+  (module
+    (module_field_memory
+      (data)))
+  (module
+    (module_field_memory
+      (data
+        (string))))
+  (module
+    (module_field_memory
+      (mem_type
+        (addr_type)
+        (uinteger))))
+  (module
+    (module_field_memory
+      (mem_type
+        (addr_type)
+        (uinteger)
+        (uinteger))))
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)
+        (mem_page_size
+          (uinteger)))))
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)
+        (uinteger)
+        (mem_page_size
+          (uinteger)))))
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)
+        (uinteger)
+        (share)))
+    (module_field_memory
+      (mem_type
+        (uinteger)
+        (uinteger)
+        (share)
+        (mem_page_size
+          (uinteger))))))

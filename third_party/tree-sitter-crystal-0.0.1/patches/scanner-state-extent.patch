@@ -1,0 +1,183 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -185,12 +185,41 @@
+ 
+     // It's possible to have nested delimited literals, like
+     //   %(#{%(foo)})
+-    // We can handle up to MAX_LITERAL_COUNT levels of nesting.
++    // Percent starts keep their separate nesting limit; all literal kinds
++    // also share the exact runtime serialization byte capacity.
+     Array(PercentLiteral) literals;
+ 
+     Array(Heredoc) heredocs;
+ };
+ typedef struct State State;
++
++// The wire format has four flags, two one-byte counts, fixed literal records
++// and three bytes plus an identifier per heredoc. Admission precedes mutation.
++static bool serialized_state_fits(State *state, size_t added_literals, size_t added_heredocs, size_t added_identifier_bytes) {
++    if (added_literals > UINT8_MAX || state->literals.size > UINT8_MAX - added_literals
++        || added_heredocs > UINT8_MAX || state->heredocs.size > UINT8_MAX - added_heredocs) {
++        return false;
++    }
++    size_t remaining = TREE_SITTER_SERIALIZATION_BUFFER_SIZE - 6;
++    size_t literals = state->literals.size + added_literals;
++    if (literals > remaining / sizeof(PercentLiteral)) {
++        return false;
++    }
++    remaining -= literals * sizeof(PercentLiteral);
++    size_t heredocs = state->heredocs.size + added_heredocs;
++    if (heredocs > remaining / 3) {
++        return false;
++    }
++    remaining -= heredocs * 3;
++    for (size_t i = 0; i < state->heredocs.size; i++) {
++        size_t identifier_bytes = array_get(&state->heredocs, i)->identifier.size;
++        if (identifier_bytes > remaining) {
++            return false;
++        }
++        remaining -= identifier_bytes;
++    }
++    return added_identifier_bytes <= remaining;
++}
+ 
+ /*
+  * State-related macros and functions
+@@ -254,7 +283,8 @@
+     }
+ 
+     size_t current_bytes = heredoc_current_buffer_size(state);
+-    return (current_bytes + heredoc.identifier.size) <= HEREDOC_BUFFER_SIZE;
++    return (current_bytes + heredoc.identifier.size) <= HEREDOC_BUFFER_SIZE
++        && serialized_state_fits(state, 0, 1, heredoc.identifier.size);
+ }
+ 
+ // Push a heredoc onto the end of the state queue. If there's already an active
+@@ -2651,6 +2681,13 @@
+                         return false;
+                     }
+ 
++                    if (!serialized_state_fits(state, 1, 0, 0)) {
++
++                        return false;
++
++                    }
++
++
+                     PUSH_LITERAL(state, ((PercentLiteral){
+                                             .opening_char = opening_char,
+                                             .closing_char = closing_char,
+@@ -2671,6 +2708,13 @@
+             if (valid_symbols[STRING_LITERAL_START]) {
+                 lex_advance(lexer);
+ 
++                if (!serialized_state_fits(state, 1, 0, 0)) {
++
++                    return false;
++
++                }
++
++
+                 PUSH_LITERAL(state, ((PercentLiteral){
+                                         .opening_char = '"',
+                                         .closing_char = '"',
+@@ -2690,6 +2734,13 @@
+         case '`':
+             if (valid_symbols[COMMAND_LITERAL_START]) {
+                 lex_advance(lexer);
++
++                if (!serialized_state_fits(state, 1, 0, 0)) {
++
++                    return false;
++
++                }
++
+ 
+                 PUSH_LITERAL(state, ((PercentLiteral){
+                                         .opening_char = '`',
+@@ -3125,8 +3176,7 @@
+     buffer[offset++] = (char)state->macro_state.in_comment;
+     buffer[offset++] = (char)state->macro_state.non_modifier_keyword_can_begin;
+ 
+-    // It's safe to cast the literal count into a char since it will always be
+-    // less than MAX_LITERAL_COUNT.
++    // Growth admission and restored extents keep the count within one byte.
+     buffer[offset++] = (char)state->literals.size;
+ 
+     // The literals array can be serialized in one chunk.
+@@ -3171,6 +3221,56 @@
+     "Maximum serialized size is too large");
+ #endif
+ 
++// Validate the complete extent before copying any serialized state into arrays.
++// A failed restoration leaves the same empty state as a zero-length reset.
++static bool valid_serialized_state(const char *buffer, unsigned length) {
++    if (buffer == NULL || length < 6 || length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) {
++        return false;
++    }
++
++    for (size_t i = 0; i < 4; i++) {
++        if ((uint8_t)buffer[i] > 1) {
++            return false;
++        }
++    }
++
++    size_t offset = 4;
++    uint8_t literals_size = (uint8_t)buffer[offset++];
++    if (literals_size > (length - offset) / sizeof(PercentLiteral)) {
++        return false;
++    }
++    for (uint8_t i = 0; i < literals_size; i++) {
++        PercentLiteral literal;
++        memcpy(&literal, &buffer[offset], sizeof literal);
++        if (literal.type > REGEX) {
++            return false;
++        }
++        offset += sizeof literal;
++    }
++
++    if (offset == length) {
++        return false;
++    }
++    uint8_t heredocs_size = (uint8_t)buffer[offset++];
++    if (heredocs_size > MAX_HEREDOC_COUNT) {
++        return false;
++    }
++    size_t identifier_bytes = 0;
++    for (uint8_t i = 0; i < heredocs_size; i++) {
++        if (length - offset < 3 || (uint8_t)buffer[offset] > 1 || (uint8_t)buffer[offset + 1] > 1) {
++            return false;
++        }
++        uint8_t identifier_size = (uint8_t)buffer[offset + 2];
++        offset += 3;
++        if (identifier_size > length - offset || identifier_size > HEREDOC_BUFFER_SIZE - identifier_bytes) {
++            return false;
++        }
++        identifier_bytes += identifier_size;
++        offset += identifier_size;
++    }
++    return offset == length;
++}
++
+ void tree_sitter_crystal_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
+     State *state = (State *)payload;
+ 
+@@ -3183,13 +3283,11 @@
+     array_clear(&state->literals);
+     array_clear(&state->heredocs);
+ 
+-    if (length == 0) {
+-        // Sometimes this function is called with a length of zero. In that
+-        // case we just finish resetting the state.
+-        state->has_leading_whitespace = false;
+-        state->previous_line_continued = false;
+-
+-        reset_macro_state(state);
++    state->has_leading_whitespace = false;
++    state->previous_line_continued = false;
++    reset_macro_state(state);
++
++    if (length == 0 || !valid_serialized_state(buffer, length)) {
+         return;
+     }
+ 

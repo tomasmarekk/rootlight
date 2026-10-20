@@ -1,0 +1,16 @@
+{
+  "upstream": "https://github.com/tree-sitter-grammars/tree-sitter-hare",
+  "revision": "eed7ddf6a66b596906aa8ca3d40521b8278adc6f",
+  "original_git_blobs": 35,
+  "version_authority": "Unmodified upstream Cargo.toml and package.json both declare 1.0.0; no release tag is asserted",
+  "license": "MIT",
+  "all_originals_retained_under": "upstream/",
+  "active_changes": [
+    "ordinary named foreach syntax",
+    "explicit generator ABI15 metadata",
+    "regenerated parser and array header",
+    "current LanguageFn wrapper using existing local runtime boundary"
+  ],
+  "build": "Only declared C compilation of local tables; no generation/acquisition",
+  "qualification": "Private native grammar probes executed; Rootlight/Rust behavioral tests and package acceptance remain unexecuted"
+}

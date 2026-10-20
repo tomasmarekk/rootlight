@@ -1,0 +1,133 @@
+{
+  "schema": "rootlight.vhdl-static-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-vhdl",
+    "version": "2.0.3",
+    "unpublished_local_binding": true
+  },
+  "upstream": {
+    "repository": "jpt13653903/tree-sitter-vhdl",
+    "revision": "9be8e45c3ae7e7a4373a943a5c81ff92ce3656f8",
+    "archive": "upstream/tree-sitter-vhdl-9be8e45c3ae7e7a4373a943a5c81ff92ce3656f8.tar.gz",
+    "original_regular_files": 121
+  },
+  "local_scanner_patch": "patches/scanner-safety.patch",
+  "generated_parser_changed": false,
+  "original_native_inputs": [
+    {
+      "path": "src/TokenTree.h",
+      "sha256": "35b86315cac1e7c8caf157c6adf12d25bb58fba2fd4e766b43613046fcb67893"
+    },
+    {
+      "path": "src/TokenTree.inc",
+      "sha256": "b58ab34db45a9b0f097f5dd549e375fd3e2e9355d0ef20e27ff8cbecc76ec247"
+    },
+    {
+      "path": "src/TokenType.h",
+      "sha256": "b0eacaa21138fa29f06d74946d66017e79684f27fee91b0288745b33d2a03839"
+    },
+    {
+      "path": "src/TokenType.inc",
+      "sha256": "cefde62d6d773164c8a6108420d35327d5b8fac695b6b35bbd5741ff370aa44f"
+    },
+    {
+      "path": "src/debug_macros.h",
+      "sha256": "d67c7d65af0c5a7209a535255d5de74e92fc994e445a8dda36bc5873ffcfad2e"
+    },
+    {
+      "path": "src/parser.c",
+      "sha256": "1953b218e6f19861094e908f3967f6387d5a72c6b81f41ae0cec8746149671d0"
+    },
+    {
+      "path": "src/scanner.c",
+      "sha256": "17b9aa0401ce9d80327fdbe7972a2f1e6de54c03e2c897e85acc9d5a7efed80f"
+    },
+    {
+      "path": "src/token_tree_match.inc",
+      "sha256": "1b61902d6ebba726800ca82b39df00e8522b3db804027879df4f54d294840fff"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ],
+  "native_inputs": [
+    {
+      "path": "src/TokenTree.h",
+      "bytes": 1258,
+      "sha256": "35b86315cac1e7c8caf157c6adf12d25bb58fba2fd4e766b43613046fcb67893"
+    },
+    {
+      "path": "src/TokenTree.inc",
+      "bytes": 845,
+      "sha256": "b58ab34db45a9b0f097f5dd549e375fd3e2e9355d0ef20e27ff8cbecc76ec247"
+    },
+    {
+      "path": "src/TokenType.h",
+      "bytes": 4633,
+      "sha256": "b0eacaa21138fa29f06d74946d66017e79684f27fee91b0288745b33d2a03839"
+    },
+    {
+      "path": "src/TokenType.inc",
+      "bytes": 16671,
+      "sha256": "cefde62d6d773164c8a6108420d35327d5b8fac695b6b35bbd5741ff370aa44f"
+    },
+    {
+      "path": "src/debug_macros.h",
+      "bytes": 4377,
+      "sha256": "d67c7d65af0c5a7209a535255d5de74e92fc994e445a8dda36bc5873ffcfad2e"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 9145496,
+      "sha256": "1953b218e6f19861094e908f3967f6387d5a72c6b81f41ae0cec8746149671d0"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 28175,
+      "sha256": "b98b82c88bb881ff49fb2eea8b6c4e869fd1a923b89f8794a996098b734b8f6c"
+    },
+    {
+      "path": "src/token_tree_match.inc",
+      "bytes": 1246538,
+      "sha256": "1b61902d6ebba726800ca82b39df00e8522b3db804027879df4f54d294840fff"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ],
+  "standard_headers": [
+    "limits.h",
+    "stdbool.h",
+    "stddef.h",
+    "stdint.h",
+    "stdio.h",
+    "stdlib.h",
+    "string.h"
+  ],
+  "native_abi": 15,
+  "external_tokens": 167,
+  "optional_queries": "Original Neovim/Helix queries are retained as inert source; no optional local Rust query exports",
+  "qualification": {
+    "compiler_parser_native_or_Rust_executed": false,
+    "discovered_or_registered": false,
+    "structural_or_semantic": false,
+    "full_language": false,
+    "installed_package": false
+  },
+  "native_control_checks": "Dedicated post-include terminating checks, plus --verify-check-failure expected exit1",
+  "predecessor_harness_sha256": "06f0920b8e60f4eddc0eb7c3687da0f81fff234b5c17f2b29852542d0ef81a7c",
+  "native_harness_changed": true,
+  "native_implementation_changed_from_predecessor": false
+}

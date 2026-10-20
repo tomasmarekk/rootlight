@@ -1,0 +1,254 @@
+{
+  "repository": "https://github.com/tree-sitter-grammars/tree-sitter-hare",
+  "revision": "eed7ddf6a66b596906aa8ca3d40521b8278adc6f",
+  "complete_tree": true,
+  "files": [
+    {
+      "path": ".eslintrc.js",
+      "bytes": 382,
+      "sha256": "50c7134fab405afbd1502195cc387421281f5dde740b1ee4001f257086a056e3",
+      "git_blob": "30a07e0433bf67d1c0b3e6d2cc9a6c428ce4c89e",
+      "git_mode": "100644"
+    },
+    {
+      "path": ".gitattributes",
+      "bytes": 125,
+      "sha256": "f8208733f1d65fac2bced8a7f67688d29a8832e4d9ab124c0f0cf9f9521f645b",
+      "git_blob": "c647c2bf4530e330360658ed4a9ccbeaab2eef85",
+      "git_mode": "100644"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 631,
+      "sha256": "64f3ebf5277a9a066e9402ee466266d7e8d4e9697e48ad9be1fc6fa9b5c60341",
+      "git_blob": "38c46e35dd5450dfe1437685cc6775f49b8ad1e6",
+      "git_mode": "100644"
+    },
+    {
+      "path": ".github/workflows/lint.yml",
+      "bytes": 289,
+      "sha256": "1bd798a8bf64b7255c66d1bdc803465367ee6f1704197040dfeef9233b0b8600",
+      "git_blob": "d94f7f39d2463b61e321df5fb5f47f7610814043",
+      "git_mode": "100644"
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "bytes": 2913,
+      "sha256": "a58a85698f12222f31e925f77a0e2175dd1e278555d391c15ba343576505a926",
+      "git_blob": "5695bdfeccdcaf80867aa732c6013d4545d4f434",
+      "git_mode": "100644"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "bytes": 653,
+      "sha256": "b094965fec5f93bfe3d1b4cad49aa76964e75cb657c38d6ec9715369ef5e92eb",
+      "git_blob": "0fbb8ab9bbcd2c9018900510ed1c36b9706da714",
+      "git_mode": "100644"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 71,
+      "sha256": "e906b23eed429684c6e13eb0808dbcd2761a7bc6864aac825408aaee4b1213d5",
+      "git_blob": "3862384615b40605384632fdbd5908fccc45ff3e",
+      "git_mode": "100644"
+    },
+    {
+      "path": ".npmignore",
+      "bytes": 39,
+      "sha256": "72d090938fcab2cb96cd3a0f658cda31aa659f66f406ca39821f89699a6469b4",
+      "git_blob": "194ff8451e99040271f07c5682ceb1b173688b7f",
+      "git_mode": "100644"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "bytes": 445,
+      "sha256": "141022530a88cbec4a0d9ea76e25f6b271ec54695a097e4c91d1195d4ad64f8f",
+      "git_blob": "dc32c1c093cfcbd340cf6110e86b9df6169e1ae5",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 593,
+      "sha256": "7a090efb2d3c8cdbf3c5873513653966b210fcd08e3895726eb3254797641ac6",
+      "git_blob": "348de80a8f94701c525eb0ee4a2bd739267dd7e6",
+      "git_mode": "100644"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1101,
+      "sha256": "099c44248f8cf353123211318680e93465587c005a4b3730ce8cb5334de043d6",
+      "git_blob": "5af536362c15275bb3a57445bc5be23b349cd1de",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Package.swift",
+      "bytes": 1086,
+      "sha256": "30817ed9b46da0224082a5b675737bd8d22bc9f15f1dea3d0d8964c81b14e5e1",
+      "git_blob": "04225a1447e1cb910d4b780261526b746f356701",
+      "git_mode": "100644"
+    },
+    {
+      "path": "README.md",
+      "bytes": 381,
+      "sha256": "8fc6b3639c4cc991e1d8657607278c5163d781faa7aee5555a3572764457912f",
+      "git_blob": "cf662d31085e4e3570e4752de30000070c2e268f",
+      "git_mode": "100644"
+    },
+    {
+      "path": "binding.gyp",
+      "bytes": 309,
+      "sha256": "a4c02a4754c299054765d00c1348c0b07b16f9ca9ea45152c77ed432eb77ccc4",
+      "git_blob": "a39f55875f06c96e0b6f11e408b1e77f7a49eb92",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 876,
+      "sha256": "f6b31a25899134fd91f26811b9883e81a9c31be64db189db9e98bc1d89996a3a",
+      "git_blob": "3c28c454d4c75ea0ee8f7bf14e124661042ea722",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 460,
+      "sha256": "5b890272337d14540dd51e26c91417eb6908b61b3f09eb2e571b3e39caae9865",
+      "git_blob": "aadfa4cf28c3e6332653d56fc917334ed241a356",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/rust/README.md",
+      "bytes": 1425,
+      "sha256": "22a06bca6451252708dd0900eba220533220d84ab0b1456efa00057113bec41b",
+      "git_blob": "5192c664dd75a10631c5523c0328b3727b28bf03",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 492,
+      "sha256": "477d7c9d306c970897a769a82315751c5e4f76c1658d489f17dce34e1dad446d",
+      "git_blob": "fc839798aed7fef71ddd0271cac34fd3ddb453d9",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 8025,
+      "sha256": "266cea0bb1ca0ccf31f6f630419abf9f35ab6856a182c8b8a736937af2922bc0",
+      "git_blob": "9699801b2822820e9a93a63c9d2edc7cea142482",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/swift/hare.h",
+      "bytes": 235,
+      "sha256": "e14c61d16509eb2be03dee2727d3aa9ad36c5aa6ae4036838c0c4779fbfc86b2",
+      "git_blob": "eda3e02a9b00269ec61ce0668bd2f4a60ef13b5d",
+      "git_mode": "100644"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 15858,
+      "sha256": "abe8e0cb22b8de13eb784d162ff31683c929467c985cb095ebef0280b68ccf41",
+      "git_blob": "3d0b0ee90397e2e70e90ca21f6884c00b933829d",
+      "git_mode": "100644"
+    },
+    {
+      "path": "package.json",
+      "bytes": 1149,
+      "sha256": "a1a3e51728a59722ca10918e8a0738cc21048607201ef174ec5400425c847fe1",
+      "git_blob": "a186a402fb464d61e53cd14034564433c0509a70",
+      "git_mode": "100644"
+    },
+    {
+      "path": "queries/folds.scm",
+      "bytes": 282,
+      "sha256": "2fbc638fdb6966e13b8e75c1fc49ddcf3f9df8615529782a7595392743cc4b0a",
+      "git_blob": "28f18b175815cd96fba4a193dfb6b5d9545b7e19",
+      "git_mode": "100644"
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 2845,
+      "sha256": "daa6e9e28d68b2e89b311032e30248e429e40cdf007fa661a9e62f60149f2cb9",
+      "git_blob": "063af31b39df6f1b8a8c294d075bc21ccc93e732",
+      "git_mode": "100644"
+    },
+    {
+      "path": "queries/indents.scm",
+      "bytes": 393,
+      "sha256": "0100af0b842b467bb010302918ea985657bf603256771f92b560205791a48949",
+      "git_blob": "0324f09c60ab910dcd6bcae48cbce55386d7b8b6",
+      "git_mode": "100644"
+    },
+    {
+      "path": "queries/injections.scm",
+      "bytes": 179,
+      "sha256": "f664a733061b1d93cc3fcab8ae17d2a2eeac7345c6c2dcd3de8b96738540ce14",
+      "git_blob": "2554c46916b6890c9c984d8e0115bd48454534eb",
+      "git_mode": "100644"
+    },
+    {
+      "path": "queries/locals.scm",
+      "bytes": 781,
+      "sha256": "836d3b6f63ae319c8c75a09e0223de16df121ba0448d1067ffa561e0092b3625",
+      "git_blob": "62eb6665b4a8d9fe504a1b1fd48d365003a784bc",
+      "git_mode": "100644"
+    },
+    {
+      "path": "script/known_failures.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "git_mode": "100644"
+    },
+    {
+      "path": "script/parse-examples",
+      "bytes": 1025,
+      "sha256": "d53e7fcc4de0a25e345a6d0add03ae890a25bd9e2de32fb9e896caa20e49a0ca",
+      "git_blob": "9cba10c0afbb7abaddba119af412266fac1803cb",
+      "git_mode": "100755"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 114263,
+      "sha256": "9a74eb4b280e46711c695b4dc95a72fbf19ec715c07d397125a0be6e17cce161",
+      "git_blob": "d5063b9061844e7c05ada9fd8881ad61acb328b1",
+      "git_mode": "100644"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 35828,
+      "sha256": "41e246bac3ae788ea277515ea08ddba2b7ac91ce46400aaf9edfa42198073b19",
+      "git_blob": "339b31542e3ae68d03dd434e39cdf0f7aa3dab7c",
+      "git_mode": "100644"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 892963,
+      "sha256": "4dc418cdaca24c63561bbf043d40994f74999d76d69476207565500dd518df33",
+      "git_blob": "ccf2f4546ef62941f2f644b6fa55ddf0ba3ceb59",
+      "git_mode": "100644"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "git_blob": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
+      "git_mode": "100644"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "git_blob": "a17a574f04e0c20c38463149640badc5126063f8",
+      "git_mode": "100644"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "git_blob": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
+      "git_mode": "100644"
+    }
+  ],
+  "source_acquisition_only": true,
+  "upstream_code_executed": false
+}

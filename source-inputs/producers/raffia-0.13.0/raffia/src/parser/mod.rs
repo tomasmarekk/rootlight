@@ -1,0 +1,104 @@
+use self::state::ParserState;
+use crate::{
+    ParserOptions,
+    config::Syntax,
+    error::{Error, PResult},
+    tokenizer::{Tokenizer, token::TokenWithSpan},
+};
+pub use builder::ParserBuilder;
+
+use std::sync::Arc;
+
+/// A cooperative checkpoint in parser construction or scanner work.
+#[derive(Clone, Copy, Debug)]
+pub enum ParseCheckpoint {
+    Scan,
+    Token,
+    Enter,
+    Leave,
+}
+
+/// A synchronous, non-rollback parser guard; false aborts with ControlledStop.
+pub type ParseControl = Arc<dyn Fn(ParseCheckpoint) -> bool + Send + Sync>;
+
+mod at_rule;
+mod builder;
+mod convert;
+mod less;
+mod macros;
+mod sass;
+mod selector;
+mod state;
+mod stmt;
+mod token_seq;
+mod value;
+
+pub trait Parse<'cmt, 's: 'cmt>: Sized {
+    fn parse(input: &mut Parser<'cmt, 's>) -> PResult<Self>;
+}
+
+/// Create a parser with some source code, then parse it.
+pub struct Parser<'cmt, 's: 'cmt> {
+    source: &'s str,
+    syntax: Syntax,
+    options: ParserOptions,
+    tokenizer: Tokenizer<'cmt, 's>,
+    state: ParserState,
+    recoverable_errors: Vec<Error>,
+    cached_token: Option<TokenWithSpan<'s>>,
+}
+
+impl<'cmt, 's: 'cmt> Parser<'cmt, 's> {
+    /// Create a parser with the given source code and specified syntax.
+    /// If you need to control more options, please use [`ParserBuilder`].
+    pub fn new(source: &'s str, syntax: Syntax) -> Self {
+        let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+        Parser {
+            source,
+            syntax,
+            options: Default::default(),
+            tokenizer: Tokenizer::new(source, syntax, None),
+            state: Default::default(),
+            recoverable_errors: vec![],
+            cached_token: None,
+        }
+    }
+
+    /// Start to parse.
+    pub fn parse<T>(&mut self) -> PResult<T>
+    where
+        T: Parse<'cmt, 's>,
+    {
+        self.tokenizer.check_control(ParseCheckpoint::Enter)?;
+        let result = T::parse(self);
+        self.tokenizer.check_control(ParseCheckpoint::Leave)?;
+        result
+    }
+
+    /// Retrieve recoverable errors.
+    #[inline]
+    pub fn recoverable_errors(&self) -> &[Error] {
+        &self.recoverable_errors
+    }
+
+    fn try_parse<R, F: FnOnce(&mut Self) -> PResult<R>>(&mut self, f: F) -> PResult<R> {
+        let tokenizer_state = self.tokenizer.state.clone();
+        let comments_count = if let Some(comments) = &self.tokenizer.comments {
+            comments.len()
+        } else {
+            0
+        };
+        let recoverable_errors_count = self.recoverable_errors.len();
+        let cached_token = self.cached_token.clone();
+        let result = f(self);
+        if result.is_err() {
+            self.tokenizer.state = tokenizer_state;
+            if let Some(comments) = &mut self.tokenizer.comments {
+                comments.truncate(comments_count);
+            }
+            self.recoverable_errors.truncate(recoverable_errors_count);
+            self.cached_token = cached_token;
+        }
+        result
+    }
+}

@@ -1,0 +1,80 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -41,6 +41,7 @@
+     [$._chain_term, $._ternary_condition],
+     [$._rhs_expression, $.member_expression],
+     [$.conditional_statement],
++    [$.macro_expression, $._modifier],
+   ],
+   rules: {
+     module: ($) => seq(repeat($.statement)),
+@@ -92,16 +93,27 @@
+         seq(
+           '#',
+           token.immediate('if'),
+-          field('condition', $.expression),
++          field('condition', $.preprocessor_condition),
+           repeat($.statement),
+           repeat(
+-            seq('#', token.immediate('elseif'), field('condition', $.expression), repeat($.statement)),
++            seq('#', token.immediate('elseif'), field('condition', $.preprocessor_condition), repeat($.statement)),
+           ),
+           optional(seq('#', token.immediate('else'), repeat($.statement))),
+           '#',
+           token.immediate('end'),
+         ),
+       ),
++
++    // Compiler flags are conditions, not runtime macro quotation operands.
++    // https://haxe.org/manual/lf-condition-compilation.html
++    preprocessor_condition: ($) => choice(
++      alias(/[a-zA-Z_][a-zA-Z0-9_]*/, $.identifier), $.string, $.integer, $.float,
++      seq('(', $.preprocessor_condition, ')'),
++      prec(3, seq('!', $.preprocessor_condition)),
++      prec.left(2, seq($.preprocessor_condition, choice('==', '!=', '>', '>=', '<', '<='), $.preprocessor_condition)),
++      prec.left(1, seq($.preprocessor_condition, '&&', $.preprocessor_condition)),
++      prec.left(0, seq($.preprocessor_condition, '||', $.preprocessor_condition)),
++    ),
+ 
+     package_statement: ($) =>
+       seq(
+@@ -195,6 +207,14 @@
+       ),
+ 
+     type_trace_expression: ($) => seq('$type', '(', $._rhs_expression, ')'),
++
++    // Reification quotes syntax; interpolation is admitted only as a macro body.
++    // https://haxe.org/manual/macro-reification-expression.html
++    macro_expression: ($) =>
++      prec.right(seq('macro', field('body', choice(prec(1, $.block), $.reification_expression, $.expression)))),
++
++    reification_expression: ($) =>
++      seq(choice('$', '$e', '$v', '$i', '$a', '$b', '$p'), '{', field('value', $.expression), $._closing_brace),
+ 
+     // Anonymous function literal used in expression position (callback
+     // arguments, variable-declaration RHS, etc.) -- `doThing(function(x) {
+@@ -303,6 +323,7 @@
+ 
+     expression: ($) =>
+       choice(
++        $.macro_expression,
+         $._unaryExpression,
+         $.subscript_expression,
+         $.runtime_type_check_expression,
+@@ -350,6 +371,7 @@
+           'return',
+           optional(
+             choice(
++              $.macro_expression,
+               seq($._rhs_expression, repeat(seq($.operator, $._chain_term))),
+               seq(
+                 alias($._prefixUnaryOperator, $.operator),
+@@ -571,7 +593,7 @@
+     // optional (wildcard catch, Haxe 4.1+: `catch (e) { ... }`, defaults to
+     // haxe.Exception).
+     try_statement: ($) =>
+-      prec.right(1, seq('try', field('body', $.statement), repeat1($.catch_clause))),
++      prec.right(1, seq('try', field('body', choice($.statement, $.expression)), repeat1($.catch_clause))),
+ 
+     catch_clause: ($) =>
+       seq(

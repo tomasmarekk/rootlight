@@ -1,0 +1,402 @@
+==================
+Simple if statement
+==================
+
+if x = 1
+    see "one" + nl
+ok
+
+---
+
+(source_file
+  (if_statement
+    condition: (binary_expression
+      (identifier)
+      (number))
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))))
+
+==================
+If with but (elseif) and else
+==================
+
+if nOption = 1  see "Hello" + nl
+but nOption = 2 see "About" + nl
+else see "bad option" + nl
+ok
+
+---
+
+(source_file
+  (if_statement
+    condition: (binary_expression
+      (identifier)
+      (number))
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))
+    (elseif_clause
+      (binary_expression
+        (identifier)
+        (number))
+      (see_statement
+        (binary_expression
+          (string)
+          (identifier))))
+    (else_clause
+      (see_statement
+        (binary_expression
+          (string)
+          (identifier))))))
+
+==================
+For loop basic
+==================
+
+for x = 1 to 10  see x + nl  next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+For loop with step
+==================
+
+for x = 0 to 10 step 2
+    see x + nl
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (number)
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+For loop with negative step
+==================
+
+for x = 10 to 0 step -2
+    see x + nl
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (unary_expression
+      (number))
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+For in loop
+==================
+
+for x in aList  see x + nl  next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (identifier)
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+For in loop with step
+==================
+
+for x in aList step 2
+    see x + nl
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (identifier)
+    (number)
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+While loop
+==================
+
+While True
+    See "Menu" + nl
+End
+
+---
+
+(source_file
+  (while_statement
+    (boolean)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))))
+
+==================
+Do again loop
+==================
+
+x = 1
+do
+    see x + nl
+    x++
+again x <= 10
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (do_again_statement
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))
+    (expression_statement
+      (postfix_expression
+        (identifier)))
+    (binary_expression
+      (identifier)
+      (number))))
+
+==================
+Switch statement
+==================
+
+Switch nOption
+On 1 See "Hello" + nl
+On 2 See "About" + nl
+Other See "bad" + nl
+Off
+
+---
+
+(source_file
+  (switch_statement
+    (identifier)
+    (case_clause
+      (number)
+      (see_statement
+        (binary_expression
+          (string)
+          (identifier))))
+    (case_clause
+      (number)
+      (see_statement
+        (binary_expression
+          (string)
+          (identifier))))
+    (other_clause
+      (see_statement
+        (binary_expression
+          (string)
+          (identifier))))))
+
+==================
+Try catch done
+==================
+
+Try
+    see 5/0
+Catch
+    see "Catch!" + nl + cCatchError
+Done
+
+---
+
+(source_file
+  (try_statement
+    (see_statement
+      (binary_expression
+        (number)
+        (number)))
+    (catch_clause
+      (see_statement
+        (binary_expression
+          (binary_expression
+            (string)
+            (identifier))
+          (identifier))))))
+
+==================
+Exit from loop
+==================
+
+for x = 1 to 10
+    see x + nl
+    if x = 5 exit ok
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))
+    (if_statement
+      condition: (binary_expression
+        (identifier)
+        (number))
+      (exit_statement))))
+
+==================
+Exit from two loops
+==================
+
+for x = 1 to 10
+    for y = 1 to 10
+        if x = 3 and y = 5
+            exit 2
+        ok
+    next
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (for_statement
+      variable: (identifier)
+      (number)
+      (number)
+      (if_statement
+        condition: (binary_expression
+          (binary_expression
+            (identifier)
+            (number))
+          (binary_expression
+            (identifier)
+            (number)))
+        (exit_statement
+          (number))))))
+
+==================
+Loop (continue) command
+==================
+
+for x = 1 to 10
+    if x = 3
+        see "Number Three" + nl
+        loop
+    ok
+    see x + nl
+next
+
+---
+
+(source_file
+  (for_statement
+    variable: (identifier)
+    (number)
+    (number)
+    (if_statement
+      condition: (binary_expression
+        (identifier)
+        (number))
+      (see_statement
+        (binary_expression
+          (string)
+          (identifier)))
+      (loop_statement))
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+==================
+Short circuit evaluation with and
+==================
+
+x = 0 y = 10
+
+if (x = 0 and nice()) and (y = 10 and nice())
+    see "great" + nl
+ok
+
+func nice  see "nice" + nl   return 1
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (if_statement
+    condition: (binary_expression
+      (parenthesized_expression
+        (binary_expression
+          (binary_expression
+            (identifier)
+            (number))
+          (call_expression
+            (identifier))))
+      (parenthesized_expression
+        (binary_expression
+          (binary_expression
+            (identifier)
+            (number))
+          (call_expression
+            (identifier)))))
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier))))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (string)
+        (identifier)))
+    (return_statement
+      (number))))

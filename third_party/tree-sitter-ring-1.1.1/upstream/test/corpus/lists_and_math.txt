@@ -1,0 +1,658 @@
+==================
+Math functions
+==================
+
+See "Sin(0) = " + sin(0) + nl
+See "Cos(0) = " + cos(0) + nl
+See "exp(1) = " + exp(1) + nl
+See "log(1) = " + log(1) + nl
+See "sqrt(4) = " + sqrt(4) + nl
+
+---
+
+(source_file
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (string)
+        (call_expression
+          (identifier)
+          (arguments
+            (number))))
+      (identifier)))
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (string)
+        (call_expression
+          (identifier)
+          (arguments
+            (number))))
+      (identifier)))
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (string)
+        (call_expression
+          (identifier)
+          (arguments
+            (number))))
+      (identifier)))
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (string)
+        (call_expression
+          (identifier)
+          (arguments
+            (number))))
+      (identifier)))
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (string)
+        (call_expression
+          (identifier)
+          (arguments
+            (number))))
+      (identifier))))
+
+==================
+Add items to list
+==================
+
+aList = ["one","two"]
+add(aList,"three")
+see aList + nl
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (string)
+        (string))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (string))))
+  (see_statement
+    (binary_expression
+      (identifier)
+      (identifier))))
+
+==================
+Add items using plus operator
+==================
+
+aList = 1:10
+aList + 11
+see aList
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number))))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (number)))
+  (see_statement
+    (identifier)))
+
+==================
+Sort list
+==================
+
+aList = [10,12,3,5,31,15]
+aList = sort(aList) see aList
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (number)
+        (number)
+        (number)
+        (number)
+        (number)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier)))))
+  (see_statement
+    (identifier)))
+
+==================
+Find in list
+==================
+
+aList = ["one","two","three","four","five"]
+see find(aList,"three")
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (string)
+        (string)
+        (string)
+        (string)
+        (string))))
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (string)))))
+
+==================
+Delete item from list
+==================
+
+aList = ["one","two","other","three"]
+Del(aList,3)
+see aList
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (string)
+        (string)
+        (string)
+        (string))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (number))))
+  (see_statement
+    (identifier)))
+
+==================
+Insert into list
+==================
+
+aList = [1,2,4,5]
+insert(aList,2,3)
+see aList
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (number)
+        (number)
+        (number)
+        (number))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (number)
+        (number))))
+  (see_statement
+    (identifier)))
+
+==================
+Get list size
+==================
+
+aList = 1:20
+see len(aList)
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number))))
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)))))
+
+==================
+Binary search
+==================
+
+aList = [3,5,10,12,15,31]
+see binarysearch(aList,12)
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (number)
+        (number)
+        (number)
+        (number)
+        (number)
+        (number))))
+  (see_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier)
+        (number)))))
+
+==================
+Reverse list
+==================
+
+aList = [1,2,3,4,5]
+reverse(aList)
+see aList
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (number)
+        (number)
+        (number)
+        (number)
+        (number))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier))))
+  (see_statement
+    (identifier)))
+
+==================
+Copy list (shallow)
+==================
+
+aList = [1,2,3]
+aList2 = aList
+aList2[1] = 100
+see aList[1]
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (number)
+        (number)
+        (number))))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (assignment_expression
+      (subscript_expression
+        (identifier)
+        (number))
+      (number)))
+  (see_statement
+    (subscript_expression
+      (identifier)
+      (number))))
+
+==================
+Eval statement
+==================
+
+Eval("nOutput = 5+2*5")
+See "5+2*5 = " + nOutput + nl
+Eval("for x = 1 to 10 see x + nl next")
+
+---
+
+(source_file
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (string))))
+  (see_statement
+    (binary_expression
+      (binary_expression
+        (string)
+        (identifier))
+      (identifier)))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (string)))))
+
+==================
+Variable scope - global vs local
+==================
+
+x = 10
+
+func main
+    for t = 1 to 10
+        mycounter()
+    next
+
+func mycounter
+    see x + nl
+    x--
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (number)))
+  (function_definition
+    name: (identifier)
+    (for_statement
+      variable: (identifier)
+      (number)
+      (number)
+      (expression_statement
+        (call_expression
+          (identifier)))))
+  (function_definition
+    name: (identifier)
+    (see_statement
+      (binary_expression
+        (identifier)
+        (identifier)))
+    (expression_statement
+      (postfix_expression
+        (identifier)))))
+
+==================
+For in loop modifying list items
+==================
+
+aList = 1:5
+for x in aList
+    switch x
+    on 1  x = "one"
+    on 2  x = "two"
+    on 3  x = "three"
+    on 4  x = "four"
+    on 5  x = "five"
+    off
+next
+see aList
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (binary_expression
+        (number)
+        (number))))
+  (for_statement
+    variable: (identifier)
+    (identifier)
+    (switch_statement
+      (identifier)
+      (case_clause
+        (number)
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (string))))
+      (case_clause
+        (number)
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (string))))
+      (case_clause
+        (number)
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (string))))
+      (case_clause
+        (number)
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (string))))
+      (case_clause
+        (number)
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (string))))))
+  (see_statement
+    (identifier)))
+
+==================
+Objects inside lists
+==================
+
+alist = [new point, new point, new point]
+alist + [1,2,3]
+alist[5] { x = 100 y = 200 z = 300 }
+see alist[5]
+
+class point x y z
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (list_literal
+        (new_expression
+          (qualified_identifier
+            (identifier)))
+        (new_expression
+          (qualified_identifier
+            (identifier)))
+        (new_expression
+          (qualified_identifier
+            (identifier))))))
+  (expression_statement
+    (binary_expression
+      (identifier)
+      (list_literal
+        (number)
+        (number)
+        (number))))
+  (expression_statement
+    (brace_expression
+      (subscript_expression
+        (identifier)
+        (number))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))))
+  (see_statement
+    (subscript_expression
+      (identifier)
+      (number)))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))))
+
+==================
+Object ID
+==================
+
+o1 = new point
+see objectid(o1) + nl
+test(o1)
+
+func test v
+    see objectid(v) + nl
+
+Class point x y z
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)))))
+  (see_statement
+    (binary_expression
+      (call_expression
+        (identifier)
+        (arguments
+          (identifier)))
+      (identifier)))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (identifier))))
+  (function_definition
+    name: (identifier)
+    parameters: (param_list
+      (identifier))
+    (see_statement
+      (binary_expression
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier)))
+        (identifier))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))))
+
+==================
+Setter and getter (method-based property access)
+==================
+
+o1 = new person
+o1.name = "Youssef"
+see o1.name + nl
+
+o1 { name = "Ahmed"  see name }
+
+Class Person
+        name family = "Elkholey"
+        func setname value
+            name = value + " " + family
+        func getname
+            return "Mr. " + name
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)))))
+  (expression_statement
+    (assignment_expression
+      (member_expression
+        (identifier)
+        (identifier))
+      (string)))
+  (see_statement
+    (binary_expression
+      (member_expression
+        (identifier)
+        (identifier))
+      (identifier)))
+  (expression_statement
+    (brace_expression
+      (identifier)
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (string)))
+      (see_statement
+        (identifier))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (string)))
+    (function_definition
+      name: (identifier)
+      parameters: (param_list
+        (identifier))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (binary_expression
+            (binary_expression
+              (identifier)
+              (string))
+            (identifier)))))
+    (function_definition
+      name: (identifier))
+    (return_statement
+      (binary_expression
+        (string)
+        (identifier)))))

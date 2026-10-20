@@ -1,0 +1,69 @@
+{
+  "upstream": "https://github.com/lsh/tree-sitter-mojo",
+  "revision": "95726f1d1e76eaddbe2f944c69a7d20ea2854712",
+  "git_tree_sha1": "211cf87e29c5c705f01ab77c7efd154e574cb906",
+  "version": "0.25.0",
+  "version_authority": "Unchanged upstream/Cargo.toml and upstream/tree-sitter.json",
+  "archive_sha256": "639e9fad7a9b4547458d00bb21f964d8e60cf05b79fca11103c67cdaeea7b8e0",
+  "license": "MIT",
+  "original_git_blobs": 82,
+  "original_bytes": 25249369,
+  "original_inventory_sha256": "7376276e1c59c30c5cd5125bbb475c0cf0e0519222a1df97d6f1272eb40a3fc0",
+  "inert_upstream_names": {
+    ".gitignore": ".gitignore.upstream",
+    ".gitattributes": ".gitattributes.upstream"
+  },
+  "active_parser": "src/parser.c",
+  "active_parser_sha256": "26d160ce6111cbc0e2677a781b7aaa5a60a0c83a1b2a8ca6f89fd6b1f0d4d85d",
+  "active_scanner": "src/scanner.c",
+  "active_scanner_sha256": "bc2ce107fe0e25874a526ea639f7ff26f9a101dee512f48d0dc7effd5c92d22a",
+  "original_scanner": "upstream/src/scanner.c",
+  "local_changes": "LOCAL_CHANGES.patch records scanner bounds and the grammar DSL correction; generated tables and headers are separately retained source inputs",
+  "generated_parser_unchanged": false,
+  "rust_wrapper": "Separate current LanguageFn wrapper with only exact local tree-sitter-language0.1.7 and cc1.2.67 dependencies",
+  "build_acquisition_or_generation": false,
+  "local_grammar": "grammar.js",
+  "local_grammar_sha256": "348eccd9b3ba5962e5730f0c449f7228947a459c2352e35e40e4990ebf810407",
+  "upstream_tree_unchanged": true,
+  "generated_parser_abi": 15,
+  "generator": {
+    "name": "tree-sitter-cli",
+    "version": "0.26.8",
+    "js_runtime": "native",
+    "abi": 15,
+    "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "build_time_generation": false
+  },
+  "generated_sources": [
+    {
+      "path": "src/parser.c",
+      "bytes": 24665853,
+      "sha256": "26d160ce6111cbc0e2677a781b7aaa5a60a0c83a1b2a8ca6f89fd6b1f0d4d85d"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 222373,
+      "sha256": "270074e5e5e23990f308d7011e2863e41422312ddbb3d684df77dce4c843f5ed"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 85428,
+      "sha256": "5e2af7f4865945be2940a9c0cbfb2cffe5640054207d6da401ac90fb6ceb4c90"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    }
+  ]
+}

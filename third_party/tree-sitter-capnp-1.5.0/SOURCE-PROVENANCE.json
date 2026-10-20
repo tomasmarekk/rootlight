@@ -1,0 +1,49 @@
+{
+  "schema": "rootlight.schema-static-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-capnp",
+    "version": "1.5.0",
+    "unpublished_local_binding": true
+  },
+  "language": "capnp",
+  "upstream": {
+    "repository": "tree-sitter-grammars/tree-sitter-capnp",
+    "revision": "7b0883c03e5edd34ef7bcf703194204299d7099f",
+    "archive": {
+      "path": "upstream/tree-sitter-capnp-7b0883c03e5edd34ef7bcf703194204299d7099f.tar.gz",
+      "bytes": 72943,
+      "sha256": "9ee2bde4046992146217747de22c8e382cd56b5b80e61e403cd87e92aea8666c"
+    },
+    "original_regular_files": 52,
+    "original_lifecycle_executed": false
+  },
+  "native_inputs": [
+    {
+      "path": "src/parser.c",
+      "bytes": 369423,
+      "sha256": "cc5771efe4f52ea7f7d4b7aee46979f681180420d8081a4d8407a5ca9af97ea7"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 6988,
+      "sha256": "a3eb18ef034b3f4255b965a26caa276f9cfe13a79573b402f1a12dc5018052aa"
+    }
+  ],
+  "native_abi": 14,
+  "external_tokens": 0,
+  "generated_parser_changed": false,
+  "generated_sources_regenerated": false,
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 24852,
+    "sha256": "0f0bf78e8f42f38e8cddd51f6cf3c9c3588b3e7437507ba9cbab62ecac2e754f"
+  },
+  "qualification": {
+    "compiler_or_parser_executed": false,
+    "discovered_or_registered": false,
+    "structural_or_semantic_analysis": false,
+    "whole_language": false,
+    "installed_package": false,
+    "empty_cache_network_denied_build": false
+  }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "tree-sitter-ring"
+version = "1.1.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ysdragon/tree-sitter-ring"
+description = "Pinned local Ring grammar and external scanner"
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

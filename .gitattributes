@@ -8,6 +8,9 @@
 *.bin binary
 *.desc binary
 # Cargo inputs retain authenticated upstream bytes rather than local formatting.
+# Published Elixir grammar members and source receipts retain exact archive bytes.
+third_party/tree-sitter-elixir-0.3.5/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-elixir-0.3.5/upstream/*.crate binary
 source-inputs/cargo/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 source-inputs/crates/*.crate binary
 source-inputs/advisory-databases/*.zip binary
@@ -139,3 +142,87 @@ third_party/tree-sitter-systemverilog-0.4.1/** -text whitespace=-blank-at-eol,-b
 third_party/tree-sitter-v-0.0.6/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 # Authored Rocq source and its retained archive preserve exact upstream bytes.
 third_party/tree-sitter-rocq-0.2.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+# Retain the exact reviewed GraphQL grammar and upstream archive bytes.
+third_party/tree-sitter-graphql-0.0.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+# Preserve the reviewed VHDL scanner correction and complete upstream originals.
+third_party/tree-sitter-vhdl-2.0.3/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/vhdl/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Retain the complete reviewed reader grammars and source archives byte-for-byte.
+third_party/tree-sitter-clojure-0.0.8/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-racket-0.25.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/clojure/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve complete reviewed Fish and Nim native inputs and physical fixtures.
+third_party/tree-sitter-fish-3.7.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-nim-0.6.2/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/fish/** -text whitespace=-blank-at-eol,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/nim/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve complete CUE/Pony native sources and physical source fixtures.
+third_party/tree-sitter-cue-0.2.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+third_party/tree-sitter-pony-0.0.3/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/cue/** -text whitespace=-blank-at-eol,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/pony/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve the complete Crystal source archive and physical evidence fixtures.
+third_party/tree-sitter-crystal-0.0.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/crystal/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve complete Zig grammar sources and physical fixtures.
+third_party/tree-sitter-zig-1.1.2/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/zig/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve complete HCL sources and original physical evidence.
+third_party/tree-sitter-hcl-1.2.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/hcl/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve complete Ada sources and physical source evidence.
+third_party/tree-sitter-ada-0.9.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/ada/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve complete D sources and original physical evidence.
+third_party/tree-sitter-d-0.8.2/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/d/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# QML grammar and original source fixtures retain authenticated bytes.
+third_party/tree-sitter-qmljs-0.3.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/qml/** -text whitespace=cr-at-eol
+
+# Preserve authenticated Ring inputs and physical source coordinates.
+third_party/tree-sitter-ring-1.1.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/ring/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve the reviewed Flux source frame across checkout platforms.
+source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Retained original language-hint sources keep their exact physical bytes.
+crates/rootlight-discovery/tests/fixtures/language-hints-original/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Hare sources and fixture retain authenticated physical bytes.
+third_party/tree-sitter-hare-1.0.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/hare/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Original C formal-control sources retain their exact physical bytes.
+crates/rootlight-adapter-treesitter/tests/fixtures/c_parameters/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Original Java setter sources retain their exact physical bytes.
+crates/rootlight-adapter-treesitter/tests/fixtures/java_setter_parameters/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Original Go input-formal sources retain their exact physical bytes.
+crates/rootlight-adapter-treesitter/tests/fixtures/go_parameters/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Retained Mojo sources and CRLF grammar examples keep authenticated bytes.
+third_party/tree-sitter-mojo-0.25.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Original Mojo fixtures preserve raw source coordinates and content hashes.
+crates/rootlight-adapter-treesitter/tests/fixtures/mojo/** -text whitespace=-blank-at-eol,cr-at-eol
+
+# Preserve complete reviewed SML and WAT source inputs and physical fixtures.
+third_party/tree-sitter-sml-0.25.0/** -text
+third_party/tree-sitter-wat-0.1.0/** -text
+crates/rootlight-adapter-treesitter/tests/fixtures/standard_ml/** -text
+crates/rootlight-adapter-treesitter/tests/fixtures/webassembly/** -text
+
+/third_party/tree-sitter-qsharp-0.2.0/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/qsharp/** -text

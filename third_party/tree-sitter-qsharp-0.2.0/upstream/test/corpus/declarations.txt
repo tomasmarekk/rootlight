@@ -1,0 +1,120 @@
+================================================================================
+Namespace declaration
+================================================================================
+
+namespace Foo.Bar {
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (namespace
+    name: (path_or_identifier
+      (path
+        (identifier)
+        (identifier)))))
+
+================================================================================
+Import with wildcard
+================================================================================
+
+import Std.Math.*;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_decl
+    (import_item
+      (import_path
+        (identifier)
+        (identifier)))))
+
+================================================================================
+Operation declaration
+================================================================================
+
+operation Main() : Unit {
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Function with generics
+================================================================================
+
+function Length<'T>(a : 'T[]) : Int {
+    body intrinsic;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    (type_params
+      (type_param
+        (apos_ident)))
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (array_type
+          (apos_ident))))
+    return_type: (builtin_type)
+    body: (callable_body
+      (specialization_list
+        (specialization
+          (spec_name)
+          (spec_generator))))))
+
+================================================================================
+Struct declaration
+================================================================================
+
+struct Complex {
+    Real : Double,
+    Imag : Double,
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    (field_def
+      name: (identifier)
+      type: (builtin_type))
+    (field_def
+      name: (identifier)
+      type: (builtin_type))))
+
+================================================================================
+Operation with functors
+================================================================================
+
+operation Foo(q : Qubit) : Unit is Adj + Ctl {
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (builtin_type)))
+    return_type: (builtin_type)
+    (functor_clause
+      (functor_expr
+        (functor_expr)
+        (functor_expr)))
+    body: (callable_body
+      (block))))

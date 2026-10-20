@@ -1,0 +1,24 @@
+# Static local binding; upstream package lifecycle scripts are not executed.
+[package]
+name = "tree-sitter-racket"
+version = "0.25.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+license-file = "LICENSE"
+repository = "https://github.com/6cdh/tree-sitter-racket"
+description = "Pinned Racket syntax tables with an exact delimiter scanner"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = "=0.26.11"

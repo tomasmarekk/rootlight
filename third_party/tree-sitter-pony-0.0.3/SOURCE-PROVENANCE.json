@@ -1,0 +1,458 @@
+{
+  "schema": "rootlight.pony-static-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-pony",
+    "version": "0.0.3",
+    "unpublished_local_binding": true
+  },
+  "upstream": {
+    "repository": "tree-sitter-grammars/tree-sitter-pony",
+    "tag": "v1.0.0",
+    "revision": "7abc589f390d3d5f5de406ded2ce68d926a532cc",
+    "tree": "525fb05a03644620d76a847035cb93631b21d718",
+    "archive": "upstream/tree-sitter-pony-7abc589f390d3d5f5de406ded2ce68d926a532cc.tar.gz",
+    "archive_sha256": "4df24f0e7de71ca85c5025fd65465ba4455e588974f46aa4fafccc20ada32247",
+    "original_regular_files": 45,
+    "cargo_manifest_version": "0.0.3",
+    "npm_manifest_version": "0.0.3",
+    "tag_manifest_version_mismatch_preserved": true
+  },
+  "upstream_files": [
+    {
+      "path": ".eslintrc.js",
+      "bytes": 382,
+      "sha256": "50c7134fab405afbd1502195cc387421281f5dde740b1ee4001f257086a056e3",
+      "git_blob_sha1": "30a07e0433bf67d1c0b3e6d2cc9a6c428ce4c89e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.eslintrc.js"
+    },
+    {
+      "path": ".gitattributes",
+      "bytes": 125,
+      "sha256": "f8208733f1d65fac2bced8a7f67688d29a8832e4d9ab124c0f0cf9f9521f645b",
+      "git_blob_sha1": "c647c2bf4530e330360658ed4a9ccbeaab2eef85",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.gitattributes.upstream"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 631,
+      "sha256": "b50e8021f25940b635ea930bdd4cc985507343c047d5d5d1df140bc150ea6dbf",
+      "git_blob_sha1": "cb17c448891f3205c1a0d2d9fd76ee9c21e58c44",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.github/workflows/ci.yml"
+    },
+    {
+      "path": ".github/workflows/fuzz.yml",
+      "bytes": 394,
+      "sha256": "6816ea3a03dafc66f309d5155970990bc7cdb50fe32d80cb79187d88d57dc762",
+      "git_blob_sha1": "f622307c0a1d2408bcc7088baab2cb6cec37c3f7",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.github/workflows/fuzz.yml"
+    },
+    {
+      "path": ".github/workflows/lint.yml",
+      "bytes": 289,
+      "sha256": "1bd798a8bf64b7255c66d1bdc803465367ee6f1704197040dfeef9233b0b8600",
+      "git_blob_sha1": "d94f7f39d2463b61e321df5fb5f47f7610814043",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.github/workflows/lint.yml"
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "bytes": 2835,
+      "sha256": "748625a1b7df5aaa7b13961bb44a2b5ed84c0dc6ebddb2c0e9343d4af97d93c4",
+      "git_blob_sha1": "faeffaa09eea2661d436d0ee6e863eaa7709cca2",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.github/workflows/publish.yml"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "bytes": 653,
+      "sha256": "647edf62c61fee6c020ec4c82d1c4c0cf50047fb8bc9bc96ad97d89189295ee2",
+      "git_blob_sha1": "0c653e733d2a4b8ec83cb63c4a67d96b1c1dd82e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.github/workflows/release.yml"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 71,
+      "sha256": "e906b23eed429684c6e13eb0808dbcd2761a7bc6864aac825408aaee4b1213d5",
+      "git_blob_sha1": "3862384615b40605384632fdbd5908fccc45ff3e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.gitignore.upstream"
+    },
+    {
+      "path": ".npmignore",
+      "bytes": 39,
+      "sha256": "72d090938fcab2cb96cd3a0f658cda31aa659f66f406ca39821f89699a6469b4",
+      "git_blob_sha1": "194ff8451e99040271f07c5682ceb1b173688b7f",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/.npmignore"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "bytes": 2560,
+      "sha256": "53f5b76254a147fd7b7c05662120d5882ed98678ad60fb6c4b73f2ea8af90be0",
+      "git_blob_sha1": "b7c2299b85a52c8b5835a153239d656876852785",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/CHANGELOG.md"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 638,
+      "sha256": "48d4873c9d6f5d3ca2b6c23757dc33bfa9c0294e3a65eda706e413bdfdbc42c7",
+      "git_blob_sha1": "f9a7dc8578d53fbc7b2a764a9d5f5c6831f410ea",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/Cargo.toml"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1139,
+      "sha256": "e8d649c1f03766310c675dc46e9733748ca1a9eedbc5196f3247196eddcbc31f",
+      "git_blob_sha1": "0e3aa7b77efb1e9ce87f2641ff33489b0c81dc00",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/LICENSE"
+    },
+    {
+      "path": "Package.swift",
+      "bytes": 1123,
+      "sha256": "5a451da61410f975716f1883e0234113de738692d2eac956f0a2104d626fb4bd",
+      "git_blob_sha1": "71f6c7692910831adc267b3c5b4ccad8df475b07",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/Package.swift"
+    },
+    {
+      "path": "README.md",
+      "bytes": 386,
+      "sha256": "9c03daf0b57905ef047cb107efab19c7d6a6526a27fef800f37be2895430cec9",
+      "git_blob_sha1": "6245bd92a4ba51fa5e2881c278650eb721c36917",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/README.md"
+    },
+    {
+      "path": "binding.gyp",
+      "bytes": 328,
+      "sha256": "c9ff9df453814e80038dd539c7db0c4b3132ac5d9003c9220b85b9ddfe125065",
+      "git_blob_sha1": "38d01bcd81e8b30a5d5fde6b8666798348baed47",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/binding.gyp"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 896,
+      "sha256": "425d700d97a119d78bd7dd74663a319268848c4cd777259819ce22ef2a8998b0",
+      "git_blob_sha1": "a83111dd4381df17dca0fbae94aee6122438bdbf",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/bindings/node/binding.cc"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 460,
+      "sha256": "c214732e4656fb606af68afb761fce84f4a86438ba9bf8bc28dabe58d46118c9",
+      "git_blob_sha1": "ddd319d46bcabb4bb405c06d97dae54ee3b8a31a",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/bindings/node/index.js"
+    },
+    {
+      "path": "bindings/rust/README.md",
+      "bytes": 1231,
+      "sha256": "5fb5cb52b21c6d6314c5cff091e6e0c0b278779c8bdc20776fd460ec64895b13",
+      "git_blob_sha1": "57b1364f4407a38bd04f03bfbe97d06e72773b65",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/bindings/rust/README.md"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 652,
+      "sha256": "fd420b75712f7437d7fadb6c488a417a3bc268bcf8c7c43185d7db1fab94c614",
+      "git_blob_sha1": "8851fed13a68dbdc9664a793811f70fd0a78608e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/bindings/rust/build.rs"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 2593,
+      "sha256": "d8f22c7e9879826f34e6b700147779ef22cef2a7fb908ed364778fc20957f7e4",
+      "git_blob_sha1": "3b3e07d281788da3fb141c6cb4d28bb5f13599f0",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/bindings/rust/lib.rs"
+    },
+    {
+      "path": "bindings/swift/pony.h",
+      "bytes": 235,
+      "sha256": "0bbe584f01d08deb9e04b48a8773720bc543dde3b8172e92986041b945c1a469",
+      "git_blob_sha1": "bcea6ecceb404419f23b775b9ff98aca9ed983b4",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/bindings/swift/pony.h"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 18010,
+      "sha256": "64510538eebb9b9465d3c5c9a2d66c82042a09a56235b2da517dad11ca1d79eb",
+      "git_blob_sha1": "07e832d7e3d66505c8b1ec9e9c78a3b2165a62d9",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/grammar.js"
+    },
+    {
+      "path": "package.json",
+      "bytes": 1154,
+      "sha256": "66f357b06eebcd1cb894402b5a167bbc4e3841ac3ba288bb19415c2f3d9ed763",
+      "git_blob_sha1": "485c40d6fba8d1be35e87bda006c13b3d1915d45",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/package.json"
+    },
+    {
+      "path": "queries/folds.scm",
+      "bytes": 598,
+      "sha256": "625e8e080572a4089baf671f3fc7f31f87269ed3061a5a7316903a51ace6e91f",
+      "git_blob_sha1": "1f7ba11b3bc29c12f3167006214322fd34804c7d",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/queries/folds.scm"
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 3652,
+      "sha256": "563e811bdfdc49394c7dd076df048557068bc0cf856c8444ddce42c2edb87f5e",
+      "git_blob_sha1": "98d60d2015f881c38324da822b7df393f5f916be",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/queries/highlights.scm"
+    },
+    {
+      "path": "queries/indents.scm",
+      "bytes": 827,
+      "sha256": "1e685b122961e5b9ca81d4b8b8202dc883c67e39e1ba2043b16b4ff8162cf94e",
+      "git_blob_sha1": "cd1c529486b3bb7e67ef39a8b4a16453bd28c147",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/queries/indents.scm"
+    },
+    {
+      "path": "queries/injections.scm",
+      "bytes": 48,
+      "sha256": "6c8d85c2f1f79ead0a09c98f7a7b7219c9e5fa0f1a92d5f401e4e3583690403c",
+      "git_blob_sha1": "e48ce9af339bbc66e456dd61774c98ee08e42d75",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/queries/injections.scm"
+    },
+    {
+      "path": "queries/locals.scm",
+      "bytes": 1269,
+      "sha256": "03af63d8407ae27cf1cd31c21d44b973f43c6813befdc807f291ab9b565e70e2",
+      "git_blob_sha1": "c5725f6e431fc3851e0b030cf937f6dc59662dae",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/queries/locals.scm"
+    },
+    {
+      "path": "queries/tags.scm",
+      "bytes": 1825,
+      "sha256": "eb2b8872891850b309a94f28e4a3ad1fd1251a657e7de5b8a736c00106be0836",
+      "git_blob_sha1": "4befc8567f931c42337cd62c5f583a3e3f078f39",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/queries/tags.scm"
+    },
+    {
+      "path": "script/known_failures.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "git_blob_sha1": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/script/known_failures.txt"
+    },
+    {
+      "path": "script/parse-examples",
+      "bytes": 1036,
+      "sha256": "1a2cfb4d917b8f25f848800026b4281cdc836678a1d9099455c6900c624f66d2",
+      "git_blob_sha1": "efa22e5b54f212c69564d81d350cfb204833dccf",
+      "git_mode": "100755",
+      "archive_mode": 509,
+      "retained_path": "upstream/script/parse-examples"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 129959,
+      "sha256": "1029fe5b920767bfcf2c4a6c751a205b3879e1629a3eebaed07eab1785cff1ba",
+      "git_blob_sha1": "eb2496c7224523581eae2f47c5a15ca45fb087d3",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/src/grammar.json"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 50422,
+      "sha256": "3e564c5b499104e6a2df8c2fbca0a78f8b2a280a63d3119c9af5cb5231419bd3",
+      "git_blob_sha1": "05ba6cd10ccb0cd80593e6330901e9a32f3c3108",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/src/node-types.json"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 4693020,
+      "sha256": "a97ffae44f76184bd65ec1ebb3856614ac7071d4545b475394f20bef1c0749c8",
+      "git_blob_sha1": "acbdb7f6f72a0066943269ab47cd311171318cdd",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/src/parser.c"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 7356,
+      "sha256": "3ace8d4b9bdf46349a8290e16d7fe2a8bc66e2bbf7c53fc288aa735ee176a681",
+      "git_blob_sha1": "6829399514760551cf42dbc43a42f1678adadc39",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/src/scanner.c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 5378,
+      "sha256": "ab104936984904469572a4e868149f7a22fb2929347f837ae6a1f9b790f1b173",
+      "git_blob_sha1": "2b14ac1046bb3b45543a62e41d8ee77d2cfae34c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/src/tree_sitter/parser.h"
+    },
+    {
+      "path": "test/corpus/characters.txt",
+      "bytes": 892,
+      "sha256": "d2c13323fa8e16389827bfed1034472f69bb7b7ccd8bf34842f9d87791071922",
+      "git_blob_sha1": "fd1c7e4c528f4fae6ea516eb77340835a54cdd7c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/characters.txt"
+    },
+    {
+      "path": "test/corpus/entity.txt",
+      "bytes": 5920,
+      "sha256": "17b8561eb096f0c52dde61ef42fcefd5563db8db3e3e0fcc7e79b6bd2ea966ba",
+      "git_blob_sha1": "d84e90bbe1cf38c2a61903416d5c19d1beee43c9",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/entity.txt"
+    },
+    {
+      "path": "test/corpus/exprs.txt",
+      "bytes": 5098,
+      "sha256": "4d782d61890eaab66828aaf94805bd63298b2e6ea4cdfb6c87c298661ffd7bce",
+      "git_blob_sha1": "1a1c981150dc9f18ee06498cc0e6e7b1d74651bb",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/exprs.txt"
+    },
+    {
+      "path": "test/corpus/generics.txt",
+      "bytes": 850,
+      "sha256": "f9a33ac8a93690e550c15d108370c1d2b6f76debd2b20923334e0bea7caaab2c",
+      "git_blob_sha1": "7a7a9892615a315361b1587bc70f840de7da719b",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/generics.txt"
+    },
+    {
+      "path": "test/corpus/lambda.txt",
+      "bytes": 7671,
+      "sha256": "adc98f98ebaefa56fd40ac6b04e504d0895d9ba9c5322888ccfcf5b681fbbf15",
+      "git_blob_sha1": "319b7f1ca34757abde89416ea7d70af9aa34dc6e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/lambda.txt"
+    },
+    {
+      "path": "test/corpus/statements.txt",
+      "bytes": 4986,
+      "sha256": "a26d2701b97c42e80c74e1f90ea409a37e94f4f2209b85a753f62000ffaf2110",
+      "git_blob_sha1": "2afab596299bd0c31fb20fa99b19f73b0820fd1e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/statements.txt"
+    },
+    {
+      "path": "test/corpus/strings.txt",
+      "bytes": 1044,
+      "sha256": "1a5415c88bf68722944cff389a49ceb043b3f212f328877c29de40c932b5f4d0",
+      "git_blob_sha1": "3c41385b5532d249c4332c89752d84c238f569ca",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/strings.txt"
+    },
+    {
+      "path": "test/corpus/types.txt",
+      "bytes": 1255,
+      "sha256": "7494cef6fab72f3d1f62e9d65c414b2008c7884a95128ec2863c66822dda34f9",
+      "git_blob_sha1": "0ec3034da14d148ef5b3e53ecba45a8a07b7ad2d",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/types.txt"
+    },
+    {
+      "path": "test/corpus/use.txt",
+      "bytes": 3689,
+      "sha256": "b98182b7e4b70ba2ee39a9f70446c7af1dd9d1238b9675f8d872b2cef0288160",
+      "git_blob_sha1": "6db498c1fd59e12e50fb43aaa230bb4b33fce911",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "retained_path": "upstream/test/corpus/use.txt"
+    }
+  ],
+  "gitlinks": [],
+  "native_abi": 14,
+  "external_tokens": 3,
+  "native_factory": "tree_sitter_pony",
+  "generated_parser_changed": false,
+  "local_scanner_patch": "patches/empty-state-reset.patch",
+  "scanner_reason": "Reset quote-count state when the runtime restores an empty serialization",
+  "generator_executed": false,
+  "build_fetches_code": false,
+  "local_changes": [
+    "Static LanguageFn Rust binding with pinned existing build dependencies",
+    "Reset scanner state before restoring nonempty serialization"
+  ],
+  "capability_scope": "Written named types and directly owned new/fun/be declarations only; fields, parameters, aliases, receiver/type/capability dispatch and complete semantic support remain unavailable",
+  "native_inputs": [
+    {
+      "path": "src/parser.c",
+      "bytes": 4693020,
+      "sha256": "a97ffae44f76184bd65ec1ebb3856614ac7071d4545b475394f20bef1c0749c8"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 7382,
+      "sha256": "715e0a0ad71ec2d4b9c7ea6a3b6b589b9ac08616e7bf3b46e71fe2b6af898bb3"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 5378,
+      "sha256": "ab104936984904469572a4e868149f7a22fb2929347f837ae6a1f9b790f1b173"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+[package]
+name = "flux"
+version = "0.155.0"
+rust-version = "1.83"
+authors = ["Flux Team <flux-developers@influxdata.com>"]
+edition = "2021"
+
+[lib]
+name = "flux"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = ["strict", "cffi"]
+strict = ["flux-core/strict"]
+cffi = ["serde", "serde_json"]
+lsp = ["flux-core/lsp"]
+label-polymorphism = []
+
+[dependencies]
+anyhow = "1"
+env_logger = "0.11"
+flatbuffers = "25.9.23"
+flux-core = { path = "../flux-core", default-features = false }
+serde = { version = "^1.0.59", optional = true, features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+thiserror = "1"
+
+# `getrandom` is a dependency of the `tera` crate, which does not support
+# the wasm32-unknown-unknown target by default.
+getrandom = { version = "0.2.6", features = ["js"] }
+
+[dev-dependencies]
+criterion = "0.3.3"
+expect-test = "1"
+maplit = "1.0.2"
+pretty_assertions = "1"
+
+[build-dependencies]
+anyhow = "1"
+env_logger = "0.11"
+flatbuffers = "25.9.23"
+flux-core = { path = "../flux-core", default-features = false }
+walkdir = "2"
+
+[[bench]]
+name = "basic"
+harness = false
+
+[[bench]]
+name = "formatter"
+harness = false
+
+[[bench]]
+name = "analyze"
+harness = false

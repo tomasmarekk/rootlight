@@ -1,0 +1,14 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -37,9 +37,10 @@
+ void tree_sitter_pony_external_scanner_deserialize(void *payload,
+                                                    const char *buffer,
+                                                    unsigned length) {
++    Scanner *scanner = (Scanner *)payload;
++    scanner->quote_count = 0;
+     if (length > 0) {
+         assert(length == sizeof(Scanner));
+-        Scanner *scanner = (Scanner *)payload;
+         memcpy(scanner, buffer, sizeof(Scanner));
+     }
+ }

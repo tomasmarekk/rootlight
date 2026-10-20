@@ -1,0 +1,158 @@
+================================================================================
+If elif else
+================================================================================
+
+operation Main() : Unit {
+    if x > 0 {
+    } elif x == 0 {
+    } else {
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (if_expression
+            condition: (binary_expression (identifier) (integer_literal))
+            body: (block)
+            (elif_clause
+              condition: (binary_expression (identifier) (integer_literal))
+              body: (block))
+            (else_clause (block))))))))
+
+================================================================================
+For loop
+================================================================================
+
+operation Main() : Unit {
+    for i in 0..5 {
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (for_expression
+            (pattern (identifier))
+            (range_expression (integer_literal) (integer_literal))
+            (block)))))))
+
+================================================================================
+For loop tuple destructuring
+================================================================================
+
+operation Main() : Unit {
+    for (a, b) in pairs {
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (for_expression
+            (pattern (pattern (identifier)) (pattern (identifier)))
+            (identifier)
+            (block)))))))
+
+================================================================================
+While loop
+================================================================================
+
+operation Main() : Unit {
+    while n > 0 {
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (while_expression
+            (binary_expression (identifier) (integer_literal))
+            (block)))))))
+
+================================================================================
+Repeat until without fixup
+================================================================================
+
+operation Main() : Unit {
+    mutable x = 0;
+    repeat {
+        x += 1;
+    } until x > 3;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (mutable_statement (pattern (identifier)) (integer_literal))
+        (expression_statement
+          (repeat_expression
+            (block
+              (expression_statement
+                (compound_assignment_expression (identifier) (integer_literal))))
+            (binary_expression (identifier) (integer_literal))))))))
+
+================================================================================
+Trailing expression without semicolon
+================================================================================
+
+function Sign(a : Int) : Int {
+    if a > 0 {
+        1
+    } else {
+        -1
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param name: (identifier) type: (builtin_type)))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (if_expression
+            condition: (binary_expression (identifier) (integer_literal))
+            body: (block
+              (expression_statement (integer_literal)))
+            (else_clause
+              (block
+                (expression_statement (unary_expression (integer_literal)))))))))))

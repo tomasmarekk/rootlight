@@ -1,0 +1,35 @@
+{
+  "upstream": "https://github.com/influxdata/flux",
+  "revision": "9eb12f7f4702875e79189789cf9b3ac560499c11",
+  "license": "LICENSE",
+  "source_tree": "upstream",
+  "selected_parser": "parser",
+  "generated_input": "parser/src/scanner/scanner_controlled.rl",
+  "active_generated_output": "parser/src/scanner/scanner_generated_controlled.rs",
+  "generator": {
+    "ragel": "7.0.1",
+    "colm": "0.14.2",
+    "build_time_generation": false
+  },
+  "native_capsule_sha256": "67e0cac5583736e287b2805bf884076da0c7e3df16a5dc1ca16e06c9d236397b",
+  "qualification_boundary": "native controls do not qualify Rootlight integration or installed package",
+  "native_capsule_scope": "Historical pre-alignment dependency frame; not qualification of the aligned package",
+  "dependency_alignment": {
+    "regex_before": "=1.12.2",
+    "regex_after": "=1.13.0",
+    "acquired_sources": false,
+    "current_native_tests_qualified": false,
+    "actual_lock_changes": [
+      {
+        "name": "regex",
+        "before": "1.12.2",
+        "after": "1.13.0"
+      },
+      {
+        "name": "regex-syntax",
+        "before": "0.8.8",
+        "after": "0.8.11"
+      }
+    ]
+  }
+}

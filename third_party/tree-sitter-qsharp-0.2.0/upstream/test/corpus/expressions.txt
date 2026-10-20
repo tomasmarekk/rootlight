@@ -1,0 +1,93 @@
+================================================================================
+Float vs range disambiguation
+================================================================================
+
+operation Main() : Unit {
+    let a = 2.0;
+    let b = 1.;
+    let c = 0..5;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (float_literal))
+        (let_statement
+          (pattern
+            (identifier))
+          (float_literal))
+        (let_statement
+          (pattern
+            (identifier))
+          (range_expression
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+String interpolation
+================================================================================
+
+operation Main() : Unit {
+    let s = $"Hello {name}!";
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (string_interpolation
+            (interpolation_content)
+            (interpolation_expression
+              (identifier))
+            (interpolation_content)))))))
+
+================================================================================
+Within apply conjugation
+================================================================================
+
+operation Main() : Unit {
+    within {
+        H(q);
+    } apply {
+        X(q);
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (conjugation_expression
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))))))))

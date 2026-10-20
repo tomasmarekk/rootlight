@@ -1,0 +1,236 @@
+[
+  {
+    "modified": true,
+    "package_path": "src/ast/mod.rs",
+    "selected_bytes": 50769,
+    "selected_sha256": "b1bd01850b177d6ed93d6ddf82fc64703caf8f3755fd6ffafb96450e9567bda2",
+    "upstream_bytes": 50784,
+    "upstream_path": "libflux/flux-core/src/ast/mod.rs",
+    "upstream_sha256": "0beeb8d26aaf2e22d397896419e0aa6933a49bccfa76d0c36ea1966aff3d0da3"
+  },
+  {
+    "modified": false,
+    "package_path": "src/ast/tests.rs",
+    "selected_bytes": 73728,
+    "selected_sha256": "8b0429d35001279818db2ef3342acd6b8600e6979df4505612a760f8f83a8dc8",
+    "upstream_bytes": 73728,
+    "upstream_path": "libflux/flux-core/src/ast/tests.rs",
+    "upstream_sha256": "8b0429d35001279818db2ef3342acd6b8600e6979df4505612a760f8f83a8dc8"
+  },
+  {
+    "modified": false,
+    "package_path": "src/ast/walk/mod.rs",
+    "selected_bytes": 18299,
+    "selected_sha256": "901de48a1faf3ca09cad9e324200bc8ea593ce83a32551b2222f22fcd5c65416",
+    "upstream_bytes": 18299,
+    "upstream_path": "libflux/flux-core/src/ast/walk/mod.rs",
+    "upstream_sha256": "901de48a1faf3ca09cad9e324200bc8ea593ce83a32551b2222f22fcd5c65416"
+  },
+  {
+    "modified": false,
+    "package_path": "src/ast/walk/tests.rs",
+    "selected_bytes": 5903,
+    "selected_sha256": "16b4a1442901ac614b40a83ff717d148b78e057dbec6d33b3e1d74d3469380cc",
+    "upstream_bytes": 5903,
+    "upstream_path": "libflux/flux-core/src/ast/walk/tests.rs",
+    "upstream_sha256": "16b4a1442901ac614b40a83ff717d148b78e057dbec6d33b3e1d74d3469380cc"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/mod.rs",
+    "selected_bytes": 93049,
+    "selected_sha256": "f392d3166b27f5182c8c82fdce36388906398c37b2e8922c2ee73668fcf804d8",
+    "upstream_bytes": 93049,
+    "upstream_path": "libflux/flux-core/src/parser/mod.rs",
+    "upstream_sha256": "f392d3166b27f5182c8c82fdce36388906398c37b2e8922c2ee73668fcf804d8"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/strconv.rs",
+    "selected_bytes": 6511,
+    "selected_sha256": "25cb1d625cbc1a3f8d9dd6e1855c0430c5293754e028127f7d09a70ddbac1968",
+    "upstream_bytes": 6511,
+    "upstream_path": "libflux/flux-core/src/parser/strconv.rs",
+    "upstream_sha256": "25cb1d625cbc1a3f8d9dd6e1855c0430c5293754e028127f7d09a70ddbac1968"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/arrow_function.rs",
+    "selected_bytes": 91701,
+    "selected_sha256": "fb36e007dd2d9a0d414ccc60d2c730bfba6e2df4cfd85a99daa7f20fb1785e74",
+    "upstream_bytes": 91701,
+    "upstream_path": "libflux/flux-core/src/parser/tests/arrow_function.rs",
+    "upstream_sha256": "fb36e007dd2d9a0d414ccc60d2c730bfba6e2df4cfd85a99daa7f20fb1785e74"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/attributes.rs",
+    "selected_bytes": 52370,
+    "selected_sha256": "faf5c173dbc90b8846473036a233baefbba0bd03971679e77b1a444562896ee6",
+    "upstream_bytes": 52370,
+    "upstream_path": "libflux/flux-core/src/parser/tests/attributes.rs",
+    "upstream_sha256": "faf5c173dbc90b8846473036a233baefbba0bd03971679e77b1a444562896ee6"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/errors.rs",
+    "selected_bytes": 59683,
+    "selected_sha256": "e8eee82eb543171847a9932c30eb5f072cac395eda1f1b91e7094196e213386b",
+    "upstream_bytes": 59683,
+    "upstream_path": "libflux/flux-core/src/parser/tests/errors.rs",
+    "upstream_sha256": "e8eee82eb543171847a9932c30eb5f072cac395eda1f1b91e7094196e213386b"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/from.rs",
+    "selected_bytes": 295767,
+    "selected_sha256": "cb4cb464cbc0ce38079d888908ccd4006fa005223d10c78b801d324bf0f0bf63",
+    "upstream_bytes": 295767,
+    "upstream_path": "libflux/flux-core/src/parser/tests/from.rs",
+    "upstream_sha256": "cb4cb464cbc0ce38079d888908ccd4006fa005223d10c78b801d324bf0f0bf63"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/literals.rs",
+    "selected_bytes": 53763,
+    "selected_sha256": "ace0e55efe11f43e9f94f929ca2a3e6754a00e9a26c82f1d586f9e2a2a5815b0",
+    "upstream_bytes": 53763,
+    "upstream_path": "libflux/flux-core/src/parser/tests/literals.rs",
+    "upstream_sha256": "ace0e55efe11f43e9f94f929ca2a3e6754a00e9a26c82f1d586f9e2a2a5815b0"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/objects.rs",
+    "selected_bytes": 52049,
+    "selected_sha256": "68b09e194c233dcf3cf2dff67d8ca70654ca19902b2e8f7f02db8d1dd80778f3",
+    "upstream_bytes": 52049,
+    "upstream_path": "libflux/flux-core/src/parser/tests/objects.rs",
+    "upstream_sha256": "68b09e194c233dcf3cf2dff67d8ca70654ca19902b2e8f7f02db8d1dd80778f3"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/operator_precedence.rs",
+    "selected_bytes": 249229,
+    "selected_sha256": "c5043c9093689f2171d1998c12cc1906836921433340e3be2f769f73fab4502d",
+    "upstream_bytes": 249229,
+    "upstream_path": "libflux/flux-core/src/parser/tests/operator_precedence.rs",
+    "upstream_sha256": "c5043c9093689f2171d1998c12cc1906836921433340e3be2f769f73fab4502d"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/property_list.rs",
+    "selected_bytes": 39181,
+    "selected_sha256": "9a8a0e910ad0e6e261a64c98ffb737b46cf9b03a15d5aa842d66558400c88aee",
+    "upstream_bytes": 39181,
+    "upstream_path": "libflux/flux-core/src/parser/tests/property_list.rs",
+    "upstream_sha256": "9a8a0e910ad0e6e261a64c98ffb737b46cf9b03a15d5aa842d66558400c88aee"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/stack_overflow.flux",
+    "selected_bytes": 7571,
+    "selected_sha256": "1386058827e40672cbca48aa420b8bec0ded69751a1cb775f4e62eee0ad841fc",
+    "upstream_bytes": 7571,
+    "upstream_path": "libflux/flux-core/src/parser/tests/stack_overflow.flux",
+    "upstream_sha256": "1386058827e40672cbca48aa420b8bec0ded69751a1cb775f4e62eee0ad841fc"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/stack_overflow_2.flux",
+    "selected_bytes": 1756,
+    "selected_sha256": "68108fb4958a841bf0885291d04527cc420fbf40a10a9a485be3e1b9e8e18099",
+    "upstream_bytes": 1756,
+    "upstream_path": "libflux/flux-core/src/parser/tests/stack_overflow_2.flux",
+    "upstream_sha256": "68108fb4958a841bf0885291d04527cc420fbf40a10a9a485be3e1b9e8e18099"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/strings.rs",
+    "selected_bytes": 52266,
+    "selected_sha256": "97af7ada8859639bd4b88c3bb546cdd1b95ea1af00f8d265c7993608f58cc642",
+    "upstream_bytes": 52266,
+    "upstream_path": "libflux/flux-core/src/parser/tests/strings.rs",
+    "upstream_sha256": "97af7ada8859639bd4b88c3bb546cdd1b95ea1af00f8d265c7993608f58cc642"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests/types.rs",
+    "selected_bytes": 76084,
+    "selected_sha256": "63939454c521bb2ddb669fa1f62cd19be7f7c201327b4e057dbe0f6ae410b439",
+    "upstream_bytes": 76084,
+    "upstream_path": "libflux/flux-core/src/parser/tests/types.rs",
+    "upstream_sha256": "63939454c521bb2ddb669fa1f62cd19be7f7c201327b4e057dbe0f6ae410b439"
+  },
+  {
+    "modified": false,
+    "package_path": "src/parser/tests.rs",
+    "selected_bytes": 294788,
+    "selected_sha256": "b1e2b3d42de723fe242192a4802858e7832ad613aa132b90fb787989394cca06",
+    "upstream_bytes": 294788,
+    "upstream_path": "libflux/flux-core/src/parser/tests.rs",
+    "upstream_sha256": "b1e2b3d42de723fe242192a4802858e7832ad613aa132b90fb787989394cca06"
+  },
+  {
+    "modified": false,
+    "package_path": "src/scanner/mod.rs",
+    "selected_bytes": 8775,
+    "selected_sha256": "4373741c755049f5e08fdf003a8938c5c0001f9820dce2f3e3aa5f9a9a68d390",
+    "upstream_bytes": 8775,
+    "upstream_path": "libflux/flux-core/src/scanner/mod.rs",
+    "upstream_sha256": "4373741c755049f5e08fdf003a8938c5c0001f9820dce2f3e3aa5f9a9a68d390"
+  },
+  {
+    "modified": false,
+    "package_path": "src/scanner/scanner.rl",
+    "selected_bytes": 8047,
+    "selected_sha256": "34e1f306994b8f69d0551110ce22efa75e0081b7c5f498ad293a739970bbcbc2",
+    "upstream_bytes": 8047,
+    "upstream_path": "libflux/flux-core/src/scanner/scanner.rl",
+    "upstream_sha256": "34e1f306994b8f69d0551110ce22efa75e0081b7c5f498ad293a739970bbcbc2"
+  },
+  {
+    "modified": false,
+    "package_path": "src/scanner/scanner_generated.rs",
+    "selected_bytes": 100261,
+    "selected_sha256": "d917184e05832393cb1ee3133723181a7eac31b259782ac3f1af56bf68a25ed4",
+    "upstream_bytes": 100261,
+    "upstream_path": "libflux/flux-core/src/scanner/scanner_generated.rs",
+    "upstream_sha256": "d917184e05832393cb1ee3133723181a7eac31b259782ac3f1af56bf68a25ed4"
+  },
+  {
+    "modified": false,
+    "package_path": "src/scanner/tests.rs",
+    "selected_bytes": 62308,
+    "selected_sha256": "3209038191df8af77a0d078e5ccb53c650ddfaf1c9140c3f9455bea4e184c199",
+    "upstream_bytes": 62308,
+    "upstream_path": "libflux/flux-core/src/scanner/tests.rs",
+    "upstream_sha256": "3209038191df8af77a0d078e5ccb53c650ddfaf1c9140c3f9455bea4e184c199"
+  },
+  {
+    "modified": false,
+    "package_path": "src/scanner/token.rs",
+    "selected_bytes": 2289,
+    "selected_sha256": "d0331d761851a4ee48c50f6acebed72d4a0101c2ff202827c92ad71fe03c9b13",
+    "upstream_bytes": 2289,
+    "upstream_path": "libflux/flux-core/src/scanner/token.rs",
+    "upstream_sha256": "d0331d761851a4ee48c50f6acebed72d4a0101c2ff202827c92ad71fe03c9b13"
+  },
+  {
+    "modified": false,
+    "package_path": "src/scanner/unicode.rl",
+    "selected_bytes": 145498,
+    "selected_sha256": "f923f3b385ddfa65c74427b11971785fc25ea806ca03d547045de808e16ef9a1",
+    "upstream_bytes": 145498,
+    "upstream_path": "libflux/flux-core/src/scanner/unicode.rl",
+    "upstream_sha256": "f923f3b385ddfa65c74427b11971785fc25ea806ca03d547045de808e16ef9a1"
+  },
+  {
+    "modified": false,
+    "package_path": "src/scanner/unicode.rl.COPYING",
+    "selected_bytes": 1092,
+    "selected_sha256": "6cf2d5d26d52772ded8a5f0813f49f83dfa76006c5f398713be3854fe7bc4c7e",
+    "upstream_bytes": 1092,
+    "upstream_path": "libflux/flux-core/src/scanner/unicode.rl.COPYING",
+    "upstream_sha256": "6cf2d5d26d52772ded8a5f0813f49f83dfa76006c5f398713be3854fe7bc4c7e"
+  }
+]

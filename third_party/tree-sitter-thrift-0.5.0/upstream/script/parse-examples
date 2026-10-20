@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+function clone_repo {
+	owner=$1
+	name=$2
+	sha=$3
+
+	path=examples/$name
+	if [ ! -d "$path" ]; then
+		echo "Cloning $owner/$name"
+		git clone "https://github.com/$owner/$name" "$path"
+	fi
+
+	pushd "$path" >/dev/null
+	actual_sha=$(git rev-parse HEAD)
+	if [ "$actual_sha" != "$sha" ]; then
+		echo "Updating $owner/$name to $sha"
+		git fetch
+		git reset --hard "$sha"
+	fi
+	popd >/dev/null
+}
+
+clone_repo apache thrift f377dd3445362b5d5f051f549a12424663801894
+clone_repo facebook fbthrift 99eb53387238ff0116ba26cf83bd75203252be04
+clone_repo twitter scrooge b455e1c4385520662c716b24e7a091eb9098ea75
+clone_repo line armeria 72de6ff3ce1f732eebf2f325d0c54863fc7a0a5d
+clone_repo cloudwego pilota a6cac667fa32e799bcd9139f344e19f6f6ee0061
+clone_repo jaegertracing jaeger-idl 05fe64e9c305526901f70ff692030b388787e388
+clone_repo stripe-archive herringbone 4f0524287ef47fc897702d654572bbeee1004879
+clone_repo Workiva frugal 847dba6dbbd256410fe5e82d882fcb409ed47bf4
+
+known_failures="$(cat script/known_failures.txt)"
+
+# # Remove directories testing invalid keywords or intended fails
+# find examples -type d \( -name keyword-samples -o -name explicit_module -o -name fail -o -name py-reserved \) -exec rm -rf {} +
+# # Remove files testing invalid keywords or intended fails
+# find examples -type f \( -name PythonReservedKeywords.thrift \) -exec rm -rf {} +
+
+# shellcheck disable=2046
+tree-sitter parse -q \
+	"examples/**/*.thrift" \
+	$(for file in $known_failures; do echo "!${file}"; done)
+
+example_count=$(find examples -name "*.thrift" | wc -l)
+failure_count=$(wc -w <<<"$known_failures")
+success_count=$((example_count - failure_count))
+success_percent=$(bc -l <<<"100*${success_count}/${example_count}")
+
+printf \
+	"Successfully parsed %d of %d example files (%.1f%%)\n" \
+	"$success_count" "$example_count" "$success_percent"

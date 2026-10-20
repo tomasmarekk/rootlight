@@ -1,0 +1,243 @@
+=============================================================
+macro calls with keyword type declaration args
+=============================================================
+
+class Name
+  private getter begin : Qux
+end
+
+class ASTNode
+  getter else : ASTNode?
+end
+
+---
+
+(expressions
+  (ERROR
+    (constant)
+    (visibility_modifier
+      visibility: (private)
+      (call
+        method: (identifier)
+        arguments: (argument_list
+          (begin
+            (ERROR)
+            body: (expressions
+              (constant))))))
+    (class_def
+      name: (constant)
+      (ERROR
+        (identifier))
+      body: (expressions
+        (nilable_constant
+          (constant))))))
+
+================================================================================
+implicit object assignment call
+:error
+================================================================================
+inner.try &.color=(color)
+--------------------------------------------------------------------------------
+
+(expressions)
+
+==================================
+case stmt with pseudo impl methods
+:error
+==================================
+
+case 1
+when .hello
+when .responds_to?(:hello)
+when .is_a?(String*)
+when .as(String*)
+when .as?(String*)
+when .nil?
+when .!
+end
+
+---
+
+(expressions)
+
+============================================
+macro variables in escaped macro expressions
+:error
+============================================
+{% for n in [8, 16, 32, 64, 128] %}
+  \{% if Int{{n}} == LibGMP::SI %}
+  \{% end %}
+{% end %}
+---
+
+(expressions)
+
+===================================
+comments inside nested named tuples
+:error
+===================================
+
+MyConst1 = {
+  # This is a comment
+  name1: {
+    sub1: [:foo, :bar]
+  },
+}
+
+MyConst2 = {
+  name1: {
+    sub1: [:foo, :bar]
+  },
+}
+
+---
+
+(expressions
+  (ERROR
+    (const_assign
+      (constant)
+      (tuple
+        (comment)
+        (call
+          (identifier)
+          (ERROR
+            (identifier))
+          (argument_list
+            (array
+              (symbol)
+              (symbol))))))
+    (ERROR))
+  (const_assign
+    (constant)
+    (named_tuple
+      (named_expr
+        (identifier)
+        (named_tuple
+          (named_expr
+            (identifier)
+            (array
+              (symbol)
+              (symbol))))))))
+
+=======================
+nillable implicit index
+=======================
+
+filters1.try(&.pos[name])
+filters1.try(&.pos[name]?)
+
+---
+
+(expressions
+  (call
+    receiver: (identifier)
+    method: (identifier)
+    arguments: (argument_list
+      (block_argument
+        (implicit_object_call
+          method: (identifier)
+          arguments: (argument_list
+            (array
+              (identifier)))))))
+  (call
+    receiver: (identifier)
+    method: (identifier)
+    arguments: (argument_list
+      (block_argument
+        (implicit_object_call
+          method: (identifier)
+          arguments: (argument_list
+            (array
+              (identifier)))))
+      (ERROR))))
+
+=================================
+percent literals in macro content
+=================================
+macro foo
+  %q( begin )
+end
+---
+
+(expressions
+  (macro_def
+    name: (identifier)
+    body: (expressions
+      (macro_content)
+      (macro_content)
+      (macro_content)
+      (macro_content))
+    (MISSING "end")))
+
+=========================
+heredocs in macro content
+=========================
+macro foo
+  <<-TEXT
+  begin
+  TEXT
+end
+---
+
+(expressions
+  (macro_def
+    name: (identifier)
+    body: (expressions
+      (macro_content)
+      (macro_content)
+      (macro_content)
+      (macro_content))
+    (MISSING "end")))
+
+======================================
+macro that accepts a method definition
+:error
+======================================
+memoize def method_3(arg_a : String, arg_b : String = "default-arg-b") : String
+  arg_a + ", " + arg_b
+end
+-----
+
+(expressions)
+
+=========================
+keyword as named argument
+:error
+=========================
+pages.series(begin: 2, end: 2)
+---
+
+(expressions)
+
+==============
+splat in tuple
+:error
+==============
+{*sensor, distance(sensor, beacon)}
+---
+
+(expressions)
+
+======================================
+}} that doesn't end a macro expression
+:error
+======================================
+{% if flag?(:win32) %}
+  with_foo({bar: {baz: "*"}}) do
+  end
+{% end %}
+---
+
+(expressions)
+
+=====================================
+fun declarations with proc parameters
+:error
+=====================================
+lib Foo
+  fun pthread_key_create(PthreadKeyT*, (Void*) ->) : Int
+  fun set_memory_functions = __gmp_set_memory_functions(malloc : SizeT -> Void*, realloc : Void*, SizeT, SizeT -> Void*, free : Void*, SizeT ->)
+end
+---
+
+(expressions)

@@ -1,0 +1,244 @@
+================================================================================
+Qubit allocation single
+================================================================================
+
+operation Main() : Unit {
+    use q = Qubit();
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (use_statement
+          (pattern
+            (identifier))
+          (qubit_init))))))
+
+================================================================================
+Qubit allocation array
+================================================================================
+
+operation Main() : Unit {
+    use qs = Qubit[5];
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (use_statement
+          (pattern
+            (identifier))
+          (qubit_init
+            (integer_literal)))))))
+
+================================================================================
+Qubit allocation tuple
+================================================================================
+
+operation Main() : Unit {
+    use (a, b) = (Qubit(), Qubit[3]);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (use_statement
+          (pattern
+            (pattern
+              (identifier))
+            (pattern
+              (identifier)))
+          (qubit_init
+            (qubit_init)
+            (qubit_init
+              (integer_literal))))))))
+
+================================================================================
+Qubit allocation with type annotation
+================================================================================
+
+operation Main() : Unit {
+    use q : Qubit = Qubit();
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (use_statement
+          (pattern
+            (identifier))
+          (builtin_type)
+          (qubit_init))))))
+
+================================================================================
+Borrow statement
+================================================================================
+
+operation Main() : Unit {
+    borrow q = Qubit();
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (borrow_statement
+          (pattern
+            (identifier))
+          (qubit_init))))))
+
+================================================================================
+Functor application Adjoint
+================================================================================
+
+operation Main() : Unit {
+    Adjoint H(q);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (call_expression
+            (unary_expression
+              (identifier))
+            (identifier)))))))
+
+================================================================================
+Functor application Controlled
+================================================================================
+
+operation Main() : Unit {
+    Controlled X([c], t);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (call_expression
+            (unary_expression
+              (identifier))
+            (array_expression
+              (identifier))
+            (identifier)))))))
+
+================================================================================
+Conjugation within apply
+================================================================================
+
+operation Main() : Unit {
+    within {
+        H(q);
+    } apply {
+        X(q);
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (conjugation_expression
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))))))))
+
+================================================================================
+Repeat until fixup
+================================================================================
+
+operation Main() : Unit {
+    use q = Qubit();
+    repeat {
+        H(q);
+    } until M(q) == Zero
+    fixup {
+        Reset(q);
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (use_statement
+          (pattern
+            (identifier))
+          (qubit_init))
+        (expression_statement
+          (repeat_expression
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))
+            (binary_expression
+              (call_expression
+                (identifier)
+                (identifier))
+              (result_literal))
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))))))))

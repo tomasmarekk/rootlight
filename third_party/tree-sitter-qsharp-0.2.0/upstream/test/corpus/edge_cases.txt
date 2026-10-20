@@ -1,0 +1,561 @@
+================================================================================
+Return statement
+================================================================================
+
+operation Main() : Int {
+    return 42;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (return_statement
+          (integer_literal))))))
+
+================================================================================
+Fail statement
+================================================================================
+
+operation Main() : Unit {
+    fail "Something went wrong";
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (fail_statement
+          (string_literal))))))
+
+================================================================================
+Empty statement
+================================================================================
+
+operation Main() : Unit {
+    ;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (empty_statement)))))
+
+================================================================================
+Tuple expression
+================================================================================
+
+operation Main() : Unit {
+    let t = (1, 2, 3);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (tuple_expression
+            (integer_literal)
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+Array repeat expression
+================================================================================
+
+operation Main() : Unit {
+    let a = [0, size = 10];
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (array_repeat_expression
+            (integer_literal)
+            (integer_literal)))))))
+
+================================================================================
+Tuple parameter in operation
+================================================================================
+
+operation Foo(q : Qubit, (b1 : Bool, b2 : Bool)) : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (builtin_type))
+      (tuple_param
+        (typed_param
+          name: (identifier)
+          type: (builtin_type))
+        (typed_param
+          name: (identifier)
+          type: (builtin_type))))
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Specialization with spec param
+================================================================================
+
+operation Foo(q : Qubit) : Unit is Ctl {
+    body ... {
+        X(q);
+    }
+    controlled (cs, ...) {
+        Controlled X(cs, q);
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list
+      (typed_param
+        name: (identifier)
+        type: (builtin_type)))
+    return_type: (builtin_type)
+    (functor_clause
+      (functor_expr))
+    body: (callable_body
+      (specialization_list
+        (specialization
+          (spec_name)
+          (spec_param)
+          (block
+            (expression_statement
+              (call_expression
+                (identifier)
+                (identifier)))))
+        (specialization
+          (spec_name)
+          (spec_param
+            (identifier))
+          (block
+            (expression_statement
+              (call_expression
+                (unary_expression
+                  (identifier))
+                (identifier)
+                (identifier)))))))))
+
+================================================================================
+Nested call expressions
+================================================================================
+
+operation Main() : Unit {
+    let x = Foo(Bar(1), Baz(2, 3));
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (call_expression
+            (identifier)
+            (call_expression
+              (identifier)
+              (integer_literal))
+            (call_expression
+              (identifier)
+              (integer_literal)
+              (integer_literal))))))))
+
+================================================================================
+Chained field access
+================================================================================
+
+operation Main() : Unit {
+    let x = a.b.c;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (field_expression
+            (field_expression
+              (identifier)
+              field: (identifier))
+            field: (identifier)))))))
+
+================================================================================
+Complex expression precedence
+================================================================================
+
+operation Main() : Unit {
+    let x = 1 + 2 * 3;
+    let y = a and b or c;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (integer_literal)
+            (binary_expression
+              (integer_literal)
+              (integer_literal))))
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (binary_expression
+              (identifier)
+              (identifier))
+            (identifier)))))))
+
+================================================================================
+Mutable with type annotation
+================================================================================
+
+operation Main() : Unit {
+    mutable x : Int = 0;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (mutable_statement
+          (pattern
+            (identifier))
+          (builtin_type)
+          (integer_literal))))))
+
+================================================================================
+Set with tuple destructuring
+================================================================================
+
+operation Main() : Unit {
+    mutable x = 0;
+    mutable y = 0;
+    set (x, y) = (1, 2);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (mutable_statement
+          (pattern
+            (identifier))
+          (integer_literal))
+        (mutable_statement
+          (pattern
+            (identifier))
+          (integer_literal))
+        (set_statement
+          (assignment_expression
+            (tuple_expression
+              (identifier)
+              (identifier))
+            (tuple_expression
+              (integer_literal)
+              (integer_literal))))))))
+
+================================================================================
+Struct inside function body
+================================================================================
+
+function Main() : Unit {
+    struct Local { Value : Int }
+    let x = new Local { Value = 42 };
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (struct_decl
+          name: (identifier)
+          (field_def
+            name: (identifier)
+            type: (builtin_type)))
+        (let_statement
+          (pattern
+            (identifier))
+          (new_expression
+            (path_or_identifier
+              (identifier))
+            (struct_fields
+              (field_assign
+                name: (identifier)
+                value: (integer_literal)))))))))
+
+================================================================================
+Attribute without arguments
+================================================================================
+
+@EntryPoint()
+operation Main() : Unit {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    (attribute
+      (path_or_identifier
+        (identifier)))
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block))))
+
+================================================================================
+Parenthesized expression
+================================================================================
+
+operation Main() : Unit {
+    let x = (1 + 2) * 3;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (binary_expression
+            (parenthesized_expression
+              (binary_expression
+                (integer_literal)
+                (integer_literal)))
+            (integer_literal)))))))
+
+================================================================================
+Compound assignment w/=
+================================================================================
+
+operation Main() : Unit {
+    mutable arr = [1, 2, 3];
+    set arr w/= 0 <- 99;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (mutable_statement
+          (pattern
+            (identifier))
+          (array_expression
+            (integer_literal)
+            (integer_literal)
+            (integer_literal)))
+        (set_statement
+          (compound_assignment_expression
+            (identifier)
+            (binary_expression
+              (integer_literal)
+              (unary_expression
+                (integer_literal)))))))))
+
+================================================================================
+Multiple elif clauses
+================================================================================
+
+operation Main() : Unit {
+    if x == 1 {
+    } elif x == 2 {
+    } elif x == 3 {
+    } else {
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (if_expression
+            condition: (binary_expression
+              (identifier)
+              (integer_literal))
+            body: (block)
+            (elif_clause
+              condition: (binary_expression
+                (identifier)
+                (integer_literal))
+              body: (block))
+            (elif_clause
+              condition: (binary_expression
+                (identifier)
+                (integer_literal))
+              body: (block))
+            (else_clause
+              (block))))))))
+
+================================================================================
+Interpolated string with multiple expressions
+================================================================================
+
+operation Main() : Unit {
+    Message($"x={x}, y={y}, sum={x + y}");
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (call_expression
+            (identifier)
+            (string_interpolation
+              (interpolation_content)
+              (interpolation_expression
+                (identifier))
+              (interpolation_content)
+              (interpolation_expression
+                (identifier))
+              (interpolation_content)
+              (interpolation_expression
+                (binary_expression
+                  (identifier)
+                  (identifier))))))))))
+
+================================================================================
+Path expression in call
+================================================================================
+
+operation Main() : Unit {
+    Std.Math.PI();
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (call_expression
+            (field_expression
+              (path
+                (identifier)
+                (identifier))
+              field: (identifier))))))))
+
+================================================================================
+Comment kinds: normal, doc, and quadruple-slash
+================================================================================
+
+// normal
+/// doc
+//// four slashes is a normal comment
+namespace N {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (comment)
+  (doc_comment)
+  (comment)
+  (namespace
+    name: (path_or_identifier
+      (identifier))))

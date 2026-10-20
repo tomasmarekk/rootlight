@@ -1,0 +1,71 @@
+{
+  "name": "tree-sitter-crystal",
+  "version": "0.0.1",
+  "description": "Crystal grammar for tree-sitter",
+  "repository": "https://github.com/crystal-lang-tools/tree-sitter-crystal",
+  "license": "MIT",
+  "author": {
+    "name": "Gabriel Holodak",
+    "email": "gthepiper@gmail.com",
+    "url": "https://github.com/keidax/"
+  },
+  "contributors": [
+    {
+      "name": "Devaune Whittle",
+      "url": "https://github.com/devnote-dev/"
+    },
+    {
+      "name": "Hugo Parente Lima",
+      "url": "https://github.com/hugopl/"
+    },
+    {
+      "name": "Margret Riegert",
+      "email": "margret@eowyn.net",
+      "url": "https://github.com/nobodywasishere/"
+    }
+  ],
+  "main": "bindings/node",
+  "types": "bindings/node",
+  "keywords": [
+    "incremental",
+    "parsing",
+    "tree-sitter",
+    "crystal"
+  ],
+  "files": [
+    "grammar.js",
+    "tree-sitter.json",
+    "binding.gyp",
+    "prebuilds/**",
+    "bindings/node/*",
+    "queries/*",
+    "src/**",
+    "*.wasm"
+  ],
+  "dependencies": {
+    "node-addon-api": "^8.2.1",
+    "node-gyp-build": "^4.8.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "eslint": "^9.16.0",
+    "globals": "^15.13.0",
+    "prebuildify": "^6.0.1",
+    "tree-sitter-cli": "^0.25.10"
+  },
+  "peerDependencies": {
+    "tree-sitter": "^0.25.0"
+  },
+  "peerDependenciesMeta": {
+    "tree_sitter": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "install": "node-gyp-build",
+    "lint": "eslint grammar.js",
+    "prestart": "tree-sitter build --wasm",
+    "start": "tree-sitter playground -q",
+    "test": "node --test bindings/node/*_test.js"
+  }
+}

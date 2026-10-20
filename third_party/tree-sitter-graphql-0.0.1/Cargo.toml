@@ -1,0 +1,21 @@
+# Local static binding for the exact reviewed GraphQL grammar source.
+# Only retained generated C is compiled; upstream lifecycle scripts never run.
+[package]
+name = "tree-sitter-graphql"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/11bit/tree-sitter-graphql"
+description = "Pinned GraphQL grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

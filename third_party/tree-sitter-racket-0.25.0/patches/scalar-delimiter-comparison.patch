@@ -1,0 +1,13 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -114,7 +114,9 @@
+     String current_line = string_new();
+     while (true) {
+         read_line(&current_line, lexer);
+-        if (strcmp(terminator.data, current_line.data) == 0) {
++        // Scalar sequences contain embedded zero bytes and are not C strings.
++        if (terminator.len == current_line.len &&
++            memcmp(terminator.data, current_line.data, terminator.len) == 0) {
+             lexer->result_symbol = HERE_STRING_BODY;
+             string_free(&terminator);
+             string_free(&current_line);

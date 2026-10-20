@@ -1,0 +1,245 @@
+{
+  "schema": "rootlight.native-producer-source-inputs/1",
+  "revision": "9eb12f7f4702875e79189789cf9b3ac560499c11",
+  "upstream_files": 1697,
+  "upstream_manifest": "UPSTREAM_MANIFEST.json",
+  "selected_files": [
+    {
+      "path": "parser/Cargo.lock",
+      "bytes": 5295,
+      "sha256": "242a4e3f9ad272adcbc9afc3b5948037b0bd165b25fa05085d7bb25cc3d6e1c2",
+      "native_seal_byte_identical": false
+    },
+    {
+      "path": "parser/Cargo.toml",
+      "bytes": 572,
+      "sha256": "14c6a85d9abf611854eca0e888716121a7f825ec96db601cdfea1f9cd2a00f0a",
+      "native_seal_byte_identical": false
+    },
+    {
+      "path": "parser/src/ast/mod.rs",
+      "bytes": 50769,
+      "sha256": "b1bd01850b177d6ed93d6ddf82fc64703caf8f3755fd6ffafb96450e9567bda2",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/ast/tests.rs",
+      "bytes": 73728,
+      "sha256": "8b0429d35001279818db2ef3342acd6b8600e6979df4505612a760f8f83a8dc8",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/ast/walk/mod.rs",
+      "bytes": 18299,
+      "sha256": "901de48a1faf3ca09cad9e324200bc8ea593ce83a32551b2222f22fcd5c65416",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/ast/walk/tests.rs",
+      "bytes": 5903,
+      "sha256": "16b4a1442901ac614b40a83ff717d148b78e057dbec6d33b3e1d74d3469380cc",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/control.rs",
+      "bytes": 4591,
+      "sha256": "7311714ef3e42d73cdcc202afc79246db5934f898d0b7e75390d144c0699cf99",
+      "native_seal_byte_identical": false
+    },
+    {
+      "path": "parser/src/controlled_parser.rs",
+      "bytes": 115337,
+      "sha256": "cc0e48d60319d2eefc9f4e49c9ac9b62836e6a31e739ac54a631d48344fb8893",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/controlled_strconv.rs",
+      "bytes": 6936,
+      "sha256": "16473bf6654b601c75bcd6fa4ced9573bfcf4522e3dbe816247b866f94cdbe4c",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/lib.rs",
+      "bytes": 363,
+      "sha256": "8c988ed1703a87c364ef62d6fbfb422db3f409f5b4d8fae34edb8e6509301a69",
+      "native_seal_byte_identical": false
+    },
+    {
+      "path": "parser/src/parser/mod.rs",
+      "bytes": 93832,
+      "sha256": "9fd8df963531c697c6ef424caf5ee48712d6f00921093b588b39a40520844b6e",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/strconv.rs",
+      "bytes": 6511,
+      "sha256": "25cb1d625cbc1a3f8d9dd6e1855c0430c5293754e028127f7d09a70ddbac1968",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/arrow_function.rs",
+      "bytes": 91701,
+      "sha256": "fb36e007dd2d9a0d414ccc60d2c730bfba6e2df4cfd85a99daa7f20fb1785e74",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/attributes.rs",
+      "bytes": 52370,
+      "sha256": "faf5c173dbc90b8846473036a233baefbba0bd03971679e77b1a444562896ee6",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/errors.rs",
+      "bytes": 59683,
+      "sha256": "e8eee82eb543171847a9932c30eb5f072cac395eda1f1b91e7094196e213386b",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/from.rs",
+      "bytes": 295767,
+      "sha256": "cb4cb464cbc0ce38079d888908ccd4006fa005223d10c78b801d324bf0f0bf63",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/literals.rs",
+      "bytes": 53763,
+      "sha256": "ace0e55efe11f43e9f94f929ca2a3e6754a00e9a26c82f1d586f9e2a2a5815b0",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/objects.rs",
+      "bytes": 52049,
+      "sha256": "68b09e194c233dcf3cf2dff67d8ca70654ca19902b2e8f7f02db8d1dd80778f3",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/operator_precedence.rs",
+      "bytes": 249229,
+      "sha256": "c5043c9093689f2171d1998c12cc1906836921433340e3be2f769f73fab4502d",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/property_list.rs",
+      "bytes": 39181,
+      "sha256": "9a8a0e910ad0e6e261a64c98ffb737b46cf9b03a15d5aa842d66558400c88aee",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/stack_overflow.flux",
+      "bytes": 7571,
+      "sha256": "1386058827e40672cbca48aa420b8bec0ded69751a1cb775f4e62eee0ad841fc",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/stack_overflow_2.flux",
+      "bytes": 1756,
+      "sha256": "68108fb4958a841bf0885291d04527cc420fbf40a10a9a485be3e1b9e8e18099",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/strings.rs",
+      "bytes": 52266,
+      "sha256": "97af7ada8859639bd4b88c3bb546cdd1b95ea1af00f8d265c7993608f58cc642",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests/types.rs",
+      "bytes": 76084,
+      "sha256": "63939454c521bb2ddb669fa1f62cd19be7f7c201327b4e057dbe0f6ae410b439",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/parser/tests.rs",
+      "bytes": 294788,
+      "sha256": "b1e2b3d42de723fe242192a4802858e7832ad613aa132b90fb787989394cca06",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/controlled.rs",
+      "bytes": 10421,
+      "sha256": "d4183bdab7ace0e680b4a4b8275a5014d16654d6cc0e8ab0f063b8b5dd7e54e4",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/mod.rs",
+      "bytes": 9065,
+      "sha256": "3f91b708cf957a165576fd77178eb07b0201a8ceeb92f909361f8c2d70c260b0",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/scanner.rl",
+      "bytes": 8047,
+      "sha256": "34e1f306994b8f69d0551110ce22efa75e0081b7c5f498ad293a739970bbcbc2",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/scanner_controlled.rl",
+      "bytes": 8195,
+      "sha256": "03b19d74c337f0f0744f20c79d15097f503790dc0902fdf0f356c312910e899f",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/scanner_generated.rs",
+      "bytes": 100261,
+      "sha256": "d917184e05832393cb1ee3133723181a7eac31b259782ac3f1af56bf68a25ed4",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/scanner_generated_controlled.rs",
+      "bytes": 100332,
+      "sha256": "f43ddcbc3f7fbebbf25a8089e7ba522d88ad2bb2171463eade9d2e1871c5cbb6",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/tests.rs",
+      "bytes": 62308,
+      "sha256": "3209038191df8af77a0d078e5ccb53c650ddfaf1c9140c3f9455bea4e184c199",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/token.rs",
+      "bytes": 2289,
+      "sha256": "d0331d761851a4ee48c50f6acebed72d4a0101c2ff202827c92ad71fe03c9b13",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/unicode.rl",
+      "bytes": 145498,
+      "sha256": "f923f3b385ddfa65c74427b11971785fc25ea806ca03d547045de808e16ef9a1",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/src/scanner/unicode.rl.COPYING",
+      "bytes": 1092,
+      "sha256": "6cf2d5d26d52772ded8a5f0813f49f83dfa76006c5f398713be3854fe7bc4c7e",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/tests/fixtures/original-scale_test.flux",
+      "bytes": 815,
+      "sha256": "b8b8bbb07e3a15910629e1569709de1b97494e2171c74642ee671ae7ada0df31",
+      "native_seal_byte_identical": true
+    },
+    {
+      "path": "parser/tests/native_control.rs",
+      "bytes": 10668,
+      "sha256": "acd3bbe245a033c402ed6f9eaef332cdc47591eee1d3d40a6cbb792844d90d2d",
+      "native_seal_byte_identical": false
+    },
+    {
+      "path": "parser/tests/parser_result.rs",
+      "bytes": 9637,
+      "sha256": "4c8b72a89a8c9646a44eeba1659f84d56b7e05547f8c450fe5ea079a103014a8",
+      "native_seal_byte_identical": false
+    }
+  ],
+  "compiled_generated_source": "parser/src/scanner/scanner_generated_controlled.rs",
+  "generated_input": "parser/src/scanner/scanner_controlled.rl",
+  "unicode_license": "parser/src/scanner/unicode.rl.COPYING",
+  "build_time_downloads": false,
+  "build_time_generation": false,
+  "native_qualification_sha256": "67e0cac5583736e287b2805bf884076da0c7e3df16a5dc1ca16e06c9d236397b",
+  "candidate_rootlight_compiled": false,
+  "native_qualification_scope": "Historical pre-alignment capsule only; aligned dependency frame requires its own actual native20 execution",
+  "current_dependency_frame_native_tests_qualified": false
+}

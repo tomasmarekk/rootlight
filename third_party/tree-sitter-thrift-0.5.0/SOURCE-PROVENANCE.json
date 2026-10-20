@@ -1,0 +1,49 @@
+{
+  "schema": "rootlight.schema-static-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-thrift",
+    "version": "0.5.0",
+    "unpublished_local_binding": true
+  },
+  "language": "thrift",
+  "upstream": {
+    "repository": "tree-sitter-grammars/tree-sitter-thrift",
+    "revision": "68fd0d80943a828d9e6f49c58a74be1e9ca142cf",
+    "archive": {
+      "path": "upstream/tree-sitter-thrift-68fd0d80943a828d9e6f49c58a74be1e9ca142cf.tar.gz",
+      "bytes": 86089,
+      "sha256": "03ef2fbf478bba40d79f8f560a11139eed6febcf8c01a22553c6c108288eb90f"
+    },
+    "original_regular_files": 54,
+    "original_lifecycle_executed": false
+  },
+  "native_inputs": [
+    {
+      "path": "src/parser.c",
+      "bytes": 731407,
+      "sha256": "4bccae3f435ab44d52a2811728749e59c030b51dcf79f854df813e8496af2047"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 6988,
+      "sha256": "a3eb18ef034b3f4255b965a26caa276f9cfe13a79573b402f1a12dc5018052aa"
+    }
+  ],
+  "native_abi": 14,
+  "external_tokens": 0,
+  "generated_parser_changed": false,
+  "generated_sources_regenerated": false,
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "bytes": 25788,
+    "sha256": "edca2daaeae6c5c7ff9796aab02780971d64f1b1ce461d2d688f87eba73e4bc9"
+  },
+  "qualification": {
+    "compiler_or_parser_executed": false,
+    "discovered_or_registered": false,
+    "structural_or_semantic_analysis": false,
+    "whole_language": false,
+    "installed_package": false,
+    "empty_cache_network_denied_build": false
+  }
+}

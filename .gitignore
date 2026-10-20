@@ -1,5 +1,6 @@
 # Rust build and coverage outputs
 /target/
+/source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/target/
 /artifacts/
 *.cdx.json
 *.profraw

@@ -1,0 +1,24 @@
+# Static local binding; upstream package lifecycle scripts remain inert evidence.
+[package]
+name = "tree-sitter-pony"
+version = "0.0.3"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+license-file = "LICENSE"
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-pony"
+description = "Pinned Pony syntax tables with exact scanner state restoration"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = "=0.26.11"

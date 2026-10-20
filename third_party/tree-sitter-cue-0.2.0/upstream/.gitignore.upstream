@@ -1,0 +1,7 @@
+Cargo.lock
+/build
+/node_modules
+script/examples/*/
+/target
+log.html
+test.cue

@@ -1,0 +1,16 @@
+{
+  "upstream": "https://github.com/ysdragon/tree-sitter-ring",
+  "revision": "b44d254e571ecba248eee803bdc5d70d00ec677f",
+  "version_authority": "Unmodified package.json/tree-sitter.json1.1.1; local Rust wrapper is authored, upstream has no Cargo wrapper",
+  "license": "MIT",
+  "original_git_blobs": 31,
+  "all_originals_exact": true,
+  "inert_upstream_names": {
+    ".gitignore": "upstream/.gitignore.upstream",
+    ".gitattributes": "upstream/.gitattributes.upstream"
+  },
+  "active_change": "Exactly s->last = LAST_NONE before optional scanner state restoration; native scanner reset RED21 is retained",
+  "unchanged_generated_parser": true,
+  "no_build_fetch_or_regeneration": true,
+  "dependency_acceptance": "Wrapper uses already-declared versions, but no Cargo resolution/build, empty-cache/network-isolated acceptance or product integration claimed"
+}

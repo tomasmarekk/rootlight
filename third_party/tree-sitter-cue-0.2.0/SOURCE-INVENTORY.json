@@ -1,0 +1,1325 @@
+{
+  "schema": "rootlight.cue-static-source-inventory/1",
+  "files": [
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 534,
+      "sha256": "3461df19d57a00821c396c16305355438ff8bdaf075d21b8d1bd10295727aff7",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 749,
+      "sha256": "4cb3d306f50724f73a2ba6a09d64a68309962cafb5c82dd150890b9903748226",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/tests.rs",
+      "bytes": 3168,
+      "sha256": "4454968c91b0883d52149dfb6d6691480a2c51428514763e243472c946f92232",
+      "executable": false
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 545,
+      "sha256": "68f63cbe9d99a647d7780e90f77c82b8a971522197d8bedaea561622bfe38188",
+      "executable": false
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 22876,
+      "sha256": "eea74964afd3a79ba216c0edbe6f13292c555429a9b70751f7a589bfc117bdcc",
+      "executable": false
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1146,
+      "sha256": "b8f5cf03ad4cbe616b948981f8cff6795a3aa2cfe7d91600d6e0d2ce9951f0c9",
+      "executable": false
+    },
+    {
+      "path": "SOURCE-PROVENANCE.json",
+      "bytes": 78613,
+      "sha256": "b221068367b853df9aa49e1b60cc8cf19be4354b4475205f4a22585ee1aa08ef",
+      "executable": false
+    },
+    {
+      "path": "SOURCES.md",
+      "bytes": 792,
+      "sha256": "6b21b6d175d6f8c61a61f79ff2c2547679838c39d06963a68eb016e1feae3b8e",
+      "executable": false
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 122523,
+      "sha256": "9b45bf175e762759a267a63a388be17408b1ba3c04346e614f8fcb17b8d3d330",
+      "executable": false
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 31219,
+      "sha256": "d5baa0948b2827672ab0a42af2b97ddb36abb4924e928725e95b1c2cefe67a58",
+      "executable": false
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 3279327,
+      "sha256": "9301d8d967ad7c86a6f235c83e8951da5cf4adafb26e4fadf6b081fda058035b",
+      "executable": false
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 11467,
+      "sha256": "4dbdfcca1c542fb5e9226102d1558d40c22d0a773ecfbefaa97671e91ac7a245",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/environment.cue",
+      "bytes": 566,
+      "sha256": "2c99e3bd0d827b92df2c36cc4cda8477c6f95d1e43cc7775abfa1fd9ebb49185",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/LICENSE",
+      "bytes": 1106,
+      "sha256": "a78f6d51569055bd73182f87a638865ecee7df9027f57d676d28ee8f5ee2416e",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/SOURCES.md",
+      "bytes": 420,
+      "sha256": "ece44e9b02ece68d5e5814f696243019932c08cd084b0cd53361a31d0cbd516a",
+      "executable": false
+    },
+    {
+      "path": "upstream/.eslintrc.js",
+      "bytes": 400,
+      "sha256": "e2cb5680b08e2e57e9b2864a4ef582567c6a29f65fa3ec42e3a8b0336429f331",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitattributes.upstream",
+      "bytes": 125,
+      "sha256": "f8208733f1d65fac2bced8a7f67688d29a8832e4d9ab124c0f0cf9f9521f645b",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/ci.yml",
+      "bytes": 633,
+      "sha256": "a303f83e4bfdaccc0bffd37fbe16ef2b2179ba594cd83e84f010c5915265ea92",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/fuzz.yml",
+      "bytes": 266,
+      "sha256": "d07b0c4128f770eab10eb8f6dfc352ab32e49bfb7edd52f37ae2c86dca7eb64c",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/lint.yml",
+      "bytes": 287,
+      "sha256": "78da9a98a4691ea05e7e5ea8525024eda1d52bd04a380f053669fc94a624018f",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitignore.upstream",
+      "bytes": 77,
+      "sha256": "f4e9ab4384f1b9c9a8a0ad8c53feec06d6521ae94aecf35676170eb5901fef13",
+      "executable": false
+    },
+    {
+      "path": "upstream/.npmignore",
+      "bytes": 34,
+      "sha256": "4577548598b140d422e2b9f4c52423d53912476e52791cd18a95309b0df1c818",
+      "executable": false
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 327,
+      "sha256": "5c154244e7a37c59fe79072f529189df11591ef9209a56552aea65f8f2c59b89",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 872,
+      "sha256": "84fd11c7222d5fe320819487efbe9f2b3b81b0c6810e4e1d18bc3b61fa34ceac",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 458,
+      "sha256": "f0e2fcf94dabbad77db2f9356dbd0a0242e253d23a4564b6a48181d767b3a573",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 652,
+      "sha256": "fd420b75712f7437d7fadb6c488a417a3bc268bcf8c7c43185d7db1fab94c614",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 2590,
+      "sha256": "07a9bdc2747dc353b7546fcc18476206d271d27df279150edfd2a36b31d3efe7",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/README.md",
+      "bytes": 1228,
+      "sha256": "53d2aab08e1e1f7e014314eed6a3f55cb4f0511354a59b0b5d47b35ed0240684",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/swift/cue.h",
+      "bytes": 231,
+      "sha256": "9c5f190bb778afce919185c23ba6bc6a75df09fd1f1100e7f76c7bd830867cfc",
+      "executable": false
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 639,
+      "sha256": "94db224132f98e437b1434e28a092f2ca031708854b66fe38f648f311666a3b8",
+      "executable": false
+    },
+    {
+      "path": "upstream/CLAUDE.md.upstream",
+      "bytes": 2547,
+      "sha256": "595bb4f264e93f93efe3a82d4eee7f91f3be26185aeffc5a2419ee9f88169346",
+      "executable": false
+    },
+    {
+      "path": "upstream/envrc.EXAMPLE",
+      "bytes": 48,
+      "sha256": "cc528cd6b0c1163e180780215fbeb9b231bfcb37e0a048105dfe85504da86b64",
+      "executable": false
+    },
+    {
+      "path": "upstream/flake.lock",
+      "bytes": 1481,
+      "sha256": "d313449339e28e20336c05e0af3fa5a29aac1a94b8f3cbb095ec3c5c8c045b4d",
+      "executable": false
+    },
+    {
+      "path": "upstream/flake.nix",
+      "bytes": 840,
+      "sha256": "271b41d4c96a416d0442e514f74c5436941cd0a30b55ffe64256a8884f61ed43",
+      "executable": false
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 22876,
+      "sha256": "eea74964afd3a79ba216c0edbe6f13292c555429a9b70751f7a589bfc117bdcc",
+      "executable": false
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1146,
+      "sha256": "b8f5cf03ad4cbe616b948981f8cff6795a3aa2cfe7d91600d6e0d2ce9951f0c9",
+      "executable": false
+    },
+    {
+      "path": "upstream/neovim-ts.png",
+      "bytes": 201182,
+      "sha256": "272469b64c60be48a34f28bff9dbfb509b5fd587987e46ebbd475cc291ac0d3d",
+      "executable": false
+    },
+    {
+      "path": "upstream/package-lock.json",
+      "bytes": 45361,
+      "sha256": "b8a42f3e86b611c43d4d1889e1357595679338e3eb748643c3c340f00e8ac81f",
+      "executable": false
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 999,
+      "sha256": "58ce3907b6974be7864ed0826a8c7312d431b14f1e8618b8089b2828d513b26e",
+      "executable": false
+    },
+    {
+      "path": "upstream/Package.swift",
+      "bytes": 1119,
+      "sha256": "16a1c79618d4e9311ea0836f878ca298db61c7a2b37886654310aedc6c3b0a9e",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/folds.scm",
+      "bytes": 52,
+      "sha256": "24a378bb15b50056c2938dd602801046d31ef0c430e41baf46bbb473920eb2f5",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/highlights.scm",
+      "bytes": 2398,
+      "sha256": "10e3808b6814e9f9bc085b81f9a5b593c2d9d9238de06e90b87894ecf46db897",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/indents.scm",
+      "bytes": 208,
+      "sha256": "88208e9de6e56c47b0117128da9cb6611a29b4ab960198543d0f0963e9046a49",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/injections.scm",
+      "bytes": 19,
+      "sha256": "3f47510c9149ea88ed743161d7c5efeb31133a605eb3b3006d90adb6d63f3411",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/locals.scm",
+      "bytes": 458,
+      "sha256": "60332d6291f18468f490087877fcf5d52c4c57d3e725054da5d1987f0c0f5f80",
+      "executable": false
+    },
+    {
+      "path": "upstream/README.md",
+      "bytes": 2535,
+      "sha256": "a3a812df1736dd669fef9bc9c70a3a17613eade28ba81e821ac047a4d12caa9c",
+      "executable": false
+    },
+    {
+      "path": "upstream/script/parse-examples",
+      "bytes": 1180,
+      "sha256": "8f3b6e039ba03204d5da1e366fe7af5838103fcc0c9aa952672a36356f6d83e0",
+      "executable": true
+    },
+    {
+      "path": "upstream/script/parse-syntax-corpus",
+      "bytes": 2470,
+      "sha256": "aea1c48528ef79f1225139e1fad46d60a507a064f81ae1ffc8e8403ec355db33",
+      "executable": true
+    },
+    {
+      "path": "upstream/script/sync-syntax-corpus",
+      "bytes": 1390,
+      "sha256": "709f1d44f2ffb47f425134c8828fcd7fad7f24d978600a769357fac86ce81fac",
+      "executable": true
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 122523,
+      "sha256": "9b45bf175e762759a267a63a388be17408b1ba3c04346e614f8fcb17b8d3d330",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 31219,
+      "sha256": "d5baa0948b2827672ab0a42af2b97ddb36abb4924e928725e95b1c2cefe67a58",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 3279327,
+      "sha256": "9301d8d967ad7c86a6f235c83e8951da5cf4adafb26e4fadf6b081fda058035b",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/scanner.c",
+      "bytes": 11467,
+      "sha256": "4dbdfcca1c542fb5e9226102d1558d40c22d0a773ecfbefaa97671e91ac7a245",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/aliases.txt",
+      "bytes": 1418,
+      "sha256": "4c24ee3b28bf45b2ef15fdf22ad418541d52b684160658da8ab141757170e6c3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/attributes.txt",
+      "bytes": 3760,
+      "sha256": "5451f8724f0a921d8ec366ceaeffc89cb6611fd18d3500682f25dae209272294",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/bytes.txt",
+      "bytes": 602,
+      "sha256": "bfa8f621f8ee767e64dc57b29c53258d9b3d13ab6ea1cae686e41f163efe9fb5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/comprehensions.txt",
+      "bytes": 9579,
+      "sha256": "cd0bea6bc36d6521f5704db11e15ba72d9b52705f37af2805097998417797686",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/expressions.txt",
+      "bytes": 4622,
+      "sha256": "f457b5324ea53bff5e38428cadaa78d93a44d9dd70a2d59b1850ee934103ebed",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/identifier.txt",
+      "bytes": 767,
+      "sha256": "02d3adb0ef0508f63bc008c5dab07afdfff73fe1c2812296c22b5fcc17cacfc8",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/lists.txt",
+      "bytes": 846,
+      "sha256": "6e31c96bba83985a08a5ab575c856fc84c662d22fb6af220c45d9371101085be",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/literals.txt",
+      "bytes": 450,
+      "sha256": "fedf825798e3bcac8ca7137bb1baef765f23c23bced668badb07bea3c77e0760",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/numbers.txt",
+      "bytes": 3625,
+      "sha256": "ffcd02ca660e69e796ff8cc0b2d6635763f85b436e825d93f27bbc9d577c6dce",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/package.txt",
+      "bytes": 356,
+      "sha256": "de2a804e7c83d802b42c58760b3be5adbff0e9a41502f1c0c54e0fb50fafbdc1",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/strings.txt",
+      "bytes": 2459,
+      "sha256": "036b780cdea0feab8545acad4971a25dc000e9a443429231f3350e37b6076c14",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/structs.txt",
+      "bytes": 2426,
+      "sha256": "3486271a60769747c6b38f620e431a2304b780517b605ce1e82b29947e579999",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/syntax.txt",
+      "bytes": 14891,
+      "sha256": "9e8eced2f6d2e79175afbd716b7fbcac65ac4e5133685cb898d70d8aac760dcb",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/toplevel.txt",
+      "bytes": 116,
+      "sha256": "742ee70e7aa992e2ffcbd42aaf262e56b0696506c1a974a4b3311a649887eb71",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/fields.cue",
+      "bytes": 62,
+      "sha256": "27a45cb9306605d61c17d134d0bc9d3239001a0dcb8dfe8c50fd004af32bcc59",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/functions.cue",
+      "bytes": 135,
+      "sha256": "5eb63c520375f4889b8c203f4e7b51ac74efff005480539e3c742af651d5760d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/alias_marker_before_alias.cue",
+      "bytes": 55,
+      "sha256": "9c7baab633a895ce34508a7bf640c498373b55a26cd25e572dceb28e6f04186f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/backtick_string.cue",
+      "bytes": 49,
+      "sha256": "c04f9cceebc3fb16e640c0d5cd5452db726e0509cf14ae5484fb0caea5698324",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/block_comment.cue",
+      "bytes": 56,
+      "sha256": "f16d28bf834b0a0dd4c48909f07af58fd4298e666be2a7c60ef27a5311e51404",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/closed_list_ellipsis.cue",
+      "bytes": 98,
+      "sha256": "58a369e4585bfdfaa27654f17ae871ff4890ef8f471fc6a999504f1b271eeb2a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/infix_div.cue",
+      "bytes": 67,
+      "sha256": "dbeebb581e2d5fa9fdb924ae37059382badac249c3d52edb45a5bc135300a226",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/isa.cue",
+      "bytes": 52,
+      "sha256": "02e9c213937e30be8cbbacab297ca71549ffc6b893824ba1384195146af3eee5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/octal_leading_zero.cue",
+      "bytes": 46,
+      "sha256": "909c8e1643f7ff02da43df6603a1a0d6c9a499024cad807774875d27e58e26b8",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/prefix_alias_field.cue",
+      "bytes": 76,
+      "sha256": "2c6f041be241db3f887ba570ef74ebf6fcf372baa339915d7e9443796693f2e9",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/prefix_alias_pattern.cue",
+      "bytes": 79,
+      "sha256": "ed28b6d76ce10e04bf8cff842108dc1215c3700f5cd52eebb60fed80cfa27598",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/prefix_alias_value.cue",
+      "bytes": 76,
+      "sha256": "c3a71c24726e8365ed712615172f73963b623faa0d1bdb252f3fcd58f01f65b7",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/reserved_dunder.cue",
+      "bytes": 66,
+      "sha256": "8434878a35ea6518c710b28b2d5b94d921910569ccfe8d67421e796ed6cd7348",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/fail/si_exa.cue",
+      "bytes": 49,
+      "sha256": "4fbc65f74002e90cbd0e5612cd22634e0b45f94ad0e5cc41abd06b4f651314fa",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_keyword_names.cue",
+      "bytes": 40,
+      "sha256": "8678a0b9889c0a2a425af5c5ef40947a70313ed4e862f3832368cd1b535c138a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_blank.cue",
+      "bytes": 56,
+      "sha256": "e5c400d1b49f1661d775a4ca0c7c172a81caae9d433de5579e90f7efdc84a266",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_dual.cue",
+      "bytes": 29,
+      "sha256": "159f492c2e7e817d6f9c1a3bf8bd467476fd1f5070ab7ef4c5c05e4e31b1b9de",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_dynamic.cue",
+      "bytes": 43,
+      "sha256": "d893f8bd0cf323361c77b68af2e16799bd711ae2cb435ef5d8bb6b460d035cb4",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_interp.cue",
+      "bytes": 26,
+      "sha256": "5f4b5e796a69b2ff05fe7198ad21116a7a712722ddf6d1b88dcf01800a2a056d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_multilabel.cue",
+      "bytes": 17,
+      "sha256": "a1eb8ac6737202f53ea93ab051510304edd79dbc18c69f1a8293ecbe8219440c",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_optional.cue",
+      "bytes": 22,
+      "sha256": "5cd1dd3214def8e724283a1db9fa7b11fa9ee52ad15a4898f47e5537ccae948d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_paren.cue",
+      "bytes": 21,
+      "sha256": "8e1d266df45656bbe1f26d57ea7f4438e909a4150e4eedca3eafb22b376680da",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_pattern.cue",
+      "bytes": 33,
+      "sha256": "32f978adde48a08f03a1aac5fc473d28b1e9ac867bf1233c888088ddebea61ed",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_simple.cue",
+      "bytes": 19,
+      "sha256": "bacb1081d4bb098385336d9301df78023a2367c06dbca5a17c08c261f362c676",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/alias_postfix_space.cue",
+      "bytes": 25,
+      "sha256": "3cff07961e2d0cc1bb21c9a7a881e97db6acc83447fc1607220ff9c33bb475ed",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/arithmetic.cue",
+      "bytes": 70,
+      "sha256": "5448c030e10c19636c964519074a4fe1692ddd69f6bc6396ed47086de6ddc6bf",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_angle_and_star.cue",
+      "bytes": 69,
+      "sha256": "2e7b3beba3d17a77ddfba288678b221eaa85f3b82f39d7203a56c175932a177c",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_bar.cue",
+      "bytes": 30,
+      "sha256": "8e96d9740129ebb5006d3efacc81b3427c655ee411ed80602f7a0c8a67cd7c22",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_bracket_values.cue",
+      "bytes": 55,
+      "sha256": "3639113bf900bc09d6de4307a604c6b3fd371eb33798aadc8d8d3e29abe6e8fa",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_comment.cue",
+      "bytes": 32,
+      "sha256": "4b944ac477ec538e76a2a305752903c31344a45f04fa8b4e06197d0c882798fb",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_dotted_keys.cue",
+      "bytes": 44,
+      "sha256": "0b3192917f36b8447407adb4e17005ff3ec63e791d5fb169f195a2ed995a751a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_equals_anywhere.cue",
+      "bytes": 49,
+      "sha256": "1b34d07001a24b75996d381a83c0a29370922513e642757e8e3c946da0c9efac",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_hash_args.cue",
+      "bytes": 30,
+      "sha256": "0747050ed83563321919bc0889cc48af978f8de8659976c4f84d85cb26e470db",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_key_after_space.cue",
+      "bytes": 26,
+      "sha256": "32c40227a2b532ee560369c2cf75c67f64142254ce16ca53a724e4ef68d0920b",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_nested_parens.cue",
+      "bytes": 33,
+      "sha256": "295718191339a41003da6026538a1c7456c8ef47a0aa5b15cf0859835953de0f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_spaced_equals.cue",
+      "bytes": 37,
+      "sha256": "50db96208ddaf64cc04ad5555669508d697bdd30bccd0012d036749e6c9cba98",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/attr_string_args.cue",
+      "bytes": 37,
+      "sha256": "eb74d201d4c6404204df767dd775b81a0f68e9ba17e1bd086d64dee6850e84a0",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/blank_identifier.cue",
+      "bytes": 83,
+      "sha256": "e641abe70921ab116e1500a61dbc7395572015579159f80c4b62d7971bb906e6",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/bounds.cue",
+      "bytes": 46,
+      "sha256": "ee1f97890a60fe03afb7381b81f4631f5d6a0cff53ce4e0907232340b3d43388",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/builtin_refs.cue",
+      "bytes": 36,
+      "sha256": "ec85295342a1c3060e9abb6028c57c1ebc7aacf82a6937de0cd34e0c9a8f3e5a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/builtins.cue",
+      "bytes": 124,
+      "sha256": "dc4fe114ff6371ee5ac181a63c53e4fa9e96dd8b4f1af4c32f2eaae88b3616f2",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/bytes.cue",
+      "bytes": 43,
+      "sha256": "364e49a7376cda87c469357f8dd5a26512c14bdab709bb601831cd75d17026ab",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/bytes_interp.cue",
+      "bytes": 33,
+      "sha256": "f86370fa794bff196cedd1e03d7dd30f1b280dc153a8d4fe118b6b981f5841e4",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/call_literal_operands.cue",
+      "bytes": 58,
+      "sha256": "6da88e74d6f3e1ca8cb2c4df0ae9a472eb33449b0d577c211dccdfb21f29eb1a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/comments.cue",
+      "bytes": 107,
+      "sha256": "d67a8a5c036f9e7062bc1f07a4a13263372fa208b68d1462de40a95c0ca0fc6f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/comprehension_body_next_line.cue",
+      "bytes": 66,
+      "sha256": "7ad8691c018deaf0610187419a13c3c81352a7d1c5b5a4781cd1b9207e70ef35",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/comprehension_clauses_multiline.cue",
+      "bytes": 105,
+      "sha256": "cad836df1ddb6e66f63a4dccace720452a3251eb83d80b6dfc1ea5f628165bd7",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/comprehension_guard_paren.cue",
+      "bytes": 96,
+      "sha256": "c477584f6ab849cf9b3bf4abf51b9f2eace64a3e4c1c5c6207964fa73871d0ad",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/comprehensions.cue",
+      "bytes": 112,
+      "sha256": "aaebc12cd48205402e5ca57b38b2266a287307d79bdde1eb6b09dc9f33ef43d1",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/decl_attr.cue",
+      "bytes": 22,
+      "sha256": "6cc632df4ff9c546fd82f74b0235277dacf666d45f6b9e0c91783fae94aebe3d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/default.cue",
+      "bytes": 10,
+      "sha256": "f6a4ae42430ba6438fe3104b500bb9a8804e373a716e5129fdc5e063c85c0a0d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/defs_hidden.cue",
+      "bytes": 21,
+      "sha256": "379649f965722b963100e5a437b138a5cc4ef60826087834a78facfc6e2a506f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/dollar_ident.cue",
+      "bytes": 17,
+      "sha256": "95a7b047d734b34790d9304fd48f682a447f4dfb50f95f4bb7d3a86b170d3e67",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/embedding.cue",
+      "bytes": 30,
+      "sha256": "e5b5c9db2490142bc4e8756bcd39e3e8bafe7ce469adffad9c793e0f249410ee",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/field_multiple_attrs.cue",
+      "bytes": 26,
+      "sha256": "f02a5cb6607827d35c419452072c90a9571692dc80bc9b64131055ca63365959",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/file_attr_after_package.cue",
+      "bytes": 64,
+      "sha256": "853d9ffb157c6b3626b1078942e41c6090d79469d406bc1ddd5c758487357718",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/file_attr_before_package.cue",
+      "bytes": 42,
+      "sha256": "9bf91973a645d591474b81983435dfef221f115a0ed465256c1af9c3ee1d0174",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/float_then_unit_label.cue",
+      "bytes": 26,
+      "sha256": "d39869c3be739ebc9a2ae6208d1104308efccd36b4d58e7e6478849d3989bd65",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/import_hidden_name.cue",
+      "bytes": 45,
+      "sha256": "3e704094d9c88026610151b8cba5a5ede158ae667c5d3d45f8142146e122bc15",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/imports.cue",
+      "bytes": 159,
+      "sha256": "7745ccaa6c54182f9be40a5c8d0d76a535042bf58f02f0d340918163d577eaa9",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/index_trailing_comma.cue",
+      "bytes": 28,
+      "sha256": "9d35c1fe8d6600d661cf68e206a5ae93d8476d0a9716b3bae5c69030dc7e3be4",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/interp_newline.cue",
+      "bytes": 24,
+      "sha256": "5290d8d3a57d0edfcc5b3de0adc018d29e5198c62dd7dd969fe9470e6699d96b",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_calls.cue",
+      "bytes": 104,
+      "sha256": "da88cb6734384a053a5512b739844a665baea81ae501c62c171336a43d94f6f2",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_for_var.cue",
+      "bytes": 40,
+      "sha256": "d3b8753dd4db0a86859adc4df9058f3900e3d1295a3748c49eaf376e4dc42793",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_labels_marked.cue",
+      "bytes": 75,
+      "sha256": "e293e5dfd6844a7019e23f97ff52c0d93748c4ff0e6e880512b399994d91067d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_ref_then_field.cue",
+      "bytes": 101,
+      "sha256": "578d75baa3691eae3926d5f7b7bab5229fc19f542e198f6e203d3be9c9184ada",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_refs.cue",
+      "bytes": 40,
+      "sha256": "9472bffd29cbe0614a38a419c0512c155bd30156e8e4a1b93f6dca7445374eb1",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_refs_clause_words.cue",
+      "bytes": 52,
+      "sha256": "34b1df03043c27ed594ab08b25975dc71d2000ed24bb446f7bd817ea943c7fc7",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_refs_line_end.cue",
+      "bytes": 89,
+      "sha256": "dd49d0dbb321e353d89d17ef91dddf1ce5b9afb123d09c702949f57aa069d21b",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_refs_value.cue",
+      "bytes": 164,
+      "sha256": "1f872dc0ad1b8af934eb0c87515d6ab1e7ab0e3dc40ecbe9121425518f61c62d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keyword_selectors.cue",
+      "bytes": 91,
+      "sha256": "9f68eab4bccbea27ab06ded1dc580b7e337cb34da43ecdf374cbcc25cbeef43a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/keywords_as_labels.cue",
+      "bytes": 208,
+      "sha256": "20bc1973797d747fc6b58c0a1c56642b59d5798fe0861f0f0d955e4d73c69ac3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/label_dynamic_after_reference.cue",
+      "bytes": 19,
+      "sha256": "887d286e0be26dfa7387ac423b19fb03d2ce7a74ed656517d9e4cf23185e275a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/label_raw_string.cue",
+      "bytes": 22,
+      "sha256": "d8ae4ba7008170c9424c22c94666dd0be8b26d1b2b0aef0704e09091f838ca58",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/let.cue",
+      "bytes": 43,
+      "sha256": "6d765e889596e2d1b7c45a7cde9ea31654b46305819ba3b9504d7897e1d823e4",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/let_keyword_name.cue",
+      "bytes": 51,
+      "sha256": "66171da2ca7734182225d9913f28b1b2d5ccca8a798e5391236c2a7a8123be2a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/line_start_unary.cue",
+      "bytes": 78,
+      "sha256": "45b7804154c295142445f9e50ca0af0af7d57172bbcb6877d7fb3eab7a38d8f5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/list_comparison.cue",
+      "bytes": 89,
+      "sha256": "600373a059199db1d3de5cbb356438e9ae07259f7ea56c23a7a4e76473fc086f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/list_ellipsis.cue",
+      "bytes": 42,
+      "sha256": "61b2c0aae83a929450d87cd36bc05bb6ec93185a33fb281f69058069f13af71f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/list_newline_sep.cue",
+      "bytes": 16,
+      "sha256": "273c72602e0885710ab1278df2cdc05e0cb450f9b3ec23f3451bb8fe8f678786",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/literal_selectors.cue",
+      "bytes": 63,
+      "sha256": "4f9157f03ecfe377d503f02d047be4146283743032ba3df0bcf439858c3d4313",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/multi_hash_string.cue",
+      "bytes": 73,
+      "sha256": "43ec01ebfae46361f3442cfd4b2cdda983a75aefb63f5799ca1e7b6b47543f10",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/multiline_escaped_newline.cue",
+      "bytes": 24,
+      "sha256": "241534950fc034db100284ba6d8a72b8a7e083960b579f77f477c52bcb8004b2",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/multiline_escaped_quote.cue",
+      "bytes": 48,
+      "sha256": "a85d49aef615015c5940d453414af9b75e287939ccffb4fc105746360b69dcc2",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/multiline_interp.cue",
+      "bytes": 34,
+      "sha256": "e36c45bc307b994e71a8c183408b9a5dc7e747b2df00582747cb4caa33c979f6",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/multiline_interp_quotes.cue",
+      "bytes": 79,
+      "sha256": "24010c38e4bba9ff91507bb16a0fc3f4c2c77a59effb8da8de82831503f7cc96",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/multiline_quote_runs.cue",
+      "bytes": 99,
+      "sha256": "83add352771db04b943da1c1eec66730c55848293c3080901b1084fa35e13ac3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/newline_before_colon.cue",
+      "bytes": 15,
+      "sha256": "be6b3dc45514bca010075100648f2b22e4f06cd383007b153758d767e8098ac5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/null_value.cue",
+      "bytes": 23,
+      "sha256": "4aa1d0398a9193b2b0027b264f75c6697a1cadb72070913d781bc2869f2e3cde",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/number_prefix_underscore.cue",
+      "bytes": 34,
+      "sha256": "afb6098682ce7bb4f77b8a54420d08762f314a9f63c047dbed70422990bf6186",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/numbers.cue",
+      "bytes": 70,
+      "sha256": "7bc9ac0cb63f160559a8fa90e18b91539054dbb948b9c3589a31e1a1199b4701",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/package_blank.cue",
+      "bytes": 28,
+      "sha256": "34a4030ca12b764fbaf71142ae42a1800f259f8505fc333d9644549c92621d07",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/pattern_constraint.cue",
+      "bytes": 41,
+      "sha256": "33067e95aca361e51080a7f9828fede199dc17bc9778f7ed14e07019208568a7",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/postfix_ellipsis.cue",
+      "bytes": 55,
+      "sha256": "c070db87f3525f5cfb7e160982712f8858c661e723977f7397fc37a9ad9f231e",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/postfix_ellipsis_int.cue",
+      "bytes": 8,
+      "sha256": "a0360acd080a8efbad4b4a414ba4a4cc917124f0187d8053277c7a0edc4a987a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/postfix_ellipsis_signed.cue",
+      "bytes": 18,
+      "sha256": "38c5e9ca99bf56a60c2a978c7325b060f3e074262d5293f7d48e0597c2a69af0",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/postfix_ellipsis_space.cue",
+      "bytes": 46,
+      "sha256": "8a0385a16e1269057bce02fdbb99ed8e4aedf47bc41aede3479caafb327aab04",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/raw_interp.cue",
+      "bytes": 33,
+      "sha256": "69a6899e1cb8ffd48b587a85f35c457a05ef9ffd4abe6e621e0b65924fb29074",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/raw_string_quote.cue",
+      "bytes": 43,
+      "sha256": "658fa70d9c4896f18f237147b45e6771a716130ec3850068fb17562ca9f89377",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/required_optional.cue",
+      "bytes": 44,
+      "sha256": "24f119fca315be23d4f8b596d0164d203c63ed00adaaab651c2e78919a40d822",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/selector_space.cue",
+      "bytes": 37,
+      "sha256": "4082a50ad13350af056845ae479567ada23b2bfbf0e1ef55e9e78fc7194757c2",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/self.cue",
+      "bytes": 49,
+      "sha256": "68b6c2ac606a20384844705a199bb22571f9fc90b11ef22e7cb9dc0fedc21250",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/shorthand.cue",
+      "bytes": 11,
+      "sha256": "443628338ae6c5e83038119bb875ab403f8f4a4f8235c279b6d7007e0311a320",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/string_escapes.cue",
+      "bytes": 48,
+      "sha256": "a1022190b7865d7273ffd38ba910b09638e49e7d30d4d3a024f3a7f38373e884",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/struct_ellipsis_end.cue",
+      "bytes": 18,
+      "sha256": "4a03b205f127091dab2e07baeaeaa9a7c3d616189d6955a33c6baae3534b653f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/struct_ellipsis_midline.cue",
+      "bytes": 18,
+      "sha256": "5e1cb40a792896a3722b9b174eb8ea5aeb73b1938fd2d7aaf6d6e8e7c2cecb19",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/top_bottom.cue",
+      "bytes": 12,
+      "sha256": "47f83beffbd1409b858e3308c9144abd0dd7abb69e166472908a7dedcdee0502",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/unary_eq.cue",
+      "bytes": 19,
+      "sha256": "c60195b3a4438a9af2417c6fc0016910a84a77da8c9627a674d107610dc3b706",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/unary_ops.cue",
+      "bytes": 27,
+      "sha256": "6704fe37f2a9e4ed844f0edb04c8c89dc72bbc38f7d8e143fae856302ac83601",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/pass/unicode_ident.cue",
+      "bytes": 17,
+      "sha256": "d2ac8f05c3bf6cff361f596cc027f908ae2e83d63e8c13831787e3b4a44b14c2",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/call_chained.cue",
+      "bytes": 99,
+      "sha256": "1afe84059fd19b0908183a8f11142b14833237e3d724a96a6c04e2a8034e7b65",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/call_labeled.cue",
+      "bytes": 93,
+      "sha256": "81c37c654f1b9af15f8480218e944eb14e9c4760ff2a4d3e13fed205af7d3e32",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/call_on_type.cue",
+      "bytes": 63,
+      "sha256": "07e594dddf9c0f5d2960762f52f5ee1cf4d83b33834d4bba26b8bea7d77ce260",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/call_partial.cue",
+      "bytes": 75,
+      "sha256": "8870f02d58ba66c2fbdf043b3aa87f9117dcd5b2f7d4358d0bde5e51bd98dd05",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/closed_list.cue",
+      "bytes": 42,
+      "sha256": "87f00ce8244ec580a99613adbe05d84fa59c7195cd97ef44aa8e809413b66eab",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/closed_struct.cue",
+      "bytes": 35,
+      "sha256": "56ea2e3cd4998ddb4ddc6cf9b804badb37a9dd93ec59b49437b501b817bd1a83",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/fallback_then_field.cue",
+      "bytes": 103,
+      "sha256": "293aa0a20520243e5e7166861df5b9a4abc05bbb5c4259b2fdcd7cd9991e2769",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/for_fallback.cue",
+      "bytes": 71,
+      "sha256": "da5c26fa9fe0a6364d6b2232de6a35282f78a53b3ab4cbfb55be333395d69698",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/for_otherwise.cue",
+      "bytes": 72,
+      "sha256": "0671ab11a186f3d95e2fed522716238d7d0e73b5761384cad75e30760c826292",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_body_no_return.cue",
+      "bytes": 47,
+      "sha256": "002ee44717fd34e9f84fab7535104f046840a6339c24de9cef4d27b32feb4da1",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_body_postfix.cue",
+      "bytes": 153,
+      "sha256": "475a844b5abed21e5b9341c6371948770db5984109d0c089333df22c7a1b46bc",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_defaults.cue",
+      "bytes": 85,
+      "sha256": "cd81af9dfb8e1ba1f6ed6e6bef2d512d106e30bed9e4bb593c09c9e69ef243e5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_keyword_params.cue",
+      "bytes": 129,
+      "sha256": "d87bdc76d9883089fb09cfc4da63e68765dfdaeabe8d7b9290022fc25bf362f4",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_literal.cue",
+      "bytes": 79,
+      "sha256": "212aa67dd8f5fa3b6a8fff57a6715f411319b0f910690ee9ecdea2b45469be82",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_multiline.cue",
+      "bytes": 67,
+      "sha256": "bbdf0e4d19cf60ccbb4f1d411d93fd0b06e19c2228c93afdf197cefe8c2adcc5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_name_then_dynamic_label.cue",
+      "bytes": 60,
+      "sha256": "b22442d447bb41bffa2c103d09f953fcedd773f32bb38bda5a4936d7cc17e2d3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_open_signature.cue",
+      "bytes": 49,
+      "sha256": "6169dfb9586028fda483a137011b9ddada340c94a221c6924516e49fccd47e9f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_param_attrs.cue",
+      "bytes": 58,
+      "sha256": "3f6a6a6f048ef2d6a0f008385ca5e87863e88959d3a87a1fe9ce9b95749383f0",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_param_markers.cue",
+      "bytes": 74,
+      "sha256": "878582cb58dd970a7dd0b1002286e98a2eeaf07006577bdf1a83b69c8e48100c",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_type_only.cue",
+      "bytes": 52,
+      "sha256": "4b66b902a3a41214cfd07fad8edf403443f297faa3943b78d7eec3337822eee5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/func_validator.cue",
+      "bytes": 89,
+      "sha256": "14c79319607ac3a9a542ecc835beb44e0d9f413a289a93431572bd0e4a7b3ed8",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/if_else.cue",
+      "bytes": 51,
+      "sha256": "c83af3324de34c0af5d117ca732db4b959f4f5681bf8d17d744c68a4aea0969a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/list_comprehension_else.cue",
+      "bytes": 80,
+      "sha256": "b0ae61bfad4f3a0e0174ff658d457838bf34fc2dd6dff86afa76f9fd9db74b56",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_assign.cue",
+      "bytes": 57,
+      "sha256": "ef5ca06c31ad68b533d9a5c8a702b6350f264bfc62fa652d8294126973c7c62a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_assign_blank.cue",
+      "bytes": 57,
+      "sha256": "67a4cec4ac6e5f265d6157cc5d88d8e622f9e437e56e034052ea29b2ea0ab6a8",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_assign_keyword.cue",
+      "bytes": 69,
+      "sha256": "a9532ca76aeaa9901961d21157f379c2a0f84bf3a847329ad8969fc06ec1b554",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_body_next_line.cue",
+      "bytes": 58,
+      "sha256": "e2b898a863e5de2317964b21da70fc2ab7be824295aa3224e161caa6e01ba083",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_clause.cue",
+      "bytes": 51,
+      "sha256": "444b88bb2ae8cc2e8856dd4c226baab3759e107ad5e3cb7262d97bf7e6340b05",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_clauses.cue",
+      "bytes": 123,
+      "sha256": "5a377cbabe38e4c7bfa5b06efc202ff501edc1e849cb085c4e58c9bd1a5181eb",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_else.cue",
+      "bytes": 58,
+      "sha256": "a2281b6859379eaca94f5d625f63eb7ca6b9766d963799686fe16eaa4b7e1528",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_in_list.cue",
+      "bytes": 40,
+      "sha256": "ac54fbb898c9935f01e989a7093d75c6c587cf2187bd94dbc675fd0ac131e2fa",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_later_clause_next_line.cue",
+      "bytes": 96,
+      "sha256": "bd1b6b6e2f2f554ab46bac1561ba150452ac1fa68d5716cec149b55c3a63bc2c",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_optional_paren.cue",
+      "bytes": 56,
+      "sha256": "dd16adbffd92d263ffb0da04539952859c0fa267fe44f5af9b585b4e6d496c54",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/preview/try_optional_selector_index.cue",
+      "bytes": 68,
+      "sha256": "692f3c2ccae41acd1f80612e2017ab5ee18aee65d4bbe0d09f0dfa6b558e8794",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/syntax/SOURCE",
+      "bytes": 30,
+      "sha256": "3967c25a2bb8348e15e2918bb08f4e64fda74f65ca797b1d4a42b4db66c8a5e8",
+      "executable": false
+    },
+    {
+      "path": "upstream/tree-sitter.json",
+      "bytes": 722,
+      "sha256": "79fdc5d01029a0ba14863d5b9a2b4b35954e2620d95745fd2648439dd333b050",
+      "executable": false
+    },
+    {
+      "path": "upstream.tar.gz",
+      "bytes": 395147,
+      "sha256": "85483037f1ecee6f23cf99c8463eb3b2297ff258b61e7459e711e8396e38298e",
+      "executable": false
+    }
+  ]
+}

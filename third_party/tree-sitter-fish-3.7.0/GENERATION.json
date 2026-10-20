@@ -1,0 +1,66 @@
+{
+  "schema": "rootlight.fish-static-generation/1",
+  "generator": {
+    "name": "tree-sitter-cli",
+    "version": "0.26.8",
+    "binary_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "official_archive": "tree-sitter-cli-windows-x64.zip",
+    "official_archive_sha256": "8d8b8b0dc0a94a2d757af227d65970e349725d445375d1eb1641595d5c691b25"
+  },
+  "command": [
+    "tree-sitter",
+    "generate",
+    "--abi",
+    "14",
+    "--js-runtime",
+    "native",
+    "grammar.js"
+  ],
+  "abi": 14,
+  "preparation_only": true,
+  "build_time_generation": false,
+  "inputs": [
+    {
+      "path": "grammar.js",
+      "bytes": 7438,
+      "sha256": "9d4aabf2f9154d26aa86cde278102f212ee24cfd271f3fd279e223b620ec8588"
+    },
+    {
+      "path": "grammar.ts",
+      "bytes": 10341,
+      "sha256": "790c061a31f8e023481b11ad2778e3fa468a1e3d07e95f33a15251d9b7610e90"
+    }
+  ],
+  "generated": [
+    {
+      "path": "src/grammar.json",
+      "bytes": 32444,
+      "sha256": "7c46702e45b2b551ce69e36d7523f914d79b627f06c243a1ae52d9fa7820c9b1"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 41628,
+      "sha256": "94b6446d6cd39ea7e6553f999123a9a72f6a800978903b3a4dbd7eca853dea63"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 536118,
+      "sha256": "b94af544be88b0fe26316c806ce5a349c16166030028098eeff7b85b3bc3186e"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ]
+}

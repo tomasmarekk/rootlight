@@ -1,0 +1,7 @@
+{
+  "extends": "https://dprint.gplane.win/2025-07.json",
+  "excludes": ["bindings/", "src/"],
+  "typescript": {
+    "arrowFunction.useParentheses": "preferNone"
+  }
+}

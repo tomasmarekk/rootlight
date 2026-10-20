@@ -1,0 +1,181 @@
+==================
+imports
+==================
+(module
+  ;; Functions
+  (import "spectest" "print_i32" (func (param i32)))
+  (func (import "spectest" "print_i64") (param i64))
+  (import "spectest" "print_i32" (func $print_i32 (param i32)))
+  (func $print_i32-2 (import "spectest" "print_i32") (param i32))
+
+  (func (export "p1") (import "spectest" "print_i32") (param i32))
+  (func $p (export "p2") (import "spectest" "print_i32") (param i32))
+  (func (export "p3") (export "p4") (import "spectest" "print_i32") (param i32))
+
+  (import "spectest" "print_i32" (func (type $forward)))
+
+  ;; Globals
+  (import "spectest" "global_i32" (global i32))
+  (global (import "spectest" "global_i32") i32)
+
+  (import "spectest" "global_i32" (global $x i32))
+  (global $y (import "spectest" "global_i32") i32)
+
+  ;; Tables
+  (import "spectest" "table" (table $tab 10 20 funcref))
+  (table $tab (import "spectest" "table") 10 20 funcref)
+  (import "test" "table-10-inf" (table 10 funcref))
+  (import "spectest" "table" (table 0 funcref))
+
+  ;; Memories
+  (import "spectest" "memory" (memory 1 2))
+  (memory (import "spectest" "memory") 1 2)
+
+  ;; Tags
+  (import "" "" (tag))
+)
+---
+
+(root
+  (module
+    (line_comment)
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_func
+        (param
+          (num_type))))
+    (module_field_func
+      (import
+        (string)
+        (string))
+      (param
+        (num_type)))
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_func
+        (identifier)
+        (param
+          (num_type))))
+    (module_field_func
+      (identifier)
+      (import
+        (string)
+        (string))
+      (param
+        (num_type)))
+    (module_field_func
+      (export
+        (string))
+      (import
+        (string)
+        (string))
+      (param
+        (num_type)))
+    (module_field_func
+      (identifier)
+      (export
+        (string))
+      (import
+        (string)
+        (string))
+      (param
+        (num_type)))
+    (module_field_func
+      (export
+        (string))
+      (export
+        (string))
+      (import
+        (string)
+        (string))
+      (param
+        (num_type)))
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_func
+        (type_use
+          (index
+            (identifier)))))
+    (line_comment)
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_global
+        (global_type
+          (num_type))))
+    (module_field_global
+      (import
+        (string)
+        (string))
+      (global_type
+        (num_type)))
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_global
+        (identifier)
+        (global_type
+          (num_type))))
+    (module_field_global
+      (identifier)
+      (import
+        (string)
+        (string))
+      (global_type
+        (num_type)))
+    (line_comment)
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_table
+        (identifier)
+        (table_type
+          (uinteger)
+          (uinteger)
+          (ref_type))))
+    (module_field_table
+      (identifier)
+      (import
+        (string)
+        (string))
+      (table_type
+        (uinteger)
+        (uinteger)
+        (ref_type)))
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_table
+        (table_type
+          (uinteger)
+          (ref_type))))
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_table
+        (table_type
+          (uinteger)
+          (ref_type))))
+    (line_comment)
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_memory
+        (mem_type
+          (uinteger)
+          (uinteger))))
+    (module_field_memory
+      (import
+        (string)
+        (string))
+      (mem_type
+        (uinteger)
+        (uinteger)))
+    (line_comment)
+    (module_field_import
+      (string)
+      (string)
+      (extern_type_tag))))

@@ -1,0 +1,30 @@
+==================
+cont
+==================
+(module
+  (type (cont $f))
+  (type (sub (cont $f)))
+  (func (param contref nullcontref (ref cont) (ref nocont)))
+)
+---
+
+(root
+  (module
+    (type_def
+      (sub_type
+        (cont_type
+          (index
+            (identifier)))))
+    (type_def
+      (sub_type
+        (cont_type
+          (index
+            (identifier)))))
+    (module_field_func
+      (param
+        (ref_type)
+        (ref_type)
+        (ref_type
+          (heap_type))
+        (ref_type
+          (heap_type))))))

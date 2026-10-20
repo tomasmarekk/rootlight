@@ -1,0 +1,115 @@
+================================================================================
+Let statement
+================================================================================
+
+operation Main() : Unit {
+    let x = 42;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement
+          (pattern
+            (identifier))
+          (integer_literal))))))
+
+================================================================================
+Qubit allocation
+================================================================================
+
+operation Main() : Unit {
+    use q = Qubit();
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (use_statement
+          (pattern
+            (identifier))
+          (qubit_init))))))
+
+================================================================================
+For loop with range
+================================================================================
+
+operation Main() : Unit {
+    for i in 0..5 {
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (expression_statement
+          (for_expression
+            (pattern
+              (identifier))
+            (range_expression
+              (integer_literal)
+              (integer_literal))
+            (block)))))))
+
+================================================================================
+Repeat until fixup
+================================================================================
+
+operation Main() : Unit {
+    use q = Qubit();
+    repeat {
+        H(q);
+    } until M(q) == Zero
+    fixup {
+        Reset(q);
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (use_statement
+          (pattern
+            (identifier))
+          (qubit_init))
+        (expression_statement
+          (repeat_expression
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))
+            (binary_expression
+              (call_expression
+                (identifier)
+                (identifier))
+              (result_literal))
+            (block
+              (expression_statement
+                (call_expression
+                  (identifier)
+                  (identifier))))))))))

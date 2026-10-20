@@ -1,0 +1,2331 @@
+================================================================================
+nil
+:language(crystal)
+================================================================================
+nil
+--------------------------------------------------------------------------------
+
+(expressions
+  (nil))
+
+================================================================================
+bools
+:language(crystal)
+================================================================================
+true
+false
+--------------------------------------------------------------------------------
+
+(expressions
+  (true)
+  (false))
+
+================================================================================
+binary integers
+:language(crystal)
+================================================================================
+0b0
+-0b1
++0b0_1
+0b1_u8
++0b0u16
+0b0_0_0_0u32
++0b1_11u64
++0b10_10_01_01u128
+0b00i8
+-0b01010i16
++0b01101i32
+0b1001_1101i64
+-0b0_1i128
+--------------------------------------------------------------------------------
+
+(expressions
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer))
+
+================================================================================
+octal integers
+:language(crystal)
+================================================================================
+0o0
+-0o7
++0o2_6
+0o3_u8
++0o1u16
+0o0_1_2_3u32
++0o7_77u64
++0o10_10_01_01u128
+0o7i8
+-0o01_234i16
++0o01114i32
+0o7036_1205i64
+-0o4_2i128
+--------------------------------------------------------------------------------
+
+(expressions
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer))
+
+================================================================================
+decimal integers
+:language(crystal)
+================================================================================
+0
+-0
+9_9
+1_0_0
++8_1_234_0
+1
+-1
++1_0
++9
+9u8
++1_2_3u16
+4_2u32
++1234567890u64
+888_888_888u128
+-7i8
++3_3i16
+32i32
+-123_456_789i64
++1_000_000_000_000i128
+--------------------------------------------------------------------------------
+
+(expressions
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer))
+
+================================================================================
+hex integers
+:language(crystal)
+================================================================================
+0x0
++0x1
+-0xf_f
+0x0u8
+0xfFu16
++0xdead_beef_u32
+0x0123456789u64
+0xAbC_dEfu128
+0x42i8
+-0x3f_ffi16
++0x5i32
+0x12341234i64
+0xaabb_bbaa_abba_baabi128
+--------------------------------------------------------------------------------
+
+(expressions
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer)
+  (integer))
+
+================================================================================
+floats
+:language(crystal)
+================================================================================
+0.0
+0.0000
++1_2.3_4
+-1.1e1
+2.0_0f64
++0.1E2f32
+7.7e-07
+3E3
+52f32
+-2e+2f64
+1_e1
+--------------------------------------------------------------------------------
+
+(expressions
+  (float)
+  (float)
+  (float)
+  (float)
+  (float)
+  (float)
+  (float)
+  (float)
+  (float)
+  (float)
+  (float))
+
+================================================================================
+chars
+:language(crystal)
+================================================================================
+'a'
+'あ'
+'"'
+'🎅'
+
+' '
+'
+'
+''
+'	'
+'#'
+
+'\0'
+'\''
+'\\'
+'\a'
+'\b'
+'\e'
+'\f'
+'\n'
+'\r'
+'\t'
+'\v'
+'\u00aF'
+'\u{0}'
+'\u{20}'
+'\u{abcd}'
+'\u{aBcDe}'
+'\u{10FFFF}'
+--------------------------------------------------------------------------------
+
+(expressions
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (literal_content))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence))
+  (char
+    (escape_sequence)))
+
+================================================================================
+strings
+:language(crystal)
+================================================================================
+""
+"_"
+"# not a comment"
+"🔮"
+" 	
+"
+
+"\
+"
+"\\"
+"\""
+"\a"
+"\b"
+"\e"
+"\f"
+"\n"
+"\r"
+"\t"
+"\v"
+
+"\0"
+"\42"
+"\177"
+
+"\x69"
+"\xff"
+
+"\u26a1"
+"\u{1F52E}"
+"\u{48 45 4C 4C 4F}"
+
+"\'"
+"\c"
+"\?"
+"\#"
+--------------------------------------------------------------------------------
+
+(expressions
+  (string)
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string)
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence)))
+
+================================================================================
+string interpolation
+:language(crystal)
+================================================================================
+"#"
+"\#{"
+"\#{}"
+
+"#{2}"
+"#{"#{"#{'a'}"}"}"
+
+"hello, #{place.to_s}"
+
+"#{a} + #{b} = #{a + b}"
+--------------------------------------------------------------------------------
+
+(expressions
+  (string
+    (literal_content))
+  (string
+    (escape_sequence)
+    (literal_content))
+  (string
+    (escape_sequence)
+    (literal_content))
+  (string
+    (interpolation
+      (integer)))
+  (string
+    (interpolation
+      (string
+        (interpolation
+          (string
+            (interpolation
+              (char
+                (literal_content))))))))
+  (string
+    (literal_content)
+    (interpolation
+      (call
+        receiver: (identifier)
+        method: (identifier))))
+  (string
+    (interpolation
+      (identifier))
+    (literal_content)
+    (interpolation
+      (identifier))
+    (literal_content)
+    (interpolation
+      (call
+        receiver: (identifier)
+        method: (operator)
+        arguments: (argument_list
+          (identifier))))))
+
+================================================================================
+nested interpolation stress test
+:language(crystal)
+================================================================================
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+%(#{
+  { {} of String => Int32, %(#{7}) }
+}) +
+%(#{
+  { {} of String => Int32, Int32 -> Int32 => %(#{8}) }
+}) +
+%(#{
+  { {} of String => Int32, %(#{
+    { {} of String => Int32, %(#{7}) }
+  })
+  }
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+})
+
+--------------------------------------------------------------------------------
+
+(expressions
+  (string
+    (interpolation
+      (string
+        (interpolation
+          (string
+            (interpolation
+              (string
+                (interpolation
+                  (string
+                    (interpolation
+                      (string
+                        (interpolation
+                          (string
+                            (interpolation
+                              (string
+                                (interpolation
+                                  (string
+                                    (interpolation
+                                      (string
+                                        (interpolation
+                                          (string
+                                            (interpolation
+                                              (string
+                                                (interpolation
+                                                  (string
+                                                    (interpolation
+                                                      (call
+                                                        receiver: (call
+                                                          receiver: (string
+                                                            (interpolation
+                                                              (tuple
+                                                                (hash
+                                                                  of_key: (constant)
+                                                                  of_value: (constant))
+                                                                (string
+                                                                  (interpolation
+                                                                    (integer))))))
+                                                          method: (operator)
+                                                          arguments: (argument_list
+                                                            (string
+                                                              (interpolation
+                                                                (hash
+                                                                  (hash_entry
+                                                                    (hash
+                                                                      of_key: (constant)
+                                                                      of_value: (proc_type
+                                                                        (constant)
+                                                                        (constant)
+                                                                        return: (constant)))
+                                                                    (string
+                                                                      (interpolation
+                                                                        (integer)))))))))
+                                                        method: (operator)
+                                                        arguments: (argument_list
+                                                          (string
+                                                            (interpolation
+                                                              (tuple
+                                                                (hash
+                                                                  of_key: (constant)
+                                                                  of_value: (constant))
+                                                                (string
+                                                                  (interpolation
+                                                                    (tuple
+                                                                      (hash
+                                                                        of_key: (constant)
+                                                                        of_value: (constant))
+                                                                      (string
+                                                                        (interpolation
+                                                                          (integer))))))))))))))))))))))))))))))))))))))
+
+================================================================================
+heredoc strings
+================================================================================
+# Not tagged with :language(crystal) because the Crystal parser moves the interpolated nodes around
+
+puts 1, <<-C, 3
+          1
+  C
+
+a,b,c,d = <<-a, <<-b, <<-c, <<-'😀嚤&÷🔮'
+aaaa\na\ aa
+a
+bbbbb#{1}bbb
+  #{2}
+b
+c
+😀嚤&÷🔮
+
+<<-'Quo ted!"'
+  a\nb#{1}c
+  'Quo ted!"'
+  Quo ted!"
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (integer)
+      (heredoc_start)
+      (integer)))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (assign
+    lhs: (identifier)
+    lhs: (identifier)
+    lhs: (identifier)
+    lhs: (identifier)
+    rhs: (heredoc_start)
+    rhs: (heredoc_start)
+    rhs: (heredoc_start)
+    rhs: (heredoc_start))
+  (heredoc_body
+    (literal_content)
+    (escape_sequence)
+    (literal_content)
+    (escape_sequence)
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (interpolation
+      (integer))
+    (literal_content)
+    (interpolation
+      (integer))
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (heredoc_end))
+  (heredoc_body
+    (heredoc_end))
+  (heredoc_start)
+  (heredoc_body
+    (literal_content)
+    (heredoc_end)))
+
+================================================================================
+nested heredoc strings
+================================================================================
+# Nested heredocs aren't actually valid in interpolations, but that restriction
+# is only on a semantic level. We can still parse this syntax just fine.
+# Not tagged with :language(crystal) because Crystal won't parse this :P
+
+<<-A
+1
+#{
+<<-E }
+2
+E
+5
+A
+
+<<-B
+1
+#{<<-F + <<-G
+2
+F
+3
+G
+}
+5
+B
+
+p <<-A
+1
+#{[<<-BB, <<-CCC].reverse.join("")}4
+3
+BB
+#{<<-E}
+  #{<<-F
+  2.5
+  F
+  }
+2
+E
+
+CCC
+5
+A
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (comment)
+  (comment)
+  (heredoc_start)
+  (heredoc_body
+    (literal_content)
+    (interpolation
+      (heredoc_start))
+    (literal_content)
+    (heredoc_body
+      (literal_content)
+      (heredoc_end))
+    (literal_content)
+    (heredoc_end))
+  (heredoc_start)
+  (heredoc_body
+    (literal_content)
+    (interpolation
+      (call
+        receiver: (heredoc_start)
+        method: (operator)
+        arguments: (argument_list
+          (heredoc_start)))
+      (heredoc_body
+        (literal_content)
+        (heredoc_end))
+      (heredoc_body
+        (literal_content)
+        (heredoc_end)))
+    (literal_content)
+    (heredoc_end))
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (heredoc_start)))
+  (heredoc_body
+    (literal_content)
+    (interpolation
+      (call
+        receiver: (call
+          receiver: (array
+            (heredoc_start)
+            (heredoc_start))
+          method: (identifier))
+        method: (identifier)
+        arguments: (argument_list
+          (string))))
+    (literal_content)
+    (heredoc_body
+      (literal_content)
+      (heredoc_end))
+    (literal_content)
+    (heredoc_body
+      (interpolation
+        (heredoc_start))
+      (literal_content)
+      (heredoc_body
+        (interpolation
+          (heredoc_start)
+          (heredoc_body
+            (literal_content)
+            (heredoc_end)))
+        (literal_content)
+        (heredoc_end))
+      (literal_content)
+      (heredoc_end))
+    (literal_content)
+    (heredoc_end)))
+
+================================================================================
+heredoc encoding stress test
+================================================================================
+# This fills up the internal heredoc buffer to its max of 512 bytes
+p <<-🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷🎣🏇😠🔹🚶🎧, <<-'🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖', <<-🛀🚍📏🙉🍽🏰📡🙅🕰🖍🚭⛔️🌎🤔🏷🖊🔁🍮🤕🏙🛩🛍🔦👪😅🎎🐸📎😊📦🚃🎇📣⛰👒🌹👶🎄__
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷🎣
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷🎣🏇
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷🎣🏇😠
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷🎣🏇😠🔹
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷🎣🏇😠🔹🚶
+Heredoc 1
+🍑📣👑⚖🚨🌶🕟🔤😬☄🚣🎆🐛🌖🎑🎧🕍👲💳🎷🎣🏇😠🔹🚶🎧
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖🍖🍖🍖🍖🍖🍖🍖
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖🍖🍖🍖🍖🍖🍖
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖🍖🍖🍖🍖🍖
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖🍖🍖🍖🍖
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖🍖🍖🍖
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖🍖🍖
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖🍖
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖 
+#{interpolation doesn't work in a quoted heredoc}
+Heredoc 2
+🐨🛡🚝💵a1;🈹☀️🖥🙉🎰🌕🌀🌷🔥🎽😮🤒🚈🏈🕋🍬↙️🐺📈🍓⚓️📚🔯😚🔂✔️🚅📆➿👚💖🚔🐮🎫😊📓🎮⚗🚦👙👹♥️🏢❤️📅👛🏳❗️🏯🏵🍁🐱🎭🤔🎚🍖
+Heredoc 3
+🛀🚍📏🙉🍽🏰📡🙅🕰🖍🚭⛔️🌎🤔🏷🖊🔁🍮🤕🏙🛩🛍🔦👪😅🎎🐸📎😊📦🚃🎇📣⛰👒🌹👶🎄__
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (heredoc_start)
+      (heredoc_start)
+      (heredoc_start)))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end)))
+
+================================================================================
+heredoc escape with leading whitespace
+================================================================================
+p <<-TEXT
+  a
+  \n
+  b
+  \c
+  c
+  TEXT
+--------------------------------------------------------------------------------
+
+(expressions
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (heredoc_start)))
+  (heredoc_body
+    (literal_content)
+    (escape_sequence)
+    (literal_content)
+    (escape_sequence)
+    (literal_content)
+    (heredoc_end)))
+
+================================================================================
+percent strings
+:language(crystal)
+================================================================================
+%(abc)
+p% ()
+
+%||
+%<>
+%{{}} % %[[]]
+%<]})>
+
+%q(
+()()()(((())()))
+)
+
+%Q["|)]
+%([{<|"''"|>}])
+
+%(\n\))
+%q[\n\]
+%Q|\|\n|
+
+%q(\)
+%q(\
+)
+%Q(\\)
+%Q(\
+\\)
+
+%(1#{2}3)
+%{#{"-"+"_"}}
+%<# {}>
+%|#\n|
+
+%Q(##{:a})
+%Q(#)
+%Q(##)
+%Q(###)
+%Q(####{{1,}})
+
+%q(#)
+%q(#{)
+%q(#{1})
+--------------------------------------------------------------------------------
+
+(expressions
+  (string
+    (literal_content))
+  (call
+    receiver: (identifier)
+    method: (operator)
+    arguments: (argument_list
+      (nil)))
+  (string)
+  (string)
+  (call
+    receiver: (string
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content))))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (escape_sequence)
+    (escape_sequence))
+  (string
+    (literal_content))
+  (string
+    (escape_sequence)
+    (escape_sequence))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (escape_sequence))
+  (string
+    (escape_sequence))
+  (string
+    (literal_content)
+    (interpolation
+      (integer))
+    (literal_content))
+  (string
+    (interpolation
+      (call
+        receiver: (string
+          (literal_content))
+        method: (operator)
+        arguments: (argument_list
+          (string
+            (literal_content))))))
+  (string
+    (literal_content))
+  (string
+    (literal_content)
+    (escape_sequence))
+  (string
+    (literal_content)
+    (interpolation
+      (symbol
+        (literal_content))))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (literal_content)
+    (interpolation
+      (tuple
+        (integer))))
+  (string
+    (literal_content))
+  (string
+    (literal_content))
+  (string
+    (literal_content)))
+
+================================================================================
+nested percent strings
+================================================================================
+# Not tagged with :language(crystal) because the Crystal parser collapses this to one string
+
+%(#{%|#{%<#{%(a)}>}|})
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (string
+    (interpolation
+      (string
+        (interpolation
+          (string
+            (interpolation
+              (string
+                (literal_content)))))))))
+
+================================================================================
+percent string arrays
+:language(crystal)
+================================================================================
+%w(a b	c
+d)
+
+%w(1\ 2)
+  %w( a\	b)
+%w{a\  a }
+%w{a \ \ }
+%w((\)))
+%w|\|\)|
+
+%w| a\b c\\
+d |
+
+%w[1 2		3
+456
+7]
+
+# This is possibly a bug with the Crystal parser
+%w<a <b c >
+%w<a <b c>>
+--------------------------------------------------------------------------------
+
+(expressions
+  (array
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content)))
+  (array
+    (string
+      (literal_content)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (string
+      (literal_content)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (string
+      (literal_content)
+      (escape_sequence))
+    (string
+      (literal_content)))
+  (array
+    (string
+      (literal_content))
+    (string
+      (escape_sequence)
+      (escape_sequence)))
+  (array
+    (string
+      (literal_content)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (string
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (string
+      (literal_content)
+      (escape_sequence)
+      (literal_content))
+    (string
+      (literal_content)
+      (escape_sequence)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content)))
+  (comment)
+  (array
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content)))
+  (array
+    (string
+      (literal_content))
+    (string
+      (literal_content))
+    (string
+      (literal_content))))
+
+================================================================================
+percent symbol arrays
+:language(crystal)
+================================================================================
+%i(a b	c
+d)
+
+%i(1\ 2)
+  %i( a\	b)
+%i{a\  a }
+%i{1\
+1 2}
+%i{a \ \ }
+%i((\)))
+%i|\|\)|
+
+%i| a\b c\d |
+
+%i[1 2		3
+456
+7]
+
+# This is possibly a bug with the Crystal parser
+%i<a <b c >
+%i<a <b c>>
+--------------------------------------------------------------------------------
+
+(expressions
+  (array
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content)
+      (escape_sequence))
+    (symbol
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content)
+      (escape_sequence)
+      (literal_content))
+    (symbol
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content))
+    (symbol
+      (escape_sequence)
+      (escape_sequence)))
+  (array
+    (symbol
+      (literal_content)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (symbol
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content)
+      (escape_sequence)
+      (literal_content))
+    (symbol
+      (literal_content)
+      (escape_sequence)
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content)))
+  (comment)
+  (array
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content)))
+  (array
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))
+    (symbol
+      (literal_content))))
+
+================================================================================
+symbols
+:language(crystal)
+================================================================================
+:a
+:stuff!
+:Q_Q
+:💯
+:!
+:>
+:>>
+:""
+:"'"
+:"123"
+:"\'"
+:"#{asdf}"
+
+:a ? :b : :c
+
+:"😀" ? puts :"\u{1234}" : :"
+"
+--------------------------------------------------------------------------------
+
+(expressions
+  (symbol
+    (literal_content))
+  (symbol
+    (literal_content))
+  (symbol
+    (literal_content))
+  (symbol
+    (literal_content))
+  (symbol
+    (literal_content))
+  (symbol
+    (literal_content))
+  (symbol
+    (literal_content))
+  (symbol)
+  (symbol
+    (literal_content))
+  (symbol
+    (literal_content))
+  (symbol
+    (escape_sequence))
+  (symbol
+    (literal_content))
+  (conditional
+    cond: (symbol
+      (literal_content))
+    then: (symbol
+      (literal_content))
+    else: (symbol
+      (literal_content)))
+  (conditional
+    cond: (symbol
+      (literal_content))
+    then: (call
+      method: (identifier)
+      arguments: (argument_list
+        (symbol
+          (escape_sequence))))
+    else: (symbol
+      (literal_content))))
+
+================================================================================
+symbols ending in !?=
+:language(crystal)
+================================================================================
+world = "world"
+:hello=
+:world==world
+:world == world
+:world!
+:world!=world
+:world != world
+:world?
+:world?==world
+--------------------------------------------------------------------------------
+
+(expressions
+  (assign
+    lhs: (identifier)
+    rhs: (string
+      (literal_content)))
+  (symbol
+    (literal_content))
+  (call
+    receiver: (symbol
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (identifier)))
+  (call
+    receiver: (symbol
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (identifier)))
+  (symbol
+    (literal_content))
+  (call
+    receiver: (symbol
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (identifier)))
+  (call
+    receiver: (symbol
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (identifier)))
+  (symbol
+    (literal_content))
+  (call
+    receiver: (symbol
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (identifier))))
+
+================================================================================
+regexes
+:language(crystal)
+================================================================================
+//
+/;/
+/\
+/
+/#/
+/🔎/
+
+/^#{name}$/
+
+/\//
+/\a/i
+/\e/m
+/\f/x
+/\n/
+/\r/
+/\t/ximixi
+
+/\c[/ =~ ""
+/\cH/ =~ "\b"
+/\c?/ =~ "\u{7f}"
+/\c@/ =~ "\u{0}"
+
+/\11/
+/\012/
+/\177/
+/\o{6666}/
+
+/\xa/
+/\x20/
+/\x{12345}/
+
+/\N{U+32}\n{U+1F52e}/ =~ " 🔮"
+
+/\P{P}/ =~ "A"
+/\p{ND}{2}/ =~ "42"
+/\p{X-p_S }/ =~ "\n"
+
+/\Q[]()\E/ =~ "[]()"
+
+/\A\d\w\z/ =~ "5X"
+
+/\!\🔮\%\/ =~ "!🔮%\e"
+
+/a#{/b/m}c/i
+--------------------------------------------------------------------------------
+
+(expressions
+  (regex)
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content)
+    (interpolation
+      (identifier))
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content)
+    (regex_modifier))
+  (regex
+    (literal_content)
+    (regex_modifier))
+  (regex
+    (literal_content)
+    (regex_modifier))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content)
+    (regex_modifier))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (escape_sequence))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (escape_sequence))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (escape_sequence))))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (escape_sequence))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content))))
+  (call
+    receiver: (regex
+      (literal_content))
+    method: (operator)
+    arguments: (argument_list
+      (string
+        (literal_content)
+        (escape_sequence))))
+  (regex
+    (literal_content)
+    (interpolation
+      (regex
+        (literal_content)
+        (regex_modifier)))
+    (literal_content)
+    (regex_modifier)))
+
+================================================================================
+regex percent literals
+:language(crystal)
+================================================================================
+%r[]
+%r|a/b|
+%r(
+)
+%r(\
+)
+
+%r<#{1}\#{2})>
+%r<a\>>
+%r(a\\)im
+%r{#{%r{f#{/o/}o}m}}
+%r(\b)
+--------------------------------------------------------------------------------
+
+(expressions
+  (regex)
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (interpolation
+      (integer))
+    (literal_content))
+  (regex
+    (literal_content))
+  (regex
+    (literal_content)
+    (regex_modifier))
+  (regex
+    (interpolation
+      (regex
+        (literal_content)
+        (interpolation
+          (regex
+            (literal_content)))
+        (literal_content)
+        (regex_modifier))))
+  (regex
+    (literal_content)))
+
+================================================================================
+arrays
+:language(crystal)
+================================================================================
+[] of Bool
+
+[
+1,
+2
+
+]
+
+[(),(),nil,] of Nil | Asdf
+
+[[1,2],[3,4]]
+
+[foo 1, 2, 3]
+--------------------------------------------------------------------------------
+
+(expressions
+  (array
+    of: (constant))
+  (array
+    (integer)
+    (integer))
+  (array
+    (nil)
+    (nil)
+    (nil)
+    of: (union_type
+      (constant)
+      (constant)))
+  (array
+    (array
+      (integer)
+      (integer))
+    (array
+      (integer)
+      (integer)))
+  (array
+    (call
+      method: (identifier)
+      arguments: (argument_list
+        (integer)
+        (integer)
+        (integer)))))
+
+================================================================================
+hashes
+:language(crystal)
+================================================================================
+{} of
+  Int16 |
+    Int32 =>
+      Bool |
+        Char
+
+{'a'=>'b','c'=>'d'}of Char=>Char
+
+{ "one" => 1, "two" => 2, }
+
+{
+  1 + 2 => { '3' => [3.0] }
+}
+--------------------------------------------------------------------------------
+
+(expressions
+  (hash
+    of_key: (union_type
+      (constant)
+      (constant))
+    of_value: (union_type
+      (constant)
+      (constant)))
+  (hash
+    (hash_entry
+      (char
+        (literal_content))
+      (char
+        (literal_content)))
+    (hash_entry
+      (char
+        (literal_content))
+      (char
+        (literal_content)))
+    of_key: (constant)
+    of_value: (constant))
+  (hash
+    (hash_entry
+      (string
+        (literal_content))
+      (integer))
+    (hash_entry
+      (string
+        (literal_content))
+      (integer)))
+  (hash
+    (hash_entry
+      (call
+        receiver: (integer)
+        method: (operator)
+        arguments: (argument_list
+          (integer)))
+      (hash
+        (hash_entry
+          (char
+            (literal_content))
+          (array
+            (float)))))))
+
+================================================================================
+ranges
+:language(crystal)
+================================================================================
+a..1
+5...7
+0..
+..60
+...
+
+1..2..3
+4..5..
+..6..7
+..8...
+...(..)
+
+foo! .. 2
+foo 1...2
+
+foo 1, ...2
+
+foo .. 6 + 7
+foo .. - bar
+
+foo bar... 8
+
+puts(..)
+--------------------------------------------------------------------------------
+
+(expressions
+  (range
+    begin: (identifier)
+    operator: (operator)
+    end: (integer))
+  (range
+    begin: (integer)
+    operator: (operator)
+    end: (integer))
+  (range
+    begin: (integer)
+    operator: (operator))
+  (range
+    operator: (operator)
+    end: (integer))
+  (range
+    operator: (operator))
+  (range
+    begin: (range
+      begin: (integer)
+      operator: (operator)
+      end: (integer))
+    operator: (operator)
+    end: (integer))
+  (range
+    begin: (range
+      begin: (integer)
+      operator: (operator)
+      end: (integer))
+    operator: (operator))
+  (range
+    begin: (range
+      operator: (operator)
+      end: (integer))
+    operator: (operator)
+    end: (integer))
+  (range
+    begin: (range
+      operator: (operator)
+      end: (integer))
+    operator: (operator))
+  (range
+    operator: (operator)
+    end: (expressions
+      (range
+        operator: (operator))))
+  (range
+    begin: (call
+      method: (identifier))
+    operator: (operator)
+    end: (integer))
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (range
+        begin: (integer)
+        operator: (operator)
+        end: (integer))))
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (integer)
+      (range
+        operator: (operator)
+        end: (integer))))
+  (range
+    begin: (identifier)
+    operator: (operator)
+    end: (call
+      receiver: (integer)
+      method: (operator)
+      arguments: (argument_list
+        (integer))))
+  (range
+    begin: (identifier)
+    operator: (operator)
+    end: (call
+      method: (operator)
+      receiver: (identifier)))
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (range
+        begin: (identifier)
+        operator: (operator)
+        end: (integer))))
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (range
+        operator: (operator)))))
+
+================================================================================
+tuples
+:language(crystal)
+================================================================================
+{1, "foo", 'a'}
+
+{(),}
+
+{
+{
+1
+}
+}
+
+{foo, _z}
+
+{ {} of TypeA => TypeB}
+--------------------------------------------------------------------------------
+
+(expressions
+  (tuple
+    (integer)
+    (string
+      (literal_content))
+    (char
+      (literal_content)))
+  (tuple
+    (nil))
+  (tuple
+    (tuple
+      (integer)))
+  (tuple
+    (identifier)
+    (identifier))
+  (tuple
+    (hash
+      of_key: (constant)
+      of_value: (constant))))
+
+================================================================================
+named tuples
+================================================================================
+# Not tagged with :language(crystal) because the Crystal parser turns string keys into identifiers
+
+{a: 123}
+
+named_tuple = {a2: "a", "55": 'b', A: "asdf#{a}", 🥰: 7, "
+":7, fooB_r: {abc: 5.8}, %(str): "yes", %Q(q_str): "YES", nani?: {1,2}}
+
+{ self: self, true: true, nil: nil, _🎃: " " }
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (named_tuple
+    (named_expr
+      name: (identifier)
+      (integer)))
+  (assign
+    lhs: (identifier)
+    rhs: (named_tuple
+      (named_expr
+        name: (identifier)
+        (string
+          (literal_content)))
+      (named_expr
+        name: (string
+          (literal_content))
+        (char
+          (literal_content)))
+      (named_expr
+        name: (identifier)
+        (string
+          (literal_content)
+          (interpolation
+            (identifier))))
+      (named_expr
+        name: (identifier)
+        (integer))
+      (named_expr
+        name: (string
+          (literal_content))
+        (integer))
+      (named_expr
+        name: (identifier)
+        (named_tuple
+          (named_expr
+            name: (identifier)
+            (float))))
+      (named_expr
+        name: (string
+          (literal_content))
+        (string
+          (literal_content)))
+      (named_expr
+        name: (string
+          (literal_content))
+        (string
+          (literal_content)))
+      (named_expr
+        name: (identifier)
+        (tuple
+          (integer)
+          (integer)))))
+  (named_tuple
+    (named_expr
+      name: (identifier)
+      (self))
+    (named_expr
+      name: (identifier)
+      (true))
+    (named_expr
+      name: (identifier)
+      (nil))
+    (named_expr
+      name: (identifier)
+      (string
+        (literal_content)))))
+
+================================================================================
+proc literals
+:language(crystal)
+================================================================================
+->{}
+
+->: Int32
+do 1 end
+
+->
+(
+a
+)
+:
+String |
+->
+{
+"a"
+}
+
+->(x : Int32,y : Int32,) : Int32 do
+                                   x + y
+                                 end
+
+-> do -> {  } end
+
+-> : Gen(A, B, C, D) {  }
+-> : Gen(A, B, C -> D) {  }
+
+-> : Int32, Int32 ->  do
+  -> (a : Int32, b : Int32) {}
+end
+
+-> : -> {->} { -> { {->{}} } }
+--------------------------------------------------------------------------------
+
+(expressions
+  (proc
+    block: (block))
+  (proc
+    type: (constant)
+    block: (block
+      body: (expressions
+        (integer))))
+  (proc
+    params: (param_list
+      (param
+        name: (identifier)))
+    type: (union_type
+      (constant)
+      (proc_type))
+    block: (block
+      body: (expressions
+        (string
+          (literal_content)))))
+  (proc
+    params: (param_list
+      (param
+        name: (identifier)
+        type: (constant))
+      (param
+        name: (identifier)
+        type: (constant)))
+    type: (constant)
+    block: (block
+      body: (expressions
+        (call
+          receiver: (identifier)
+          method: (operator)
+          arguments: (argument_list
+            (identifier))))))
+  (proc
+    block: (block
+      body: (expressions
+        (proc
+          block: (block)))))
+  (proc
+    type: (generic_instance_type
+      (constant)
+      params: (param_list
+        (constant)
+        (constant)
+        (constant)
+        (constant)))
+    block: (block))
+  (proc
+    type: (generic_instance_type
+      (constant)
+      params: (param_list
+        (proc_type
+          (constant)
+          (constant)
+          (constant)
+          return: (constant))))
+    block: (block))
+  (proc
+    type: (proc_type
+      (constant)
+      (constant))
+    block: (block
+      body: (expressions
+        (proc
+          params: (param_list
+            (param
+              name: (identifier)
+              type: (constant))
+            (param
+              name: (identifier)
+              type: (constant)))
+          block: (block)))))
+  (proc
+    type: (proc_type
+      return: (tuple_type
+        (proc_type)))
+    block: (block
+      body: (expressions
+        (proc
+          block: (block
+            body: (expressions
+              (tuple
+                (proc
+                  block: (block))))))))))
+
+================================================================================
+creating procs from methods
+:language(crystal)
+================================================================================
+foo = nil
+
+method          = ->qux=(String)
+global_method   = ->::qux!
+instance_method = ->foo.bar
+class_method    = ->Foo.baz?(Array*, ->)
+self_method     = ->self.<=>(self)
+operator        = -> foo . [] ( Int32 )
+instance_var    = ->@var.size
+class_var       = ->@@var.size
+
+extreme \
+=
+->
+foo \
+.
+[] \
+( \
+Int32 \
+)
+--------------------------------------------------------------------------------
+
+(expressions
+  (assign
+    lhs: (identifier)
+    rhs: (nil))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      method: (identifier)
+      params: (param_list
+        (constant))))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      method: (identifier)))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      receiver: (identifier)
+      method: (identifier)))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      receiver: (constant)
+      method: (identifier)
+      params: (param_list
+        (pointer_type
+          (constant))
+        (proc_type))))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      receiver: (self)
+      method: (operator)
+      params: (param_list
+        (self))))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      receiver: (identifier)
+      method: (operator)
+      params: (param_list
+        (constant))))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      receiver: (instance_var)
+      method: (identifier)))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      receiver: (class_var)
+      method: (identifier)))
+  (assign
+    lhs: (identifier)
+    rhs: (method_proc
+      receiver: (identifier)
+      method: (operator)
+      params: (param_list
+        (constant)))))
+
+================================================================================
+command literals
+:language(crystal)
+================================================================================
+``
+`a \
+--b \
+--c`
+`tree-sitter generate`
+
+`echo "#{foo}\n"; \`echo "echo"\``
+
+puts %x[echo \t[#{foo}]\]]
+--------------------------------------------------------------------------------
+
+(expressions
+  (command)
+  (command
+    (literal_content)
+    (literal_content)
+    (literal_content))
+  (command
+    (literal_content))
+  (command
+    (literal_content)
+    (interpolation
+      (identifier))
+    (escape_sequence)
+    (literal_content)
+    (escape_sequence)
+    (literal_content)
+    (escape_sequence))
+  (call
+    method: (identifier)
+    arguments: (argument_list
+      (command
+        (literal_content)
+        (escape_sequence)
+        (literal_content)
+        (interpolation
+          (identifier))
+        (literal_content)
+        (escape_sequence)))))
+
+================================================================================
+strings with backslash newlines
+================================================================================
+# Not tagged with :language(crystal) because the Crystal parser collapses a backslash-chained string
+# into a single string node
+
+a, b, c, d, e = "1\
+2", %q(1\
+2), %Q(1\
+2), <<-D, \
+<<-'E'
+d\
+d
+D
+e\
+e
+E
+
+string_with_newline = "hello
+  world"
+
+string_with_interior_backslashes = "hello \
+  world \
+  no \
+  newlines"
+
+string_joined_with_backslashes = "hello " \
+  "world "\
+  " no " \
+  "newlines"
+
+not_chained = "str1"
+  "str2"
+--------------------------------------------------------------------------------
+
+(expressions
+  (comment)
+  (comment)
+  (assign
+    lhs: (identifier)
+    lhs: (identifier)
+    lhs: (identifier)
+    lhs: (identifier)
+    lhs: (identifier)
+    rhs: (string
+      (literal_content)
+      (literal_content))
+    rhs: (string
+      (literal_content))
+    rhs: (string
+      (literal_content)
+      (literal_content))
+    rhs: (heredoc_start)
+    rhs: (heredoc_start))
+  (heredoc_body
+    (literal_content)
+    (literal_content)
+    (heredoc_end))
+  (heredoc_body
+    (literal_content)
+    (heredoc_end))
+  (assign
+    lhs: (identifier)
+    rhs: (string
+      (literal_content)))
+  (assign
+    lhs: (identifier)
+    rhs: (string
+      (literal_content)
+      (literal_content)
+      (literal_content)
+      (literal_content)))
+  (assign
+    lhs: (identifier)
+    rhs: (chained_string
+      (string
+        (literal_content))
+      (string
+        (literal_content))
+      (string
+        (literal_content))
+      (string
+        (literal_content))))
+  (assign
+    lhs: (identifier)
+    rhs: (string
+      (literal_content)))
+  (string
+    (literal_content)))
+
+=================================
+Array-like and hash-like literals
+:language(crystal)
+=================================
+
+Array[1, 2, 3]
+Set{1, 2, 3}
+MyType      {"foo" => "bar"}
+IO::Memory{1, 2, 3}
+Set(Int32)  {1, 2, 3}
+MyHash(String, String | Int32){"foo" => "bar"}
+
+---
+
+(expressions
+  (index_call
+    receiver: (constant)
+    method: (operator)
+    arguments: (argument_list
+      (integer)
+      (integer)
+      (integer)))
+  (array_like
+    name: (constant)
+    values: (tuple
+      (integer)
+      (integer)
+      (integer)))
+  (hash_like
+    name: (constant)
+    values: (hash
+      (hash_entry
+        (string
+          (literal_content))
+        (string
+          (literal_content)))))
+  (array_like
+    name: (constant)
+    values: (tuple
+      (integer)
+      (integer)
+      (integer)))
+  (array_like
+    name: (generic_instance_type
+      (constant)
+      params: (param_list
+        (constant)))
+    values: (tuple
+      (integer)
+      (integer)
+      (integer)))
+  (hash_like
+    name: (generic_instance_type
+      (constant)
+      params: (param_list
+        (constant)
+        (union_type
+          (constant)
+          (constant))))
+    values: (hash
+      (hash_entry
+        (string
+          (literal_content))
+        (string
+          (literal_content))))))

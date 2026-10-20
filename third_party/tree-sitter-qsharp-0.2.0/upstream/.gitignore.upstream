@@ -1,0 +1,7 @@
+node_modules/
+build/
+prebuilds/
+target/
+*.wasm
+.build/
+knowledge/

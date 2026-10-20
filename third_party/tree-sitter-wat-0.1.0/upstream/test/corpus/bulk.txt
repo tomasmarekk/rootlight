@@ -1,0 +1,110 @@
+==================
+bulk
+==================
+;; segment syntax
+(module
+  (memory 1)
+  (data "foo"))
+
+(module
+  (table 3 funcref)
+  (elem funcref (ref.func 0) (ref.null func) (ref.func 1))
+  (func))
+
+;; memory.fill
+(module
+  (func (export "fill") (param i32 i32 i32)
+    (memory.fill
+      (local.get 0)
+      (local.get 1)
+      (local.get 2)))
+)
+
+
+(module
+  (data $p "x")
+  (data $a (memory 0) (i32.const 0) "x")
+)
+
+
+(module
+  (elem (i32.const 0) $zero $one $two)
+)
+---
+
+(root
+  (line_comment)
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)))
+    (module_field_data
+      (string)))
+  (module
+    (module_field_table
+      (table_type
+        (uinteger)
+        (ref_type)))
+    (module_field_elem
+      (elem_list
+        (ref_type)
+        (elem_expr
+          (plain_instr
+            (instr_name)
+            (integer)))
+        (elem_expr
+          (plain_instr
+            (instr_name)
+            (heap_type)))
+        (elem_expr
+          (plain_instr
+            (instr_name)
+            (integer)))))
+    (module_field_func))
+  (line_comment)
+  (module
+    (module_field_func
+      (export
+        (string))
+      (param
+        (num_type)
+        (num_type)
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (plain_instr
+          (instr_name)
+          (integer))
+        (plain_instr
+          (instr_name)
+          (integer))
+        (plain_instr
+          (instr_name)
+          (integer)))))
+  (module
+    (module_field_data
+      (identifier)
+      (string))
+    (module_field_data
+      (identifier)
+      (mem_use
+        (index
+          (uinteger)))
+      (offset
+        (plain_instr
+          (instr_name)
+          (integer)))
+      (string)))
+  (module
+    (module_field_elem
+      (offset
+        (plain_instr
+          (instr_name)
+          (integer)))
+      (elem_list
+        (index
+          (identifier))
+        (index
+          (identifier))
+        (index
+          (identifier))))))

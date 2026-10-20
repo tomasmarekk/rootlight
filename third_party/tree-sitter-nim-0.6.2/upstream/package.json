@@ -1,0 +1,49 @@
+{
+  "name": "tree-sitter-nim",
+  "version": "0.6.2",
+  "description": "Tree-sitter grammar for Nim",
+  "main": "bindings/node",
+  "types": "bindings/node",
+  "scripts": {
+    "build": "tree-sitter generate --no-bindings && tree-sitter build",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse",
+    "install": "node-gyp-build",
+    "prebuildify": "prebuildify --napi --strip"
+  },
+  "author": "leorize",
+  "license": "MPL-2.0",
+  "devDependencies": {
+    "eslint": "^9.6.0",
+    "nan": "^2.20.0",
+    "node-gyp": "^10.1.0",
+    "prebuildify": "^6.0.1",
+    "tree-sitter-cli": "^0.22.6"
+  },
+  "dependencies": {
+    "node-gyp-build": "^4.8.1"
+  },
+  "peerDependencies": {
+    "tree-sitter": "^0.21.1"
+  },
+  "peerDependenciesMeta": {
+    "tree_sitter": {
+      "optional": true
+    }
+  },
+  "files": [
+    "grammar.js",
+    "binding.gyp",
+    "prebuilds/**",
+    "bindings/node/*",
+    "queries/*",
+    "src/**"
+  ],
+  "tree-sitter": [
+    {
+      "scope": "source.nim",
+      "file-types": ["nim", "nimble", "nims"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

@@ -1,0 +1,654 @@
+{
+  "schema": "rootlight.crystal-static-source-inventory/1",
+  "files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 568,
+      "sha256": "d34e3fb3b398b73df34d558caf133465030ed5680cab7958cd1f3ed46d8984ea",
+      "executable": false
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1072,
+      "sha256": "d1e5e5f807a9e842c16a0b392d7dcc5542f9ed9163533fa7d9798f7289fa8547",
+      "executable": false
+    },
+    {
+      "path": "SOURCE-PROVENANCE.json",
+      "bytes": 33287,
+      "sha256": "d576b8e85893621b679f1124a78b67a1eabf22ed5f1e7f5a370752ee67d35211",
+      "executable": false
+    },
+    {
+      "path": "SOURCES.md",
+      "bytes": 2466,
+      "sha256": "b5c863fe4dda342b0d2404bb23d32139d28e7d0c645a29b6f7b060f3427b60b4",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 602,
+      "sha256": "62e1efac57cb2dbd05f1784144862762be28bd8ada84b8f4d131712cf7ac27cb",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 723,
+      "sha256": "cd6bbda38f8d7cbf89e219ec1ded9a7da1ca63ec65aeaf6ba61142bd0dd18dfc",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/tests.rs",
+      "bytes": 6012,
+      "sha256": "c821d03a7d4be2dfcdce97433ad46dc6e08ded14b8f8ea12cb740d864142a3a2",
+      "executable": false
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 79919,
+      "sha256": "275fa659c03a58764fa9e4258550f4f686ba95c5956089c69aae16beb6eb695a",
+      "executable": false
+    },
+    {
+      "path": "patches/scanner-state-extent.patch",
+      "bytes": 6408,
+      "sha256": "37b52f6a89b202293d0ed9427abd8b7acaff2f8ae0c3a75373bc3540fd7f1c54",
+      "executable": false
+    },
+    {
+      "path": "patches/short-block-setter.patch",
+      "bytes": 793,
+      "sha256": "432aa209d0b3922c56b065bcb73f3c7061880161564299563f557e0ca63ce5cb",
+      "executable": false
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 391924,
+      "sha256": "1d5b1b4653fb4ab953c69953f8fabf62b7b25a432344b06c7d0f2070fd7265b9",
+      "executable": false
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 408766,
+      "sha256": "3b42748df539bd8576723149087591825726d9e179ff102a54f4b9573ec33799",
+      "executable": false
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 45777021,
+      "sha256": "b847965437b548e77bbc1a1469e310764c75e05a6613975fc7c11fc95011c032",
+      "executable": false
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 125085,
+      "sha256": "72902052dd0ff1a236f05dd504cdcfa1815339bd56be8575e700d708bb18ca4b",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false
+    },
+    {
+      "path": "src/unicode.c",
+      "bytes": 4642,
+      "sha256": "62870f7ff29e7153d3eb74dabe4c2d7084374c8332b149c7cedfd9f88b5c6b43",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/LICENSE",
+      "bytes": 1078,
+      "sha256": "b4be89e37126f0444fb82fb579efdc0a7c073defc895329e98a1dcb856a1fb5d",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/SOURCES.md",
+      "bytes": 387,
+      "sha256": "0ca928fbd8a012dd4fe058fa0ccb3bbd944cdf95deb4e20acf2d71e12ec8700e",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/null_log_handler.cr",
+      "bytes": 313,
+      "sha256": "3cdbdb592bd5c9dc070116df3491c9f6046de181d4936878240e0d1d47765d48",
+      "executable": false
+    },
+    {
+      "path": "upstream.tar.gz",
+      "bytes": 2114269,
+      "sha256": "2d3c20aedf6bbe136d0d88d9ad0ebddbe05c8acdeb4e3dac983accd91a133389",
+      "executable": false
+    },
+    {
+      "path": "upstream/.ameba.yml",
+      "bytes": 305,
+      "sha256": "a7ccaa461cf38fe41f9be30bada93a47eecbc1067f47346af437249c23e5fba5",
+      "executable": false
+    },
+    {
+      "path": "upstream/.clang-format",
+      "bytes": 434,
+      "sha256": "bc8ce92d36a097fe812bcd160788bdff817dd0dcef2533c53e3bdd24bde20c67",
+      "executable": false
+    },
+    {
+      "path": "upstream/.editorconfig",
+      "bytes": 541,
+      "sha256": "90496ff136741e183308ae716913a90325bb20f5a83194b37aee5182501c81ee",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitattributes.upstream",
+      "bytes": 830,
+      "sha256": "e3b1a898613fff76716dcc1cf317d7edd1ccfabaa42e68c69867b75583c1647d",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/ci.yml",
+      "bytes": 1821,
+      "sha256": "ef9f8164f93c5cd91ba2fda3114a785079cb501bc8441c29e97c1cdd6d0ea14e",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/compile_check.yml",
+      "bytes": 1157,
+      "sha256": "a3ae79e5c9140d289e641f2b81964702b58fb4fb8470c6ad467dd3da5e762b4d",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/crystal-ameba.yml",
+      "bytes": 1082,
+      "sha256": "df90cdd9a3c507a45785fa30cdaaf60be124991bc04280ac90d61b1621ab5479",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitignore.upstream",
+      "bytes": 514,
+      "sha256": "1df7918e1f8e6cd38cf2fb10f4bd36810c939e785f29bdb3a07ee077d6c5c85f",
+      "executable": false
+    },
+    {
+      "path": "upstream/CMakeLists.txt",
+      "bytes": 2602,
+      "sha256": "f2db7ab3310a79ee94a9eb993df58286bac9818e1b3a1d9430c6fa3f2f5a5c0f",
+      "executable": false
+    },
+    {
+      "path": "upstream/Cargo.lock",
+      "bytes": 2484,
+      "sha256": "c029825e1fd13a5f2a98e0c5f14ed97dac3af717cda399eb3a8a192d132ce96e",
+      "executable": false
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 822,
+      "sha256": "ca4816a12a3478bde61c1e759d31db937529d2c98032297fb603a2d7360ffae7",
+      "executable": false
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1072,
+      "sha256": "d1e5e5f807a9e842c16a0b392d7dcc5542f9ed9163533fa7d9798f7289fa8547",
+      "executable": false
+    },
+    {
+      "path": "upstream/Makefile",
+      "bytes": 4304,
+      "sha256": "b6eaaa4328b05fa5004ffbe1cfe0f373c158ef880cb5b615378558cc0db5fa7a",
+      "executable": false
+    },
+    {
+      "path": "upstream/Package.resolved",
+      "bytes": 605,
+      "sha256": "8a4cf3ecb55259944bc9d27033114a2bf3d0b86e4e170c313947c4ebc875e470",
+      "executable": false
+    },
+    {
+      "path": "upstream/Package.swift",
+      "bytes": 1091,
+      "sha256": "9ad9b7f8956c84790fbe6055a62e27bbc25ee239f10d62f73e83dd860e7393a0",
+      "executable": false
+    },
+    {
+      "path": "upstream/README.md",
+      "bytes": 2138,
+      "sha256": "c655d7ffc2ac296be0173478e0e21d4cd26dc07fbe9743a5323b925eb398f77b",
+      "executable": false
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 766,
+      "sha256": "b14202f21749a0b20d82fa396d1c41cdca95a6404fd657e18c3d17f85f86c02f",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-crystal.h",
+      "bytes": 250,
+      "sha256": "c0ef741f67e41293c64d233a9c3852bffeb1a3add476405e2d1b9247ce4a36d3",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-crystal.pc.in",
+      "bytes": 299,
+      "sha256": "d0ad4bd0a1f6657c5a28be329e2af805ee68a25f3a8f6a174ce9999a936b45da",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/go/binding.go",
+      "bytes": 343,
+      "sha256": "f5d9d6942ffbe0b85e8ed76495c860b86425080e8a4fa89e822fa590e7b94317",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/go/binding_test.go",
+      "bytes": 376,
+      "sha256": "4d36658b5c3646b4e9165c5cd638d2fe3188090b05e0181ae12d44852a89aa49",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 532,
+      "sha256": "7c39492b33f802b4608393d53e95ab2d0669dd035da808b86992caf775ad4b45",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/binding_test.js",
+      "bytes": 250,
+      "sha256": "c35f2aaec5d06fa42a4cea226fa4cb841a04a7506e70086c2ea5d9fd67d8c482",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/index.d.ts",
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 456,
+      "sha256": "7f27799acb1f4865c834aa763a1f54bd7db39c62093fd5b671c4cb67f547f4f4",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tests/test_binding.py",
+      "bytes": 299,
+      "sha256": "62273fa65292a83b5d2bcd7c441be948c8134f7b86a8be8830dec00d292084d6",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_crystal/__init__.py",
+      "bytes": 1156,
+      "sha256": "0ae37b6ee3c83f99b3f22a41b2ed4550f499d4e7da2fcff699def51d4b7eee99",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_crystal/__init__.pyi",
+      "bytes": 247,
+      "sha256": "a22c459bc957b1965661ae5c4708fa6eb6ea877eff7f3376acb13e7665fdfeb0",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_crystal/binding.c",
+      "bytes": 685,
+      "sha256": "ea05c889461763dfaac85657d5d209271469bda2cfab2d3c8f3121c422555201",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_crystal/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 614,
+      "sha256": "9616c76e5955d8e884a85ba768924302147831578de99305a0b5fead875c8fe4",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 1960,
+      "sha256": "502d0a3e7591e7322e89581ea9778a16bcec48bec17e41cf5c5e082c5ebbacff",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterCrystal/crystal.h",
+      "bytes": 250,
+      "sha256": "c0ef741f67e41293c64d233a9c3852bffeb1a3add476405e2d1b9247ce4a36d3",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterCrystalTests/TreeSitterCrystalTests.swift",
+      "bytes": 371,
+      "sha256": "ed7758cc88850ac82404901f0d3b9b66acdb1a7b6e1e718ff2859158eb5efaf6",
+      "executable": false
+    },
+    {
+      "path": "upstream/eslint.config.mjs",
+      "bytes": 1785,
+      "sha256": "c4a35c5d527455e928b30d4d1207259c3ce711eeb1dcaf8859044c1dffb32cb0",
+      "executable": false
+    },
+    {
+      "path": "upstream/go.mod",
+      "bytes": 177,
+      "sha256": "26e12d817777b00984a3d5a48485c58d70138ff08eb285b7a0d54c6247585388",
+      "executable": false
+    },
+    {
+      "path": "upstream/go.sum",
+      "bytes": 368,
+      "sha256": "991ddd6331f5a8f65f980f7eae83a1d40198e78bb93a62860630056c9c95f5b0",
+      "executable": false
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 79427,
+      "sha256": "968ebf9ed3e8ff658cbe45ffb2ce6a39f166a6c5ea1403b566b10c80ff467334",
+      "executable": false
+    },
+    {
+      "path": "upstream/package-lock.json",
+      "bytes": 51060,
+      "sha256": "ba5f72e1cec6fc6e4c4fbc3f1f2c762ec1959ca0f4c75be9a8bc81bcef4a558b",
+      "executable": false
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 1605,
+      "sha256": "d645d2e821286e98da3f08973f73d142ad32bd0f140d9334ce5f1d982198b995",
+      "executable": false
+    },
+    {
+      "path": "upstream/pyproject.toml",
+      "bytes": 931,
+      "sha256": "f8a9217ca41e3db6c6abb2cd7f344e9b15773ee1679cd318d6492c2eed5eaf62",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/injections.scm",
+      "bytes": 161,
+      "sha256": "6e253567b5e0748352fe01afee82d838812809fe6cde1e3e60712b315dbf5734",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/nvim/aerial.scm",
+      "bytes": 956,
+      "sha256": "76e09f61d91b633d8bb4f62baa51cfd5cb81b2e600ba7cd5df160b7fce72fddb",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/nvim/context.scm",
+      "bytes": 1058,
+      "sha256": "ae413e989208e9da53524b6d602237d749d850da16d3b06c6a31d1fe9440eaa7",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/nvim/folds.scm",
+      "bytes": 327,
+      "sha256": "f58e08a7d05acb83f2ae52e9a0e9450f15e11bc649c2d2ba3513262b22a3cc82",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/nvim/highlights.scm",
+      "bytes": 3574,
+      "sha256": "0e955fb524554d62dbbde235cd9eecc356138a1c9542261ba851500448d7b5ef",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/nvim/injections.scm",
+      "bytes": 1298,
+      "sha256": "8755e9810430d82d5203de48a9c03d785d0058b0320ec59c046fc336a0f4327d",
+      "executable": false
+    },
+    {
+      "path": "upstream/setup.py",
+      "bytes": 1956,
+      "sha256": "d3716066eb9b5571be83872fba46531c4b38a2d68417443fbfa27d452a5fd4ea",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 389545,
+      "sha256": "0b164ebc3b8f0a57aa27ff2f9479f50c0f5eacc6a4c342e03749c85e3f7f7589",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 408766,
+      "sha256": "3b42748df539bd8576723149087591825726d9e179ff102a54f4b9573ec33799",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 45156078,
+      "sha256": "dfc9cd97815feabeae329767560379b57dbc88c2ffe6485fff238ae23a7d69d3",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/scanner.c",
+      "bytes": 121828,
+      "sha256": "88263ca609ef7c195829b6ac513727de0f22f25c88f2b8a05e224248567df032",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/array.h",
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/unicode.c",
+      "bytes": 4642,
+      "sha256": "62870f7ff29e7153d3eb74dabe4c2d7084374c8332b149c7cedfd9f88b5c6b43",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/errors.txt",
+      "bytes": 15206,
+      "sha256": "fcd70ba27b38792257c8c42db750c315057d17d60c8dbafc88a1103e76f08295",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/expressions.txt",
+      "bytes": 120828,
+      "sha256": "a902d0e790c54716ea1371efd7cc08854c2e2e79627ce73736654c1fa8aa4937",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/literals.txt",
+      "bytes": 50202,
+      "sha256": "3a4c190ee707ca0c1f9ba77434ee1946601727895608c09c5563813c13b8abbc",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/macros.txt",
+      "bytes": 23823,
+      "sha256": "e9acb2d408b35fdd9904b67a7b937c8848ac81edb2459c236862bac57cf22cf3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/statements.txt",
+      "bytes": 39427,
+      "sha256": "85683db883b4d28e9a91a1e76251abc4765b5a4ce766e275659d801b52a07ab3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/todo.txt",
+      "bytes": 4653,
+      "sha256": "788536af694d0d53ab5f28cea95b9f4686a38e7be0deed506e4727fac1f71ed3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/types.txt",
+      "bytes": 31728,
+      "sha256": "f054d6359c627cc1782e0d2d6ae9dc400bdf1ff54f3f3ce7622bd7144e282406",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/crystal_parse_corpus.cr",
+      "bytes": 990,
+      "sha256": "8c098e893757800df042418e623a800ac1754359b3f4125e4154c9ac94341bd2",
+      "executable": true
+    },
+    {
+      "path": "upstream/test/crystal_parse_stdlib.cr",
+      "bytes": 1849,
+      "sha256": "ccea1b4f42c6c93cde83112f956f1bf538074c9ddadbd2b04045c2ff5b3e58bb",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/crystal_parse_stdlib_fail.txt",
+      "bytes": 19871,
+      "sha256": "bfcaad2d699b7de99a4a6827ffc7b04ba7aa44fb26e7a27b599055be9d7f3b1e",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/annotations.cr",
+      "bytes": 608,
+      "sha256": "906e6020c8bef0c1b8b6e687dad5faae2cc5fddc3e4773f287092a9dbb6543a0",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/arrays.cr",
+      "bytes": 209,
+      "sha256": "0ae98e75cdf8eafdcd6dc8273ea98e5e01a2dc381a7618708d29c829c9802254",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/blocks.cr",
+      "bytes": 720,
+      "sha256": "90145432de667462f905db7cc4112fb5e62d7b55837b82c9aa2e0d0cb9c063a5",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/hashes.cr",
+      "bytes": 398,
+      "sha256": "3cfef8292a4655b44b609c31b87dddf2bf6f1e06a81d39ea1279c27fbb6ff16e",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/methods.cr",
+      "bytes": 757,
+      "sha256": "1ea5210ebd428759cb58717d8d6ed9005936a072da4cf57d9a242baad3aa35a7",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/operators.cr",
+      "bytes": 150,
+      "sha256": "86b7c94617d8f5621f2b08556b8ab8f1eaaa7cd71b75e36de963c61131153dc3",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/regex.cr",
+      "bytes": 606,
+      "sha256": "919d7bb89ea8ec0e90c39ab3657da5c4d912a073ed60d6c0f5846d8f5640182a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/tuples.cr",
+      "bytes": 627,
+      "sha256": "7abc4a3aae15de006f8e792278ad029b29fa173414ee66236fc07d17291f7af7",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/types.cr",
+      "bytes": 640,
+      "sha256": "a27fddf3a662440ea60d278dc07a11b80542328d8841e63e4f862f03845c2000",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/s_exp_parser.cr",
+      "bytes": 298,
+      "sha256": "a41158584edcb19ae59db374f1630101a29f0d22c833c39581fe4e4eb9e451d1",
+      "executable": true
+    },
+    {
+      "path": "upstream/test/s_exp_visitor.cr",
+      "bytes": 43693,
+      "sha256": "694bd71e2d90a171f3cb29ca102cdf3e4a5de6b62b6982d0d7cca6744bdcc53c",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/stdlib_coverage.cr",
+      "bytes": 2698,
+      "sha256": "39748c400689400e35cc17ef263f40cb40dbe996db8ee34516fe4b640e40eacd",
+      "executable": true
+    },
+    {
+      "path": "upstream/test/stdlib_coverage_expected_to_fail.txt",
+      "bytes": 786,
+      "sha256": "bdf0d552060fa76b69d85278c759d108569f9074e7b12d74e3609ad3c291ae5b",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/util.cr",
+      "bytes": 5280,
+      "sha256": "f36a3c043ec4e81ff2e751c0e737a3cba257518e20d39e8066490d8da06fde71",
+      "executable": false
+    },
+    {
+      "path": "upstream/tree-sitter.json",
+      "bytes": 1122,
+      "sha256": "f6d66107b473ff794020ae8ec56db6480992e66f95efa689d3a17a958ae6d0df",
+      "executable": false
+    }
+  ],
+  "directories": [
+    "bindings",
+    "bindings/rust",
+    "patches",
+    "src",
+    "src/tree_sitter",
+    "tests",
+    "tests/fixtures",
+    "upstream",
+    "upstream/.github",
+    "upstream/.github/workflows",
+    "upstream/bindings",
+    "upstream/bindings/c",
+    "upstream/bindings/go",
+    "upstream/bindings/node",
+    "upstream/bindings/python",
+    "upstream/bindings/python/tests",
+    "upstream/bindings/python/tree_sitter_crystal",
+    "upstream/bindings/rust",
+    "upstream/bindings/swift",
+    "upstream/bindings/swift/TreeSitterCrystal",
+    "upstream/bindings/swift/TreeSitterCrystalTests",
+    "upstream/queries",
+    "upstream/queries/nvim",
+    "upstream/src",
+    "upstream/src/tree_sitter",
+    "upstream/test",
+    "upstream/test/corpus",
+    "upstream/test/highlight"
+  ],
+  "inventory_excludes_itself": true
+}

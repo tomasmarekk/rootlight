@@ -1,0 +1,165 @@
+================================================================================
+Integer literals
+================================================================================
+
+operation Main() : Unit {
+    let a = 42;
+    let b = 0b1010;
+    let c = 0o52;
+    let d = 0xFF;
+    let e = 1_000_000;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier)) (integer_literal))
+        (let_statement (pattern (identifier)) (integer_literal))
+        (let_statement (pattern (identifier)) (integer_literal))
+        (let_statement (pattern (identifier)) (integer_literal))
+        (let_statement (pattern (identifier)) (integer_literal))))))
+
+================================================================================
+BigInt literals
+================================================================================
+
+operation Main() : Unit {
+    let x = 42L;
+    let y = 0xFFL;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier)) (bigint_literal))
+        (let_statement (pattern (identifier)) (bigint_literal))))))
+
+================================================================================
+Float literals
+================================================================================
+
+operation Main() : Unit {
+    let a = 3.14;
+    let b = 1.;
+    let c = 1e5;
+    let d = 1.0e-3;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier)) (float_literal))
+        (let_statement (pattern (identifier)) (float_literal))
+        (let_statement (pattern (identifier)) (float_literal))
+        (let_statement (pattern (identifier)) (float_literal))))))
+
+================================================================================
+Imaginary literals
+================================================================================
+
+operation Main() : Unit {
+    let a = 2i;
+    let b = 1.5i;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier)) (imaginary_literal))
+        (let_statement (pattern (identifier)) (imaginary_literal))))))
+
+================================================================================
+String literal
+================================================================================
+
+operation Main() : Unit {
+    let s = "hello\nworld";
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier)) (string_literal))))))
+
+================================================================================
+Bool Result Pauli literals
+================================================================================
+
+operation Main() : Unit {
+    let a = true;
+    let b = false;
+    let c = Zero;
+    let d = One;
+    let e = PauliX;
+    let f = PauliZ;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier)) (bool_literal))
+        (let_statement (pattern (identifier)) (bool_literal))
+        (let_statement (pattern (identifier)) (result_literal))
+        (let_statement (pattern (identifier)) (result_literal))
+        (let_statement (pattern (identifier)) (pauli_literal))
+        (let_statement (pattern (identifier)) (pauli_literal))))))
+
+================================================================================
+Discard and type hole
+================================================================================
+
+operation Main() : Unit {
+    let _ = 0;
+    let x : _ = 5;
+    let f = Foo(_, 1);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (discard)) (integer_literal))
+        (let_statement (pattern (identifier)) (discard) (integer_literal))
+        (let_statement (pattern (identifier))
+          (call_expression (identifier) (discard) (integer_literal)))))))

@@ -1,0 +1,1 @@
+examples/scrooge/scrooge-linter/src/test/thrift/fail/invalid.thrift

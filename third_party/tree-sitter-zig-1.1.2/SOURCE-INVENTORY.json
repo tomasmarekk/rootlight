@@ -1,0 +1,467 @@
+{
+  "schema": "rootlight.zig-static-source-inventory/1",
+  "files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 584,
+      "sha256": "39ec947eff05d56329fc3de54b2e176c1e6bcd95991aa050050b4108874dca16",
+      "executable": false
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1101,
+      "sha256": "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727",
+      "executable": false
+    },
+    {
+      "path": "SOURCE-PROVENANCE.json",
+      "bytes": 20509,
+      "sha256": "fbc7085cc29dc84f3c0bb53490d4b1c06a7ad8f17e22cbe3bbf571184f161aeb",
+      "executable": false
+    },
+    {
+      "path": "SOURCES.md",
+      "bytes": 1439,
+      "sha256": "91073b4be1e09a9938cac38534ce64868af5cc0021d7460a68a1e4747a5ae2b1",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 441,
+      "sha256": "b67856421c94821d89af06a836cba33c4776d46befc1fe68a5f9f10e6b7329e1",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 701,
+      "sha256": "bc080c337a9b0b1e603c5c2e340d1e56ebc4faaf9978d4ad1dcf7caa0d5ff0b3",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/tests.rs",
+      "bytes": 4446,
+      "sha256": "ddd3d8827550f613a914050d70093eb3de96d50f3dc851440e15e7908ba507a0",
+      "executable": false
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 21658,
+      "sha256": "925893baab54f4a7d75d458fb4db82135718fd75cb0bd899e4c681e76c969345",
+      "executable": false
+    },
+    {
+      "path": "patches/empty-container-members.patch",
+      "bytes": 738,
+      "sha256": "cbe497b1198bc6eb8362238e0dae408bf8abe32531f31a6beab1ea0adc87eb28",
+      "executable": false
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 160086,
+      "sha256": "48a738cc08cb5adfd8891f25a34586c99b8329229bd0948ee6490ebdde44d193",
+      "executable": false
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 53955,
+      "sha256": "6f5c5e0d260e402fcbc5e330ac4051c829b5a8682e3c6ecf3e05cb15b0841ff0",
+      "executable": false
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 5892222,
+      "sha256": "3ddc4d39455fcbce8b30d706f67b0639b5cd887e386076fde3979d815215a626",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/LICENSE",
+      "bytes": 1118,
+      "sha256": "3129de97bc7769d683e52ce02cb4eaecd2b0aab144b09d6325a1b135bdc87cc0",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/SOURCES.md",
+      "bytes": 513,
+      "sha256": "645cfc873b2b76ae50eed0aae8dc36195d6f4ab9c81d3d392ab9a3b5006bf1ff",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/pipe.zig",
+      "bytes": 772,
+      "sha256": "a1675327f796a7efc5841819c69dd85401bfa3fd0f36221768b5b0413d21b289",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/recovery/pkg/highway/src/detect/x86.zig",
+      "bytes": 5446,
+      "sha256": "351d231fc4206083b22fb3c84fa7a23d29d7891cc4b259ec06694738b5dd968a",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/recovery/src/Command.zig",
+      "bytes": 37939,
+      "sha256": "4f3d9c2c8fcbe35d7fc8cec1b04f550b08b37e60265924b5d32677d4bc8536ae",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/recovery/src/Surface.zig",
+      "bytes": 223407,
+      "sha256": "d40ad8c1492ea2e4759955e4e67505aee174df8cca4ce38f0d073783eab7310a",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/recovery/src/global.zig",
+      "bytes": 16118,
+      "sha256": "dd9e590c2ed3377add0adb1d3028745c511a7ef6aa1ec38045c2844f4b1b29da",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/recovery/src/main_c.zig",
+      "bytes": 9717,
+      "sha256": "3faf03846ca86a919a30e392cde1fc4aaf95f84aaba028ae4a57cc71aa288b3a",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/recovery/src/quirks_memset.zig",
+      "bytes": 13476,
+      "sha256": "6ece1baf7ab3cbbf9663425fe5a4da74abbf7af0deca149e196e6af88eb5f270",
+      "executable": false
+    },
+    {
+      "path": "tests/fixtures/source-pins.json",
+      "bytes": 1687,
+      "sha256": "44587f617fbb38b84cd1a0dac75cb313d92f7d5390e15aa1767027ec36c5edda",
+      "executable": false
+    },
+    {
+      "path": "upstream.tar.gz",
+      "bytes": 264725,
+      "sha256": "c7af5b1a992fcaffdf50a11a9974fbf8f09d20c4d9ef42245ac90c152dd3a85a",
+      "executable": false
+    },
+    {
+      "path": "upstream/.editorconfig",
+      "bytes": 541,
+      "sha256": "90496ff136741e183308ae716913a90325bb20f5a83194b37aee5182501c81ee",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitattributes.upstream",
+      "bytes": 862,
+      "sha256": "4af865e7a4e4a96e9e465794e6b112bd922c4b81bea45f8162f529c69c9fd9be",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/ci.yml",
+      "bytes": 5926,
+      "sha256": "0219ceffa27d9007084d41cb5298d8b7f2a6d2e91d8cc5e9d6304608e7544618",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/lint.yml",
+      "bytes": 511,
+      "sha256": "b31b4fe53081449ab8e37d88b5ed9c5c154be94b5fb80694a46ad5c04fdafbb1",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/publish.yml",
+      "bytes": 796,
+      "sha256": "0af81fc6243170b3e6587e76969737c71e222d322977d7e8b7e550ffeb14aad7",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitignore",
+      "bytes": 324,
+      "sha256": "b3ab146577626a302df228cfdbe663020ecbed513dd0a02700b68fea1e8ce00e",
+      "executable": false
+    },
+    {
+      "path": "upstream/CMakeLists.txt",
+      "bytes": 2417,
+      "sha256": "611001363dc270b718fc38010e28c56e4360c2d69907da02d56c972c1100f013",
+      "executable": false
+    },
+    {
+      "path": "upstream/Cargo.lock",
+      "bytes": 2480,
+      "sha256": "486913df540b45dae3ad2595844f53d65ceee8d61deb08abaedfa7fd6bcf3d21",
+      "executable": false
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 674,
+      "sha256": "bebc1f42aef0666a6fdaecc56ff3f122dcc25b272ee6a17c6afeba07dd71d6f8",
+      "executable": false
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1101,
+      "sha256": "0eea8dc45e89deeb03c7799bbbc7b4688f365fb274562f4540ecfebdea82e727",
+      "executable": false
+    },
+    {
+      "path": "upstream/Makefile",
+      "bytes": 3185,
+      "sha256": "229040b55c947d2fe33e39201a8d6e8aee6b3e1df8b881d50d0e4327f15feec5",
+      "executable": false
+    },
+    {
+      "path": "upstream/Package.resolved",
+      "bytes": 605,
+      "sha256": "8a4cf3ecb55259944bc9d27033114a2bf3d0b86e4e170c313947c4ebc875e470",
+      "executable": false
+    },
+    {
+      "path": "upstream/Package.swift",
+      "bytes": 953,
+      "sha256": "289fa312d2acdbaf3ae847707c4ca67616c44bf34550aeba2f40a7ea349d8839",
+      "executable": false
+    },
+    {
+      "path": "upstream/README.md",
+      "bytes": 1156,
+      "sha256": "a466d7c9ce6f3ab4ae372612a840ab55d59dd737c4d19461b3959a7ac08519cc",
+      "executable": false
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 573,
+      "sha256": "f6fc09ec38d87919b513251b66157eb2bcd35d55e971df2aeb9584528f40a3b3",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-zig.h",
+      "bytes": 234,
+      "sha256": "70230dba8c197c1103b3a8c9a102cccc692d58767c54a4a17a9d782ada1b40a5",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-zig.pc.in",
+      "bytes": 291,
+      "sha256": "265ed99e8fcf9e86caaf59644407bf43590d324b822f74252f829a920b8ba46a",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/go/binding.go",
+      "bytes": 247,
+      "sha256": "97c77441239ecd041d25171a79543cc4293b19bdc306c1f779214b555652a13a",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/go/binding_test.go",
+      "bytes": 358,
+      "sha256": "0638bf6e35fae548b9e7178e17173274f732036faac996cfcafeb4cef6cf2776",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 573,
+      "sha256": "ff06f288f76c1c78d7fb0e8393eb8c66ca5a9068ffd42a9dd48913323de18af4",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/binding_test.js",
+      "bytes": 250,
+      "sha256": "c35f2aaec5d06fa42a4cea226fa4cb841a04a7506e70086c2ea5d9fd67d8c482",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/index.d.ts",
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 452,
+      "sha256": "893c64b77921ab7c5948eaf724772c2926371dee0c067b14ab3a9dcf7b63f67a",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tests/test_binding.py",
+      "bytes": 287,
+      "sha256": "afe04584558cfd97f893b85ac3ee32a1c2e830944960e0a264ea568745608310",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_zig/__init__.py",
+      "bytes": 842,
+      "sha256": "3b555ab0016851b1c4f6cf96481ff1fbfa38af1f47405a84d27584b691902f2b",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_zig/__init__.pyi",
+      "bytes": 115,
+      "sha256": "e2a64b14c0e0cbbce3e3eca0e618c47aa576f371a3460ac7286bb75b0c93c582",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_zig/binding.c",
+      "bytes": 677,
+      "sha256": "6cbd968f0746ff5a36984268989e1f12f826a2f126b62b4b683069b7cf711241",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_zig/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 405,
+      "sha256": "8446df769cecfa19ca6e7d348156ff5b20c6e28e6d5ef9f576973b136bd70673",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 1802,
+      "sha256": "91b5bfbe0c19fe8e26a0a15c701bc34fab4539ea5430dfc4a58b9f0a436a25e2",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterZig/zig.h",
+      "bytes": 234,
+      "sha256": "70230dba8c197c1103b3a8c9a102cccc692d58767c54a4a17a9d782ada1b40a5",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterZigTests/TreeSitterZigTests.swift",
+      "bytes": 355,
+      "sha256": "f6b83663a4250db2b06a9174ea4824ff0fc8e760bf1fb068255c46e5ee2918a2",
+      "executable": false
+    },
+    {
+      "path": "upstream/eslint.config.mjs",
+      "bytes": 89,
+      "sha256": "e7b2dbe4f462cf890b53cc2d140aef6785fa31caabaaf6a11a38bf12a3ece091",
+      "executable": false
+    },
+    {
+      "path": "upstream/go.mod",
+      "bytes": 175,
+      "sha256": "28fe1ad05eb5c1bcdfeecd330c71a5811dbdb60b51a77b16cebaac8855eca0c7",
+      "executable": false
+    },
+    {
+      "path": "upstream/go.sum",
+      "bytes": 4176,
+      "sha256": "a7d2dd524ce7f8e47eb33d9aa480d5011628376107c15e3a415cfef44d22fc44",
+      "executable": false
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 21618,
+      "sha256": "c4a524b2826f9484e5376a6c686af48ba52a8331f446de144754cb1ce11695cb",
+      "executable": false
+    },
+    {
+      "path": "upstream/package-lock.json",
+      "bytes": 56701,
+      "sha256": "66dcaa6605e0aebe9b743ca41bb89d11ed79946281fa67c4526df54d81188615",
+      "executable": false
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 1260,
+      "sha256": "3d19c349d741fe74a908d0226a5196b204483711cd7ce2bedaf62bb5961dac45",
+      "executable": false
+    },
+    {
+      "path": "upstream/pyproject.toml",
+      "bytes": 767,
+      "sha256": "ce3c1c0bd65c9a031b571aa7155a9d430b8017aaa97b9271383caf28ce03ab16",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/folds.scm",
+      "bytes": 409,
+      "sha256": "e27dc66370e7f2dc344fff86e5e85b9a01694703bfbbdb663ad3e13afdf91c3f",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/highlights.scm",
+      "bytes": 3345,
+      "sha256": "27a7ffc77086ec6394c04e59b42f0da4c9d3c294a0225bc155c80305ee54ca86",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/indents.scm",
+      "bytes": 207,
+      "sha256": "e97fa8bd0cefb0bc1fafe4cacf3a4e715304067d4765c5995c2742b71840a755",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/injections.scm",
+      "bytes": 352,
+      "sha256": "6c68bd360ae39e7e04e64ca647d925a0eae1dc9ce98de6088b8af34956f5c6a0",
+      "executable": false
+    },
+    {
+      "path": "upstream/setup.py",
+      "bytes": 1666,
+      "sha256": "6dcbbcc3b949ad286ec3681ec6744b86d36da0d783cdff6e28c2e7d7a381f1e5",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 159437,
+      "sha256": "83b0b4f6a58d5803aa4be2fdc4eeeecab8cbd5724543239e23ad06fc9abfafde",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 53932,
+      "sha256": "dd85513d4bf1b5f03fe6404376162b66924ee23c8b6d5a18e20d9360000be4d0",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 5843608,
+      "sha256": "5449f98eb876939fcb12be76891ecb0c99b78be3bfe843e140d64c680b66ae63",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/array.h",
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "executable": false
+    },
+    {
+      "path": "upstream/tree-sitter.json",
+      "bytes": 827,
+      "sha256": "65bf4818e9358a2600a4874446aecacc53ce98863dfd8f2b855dacb87e94a62b",
+      "executable": false
+    }
+  ]
+}

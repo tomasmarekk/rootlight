@@ -1,0 +1,23 @@
+{
+  "grammars": [
+    {
+      "name": "hare",
+      "scope": "source.hare",
+      "path": ".",
+      "file-types": [
+        "ha"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "license": "MIT",
+    "description": "Hare grammar retained at the pinned upstream revision",
+    "links": {
+      "repository": "https://github.com/tree-sitter-grammars/tree-sitter-hare"
+    }
+  },
+  "bindings": {
+    "rust": true
+  }
+}

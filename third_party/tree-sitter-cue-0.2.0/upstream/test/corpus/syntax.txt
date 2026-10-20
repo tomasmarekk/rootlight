@@ -1,0 +1,925 @@
+===============
+spread operator
+===============
+
+b: #A...
+c: {x: 1}...
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (spread_expression
+        (identifier))))
+  (field
+    (label
+      (identifier))
+    (value
+      (spread_expression
+        (struct_lit
+          (field
+            (label
+              (identifier))
+            (value
+              (number))))))))
+
+====================================
+ellipsis on its own line in a struct
+====================================
+
+a: {
+	b: 1
+	...
+}
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (struct_lit
+        (field
+          (label
+            (identifier))
+          (value
+            (number)))
+        (ellipsis)))))
+
+=====================
+closed struct literal
+=====================
+
+a: #{b: 1}
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (struct_lit
+        (field
+          (label
+            (identifier))
+          (value
+            (number)))))))
+
+================
+otherwise clause
+================
+
+for x in [] {
+	"\(x)": x
+} otherwise {
+	empty: true
+}
+
+---
+
+(source_file
+  (comprehension
+    (for_clause
+      (identifier)
+      (list_lit))
+    (struct_lit
+      (field
+        (label
+          (string
+            (interpolation
+              (identifier))))
+        (value
+          (identifier))))
+    (else_clause
+      (struct_lit
+        (field
+          (label
+            (identifier))
+          (value
+            (boolean)))))))
+
+===============
+fallback clause
+===============
+
+for x in [] {
+	"\(x)": x
+} fallback {
+	empty: true
+}
+
+---
+
+(source_file
+  (comprehension
+    (for_clause
+      (identifier)
+      (list_lit))
+    (struct_lit
+      (field
+        (label
+          (string
+            (interpolation
+              (identifier))))
+        (value
+          (identifier))))
+    (else_clause
+      (struct_lit
+        (field
+          (label
+            (identifier))
+          (value
+            (boolean)))))))
+
+=============
+function type
+=============
+
+f: func(int, string) -> int
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (primitive_type))
+          (parameter
+            (primitive_type)))
+        (primitive_type)))))
+
+====================================
+attribute between package and import
+====================================
+
+package p
+
+@experiment(try)
+
+import "strings"
+
+a: strings.ToUpper("x")
+
+---
+
+(source_file
+  (package_clause
+    (package_identifier))
+  (attribute
+    (identifier)
+    (identifier))
+  (import_declaration
+    (import_spec
+      (string)))
+  (field
+    (label
+      (identifier))
+    (value
+      (call_expression
+        (selector_expression
+          (identifier)
+          (identifier))
+        (arguments
+          (string))))))
+
+====================
+two field attributes
+====================
+
+a: 1 @foo(x) @bar(y)
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (number))
+    (attribute
+      (identifier)
+      (identifier))
+    (attribute
+      (identifier)
+      (identifier))))
+
+===================
+closed list literal
+===================
+
+a: #[1, 2]
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (list_lit
+        (number)
+        (number)))))
+
+====================
+alias in parentheses
+====================
+
+a~(X): {b: 1}
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier)
+      (postfix_alias
+        (identifier)))
+    (value
+      (struct_lit
+        (field
+          (label
+            (identifier))
+          (value
+            (number)))))))
+
+==========================
+alias then optional marker
+==========================
+
+a~(X)?: int
+
+---
+
+(source_file
+  (field
+    (label
+      (optional
+        (identifier)
+        (postfix_alias
+          (identifier))))
+    (value
+      (primitive_type))))
+
+==========================
+raw string with two hashes
+==========================
+
+a: ##"foo"#bar"##
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (string))))
+
+==============
+unary equality
+==============
+
+a: ==5
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (unary_expression
+        (number)))))
+
+===========================
+index with a trailing comma
+===========================
+
+a: l[0,]
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (index_expression
+        (identifier)
+        (number)))))
+
+==============================
+null, true and false as labels
+==============================
+
+x: {
+	null: 1
+	true: 2
+	false: 3
+}
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (struct_lit
+        (field
+          (label
+            (identifier))
+          (value
+            (number)))
+        (field
+          (label
+            (identifier))
+          (value
+            (number)))
+        (field
+          (label
+            (identifier))
+          (value
+            (number)))))))
+
+========================================
+raw string nested in a raw interpolation
+========================================
+
+a: #"x\#(##"y"## + "z")w"#
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (string
+        (raw_interpolation
+          (binary_expression
+            (string)
+            (string)))))))
+
+=====================================
+raw escapes take the number of hashes
+=====================================
+
+a: ##"\##n and \#n"##
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (string
+        (escape_char)))))
+
+=================================
+raw interpolation with two hashes
+=================================
+
+x: 1
+a: ##"v\##(x)"##
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (number)))
+  (field
+    (label
+      (identifier))
+    (value
+      (string
+        (raw_interpolation
+          (identifier))))))
+
+====================================
+multiline raw string with two hashes
+====================================
+
+a: ##"""
+	x"""#y
+	"""##
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (string))))
+
+=========================
+raw bytes with two hashes
+=========================
+
+a: ##'b'##
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (string))))
+
+================
+empty raw string
+================
+
+a: #""#
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (string))))
+
+=====================================
+escaped newline in a multiline string
+=====================================
+
+a: """
+	foo \
+	bar
+	"""
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (string
+        (escape_char)))))
+
+========================
+function parameter forms
+========================
+
+f: func(_~x: int, a!: int = 5, b?: int @doc(x), string) -> int: x + a
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (postfix_alias
+              (identifier))
+            (primitive_type))
+          (parameter
+            (identifier)
+            (primitive_type)
+            (number))
+          (parameter
+            (identifier)
+            (primitive_type)
+            (attribute
+              (identifier)
+              (identifier)))
+          (parameter
+            (primitive_type)))
+        (primitive_type)
+        (binary_expression
+          (identifier)
+          (identifier))))))
+
+==============================
+function without a result type
+==============================
+
+f: func(a: int): a + 1
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (primitive_type)))
+        (binary_expression
+          (identifier)
+          (number))))))
+
+=========================
+labeled and partial calls
+=========================
+
+x: f(a: 1, b: 2)
+y: f(1, ...)
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (call_expression
+        (identifier)
+        (arguments
+          (labeled_argument
+            (identifier)
+            (number))
+          (labeled_argument
+            (identifier)
+            (number))))))
+  (field
+    (label
+      (identifier))
+    (value
+      (call_expression
+        (identifier)
+        (arguments
+          (number)
+          (ellipsis))))))
+
+================================
+call on a parenthesized function
+================================
+
+x: (func(a: int): a)(1)
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (call_expression
+        (parenthesized_expression
+          (function
+            (parameters
+              (parameter
+                (identifier)
+                (primitive_type)))
+            (identifier)))
+        (arguments
+          (number))))))
+
+===============================
+func as a label and a reference
+===============================
+
+func: 1
+y: func
+x: {
+	func?: int
+	func!: int
+}
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (number)))
+  (field
+    (label
+      (identifier))
+    (value
+      (identifier)))
+  (field
+    (label
+      (identifier))
+    (value
+      (struct_lit
+        (field
+          (label
+            (optional
+              (identifier)))
+          (value
+            (primitive_type)))
+        (field
+          (label
+            (required
+              (identifier)))
+          (value
+            (primitive_type)))))))
+
+==================================================
+dynamic label on the line after a reference to func
+==================================================
+
+func: 1
+k: "x"
+a: func
+(k): 2
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (number)))
+  (field
+    (label
+      (identifier))
+    (value
+      (string)))
+  (field
+    (label
+      (identifier))
+    (value
+      (identifier)))
+  (field
+    (label
+      (dynamic
+        (identifier)))
+    (value
+      (number))))
+
+==================================================
+function bodies and results ending in a selector, an index or a spread
+==================================================
+
+f: func(s: int) -> int: s.x + 1
+g: func(a: int): a[0]
+h: func(a: int) -> int: g(a)[0]
+k: func(s: int) -> int: s.x...
+l: func(a: int) -> m[0]
+n: func(a: int) -> x.y: 1
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (primitive_type)))
+        (primitive_type)
+        (binary_expression
+          (selector_expression
+            (identifier)
+            (identifier))
+          (number)))))
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (primitive_type)))
+        (index_expression
+          (identifier)
+          (number)))))
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (primitive_type)))
+        (primitive_type)
+        (index_expression
+          (call_expression
+            (identifier)
+            (arguments
+              (identifier)))
+          (number)))))
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (primitive_type)))
+        (primitive_type)
+        (spread_expression
+          (selector_expression
+            (identifier)
+            (identifier))))))
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (primitive_type)))
+        (index_expression
+          (identifier)
+          (number)))))
+  (field
+    (label
+      (identifier))
+    (value
+      (function
+        (parameters
+          (parameter
+            (identifier)
+            (primitive_type)))
+        (selector_expression
+          (identifier)
+          (identifier))
+        (number)))))
+
+==========================
+call on a call or an index
+==========================
+
+g: f(1, ...)(2)
+h: l[0](1, 2)
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (call_expression
+        (call_expression
+          (identifier)
+          (arguments
+            (number)
+            (ellipsis)))
+        (arguments
+          (number)))))
+  (field
+    (label
+      (identifier))
+    (value
+      (call_expression
+        (index_expression
+          (identifier)
+          (number))
+        (arguments
+          (number)
+          (number))))))
+
+===============================
+dynamic label after a reference
+===============================
+
+a: k
+(k): 2
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (identifier)))
+  (field
+    (label
+      (dynamic
+        (identifier)))
+    (value
+      (number))))
+
+====================
+spread on an integer
+====================
+
+a: 1...
+b: 1.5...
+c: 1.
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (spread_expression
+        (number))))
+  (field
+    (label
+      (identifier))
+    (value
+      (spread_expression
+        (float))))
+  (field
+    (label
+      (identifier))
+    (value
+      (float))))
+
+=====================================
+hashes before a spread on an integer
+=====================================
+
+a: ##1...
+
+---
+
+(source_file
+  (field
+    (label
+      (identifier))
+    (value
+      (identifier)))
+  (identifier)
+  (spread_expression
+    (number)))
+
+=====================
+raw strings as labels
+=====================
+
+#"a b"#: 1
+##"c"##: 2
+
+---
+
+(source_file
+  (field
+    (label
+      (string))
+    (value
+      (number)))
+  (field
+    (label
+      (string))
+    (value
+      (number))))
+
+=======================
+calls on other operands
+=======================
+
+a: int(1)
+b: "s"(1)
+c: [1](0)
+d: {}(1)
+e: 1(2)
+f: true(1)
+g: func(int) -> int(1)
+h: func(int)(1)
+
+---
+
+(source_file
+  (field (label (identifier))
+    (value (call_expression (primitive_type) (arguments (number)))))
+  (field (label (identifier))
+    (value (call_expression (string) (arguments (number)))))
+  (field (label (identifier))
+    (value (call_expression (list_lit (number)) (arguments (number)))))
+  (field (label (identifier))
+    (value (call_expression (struct_lit) (arguments (number)))))
+  (field (label (identifier))
+    (value (call_expression (number) (arguments (number)))))
+  (field (label (identifier))
+    (value (call_expression (boolean) (arguments (number)))))
+  (field (label (identifier))
+    (value (function (parameters (parameter (primitive_type)))
+      (call_expression (primitive_type) (arguments (number))))))
+  (field (label (identifier))
+    (value (call_expression
+      (function (parameters (parameter (primitive_type))))
+      (arguments (number))))))

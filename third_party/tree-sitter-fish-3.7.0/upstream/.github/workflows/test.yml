@@ -1,0 +1,28 @@
+name: Tests
+on:
+    push:
+        branches: [ master ]
+    pull_request:
+        branches: [ master ]
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v2
+            with:
+              submodules: true
+          - uses: actions/setup-node@v2
+            with:
+              node-version: '18'
+          - name: Install dependencies
+            run: npm i
+          - name: Init Tree-Sitter config
+            run: |
+              mkdir ~/.tree-sitter
+              echo "{\"parser-directories\": [\"$(realpath ../)\"] }" > ~/.tree-sitter/config.json
+          - name: Build
+            run: npm run build
+          - name: Run parser tests
+            run: npm run test
+          - name: Run parser against examples
+            run: npm run test:examples

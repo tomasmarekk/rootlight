@@ -1,0 +1,535 @@
+==================
+Simple class with attributes
+==================
+
+Class Point x y z func print see x + nl + y + nl + z + nl
+
+---
+
+(source_file
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (function_definition
+      name: (identifier))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (binary_expression
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (identifier))
+              (identifier))
+            (identifier))
+          (identifier))
+        (identifier)))))
+
+==================
+New object with brace access
+==================
+
+New point { x=10  y=20  z=30  print() }
+
+---
+
+(source_file
+  (expression_statement
+    (new_expression
+      (qualified_identifier
+        (identifier))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (call_expression
+          (identifier))))))
+
+==================
+New object with constructor arguments
+==================
+
+new point(10,20,30)
+
+---
+
+(source_file
+  (expression_statement
+    (new_expression
+      (qualified_identifier
+        (identifier))
+      (arguments
+        (number)
+        (number)
+        (number)))))
+
+==================
+Class with init constructor
+==================
+
+Class Point
+    x y z
+    func init p1,p2,p3 x=p1 y=p2 z=p3 print()
+    func print see x + nl + y + nl + z + nl
+
+---
+
+(source_file
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (function_definition
+      name: (identifier)
+      parameters: (param_list
+        (identifier)
+        (identifier)
+        (identifier))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (identifier))))
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (identifier)))
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (identifier)))
+    (expression_statement
+      (call_expression
+        (identifier)))
+    (function_definition
+      name: (identifier))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (binary_expression
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (identifier))
+              (identifier))
+            (identifier))
+          (identifier))
+        (identifier)))))
+
+==================
+Class with default attribute values
+==================
+
+new point { print() }
+Class Point
+    x = 10  y = 20  z = 30
+    func print see x + nl + y + nl + z + nl
+
+---
+
+(source_file
+  (expression_statement
+    (new_expression
+      (qualified_identifier
+        (identifier))
+      (expression_statement
+        (call_expression
+          (identifier)))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (number)))
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (number)))
+    (expression_statement
+      (assignment_expression
+        (identifier)
+        (number)))
+    (function_definition
+      name: (identifier))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (binary_expression
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (identifier))
+              (identifier))
+            (identifier))
+          (identifier))
+        (identifier)))))
+
+==================
+Inheritance with from keyword
+==================
+
+Class Employee from Human
+    Job Salary
+    func print
+        super.print()
+        see "Job  : " + job + nl + "Salary : " + salary + nl
+
+---
+
+(source_file
+  (class_definition
+    name: (identifier)
+    parent: (class_parent
+      (qualified_identifier
+        (identifier)))
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (function_definition
+      name: (identifier)
+      (expression_statement
+        (call_expression
+          (member_expression
+            (super)
+            (identifier))))
+      (see_statement
+        (binary_expression
+          (binary_expression
+            (binary_expression
+              (binary_expression
+                (binary_expression
+                  (string)
+                  (identifier))
+                (identifier))
+              (string))
+            (identifier))
+          (identifier))))))
+
+==================
+Package definition
+==================
+
+import System.output
+o1 = new console { print("Hello World") }
+
+Package System.Output
+    Class Console
+        Func Print cText
+            see cText + nl
+
+---
+
+(source_file
+  (import_statement
+    (qualified_identifier
+      (identifier)
+      (identifier)))
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier))
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string)))))))
+  (package_definition
+    name: (qualified_identifier
+      (identifier)
+      (identifier))
+    (class_definition
+      name: (identifier)
+      (function_definition
+        name: (identifier)
+        parameters: (param_list
+          (identifier))
+        (see_statement
+          (binary_expression
+            (identifier)
+            (identifier)))))))
+
+==================
+Private section
+==================
+
+Class Person
+    name age
+    func print
+        see "Name : " + name + nl
+    private
+    salary = 15000
+    func increasesalary x
+        salary += x
+
+---
+
+(source_file
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (function_definition
+      name: (identifier))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (string)
+          (identifier))
+        (identifier)))
+    (private_section
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (function_definition
+        name: (identifier)
+        parameters: (param_list
+          (identifier))
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (identifier)))))))
+
+==================
+Operator overloading
+==================
+
+class point x y
+    func operator cOperator,Para
+        result = new point
+        switch cOperator
+        on "+"
+            result.x = x + Para.x
+        on "-"
+            result.x = x - Para.x
+        off
+        return result
+
+---
+
+(source_file
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (function_definition
+      name: (identifier)
+      parameters: (param_list
+        (identifier)
+        (identifier))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (new_expression
+            (qualified_identifier
+              (identifier)))))
+      (switch_statement
+        (identifier)
+        (case_clause
+          (string)
+          (expression_statement
+            (assignment_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (binary_expression
+                (identifier)
+                (member_expression
+                  (identifier)
+                  (identifier))))))
+        (case_clause
+          (string)
+          (expression_statement
+            (assignment_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (binary_expression
+                (identifier)
+                (member_expression
+                  (identifier)
+                  (identifier)))))))
+      (return_statement
+        (identifier)))))
+
+==================
+New with hash pair arguments
+==================
+
+new point( [ :x = 10 , :y = 20 , :z = 30 ] )
+
+---
+
+(source_file
+  (expression_statement
+    (new_expression
+      (qualified_identifier
+        (identifier))
+      (arguments
+        (list_literal
+          (hash_pair
+            (symbol
+              (identifier))
+            (number))
+          (hash_pair
+            (symbol
+              (identifier))
+            (number))
+          (hash_pair
+            (symbol
+              (identifier))
+            (number)))))))
+
+==================
+Object brace access on existing variable
+==================
+
+o1 = new Point
+o1 {
+    x=5
+    y=15
+    z=25
+    print()
+}
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)))))
+  (expression_statement
+    (brace_expression
+      (identifier)
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (assignment_expression
+          (identifier)
+          (number)))
+      (expression_statement
+        (call_expression
+          (identifier))))))
+
+==================
+Chained brace method call
+==================
+
+o1 = new Point
+o1 { x=10 y=20 z=30 }.print()
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier)))))
+  (expression_statement
+    (call_expression
+      (member_expression
+        (brace_expression
+          (identifier)
+          (expression_statement
+            (assignment_expression
+              (identifier)
+              (number)))
+          (expression_statement
+            (assignment_expression
+              (identifier)
+              (number)))
+          (expression_statement
+            (assignment_expression
+              (identifier)
+              (number))))
+        (identifier)))))
+
+==================
+Self member access
+==================
+
+o1 = new point { x = 10 y = 10 print("P1") }
+
+class point x y
+    func print cPoint
+        see cPoint + "X : " + x + " Y : " + y + nl
+
+---
+
+(source_file
+  (expression_statement
+    (assignment_expression
+      (identifier)
+      (new_expression
+        (qualified_identifier
+          (identifier))
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (number)))
+        (expression_statement
+          (assignment_expression
+            (identifier)
+            (number)))
+        (expression_statement
+          (call_expression
+            (identifier)
+            (arguments
+              (string)))))))
+  (class_definition
+    name: (identifier)
+    (expression_statement
+      (identifier))
+    (expression_statement
+      (identifier))
+    (function_definition
+      name: (identifier)
+      parameters: (param_list
+        (identifier)))
+    (see_statement
+      (binary_expression
+        (binary_expression
+          (binary_expression
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (string))
+              (identifier))
+            (string))
+          (identifier))
+        (identifier)))))

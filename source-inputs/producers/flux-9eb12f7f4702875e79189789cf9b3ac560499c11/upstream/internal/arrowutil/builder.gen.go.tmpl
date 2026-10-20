@@ -1,0 +1,12 @@
+package arrowutil
+
+import (
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/influxdata/flux/array"
+)
+
+{{range .}}
+func New{{.Name}}Builder(mem memory.Allocator) *{{.Type}}Builder {
+	return array.New{{.Name}}Builder(mem)
+}
+{{end}}

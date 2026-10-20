@@ -1,0 +1,113 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -441,7 +441,7 @@
+     size += delimiter_count;
+ 
+     uint32_t iter = 1;
+-    for (; iter < scanner->indents.size && size < TREE_SITTER_SERIALIZATION_BUFFER_SIZE; ++iter) {
++    for (; iter < scanner->indents.size && size + 1 < TREE_SITTER_SERIALIZATION_BUFFER_SIZE; ++iter) {
+         uint16_t indent_value = *array_get(&scanner->indents, iter);
+         buffer[size++] = (char)(indent_value & 0xFF);
+         buffer[size++] = (char)((indent_value >> 8) & 0xFF);
+@@ -456,24 +456,32 @@
+     array_delete(&scanner->delimiters);
+     array_delete(&scanner->indents);
+     array_push(&scanner->indents, 0);
+-
+-    if (length > 0) {
+-        size_t size = 0;
+-
+-        scanner->inside_interpolated_string = (bool)buffer[size++];
+-
+-        size_t delimiter_count = (uint8_t)buffer[size++];
+-        if (delimiter_count > 0) {
+-            array_reserve(&scanner->delimiters, delimiter_count);
+-            scanner->delimiters.size = delimiter_count;
+-            memcpy(scanner->delimiters.contents, &buffer[size], delimiter_count);
+-            size += delimiter_count;
+-        }
+-
+-        for (; size + 1 < length; size += 2) {
+-            uint16_t indent_value = (unsigned char)buffer[size] | ((unsigned char)buffer[size + 1] << 8);
+-            array_push(&scanner->indents, indent_value);
+-        }
++    scanner->inside_interpolated_string = false;
++
++    // A state must contain its complete header, delimiters and paired indent bytes.
++    if (length == 0 || buffer == NULL || length < 2 || length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) {
++        return;
++    }
++    size_t delimiter_count = (uint8_t)buffer[1];
++    if (delimiter_count > length - 2 || (length - 2 - delimiter_count) % 2 != 0) {
++        return;
++    }
++
++    size_t size = 0;
++
++    scanner->inside_interpolated_string = (bool)buffer[size++];
++
++    ++size;
++    if (delimiter_count > 0) {
++        array_reserve(&scanner->delimiters, delimiter_count);
++        scanner->delimiters.size = delimiter_count;
++        memcpy(scanner->delimiters.contents, &buffer[size], delimiter_count);
++        size += delimiter_count;
++    }
++
++    for (; size + 1 < length; size += 2) {
++        uint16_t indent_value = (unsigned char)buffer[size] | ((unsigned char)buffer[size + 1] << 8);
++        array_push(&scanner->indents, indent_value);
+     }
+ }
+ 
+
+--- upstream/grammar.js
++++ grammar.js
+@@ -71,6 +71,7 @@
+   ],
+ 
+   conflicts: ($) => [
++    [$.parameter_for_statement, $.primary_expression],
+     [$.parameter_list, $.subscript],
+     [$.primary_expression, $.pattern],
+     [$.primary_expression, $.list_splat_pattern],
+@@ -305,6 +306,7 @@
+     _compound_statement: ($) => choice(
+       $.if_statement,
+       $.for_statement,
++      $.parameter_for_statement,
+       $.while_statement,
+       $.try_statement,
+       $.with_statement,
+@@ -717,6 +719,11 @@
+       ']',
+     ),
+ 
++    // Legacy parameter loops have an exact directive, not an arbitrary decorator.
++    parameter_for_statement: ($) => seq(
++      '@', 'parameter', $._newline, $.for_statement,
++    ),
++
+     decorated_definition: ($) => seq(
+       repeat1($.decorator),
+       field('definition', choice(
+@@ -1023,7 +1030,10 @@
+       seq(
+         "unified",
+         "{",
+-        commaSep1(seq($.argument_convention, $.identifier)),
++        commaSep1(choice(
++          seq($.argument_convention, $.identifier),
++          "mut",
++        )),
+         optional(","),
+         "}",
+       ),
+@@ -1763,6 +1773,7 @@
+ 
+     keyword_identifier: ($) =>
+       choice(
++        alias("parameter", $.identifier),
+         prec(
+           -3,
+           alias(choice("print", "exec", "async", "await"), $.identifier),

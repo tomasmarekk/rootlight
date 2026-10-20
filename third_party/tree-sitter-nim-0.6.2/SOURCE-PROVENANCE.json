@@ -1,0 +1,1079 @@
+{
+  "schema": "rootlight.nim-static-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/alaviss/tree-sitter-nim",
+    "tag": "0.6.2",
+    "revision": "897e5d346f0b59ed62b517cfb0f1a845ad8f0ab7",
+    "tree": "e9d8259b414208638a985be8bddd6e126a3aa67d",
+    "archive": "upstream.tar.gz",
+    "archive_bytes": 3854660,
+    "archive_sha256": "5ee12363f12b72fdf7048cdff3aa3124c9d70eabf01c5e843ede2b1ce7527e12"
+  },
+  "upstream_files": [
+    {
+      "path": ".clang-format",
+      "bytes": 781,
+      "sha256": "e942a34915f2942dfa06fb4f67616bf21f7bbc9c7a8faa5ea8d5913fd587719e",
+      "git_blob_sha1": "f02ea706b54388948ba9c6e4e27a96e1a893f321",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.clang-format"
+    },
+    {
+      "path": ".clangd",
+      "bytes": 1347,
+      "sha256": "a8c21532514135a793c3f87291da0970f1ef72fe76b4fb8659be68bb0069cb3d",
+      "git_blob_sha1": "d964d0096602dd6b3a869a84631ab15898631c7e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.clangd"
+    },
+    {
+      "path": ".editorconfig",
+      "bytes": 201,
+      "sha256": "e63defa8aa1831da64b6cad15aea205bfbeda0c0aa3441d6420890d6e6f7f261",
+      "git_blob_sha1": "df949cffaaedb1fc6f8a1e442decb94285ba21b4",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.editorconfig"
+    },
+    {
+      "path": ".eslintrc.json",
+      "bytes": 260,
+      "sha256": "d3fcdd4b84c6672d257d4ed2cb16c57503ce5e708801fa4e7b1e3f878a1e86e9",
+      "git_blob_sha1": "1b2d6baea63262f21bc8a403c10711a9acfdaa48",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.eslintrc.json"
+    },
+    {
+      "path": ".eslintrc.json.license",
+      "bytes": 63,
+      "sha256": "86cec129445fd3b96ba5fd882e07de101becedd787ae52f6e859ec996c75a853",
+      "git_blob_sha1": "fe27c4fef3e692dec345c8d1dad1d03d0ccd561c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.eslintrc.json.license"
+    },
+    {
+      "path": ".gitattributes",
+      "bytes": 189,
+      "sha256": "445c1d0194d3f9c46e75b6a7b60095d7974dfd0316a6934543f5f1fb56234fe1",
+      "git_blob_sha1": "a93ce2f22dc8ea0dfe2dd86e7da4d5f38e5c0556",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.gitattributes.upstream"
+    },
+    {
+      "path": ".github/FUNDING.yml",
+      "bytes": 105,
+      "sha256": "14732bdda4a81c9ded004677ab512f87e23fd61b160c3acd465112a895f3544b",
+      "git_blob_sha1": "ee53eab132e5d4dce6efe98520b34778090b43e6",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.github/FUNDING.yml"
+    },
+    {
+      "path": ".github/dependabot.yml",
+      "bytes": 251,
+      "sha256": "9e43af3f300d9d1dc31348eee892b19afd7ede5c5d1c2081866b9e95eb1590d9",
+      "git_blob_sha1": "bdf3522c1f5202902fda12e5a26a35bb0aa6a28c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.github/dependabot.yml"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 3405,
+      "sha256": "08d0a273891aa9522d3d2898b3c9eec803db1c03137143efd24b0620934a117a",
+      "git_blob_sha1": "253d6238593ab17b50bf4be2b6f7969d74a218fc",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.github/workflows/ci.yml"
+    },
+    {
+      "path": ".github/workflows/reuse.yml",
+      "bytes": 367,
+      "sha256": "050771622b886551cef54b06b13e97be5d751146b5a65876def5abe10a355dd7",
+      "git_blob_sha1": "1048a1238a9ff5c46b2f2735afe599555c8091f5",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.github/workflows/reuse.yml"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 178,
+      "sha256": "d7b42a09af0a98c23238234774eac2101a911490624e85f93e3d3cb3c3c55c30",
+      "git_blob_sha1": "2a1833321b871858c253a13d381cacb59fca5deb",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.gitignore.upstream"
+    },
+    {
+      "path": ".neoconf.json",
+      "bytes": 181,
+      "sha256": "8f174bfcff42a9fc7debad5fbfeb613e520a85c77fb45d192278f69e35c9a6fc",
+      "git_blob_sha1": "ae454e09632c5c008461fed81a7abbf00eab821a",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.neoconf.json"
+    },
+    {
+      "path": ".neoconf.json.license",
+      "bytes": 63,
+      "sha256": "86cec129445fd3b96ba5fd882e07de101becedd787ae52f6e859ec996c75a853",
+      "git_blob_sha1": "fe27c4fef3e692dec345c8d1dad1d03d0ccd561c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.neoconf.json.license"
+    },
+    {
+      "path": ".prettierrc",
+      "bytes": 116,
+      "sha256": "aa7911a4c6b63cd4b7e6e27fbf5fc9b7eba337cbc9bc4cd2fb1b0dbd02888a48",
+      "git_blob_sha1": "27af23a6de54f53660431acac389e25fd31e3e03",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.prettierrc"
+    },
+    {
+      "path": ".prettierrc.license",
+      "bytes": 97,
+      "sha256": "d3ff3cf30f0910d5ca863236812a51da4343a970cd64551022d9ff9bd540a0de",
+      "git_blob_sha1": "6536921f42d2215dc570dd914902394f0db7eb02",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.prettierrc.license"
+    },
+    {
+      "path": ".reuse/dep5",
+      "bytes": 460,
+      "sha256": "340280079ec585822ff38e002f9c5af32ec1bbfb4e8fb6709f58afb0ad9a9b90",
+      "git_blob_sha1": "d97f32c4e5986abb00a8e9df866d950702e1df12",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/.reuse/dep5"
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 1769,
+      "sha256": "f1b9cf949ea38e6c656f63de4cd50e8601f13eb5fe191f59f2583a9e64b0528b",
+      "git_blob_sha1": "5a7909c23f517938fb8476cfbc1475407da79028",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/Cargo.lock"
+    },
+    {
+      "path": "Cargo.lock.license",
+      "bytes": 63,
+      "sha256": "86cec129445fd3b96ba5fd882e07de101becedd787ae52f6e859ec996c75a853",
+      "git_blob_sha1": "fe27c4fef3e692dec345c8d1dad1d03d0ccd561c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/Cargo.lock.license"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 584,
+      "sha256": "55fb23b42ea3cd33eb1c6dfa306f9dc5708f280cee8479947535725d90ae5ce4",
+      "git_blob_sha1": "104ee6117030e85dc86eede4a8d693abdf010145",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/Cargo.toml"
+    },
+    {
+      "path": "LICENSE.txt",
+      "bytes": 16727,
+      "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+      "git_blob_sha1": "ee6256cdb62a765749a71aae3abea32884301cd1",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/LICENSE.txt"
+    },
+    {
+      "path": "LICENSES/CC0-1.0.txt",
+      "bytes": 7048,
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "git_blob_sha1": "0e259d42c996742e9e3cba14c677129b2c1b6311",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/LICENSES/CC0-1.0.txt"
+    },
+    {
+      "path": "LICENSES/MIT.txt",
+      "bytes": 1078,
+      "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+      "git_blob_sha1": "2071b23b0e08594ea6bc99ac71129ef992abf498",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/LICENSES/MIT.txt"
+    },
+    {
+      "path": "LICENSES/MPL-2.0.txt",
+      "bytes": 16727,
+      "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+      "git_blob_sha1": "ee6256cdb62a765749a71aae3abea32884301cd1",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/LICENSES/MPL-2.0.txt"
+    },
+    {
+      "path": "Makefile",
+      "bytes": 3724,
+      "sha256": "65843128f218a9b4b30975b6a69c77aebdbb7d3ee87acb63aa0da3409c59727d",
+      "git_blob_sha1": "f57f6a434a67dc3327eaf625995a18f620fadae4",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/Makefile"
+    },
+    {
+      "path": "Package.swift",
+      "bytes": 1498,
+      "sha256": "d5e97f1274950fca9759f8b936a3f9f451ab65c28c8aac1629789227dd90d564",
+      "git_blob_sha1": "6e014c37b2b7949498ab30d2e39317ad08ccb6bd",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/Package.swift"
+    },
+    {
+      "path": "binding.gyp",
+      "bytes": 666,
+      "sha256": "c4735756a870ff396965bc2408c89190a68c89e438a7e50759d652556632df8b",
+      "git_blob_sha1": "0ab4748895ec8ac0eca936ff1b79d0408b37894a",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/binding.gyp"
+    },
+    {
+      "path": "bindings/c/tree-sitter-nim.h",
+      "bytes": 327,
+      "sha256": "569c0fdff28267dc377c9d2b5aaf212b3eaef6cdce39bcb233d6ead8ce3848b7",
+      "git_blob_sha1": "b530102e93889aa39b05ad7d7db7ddc2882cbbe2",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/c/tree-sitter-nim.h"
+    },
+    {
+      "path": "bindings/c/tree-sitter-nim.pc.in",
+      "bytes": 249,
+      "sha256": "147ac2e1d9a3d4936a708b707c9bcee2296c095f24d7503487bfe3631b90a569",
+      "git_blob_sha1": "2fb073433f0328f4dabb886bcc7b2979292e8b71",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/c/tree-sitter-nim.pc.in"
+    },
+    {
+      "path": "bindings/c/tree-sitter-nim.pc.in.license",
+      "bytes": 84,
+      "sha256": "2199da49b74ea32b68da181566b15e0a365da5a85362d30c22dfbfdfab87d473",
+      "git_blob_sha1": "5d18fb0030e96db3ccf25fe32aabc82965d306e8",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/c/tree-sitter-nim.pc.in.license"
+    },
+    {
+      "path": "bindings/go/binding.go",
+      "bytes": 374,
+      "sha256": "4e5ceee871c914bd75d21adbd1c75109093dc778e279d6c071bc1c949c77b71f",
+      "git_blob_sha1": "b66baa636691cb91b5acd355d5705e0807ed18cc",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/go/binding.go"
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "bytes": 410,
+      "sha256": "39ae3c9444653c7f1655bb4e6de60440394b6ff410b9dca54e6f8ab7347f9abf",
+      "git_blob_sha1": "d0fd2589433f221a039dc0195b577aad394873d2",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/go/binding_test.go"
+    },
+    {
+      "path": "bindings/go/go.mod",
+      "bytes": 226,
+      "sha256": "471177a18f73e9eac314e682e9e6daaa0ff3c248920066bc4d2837e03187c608",
+      "git_blob_sha1": "c7a6f4fc82d632e9f3e0a4a48a8702f3bed2fbe7",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/go/go.mod"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 664,
+      "sha256": "82b4456ce0d6f92c0f40580ab8845f49c1c441a488da1c9d452ddf1068e3d0c2",
+      "git_blob_sha1": "d2a4a1ccafd30496b4169d86daa0262e73ddded8",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/node/binding.cc"
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "bytes": 545,
+      "sha256": "0485dcb3679bc742b3304fcd820f1288856e4a2ef18a7b6061907e4e810714a6",
+      "git_blob_sha1": "13cab4a72b135640207f13861aaf903fa04e17f8",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/node/index.d.ts"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 294,
+      "sha256": "3063dfcec38eaabb39d436c816597fd3dbe6575f9a1ae0f731fe7358f4571202",
+      "git_blob_sha1": "c720fba6379988c3fa0b9961844722ef54dfa654",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/node/index.js"
+    },
+    {
+      "path": "bindings/python/tree_sitter_nim/__init__.py",
+      "bytes": 176,
+      "sha256": "db94da1e246cebc48030861201d9c567e432d1d445af10698a13d4f07102e6f5",
+      "git_blob_sha1": "2d19447dc4acec98a2a7879c733f21fcfd1a8d72",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/python/tree_sitter_nim/__init__.py"
+    },
+    {
+      "path": "bindings/python/tree_sitter_nim/__init__.pyi",
+      "bytes": 117,
+      "sha256": "b998ca51224e6ff0fa929a594ae2863ee220b8ff7833d927d473110734e03f4c",
+      "git_blob_sha1": "c9b048eb0e78b2cabe4623c8ae9fff49a413b31e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/python/tree_sitter_nim/__init__.pyi"
+    },
+    {
+      "path": "bindings/python/tree_sitter_nim/binding.c",
+      "bytes": 723,
+      "sha256": "75e52e597766f7c1ee4e118baccb9a696044c29567a86e079375a66d304988d2",
+      "git_blob_sha1": "f8cc74b4cbea20d07179af4bced8df5fb3ee4d74",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/python/tree_sitter_nim/binding.c"
+    },
+    {
+      "path": "bindings/python/tree_sitter_nim/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "git_blob_sha1": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/python/tree_sitter_nim/py.typed"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 853,
+      "sha256": "8e02ad7ce5a03573240dda90a7c94daf680a7d48a789fa09774043e2e3923dfb",
+      "git_blob_sha1": "76431848c5898258baef4965f308df8de77a2807",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/rust/build.rs"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 2070,
+      "sha256": "4200de92f6b4c4a8555bb6f571dbb072e6b927857c12c2c32b625abac9f2abcb",
+      "git_blob_sha1": "7c4c13ceb42417b66bc666a772c96b54b214d199",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/rust/lib.rs"
+    },
+    {
+      "path": "bindings/swift/TreeSitterNim/nim.h",
+      "bytes": 327,
+      "sha256": "569c0fdff28267dc377c9d2b5aaf212b3eaef6cdce39bcb233d6ead8ce3848b7",
+      "git_blob_sha1": "b530102e93889aa39b05ad7d7db7ddc2882cbbe2",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/bindings/swift/TreeSitterNim/nim.h"
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 46960,
+      "sha256": "818a6875ad29c2c3bad3f9fa7b7205a382fea860411bd68d49733a5650087221",
+      "git_blob_sha1": "4e23ab3233898861cdaed324ff0a68f55f334e90",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/grammar.js"
+    },
+    {
+      "path": "jsconfig.json",
+      "bytes": 160,
+      "sha256": "1ade9a41335c3def9798bdb55e1b2e158d8f5a061c525bc5982802799379e072",
+      "git_blob_sha1": "b5746bc110abc48de7e6bc047d63f4d0bcbb88a7",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/jsconfig.json"
+    },
+    {
+      "path": "jsconfig.json.license",
+      "bytes": 97,
+      "sha256": "d3ff3cf30f0910d5ca863236812a51da4343a970cd64551022d9ff9bd540a0de",
+      "git_blob_sha1": "6536921f42d2215dc570dd914902394f0db7eb02",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/jsconfig.json.license"
+    },
+    {
+      "path": "package-lock.json",
+      "bytes": 86362,
+      "sha256": "9c3066f10109cf4dfd7dd58e49800e18bdc7637a48c2f99a0f9bbe9b4ea846c5",
+      "git_blob_sha1": "cc761772c39b31fbd1dc81ea22801c77c70af666",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/package-lock.json"
+    },
+    {
+      "path": "package-lock.json.license",
+      "bytes": 63,
+      "sha256": "86cec129445fd3b96ba5fd882e07de101becedd787ae52f6e859ec996c75a853",
+      "git_blob_sha1": "fe27c4fef3e692dec345c8d1dad1d03d0ccd561c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/package-lock.json.license"
+    },
+    {
+      "path": "package.json",
+      "bytes": 1088,
+      "sha256": "3f7b431d04f7780cdb905f2a43539187a03ba92d491fb760bd3bd7bb827ae15c",
+      "git_blob_sha1": "a7b56df4c31b50cc7d2347cb40ec96fbf33d23c3",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/package.json"
+    },
+    {
+      "path": "package.json.license",
+      "bytes": 63,
+      "sha256": "86cec129445fd3b96ba5fd882e07de101becedd787ae52f6e859ec996c75a853",
+      "git_blob_sha1": "fe27c4fef3e692dec345c8d1dad1d03d0ccd561c",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/package.json.license"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 802,
+      "sha256": "566d9f0831a3bf2ceea6b8d75c093cee62276e8511fc41cd9d9d890bffd7be6d",
+      "git_blob_sha1": "32b303b1c93f5e2a4a79b6d000604a31a1ed6eae",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/pyproject.toml"
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 3011,
+      "sha256": "feda18993ae651016a36a3d9e936715e6bc31626ecad9ae29006996d597256a8",
+      "git_blob_sha1": "27e620c079bb1184d2546962e2707b83368cae08",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/queries/highlights.scm"
+    },
+    {
+      "path": "readme.md",
+      "bytes": 1263,
+      "sha256": "8fd63d36036c844d783885b511ad0d7317684e4ef5f4f72389b2cd097a4d74b5",
+      "git_blob_sha1": "169d95119b6d1620774480dfc550fbcc706eb8ed",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/readme.md"
+    },
+    {
+      "path": "samples/cps/exprs.nim",
+      "bytes": 29441,
+      "sha256": "b24ff68cf8351ac6816ab2abaceadf93e33590489ef285c70c965e843d478d86",
+      "git_blob_sha1": "88f51b23bbe037a4f361e258d1192a25bd719e2a",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/cps/exprs.nim"
+    },
+    {
+      "path": "samples/cps/readme.md",
+      "bytes": 204,
+      "sha256": "f55591797c27a5e6db1f5923bf7d7190ce1a38ddc97368924d07505710754652",
+      "git_blob_sha1": "8b6cf9286fe89838064d81be49e72f982eda25c5",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/cps/readme.md"
+    },
+    {
+      "path": "samples/cps/transform.nim",
+      "bytes": 48409,
+      "sha256": "39c3c5445d8319ee04e3b29e63ff99572b86e2ee15d7ccb4480d3831f68723c9",
+      "git_blob_sha1": "d97d7a81d5fed471943f109d5e008252505a4c09",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/cps/transform.nim"
+    },
+    {
+      "path": "samples/nim/ccgexprs.nim",
+      "bytes": 131963,
+      "sha256": "c8e43e38e4d7271cec68ad79b51940c85e2ab04993c3cf4d57d4d3787b9718ce",
+      "git_blob_sha1": "e351e95b02332260c45db10e77243a4666cf32c7",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/nim/ccgexprs.nim"
+    },
+    {
+      "path": "samples/nim/koch.nim",
+      "bytes": 30138,
+      "sha256": "8754610801eb873d672296baedad4922dac1f723d9a58fe66522ae4d59467597",
+      "git_blob_sha1": "fe5427d43abf54d964b2d19ec3883f8fe0c669bc",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/nim/koch.nim"
+    },
+    {
+      "path": "samples/nim/readme.md",
+      "bytes": 205,
+      "sha256": "5b64894f9a2230dbf336507b277f95368807c83475e324d35bb2dec73c882dbd",
+      "git_blob_sha1": "ae75c125f9cd346d6fb4c9ffc67c0941886c4426",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/nim/readme.md"
+    },
+    {
+      "path": "samples/nim/semexprs.nim",
+      "bytes": 127096,
+      "sha256": "807f5dafe597bec324ef840a7986d863e34441c0590c588ae449e0a298519965",
+      "git_blob_sha1": "a01466868b3a931da5286f5e66e57c0a9cfa75f0",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/nim/semexprs.nim"
+    },
+    {
+      "path": "samples/nim/semstmts.nim",
+      "bytes": 98282,
+      "sha256": "c392afa12430f387504f1e2e74906e592086e5daa92cb6b3bde8e20ed2852c07",
+      "git_blob_sha1": "126d1aa6544fc32d033a87fcb1c092d54432291b",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/nim/semstmts.nim"
+    },
+    {
+      "path": "samples/readme.md",
+      "bytes": 316,
+      "sha256": "b74c6568cbfead885ffe21dbd63db03b2c36852896f750267be10a4bcd614b2c",
+      "git_blob_sha1": "8bf2c1e399b136b786d4953af9653eb0d8935771",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/samples/readme.md"
+    },
+    {
+      "path": "setup.py",
+      "bytes": 1675,
+      "sha256": "ff17526b00a26b6d8ce4fe5debf4ac8b7d699504eb4853141a673907e346a481",
+      "git_blob_sha1": "65abf132b40514d5b87aaf5acd61d7a9274ae2f8",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/setup.py"
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 385223,
+      "sha256": "49268f893bcf86b2a9f98ab934f82b116cd521735510b20bc728ef1727b3ea1a",
+      "git_blob_sha1": "fd8662659b251b83d30870d8c7be816388da4d65",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/grammar.json"
+    },
+    {
+      "path": "src/grammar.json.license",
+      "bytes": 97,
+      "sha256": "4b892db06e8229b650f0e7282980f6b7bfdcd42f0a07944b731faeaf0f0a096d",
+      "git_blob_sha1": "49b88c88292b17859064499335526baa8b428a78",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/grammar.json.license"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 248487,
+      "sha256": "b24928676a8cfaf5f2284bc19554aae7d4f1c54c825e7164af051e8af862fefd",
+      "git_blob_sha1": "372e17b112146ca14af1f00391cf0728f37d8606",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/node-types.json"
+    },
+    {
+      "path": "src/node-types.json.license",
+      "bytes": 97,
+      "sha256": "4b892db06e8229b650f0e7282980f6b7bfdcd42f0a07944b731faeaf0f0a096d",
+      "git_blob_sha1": "49b88c88292b17859064499335526baa8b428a78",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/node-types.json.license"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 68553663,
+      "sha256": "8b8ab9019d9f8d7872862273c77c54fbce801546323722b1b6381b684f88d92f",
+      "git_blob_sha1": "8d7878bf37fd470f1a96317055147e527c33e23b",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/parser.c"
+    },
+    {
+      "path": "src/parser.c.license",
+      "bytes": 97,
+      "sha256": "4b892db06e8229b650f0e7282980f6b7bfdcd42f0a07944b731faeaf0f0a096d",
+      "git_blob_sha1": "49b88c88292b17859064499335526baa8b428a78",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/parser.c.license"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 27846,
+      "sha256": "6dec7f269c1a1d9f522397bb5b320b24734cb929d700bc7265feb8c67fedcd20",
+      "git_blob_sha1": "3a3d9b0d1aca325060014496628700042b8a6ea1",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/scanner.c"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 958,
+      "sha256": "253b44a7b4313a7afd0c505c2fc6e7ce4b8e78955ebf4be3ea000532ec060673",
+      "git_blob_sha1": "1f4466d75c40b6e62728b2de94c82c6398e42151",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/tree_sitter/alloc.h"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h.license",
+      "bytes": 84,
+      "sha256": "2199da49b74ea32b68da181566b15e0a365da5a85362d30c22dfbfdfab87d473",
+      "git_blob_sha1": "5d18fb0030e96db3ccf25fe32aabc82965d306e8",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/tree_sitter/alloc.h.license"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "git_blob_sha1": "15a3b233bbb8760a5d87089b259fe0122da75c8a",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/tree_sitter/array.h"
+    },
+    {
+      "path": "src/tree_sitter/array.h.license",
+      "bytes": 84,
+      "sha256": "2199da49b74ea32b68da181566b15e0a365da5a85362d30c22dfbfdfab87d473",
+      "git_blob_sha1": "5d18fb0030e96db3ccf25fe32aabc82965d306e8",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/tree_sitter/array.h.license"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 6988,
+      "sha256": "a3eb18ef034b3f4255b965a26caa276f9cfe13a79573b402f1a12dc5018052aa",
+      "git_blob_sha1": "17f0e94bfcf4d8a54615c24fe61820a18e4d1411",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/tree_sitter/parser.h"
+    },
+    {
+      "path": "src/tree_sitter/parser.h.license",
+      "bytes": 97,
+      "sha256": "4b892db06e8229b650f0e7282980f6b7bfdcd42f0a07944b731faeaf0f0a096d",
+      "git_blob_sha1": "49b88c88292b17859064499335526baa8b428a78",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/src/tree_sitter/parser.h.license"
+    },
+    {
+      "path": "test/corpus/declarations.txt",
+      "bytes": 35185,
+      "sha256": "e66098e6e2d3f0c70b374acfca00790586e3a475d5c2a70f4640ffcf9189715a",
+      "git_blob_sha1": "2da6b3f23fa1175908aeb316d133ef96d83ae128",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/corpus/declarations.txt"
+    },
+    {
+      "path": "test/corpus/deviations.txt",
+      "bytes": 1543,
+      "sha256": "fdd227985c6d0188854f30fbd2651fd57c3f9d7dd6c66bbba575475ee4a29f43",
+      "git_blob_sha1": "3844aa4f0bc851050ad1320d0ce0092a9b5dce16",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/corpus/deviations.txt"
+    },
+    {
+      "path": "test/corpus/errors.txt",
+      "bytes": 4316,
+      "sha256": "0fa06bb50198ce57df0cc4926dd3c4cedf74fb51e2623766e5c0dc37566af915",
+      "git_blob_sha1": "80e48d2b807f44db68fc214bcfd238e85a88810b",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/corpus/errors.txt"
+    },
+    {
+      "path": "test/corpus/expressions.txt",
+      "bytes": 41313,
+      "sha256": "6c1a14ae64e54f18975d0b4465e04cd77a1eb6db30a3e18f27e39fc3707490c9",
+      "git_blob_sha1": "a5f822f04e2fddb8c48c9af0d408014019d0b41e",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/corpus/expressions.txt"
+    },
+    {
+      "path": "test/corpus/extras.txt",
+      "bytes": 2355,
+      "sha256": "36cfd071218e88b26ca0e9de59622a8bfe166f8dad207be5718d940b81c91673",
+      "git_blob_sha1": "dd91361da45b57abfcaa518000c2af31e4aed428",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/corpus/extras.txt"
+    },
+    {
+      "path": "test/corpus/literals.txt",
+      "bytes": 4986,
+      "sha256": "82ab9b12fcd9831594cfd4a6d2825d1a3efb22609b84ae787c9d302aa24e7d1a",
+      "git_blob_sha1": "0d80e8a93a11c964b85f4ba1b391dcc49b60460a",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/corpus/literals.txt"
+    },
+    {
+      "path": "test/corpus/statements.txt",
+      "bytes": 10917,
+      "sha256": "1ae6cc26576422fdf146626a2509a7157b3128625a993f2db9dc9d35ab43f845",
+      "git_blob_sha1": "4a2c5375c3b9309232edae8891bd1904c9c3bf6f",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/corpus/statements.txt"
+    },
+    {
+      "path": "test/highlight/declarations.nim",
+      "bytes": 793,
+      "sha256": "798b9499c45bbd9388956ece871b1a336d6300b25cc2b1478dde892832fdcd45",
+      "git_blob_sha1": "86b7e6f2eab1c5defd3202a4eb7160c47e651336",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/highlight/declarations.nim"
+    },
+    {
+      "path": "test/highlight/expressions.nim",
+      "bytes": 192,
+      "sha256": "566d58af094edec9d28d6a25f72d02de6db3109b1f4123f20930e4df2a84fa4e",
+      "git_blob_sha1": "fb9346b0fb1a578ee2715eb618b23be241f8db7d",
+      "git_mode": "100644",
+      "archive_mode": 436,
+      "archive_mtime": 1720741202,
+      "executable_intent": false,
+      "retained_path": "upstream/test/highlight/expressions.nim"
+    }
+  ],
+  "upstream_directories": [
+    {
+      "path": ".github",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": ".github/workflows",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": ".reuse",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "LICENSES",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/c",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/go",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/node",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/python",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/python/tree_sitter_nim",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/rust",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/swift",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "bindings/swift/TreeSitterNim",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "queries",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "samples",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "samples/cps",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "samples/nim",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "src",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "src/tree_sitter",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "test",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "test/corpus",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    },
+    {
+      "path": "test/highlight",
+      "archive_mode": 509,
+      "git_mode": "040000",
+      "archive_mtime": 1720741202
+    }
+  ],
+  "native_abi": 14,
+  "local_changes": [
+    "Modern static LanguageFn binding; no generation or lifecycle scripts",
+    "Bounded scanner copy and validation of strictly increasing serialized indentation"
+  ],
+  "overflow_reachability": "Reproduced through malformed external deserialize input; not established from parser-generated input",
+  "whole_language_qualified": false
+}

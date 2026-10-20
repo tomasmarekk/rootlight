@@ -1,0 +1,92 @@
+================================================================================
+Struct declaration with trailing comma
+================================================================================
+
+struct Point {
+    X : Double,
+    Y : Double,
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_decl
+    name: (identifier)
+    (field_def name: (identifier) type: (builtin_type))
+    (field_def name: (identifier) type: (builtin_type))))
+
+================================================================================
+New struct expression
+================================================================================
+
+operation Main() : Unit {
+    let p = new Point { X = 1.0, Y = 2.0 };
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier))
+          (new_expression
+            (path_or_identifier (identifier))
+            (struct_fields
+              (field_assign name: (identifier) value: (float_literal))
+              (field_assign name: (identifier) value: (float_literal)))))))))
+
+================================================================================
+Struct copy and update
+================================================================================
+
+operation Main() : Unit {
+    let p2 = new Point { ...p1, X = 3.0 };
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (callable_decl
+    name: (identifier)
+    params: (param_list)
+    return_type: (builtin_type)
+    body: (callable_body
+      (block
+        (let_statement (pattern (identifier))
+          (new_expression
+            (path_or_identifier (identifier))
+            (struct_fields
+              (identifier)
+              (field_assign name: (identifier) value: (float_literal)))))))))
+
+================================================================================
+Newtype declaration
+================================================================================
+
+newtype PositiveInt = Int;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (newtype_decl
+    name: (identifier)
+    (type_def (builtin_type))))
+
+================================================================================
+Newtype with named fields
+================================================================================
+
+newtype Complex = (Re : Double, Im : Double);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (newtype_decl
+    name: (identifier)
+    (type_def
+      (type_def (identifier) (builtin_type))
+      (type_def (identifier) (builtin_type)))))

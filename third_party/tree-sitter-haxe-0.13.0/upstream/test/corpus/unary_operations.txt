@@ -1,0 +1,239 @@
+===================
+increment unop postfix
+===================
+
+class main {
+  function test() {
+    x++;
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+          (identifier) (operator)
+        )
+      )
+    )
+  )
+)
+
+===================
+increment unop prefix
+===================
+
+class main {
+  function test() {
+    ++x;
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+          (operator) (identifier)
+        )
+      )
+    )
+  )
+)
+
+===================
+decrement_unop postfix
+===================
+
+class main {
+  function test() {
+    x--;
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+          (identifier) (operator)
+        )
+      )
+    )
+  )
+)
+
+
+===================
+decrement_unop prefix
+===================
+
+class main {
+  function test() {
+    --x;
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+           (operator) (identifier)
+        )
+      )
+    )
+  )
+)
+
+===================
+logical not unop
+===================
+
+class main {
+  function test() {
+    !x;
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+           (operator) (identifier)
+        )
+      )
+    )
+  )
+)
+
+===================
+negative unop
+===================
+
+class main {
+  function test() {
+    -x;
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+           (operator) (identifier)
+        )
+      )
+    )
+  )
+)
+
+===================
+bitwise_negative_unop
+===================
+
+class main {
+  function test() {
+    ~x;
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+           (operator) (identifier)
+        )
+      )
+    )
+  )
+)
+
+===================
+logical not unop as the head of a binary operator chain
+===================
+
+class main {
+  function test() {
+    if (!x && y) { z(); }
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+          (conditional_statement
+            (operator) (identifier) (operator) (identifier)
+            (block (call_expression (identifier)))
+          )
+        )
+      )
+    )
+  )
+)
+
+===================
+logical not unop as the tail of a binary operator chain
+===================
+
+class main {
+  function test() {
+    if (x && !y) { z(); }
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+          (conditional_statement
+            (identifier) (operator) (operator) (identifier)
+            (block (call_expression (identifier)))
+          )
+        )
+      )
+    )
+  )
+)
+
+===================
+logical not unop as both the head and the tail of a binary operator chain
+===================
+
+class main {
+  function test() {
+    if (!x && !y) { z(); }
+  }
+}
+
+---
+(module
+  (class_declaration (identifier)
+    (block
+      (function_declaration (identifier)
+        (block
+          (conditional_statement
+            (operator) (identifier) (operator) (operator) (identifier)
+            (block (call_expression (identifier)))
+          )
+        )
+      )
+    )
+  )
+)

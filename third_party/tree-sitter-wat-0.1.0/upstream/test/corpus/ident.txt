@@ -1,0 +1,14 @@
+==================
+ident
+==================
+(module
+  (func $')
+  (func $f'))
+---
+
+(root
+  (module
+    (module_field_func
+      (identifier))
+    (module_field_func
+      (identifier))))

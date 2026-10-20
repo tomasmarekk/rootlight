@@ -1,0 +1,130 @@
+--- upstream/src/scanner.c
++++ src/scanner.c
+@@ -1,6 +1,10 @@
++/* VHDL external tokens use versioned state and checked numeric consumption.
++ * The original source remains retained separately with its producer identity. */
+ // #define DEBUG
+ //------------------------------------------------------------------------------
+ 
++#include <limits.h>
++#include <stdint.h>
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -39,19 +43,67 @@
+ }
+ //------------------------------------------------------------------------------
+ 
++/* Tree-sitter can restore an empty state before any external token. Keep this
++ * representation independent of C padding, enum width and bool layout. */
++enum { SCANNER_STATE_VERSION = 1, SCANNER_STATE_BYTES = 7 };
++_Static_assert(SCANNER_STATE_BYTES <= TREE_SITTER_SERIALIZATION_BUFFER_SIZE,
++               "scanner state exceeds the Tree-sitter serialization buffer");
++
++static bool encode_bit_string_base(TokenType base, uint8_t* encoded)
++{
++    switch(base){
++        case IDENTIFIER:             *encoded = 0; return true;
++        case BASE_SPECIFIER_BINARY:  *encoded = 1; return true;
++        case BASE_SPECIFIER_OCTAL:   *encoded = 2; return true;
++        case BASE_SPECIFIER_DECIMAL: *encoded = 3; return true;
++        case BASE_SPECIFIER_HEX:     *encoded = 4; return true;
++        default: return false;
++    }
++}
++
+ unsigned tree_sitter_vhdl_external_scanner_serialize(Scanner* scanner, char* buffer)
+ {
+-    memcpy(buffer, scanner, sizeof(Scanner));
+-    return sizeof(Scanner);
+-}
+-//------------------------------------------------------------------------------
++    uint8_t encoded_base;
++    if(!scanner || !buffer || scanner->base < 0 ||
++       (uintmax_t)scanner->base > UINT32_MAX ||
++       !encode_bit_string_base(scanner->bit_string_base, &encoded_base)) return 0;
++    uint32_t base = (uint32_t)scanner->base;
++    buffer[0] = SCANNER_STATE_VERSION;
++    buffer[1] = (char)((scanner->is_in_directive ? 1u : 0u) |
++                       (scanner->is_block_comment ? 2u : 0u));
++    buffer[2] = (char)encoded_base;
++    for(unsigned index = 0; index < 4; index++){
++        buffer[3 + index] = (char)((base >> (8u * index)) & UINT32_C(255));
++    }
++    return SCANNER_STATE_BYTES;
++}
+ 
+ void tree_sitter_vhdl_external_scanner_deserialize(Scanner* scanner, const char* buffer, unsigned length)
+ {
+-    if(length > 0 && length <= sizeof(Scanner) && buffer)
+-        memcpy(scanner, buffer, length);
+-}
+-//------------------------------------------------------------------------------
++    if(!scanner) return;
++    *scanner = (Scanner){0};
++    if(!buffer || length != SCANNER_STATE_BYTES) return;
++    const unsigned char* bytes = (const unsigned char*)buffer;
++    if(bytes[0] != SCANNER_STATE_VERSION || (bytes[1] & ~3u) || bytes[2] > 4) return;
++    uint32_t base = 0;
++    for(unsigned index = 0; index < 4; index++){
++        base |= (uint32_t)bytes[3 + index] << (8u * index);
++    }
++    if((uintmax_t)base > (uintmax_t)INT_MAX) return;
++    TokenType bit_string_base;
++    switch(bytes[2]){
++        case 0: bit_string_base = IDENTIFIER; break;
++        case 1: bit_string_base = BASE_SPECIFIER_BINARY; break;
++        case 2: bit_string_base = BASE_SPECIFIER_OCTAL; break;
++        case 3: bit_string_base = BASE_SPECIFIER_DECIMAL; break;
++        case 4: bit_string_base = BASE_SPECIFIER_HEX; break;
++        default: return;
++    }
++    scanner->is_in_directive = (bytes[1] & 1u) != 0;
++    scanner->is_block_comment = (bytes[1] & 2u) != 0;
++    scanner->bit_string_base = bit_string_base;
++    scanner->base = (int)base;
++}
+ 
+ static bool is_whitespace(int32_t character)
+ {
+@@ -294,8 +346,12 @@
+         if(lexer->lookahead == '_') lexer->advance(lexer, false);
+         if(lexer->lookahead < '0' || lexer->lookahead > '9') return result;
+ 
+-        result *= 10;
+-        result += lexer->lookahead - '0';
++        int digit = lexer->lookahead - '0';
++        /* Only a based literal uses the value; decimal magnitude is not
++         * evaluated here. Any representable base above 35 admits the same
++         * digit alphabet, so saturation preserves long-token consumption. */
++        if(result <= (INT_MAX - digit) / 10) result = result * 10 + digit;
++        else result = INT_MAX;
+         lexer->advance(lexer, false);
+     }
+     return result;
+@@ -432,7 +488,7 @@
+ }
+ //------------------------------------------------------------------------------
+ 
+-bool tree_sitter_vhdl_external_scanner_scan(Scanner* scanner, TSLexer* lexer, const bool* valid_symbols)
++static bool scan_vhdl(Scanner* scanner, TSLexer* lexer, const bool* valid_symbols)
+ {
+     #ifdef DEBUG
+         if(valid_symbols[ERROR_SENTINEL]){
+@@ -688,3 +744,16 @@
+ }
+ //------------------------------------------------------------------------------
+ 
++
++/* Some token-tree matches are ambiguous until their suffix is consumed. Only
++ * commit state after the final emitted token satisfies the caller's mask. */
++bool tree_sitter_vhdl_external_scanner_scan(Scanner* scanner, TSLexer* lexer, const bool* valid_symbols)
++{
++    if(!scanner || !lexer || !valid_symbols) return false;
++    Scanner candidate = *scanner;
++    if(!scan_vhdl(&candidate, lexer, valid_symbols)) return false;
++    if(lexer->result_symbol >= ERROR_SENTINEL ||
++       !valid_symbols[lexer->result_symbol]) return false;
++    *scanner = candidate;
++    return true;
++}

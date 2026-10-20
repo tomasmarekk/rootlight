@@ -1,0 +1,455 @@
+{
+  "schema": "rootlight.fish-static-source-inventory/1",
+  "files": [
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 479,
+      "sha256": "9e04e80e08910401ddfc2cddc9f06516dc8f91578b60153357c262b326fafebd",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 716,
+      "sha256": "038922c60a3b5e8ea016b0442223917fbd802a406c1d62d2b9f0d499ef426dc0",
+      "executable": false
+    },
+    {
+      "path": "bindings/rust/tests.rs",
+      "bytes": 2874,
+      "sha256": "d13483bb730aad194d66f9cb282c2c01f0bbb4c197ddc076c3b53c06b8065caf",
+      "executable": false
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 556,
+      "sha256": "73ba222d0789c528a87d50e9e956096f4112fd0501a4540ebca29b6fbd3b56e6",
+      "executable": false
+    },
+    {
+      "path": "GENERATION.json",
+      "bytes": 1908,
+      "sha256": "e4c117869ef90b32639b99a26c25a7e594a8b23dd8524b1aa5d2c0dfb5e2a4e4",
+      "executable": false
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 7438,
+      "sha256": "9d4aabf2f9154d26aa86cde278102f212ee24cfd271f3fd279e223b620ec8588",
+      "executable": false
+    },
+    {
+      "path": "grammar.ts",
+      "bytes": 10341,
+      "sha256": "790c061a31f8e023481b11ad2778e3fa468a1e3d07e95f33a15251d9b7610e90",
+      "executable": false
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1211,
+      "sha256": "6b0382b16279f26ff69014300541967a356a666eb0b91b422f6862f6b7dad17e",
+      "executable": false
+    },
+    {
+      "path": "patches/final-statement.patch",
+      "bytes": 1066,
+      "sha256": "1a471ecba5e093512a6f0b211a87b24062be35f57ecca88a3a931f479a914714",
+      "executable": false
+    },
+    {
+      "path": "SOURCE-PROVENANCE.json",
+      "bytes": 22362,
+      "sha256": "194a719b1ba2395fad6b63f8ac7c24ef152dafe2b35619d282a4318a64e64169",
+      "executable": false
+    },
+    {
+      "path": "SOURCES.md",
+      "bytes": 2011,
+      "sha256": "23eb91e912bce7624eb5a575e1df95abf602fee10231ecdf4f6ee1fef93f2360",
+      "executable": false
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 32444,
+      "sha256": "7c46702e45b2b551ce69e36d7523f914d79b627f06c243a1ae52d9fa7820c9b1",
+      "executable": false
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 41628,
+      "sha256": "94b6446d6cd39ea7e6553f999123a9a72f6a800978903b3a4dbd7eca853dea63",
+      "executable": false
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 536118,
+      "sha256": "b94af544be88b0fe26316c806ce5a349c16166030028098eeff7b85b3bc3186e",
+      "executable": false
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 2523,
+      "sha256": "ecf7bd668bf07280d468df5dad5fc66ef63952d41fb7db588976205f328ee647",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "executable": false
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "executable": false
+    },
+    {
+      "path": "upstream/.github/workflows/test.yml",
+      "bytes": 804,
+      "sha256": "4a704855d86a304d9f74e99e5bf838ba867b34f064209c398d9bc28c81fb61e8",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitignore.upstream",
+      "bytes": 90,
+      "sha256": "6e331772c1847349a2385a75398a34860fe798e92ff7e569bfef315766849e76",
+      "executable": false
+    },
+    {
+      "path": "upstream/.gitmodules.upstream",
+      "bytes": 102,
+      "sha256": "3e939f86357664dc63b91956fe64b8c1b3c12d2a647f9b55550f5e919b01d660",
+      "executable": false
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 409,
+      "sha256": "9d8b7a932b1b3fccb6bfda05130b562985b70239f469d6312ec3248c695a7f0a",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 575,
+      "sha256": "9788cd1d8d076d69fb3eac20a832859845cbfb4332e997db701d69facd67da4b",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/index.d.ts",
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 201,
+      "sha256": "609bdf22b8fd183025b3c24e8587f6211d50358e8f2e4c526b9217349ed9dbc0",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 1305,
+      "sha256": "bbbb5cf8882de8573faa4e7f20270b2f136da4e2e5df1dfe1ea51dfabdd8efeb",
+      "executable": false
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 1934,
+      "sha256": "74dceeedabd0d5a46bd525ce133e9bfbb70f198d56441014aa1df82811e70d42",
+      "executable": false
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 519,
+      "sha256": "c5903cc72881334d14b5736a3324e26ab0af9ba61ee45804959ae7c0bb4dd058",
+      "executable": false
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 7409,
+      "sha256": "ec33cf5c591df4dc97983e1d6eef19b56a5dd8ac3ebd81cc0a7f7e98b17c3730",
+      "executable": false
+    },
+    {
+      "path": "upstream/grammar.ts",
+      "bytes": 10312,
+      "sha256": "4bcd0ffc89174f2aed24e8f27ec0b733b40ebf62c581c70d8d21ae922f2828d8",
+      "executable": false
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1211,
+      "sha256": "6b0382b16279f26ff69014300541967a356a666eb0b91b422f6862f6b7dad17e",
+      "executable": false
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 1787,
+      "sha256": "2f8978b331ce8742342633858e4e44a8d67cba8ab38d4400c7b16a6ae90b1679",
+      "executable": false
+    },
+    {
+      "path": "upstream/queries/highlights.scm",
+      "bytes": 954,
+      "sha256": "b0b7975573571de38eb4700459e3f5cdb02f5cf7543bcb466937071352b914f2",
+      "executable": false
+    },
+    {
+      "path": "upstream/README.md",
+      "bytes": 574,
+      "sha256": "2ff497beecc1c5b0d8e29285d318c5dde62cf67ba9c9804582d43385c8c3f926",
+      "executable": false
+    },
+    {
+      "path": "upstream/scripts/test_shared.sh",
+      "bytes": 307,
+      "sha256": "5036ebdf8b13702a37d7daf17c31ffa66c310cbde4362c520319a5fece738655",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 31941,
+      "sha256": "982322cb843ef4781052d7e882eb3de513207bc133297982573785ee3b08b0f4",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 41591,
+      "sha256": "8df406f0cef22c1d72ce355166e400a6c4cb35e46300fdfdb4f976db03317124",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 474997,
+      "sha256": "9e0b21465ab23b6b0e74f939b63f786f96a37db8d7113c666f4ecc1cc698e03c",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/scanner.c",
+      "bytes": 2523,
+      "sha256": "ecf7bd668bf07280d468df5dad5fc66ef63952d41fb7db588976205f328ee647",
+      "executable": false
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 5378,
+      "sha256": "ab104936984904469572a4e868149f7a22fb2929347f837ae6a1f9b790f1b173",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/background.txt",
+      "bytes": 1164,
+      "sha256": "8487c7363681bcc3a7c6c14a42f36745cc7c89551bf8dabc70eab31420535653",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/begin_statement.txt",
+      "bytes": 3258,
+      "sha256": "e1c7ce6a2d9cd704a9b0111ddb4bfe51c9a184184caad2a86102178918681271",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/brace_expansion.txt",
+      "bytes": 7412,
+      "sha256": "16c7770eda197bd5a79b942c9fe50fffb273c8c8085a5a319ed28fb0f439cf4a",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/command.txt",
+      "bytes": 2257,
+      "sha256": "851ceccc9e291af4b87c96ca8f3b1b72a6d9b221b40cf8da44a3955bd3fe7c18",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/command_substitution.txt",
+      "bytes": 2669,
+      "sha256": "d3e07b38dca96cf0081795a8204369174ab65d592d8a0c3277abb12a068a9619",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/comment.txt",
+      "bytes": 1589,
+      "sha256": "936e7b7df9f46409000d40fa5350e0bd6bd1e4196e8a9d58694f5ee3d211a1b7",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/concatenation.txt",
+      "bytes": 9151,
+      "sha256": "e481e322e2f79f9e6a5c6dda136cfd455f59647b793f46b399b870cf2d3cf30b",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/conditional_execution.txt",
+      "bytes": 2308,
+      "sha256": "46df3a7b873bd58dbead1e58058ce10d37de8531a767d19c6ad952934b257110",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/double_quote_string.txt",
+      "bytes": 3533,
+      "sha256": "d88b1ee89d5d0d94291a3d1c412e639322d51b1e631e58b16c16c370a86edefa",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/escape_sequence.txt",
+      "bytes": 1733,
+      "sha256": "f6782e73b3bc744856f3570559f6991b91e0bf3518b641aa34221a500d246dee",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/failing_cases.txt",
+      "bytes": 850,
+      "sha256": "05bb98d9bd59e21a0dc4d617dd2a0f7d3cd969b3bb1fd9e29d0f3014b981d13e",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/falsely_correct_cases.txt",
+      "bytes": 893,
+      "sha256": "75de8c7550574aeb09ae28106e9c633c5577630a33cc7906d0fd21ebb73c924b",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/for_statement.txt",
+      "bytes": 1741,
+      "sha256": "36aa707967e320c12462b98c680e06f1341a128f15582207a6b9842672e4854f",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/function_definition.txt",
+      "bytes": 2839,
+      "sha256": "00df33908ac038782f83d87a3315ac21c4fb450b6ff6e1a825c42018f7a92772",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/glob.txt",
+      "bytes": 771,
+      "sha256": "6f159abcce582100df2064c8d76c5bf342a7fbdd401fce0fd03d04adba07a8c0",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/home_dir_expansion.txt",
+      "bytes": 513,
+      "sha256": "77b29b4dbacc4cf7da442778177efd3e39b6b93449c3592cc81b73c2e001ac7d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/if_statement.txt",
+      "bytes": 2451,
+      "sha256": "b5e821487cdf687f3ac55383ac6aacb022d03a115be0bd05ce047d7a04225fae",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/list_element_access.txt",
+      "bytes": 5828,
+      "sha256": "c81a7b4d9c60a45532656e0e9805074ea3a922052ab22fc0c4045ec8a5ed1050",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/negated_statement.txt",
+      "bytes": 1684,
+      "sha256": "db87d33459f2b70b08a4808a0634dcf6db49af3aaeb603f5a5ca881a7a5e7b21",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/pipe.txt",
+      "bytes": 2213,
+      "sha256": "f6c01737a68bb87ee21d9b497b65fc66db3cfd51be125526fc0bd8b540024ce9",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/redirects.txt",
+      "bytes": 4718,
+      "sha256": "eddd1c8f889d249095e90091eb01007f855d5b8f88930aa254e3fdb5d3ad4a3d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/single_quote_string.txt",
+      "bytes": 2371,
+      "sha256": "1b6e58982dc762d4b8a02d1384bbb2f4915506da13e4137d73f5b098a4d33971",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/special_character.txt",
+      "bytes": 649,
+      "sha256": "1dd88433349d3b72a34a628f9bb9e7765412ec8128536d6b60cd9bc65ef3ac36",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/switch_statement.txt",
+      "bytes": 1160,
+      "sha256": "e6af2830fffbb3f7c4a04b6bddf692a2ce1bf10a5080aa178d34555b69e71998",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/test_command.txt",
+      "bytes": 14129,
+      "sha256": "a6e2883468ff03b6c8fdccae6cb5b45c1075d4e73facf5fe28d88749e844e88d",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/variable_expansion.txt",
+      "bytes": 1186,
+      "sha256": "b84fccf7604a157793494bde087c3bf71481723578b68dc78159d9fe70e73d78",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/corpus/while_statement.txt",
+      "bytes": 1995,
+      "sha256": "1b836288465e99d5455cb73a9b9946ba54749fffc661f5aa573c57a3ac9529f0",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/keyword.fish",
+      "bytes": 583,
+      "sha256": "03ac8bc7bbb1d475f7781f5f126cc11fa013e5e111a41ea7dc654a1249805067",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/number.fish",
+      "bytes": 86,
+      "sha256": "e4efb30b4d4da1e7aa7521dff2ac03ab2002b6022b39ebd4bb0e9faceca32407",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/operator.fish",
+      "bytes": 497,
+      "sha256": "ad6b1be6035cc10b3c7dba5a1bfad79296af64a77847d7a16d2aa87f644e6f82",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/punctuation.fish",
+      "bytes": 268,
+      "sha256": "c4dcfe7c7832bf26001059cebae577174d6fb65241810a4bd216905c0b30d705",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/string.fish",
+      "bytes": 70,
+      "sha256": "bf751ab69c6992e98234400ef4288794a991cc67542fd983735d6678011c2f67",
+      "executable": false
+    },
+    {
+      "path": "upstream/test/highlight/variable_expansion.fish",
+      "bytes": 273,
+      "sha256": "f6b871a92ea0415434a15a0148b487b37148bf1e48a8ee2662c2efd7d17f1cdd",
+      "executable": false
+    },
+    {
+      "path": "upstream/tree-sitter-fish-fa2143f5d66a9eb6c007ba9173525ea7aaafe788.tar.gz",
+      "bytes": 54568,
+      "sha256": "142498ef82eecdd44c0e27d9f096edf75fb8b61d13c4aab0d7fcd0eb6ce71eff",
+      "executable": false
+    },
+    {
+      "path": "upstream/tsconfig.json",
+      "bytes": 222,
+      "sha256": "20d0d54945877ef504bcca4368f539be2007567feca4673bb9890dd371812a6a",
+      "executable": false
+    }
+  ]
+}

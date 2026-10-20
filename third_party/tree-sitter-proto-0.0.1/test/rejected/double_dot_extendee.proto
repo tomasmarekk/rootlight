@@ -1,0 +1,1 @@
+extend ..sample.External { optional string x = 50000; }

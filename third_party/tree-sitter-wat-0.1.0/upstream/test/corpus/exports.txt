@@ -1,0 +1,581 @@
+==================
+exports
+==================
+;; Functions
+
+(module (func) (export "a" (func 0)))
+(module (func) (export "a" (func 0)) (export "b" (func 0)))
+(module (func) (func) (export "a" (func 0)) (export "b" (func 1)))
+
+(module (func (export "a")))
+(module (func (export "a") (export "b") (export "c")))
+(module (func (export "a") (export "b") (param i32)))
+(module (func) (export "a" (func 0)))
+(module (func $a (export "a")))
+(module (func $a) (export "a" (func $a)))
+(module (export "a" (func 0)) (func))
+(module (export "a" (func $a)) (func $a))
+
+;; Globals
+
+(module (global i32 (i32.const 0)) (export "a" (global 0)))
+(module (global i32 (i32.const 0)) (export "a" (global 0)) (export "b" (global 0)))
+(module (global i32 (i32.const 0)) (global i32 (i32.const 0)) (export "a" (global 0)) (export "b" (global 1)))
+
+(module (global (export "a") i32 (i32.const 0)))
+(module (global i32 (i32.const 0)) (export "a" (global 0)))
+(module (global $a (export "a") i32 (i32.const 0)))
+(module (global $a i32 (i32.const 0)) (export "a" (global $a)))
+(module (export "a" (global 0)) (global i32 (i32.const 0)))
+(module (export "a" (global $a)) (global $a i32 (i32.const 0)))
+
+;; Tables
+
+(module (table 0 funcref) (export "a" (table 0)))
+(module (table 0 funcref) (export "a" (table 0)) (export "b" (table 0)))
+(module (table 0 funcref) (table 0 funcref) (export "a" (table 0)) (export "b" (table 1)))
+
+(module (table (export "a") 0 funcref))
+(module (table (export "a") 0 1 funcref))
+(module (table 0 funcref) (export "a" (table 0)))
+(module (table 0 1 funcref) (export "a" (table 0)))
+(module (table $a (export "a") 0 funcref))
+(module (table $a (export "a") 0 1 funcref))
+(module (table $a 0 funcref) (export "a" (table $a)))
+(module (table $a 0 1 funcref) (export "a" (table $a)))
+(module (export "a" (table 0)) (table 0 funcref))
+(module (export "a" (table 0)) (table 0 1 funcref))
+(module (export "a" (table $a)) (table $a 0 funcref))
+(module (export "a" (table $a)) (table $a 0 1 funcref))
+
+;; Memories
+
+(module (memory 0) (export "a" (memory 0)))
+(module (memory 0) (export "a" (memory 0)) (export "b" (memory 0)))
+;; No multiple memories yet.
+;; (module (memory 0) (memory 0) (export "a" (memory 0)) (export "b" (memory 1)))
+
+(module (memory (export "a") 0))
+(module (memory (export "a") 0 1))
+(module (memory 0) (export "a" (memory 0)))
+(module (memory 0 1) (export "a" (memory 0)))
+(module (memory $a (export "a") 0))
+(module (memory $a (export "a") 0 1))
+(module (memory $a 0) (export "a" (memory $a)))
+(module (memory $a 0 1) (export "a" (memory $a)))
+(module (export "a" (memory 0)) (memory 0))
+(module (export "a" (memory 0)) (memory 0 1))
+(module (export "a" (memory $a)) (memory $a 0))
+(module (export "a" (memory $a)) (memory $a 0 1))
+---
+
+(root
+  (line_comment)
+  (module
+    (module_field_func)
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_func)
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_func)
+    (module_field_func)
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_func
+      (export
+        (string))))
+  (module
+    (module_field_func
+      (export
+        (string))
+      (export
+        (string))
+      (export
+        (string))))
+  (module
+    (module_field_func
+      (export
+        (string))
+      (export
+        (string))
+      (param
+        (num_type))))
+  (module
+    (module_field_func)
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_func
+      (identifier)
+      (export
+        (string))))
+  (module
+    (module_field_func
+      (identifier))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier)))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_func))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier))))
+    (module_field_func
+      (identifier)))
+  (line_comment)
+  (module
+    (module_field_global
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_global
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_global
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer)))
+    (module_field_global
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_global
+      (export
+        (string))
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer))))
+  (module
+    (module_field_global
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_global
+      (identifier)
+      (export
+        (string))
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer))))
+  (module
+    (module_field_global
+      (identifier)
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier)))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_global
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier))))
+    (module_field_global
+      (identifier)
+      (global_type
+        (num_type))
+      (plain_instr
+        (instr_name)
+        (integer))))
+  (line_comment)
+  (module
+    (module_field_table
+      (table_type
+        (uinteger)
+        (ref_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_table
+      (table_type
+        (uinteger)
+        (ref_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_table
+      (table_type
+        (uinteger)
+        (ref_type)))
+    (module_field_table
+      (table_type
+        (uinteger)
+        (ref_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_table
+      (export
+        (string))
+      (table_type
+        (uinteger)
+        (ref_type))))
+  (module
+    (module_field_table
+      (export
+        (string))
+      (table_type
+        (uinteger)
+        (uinteger)
+        (ref_type))))
+  (module
+    (module_field_table
+      (table_type
+        (uinteger)
+        (ref_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_table
+      (table_type
+        (uinteger)
+        (uinteger)
+        (ref_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_table
+      (identifier)
+      (export
+        (string))
+      (table_type
+        (uinteger)
+        (ref_type))))
+  (module
+    (module_field_table
+      (identifier)
+      (export
+        (string))
+      (table_type
+        (uinteger)
+        (uinteger)
+        (ref_type))))
+  (module
+    (module_field_table
+      (identifier)
+      (table_type
+        (uinteger)
+        (ref_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier)))))
+  (module
+    (module_field_table
+      (identifier)
+      (table_type
+        (uinteger)
+        (uinteger)
+        (ref_type)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier)))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_table
+      (table_type
+        (uinteger)
+        (ref_type))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_table
+      (table_type
+        (uinteger)
+        (uinteger)
+        (ref_type))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier))))
+    (module_field_table
+      (identifier)
+      (table_type
+        (uinteger)
+        (ref_type))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier))))
+    (module_field_table
+      (identifier)
+      (table_type
+        (uinteger)
+        (uinteger)
+        (ref_type))))
+  (line_comment)
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (line_comment)
+  (line_comment)
+  (module
+    (module_field_memory
+      (export
+        (string))
+      (mem_type
+        (uinteger))))
+  (module
+    (module_field_memory
+      (export
+        (string))
+      (mem_type
+        (uinteger)
+        (uinteger))))
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_memory
+      (mem_type
+        (uinteger)
+        (uinteger)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger)))))
+  (module
+    (module_field_memory
+      (identifier)
+      (export
+        (string))
+      (mem_type
+        (uinteger))))
+  (module
+    (module_field_memory
+      (identifier)
+      (export
+        (string))
+      (mem_type
+        (uinteger)
+        (uinteger))))
+  (module
+    (module_field_memory
+      (identifier)
+      (mem_type
+        (uinteger)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier)))))
+  (module
+    (module_field_memory
+      (identifier)
+      (mem_type
+        (uinteger)
+        (uinteger)))
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier)))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_memory
+      (mem_type
+        (uinteger))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (uinteger))))
+    (module_field_memory
+      (mem_type
+        (uinteger)
+        (uinteger))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier))))
+    (module_field_memory
+      (identifier)
+      (mem_type
+        (uinteger))))
+  (module
+    (module_field_export
+      (string)
+      (extern_idx
+        (index
+          (identifier))))
+    (module_field_memory
+      (identifier)
+      (mem_type
+        (uinteger)
+        (uinteger)))))

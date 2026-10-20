@@ -1,0 +1,24 @@
+[package]
+name = "flux-source-parser"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+publish = false
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+chrono = { version = "=0.4.42", default-features = false, features = ["std", "serde"] }
+ordered-float = { version = "=3.9.2", features = ["serde"] }
+regex = "=1.13.0"
+fnv = "=1.0.7"
+serde = { version = "=1.0.228", features = ["derive", "rc"] }
+serde_derive = "=1.0.228"
+derive_more = { version = "=2.0.1", default-features = false, features = ["display", "from"] }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
