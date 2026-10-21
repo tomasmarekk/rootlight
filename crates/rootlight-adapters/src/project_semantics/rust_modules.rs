@@ -10,6 +10,9 @@ use super::{
 };
 use rootlight_adapter_sdk::{SyntaxKindLabel, canonical_rust_identifier};
 
+mod trait_candidates;
+pub(super) use trait_candidates::TraitCallProof;
+
 /// A unique foreign free-function binding with authenticated source dependencies.
 pub(super) struct CallProof {
     pub(super) target: SymbolId,
@@ -20,6 +23,7 @@ pub(super) struct CallProof {
 pub(super) struct ModuleCalls {
     pub(super) proofs: BTreeMap<SourceSpan, CallProof>,
     pub(super) generic_gaps: Vec<SourceSpan>,
+    pub(super) trait_calls: BTreeMap<SourceSpan, TraitCallProof>,
 }
 
 struct FileSyntax<'a> {
@@ -169,6 +173,7 @@ pub(super) fn resolve(
                             | "rust.anonymous_function.declaration"
                     )
                     && item_module(fact, &facts).is_none()
+                    && !trait_candidates::direct_member(fact, &facts, &text)
         });
         files.insert(
             root.span().file(),
@@ -410,6 +415,7 @@ pub(super) fn resolve(
     Ok(ModuleCalls {
         proofs,
         generic_gaps: generic_gaps.into_iter().collect(),
+        trait_calls: trait_candidates::resolve(builder, &files, &graph)?,
     })
 }
 
@@ -427,12 +433,7 @@ impl Graph {
         };
         for (&file, syntax) in files {
             let path = &builder.path_by_file[&file];
-            if !syntax.opaque
-                && matches!(path.rsplit('/').next(), Some("lib.rs" | "main.rs"))
-                && path
-                    .rsplit_once('/')
-                    .is_some_and(|(directory, _)| directory.rsplit('/').next() == Some("src"))
-            {
+            if !syntax.opaque && matches!(path.rsplit('/').next(), Some("lib.rs" | "main.rs")) {
                 let root = graph.modules.len();
                 graph.insert(Module {
                     file,

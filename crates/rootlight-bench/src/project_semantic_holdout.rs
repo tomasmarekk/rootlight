@@ -589,13 +589,30 @@ fn annotated_call<'document>(
 ) -> Result<&'document OccurrenceRecord, ProjectSemanticHoldoutError> {
     let (line_start, line_end) = line_bounds(source, line)?;
     let expected_hash = content_hash(name.as_bytes());
+    // Rust binds the entire written callee, including a receiver, into this hash.
+    let full_spelling_hash = document
+        .files
+        .iter()
+        .any(|record| record.id == file && record.language == "rust");
     let mut matches = document.occurrences.iter().filter(|occurrence| {
         let span = occurrence.source.span();
         occurrence.role == OccurrenceRole::CallSite
             && occurrence.file == file
-            && occurrence.syntactic_text_hash == expected_hash
             && span.start_byte() >= line_start
             && span.end_byte() <= line_end
+            && if full_spelling_hash {
+                usize::try_from(span.start_byte())
+                    .ok()
+                    .zip(usize::try_from(span.end_byte()).ok())
+                    .and_then(|(start, end)| source.get(start..end))
+                    .is_some_and(|bytes| {
+                        occurrence.syntactic_text_hash == content_hash(bytes)
+                            && std::str::from_utf8(bytes)
+                                .is_ok_and(|text| authoritative_call_span_has_terminal(text, name))
+                    })
+            } else {
+                occurrence.syntactic_text_hash == expected_hash
+            }
     });
     let occurrence = matches
         .next()
@@ -1904,6 +1921,44 @@ mod tests {
             "FixtureNode01 + value",
             "FixtureNode01"
         ));
+    }
+
+    #[test]
+    fn rust_receiver_call_requires_the_hash_of_its_full_source_spelling() {
+        let fixture = load_fixture().unwrap();
+        let manifest = &fixture.manifest.languages[0];
+        let answer = &fixture.answer_key.languages[0];
+        let parser: Arc<dyn ParseProvider> =
+            Arc::new(TreeSitterProvider::new(parser_config().unwrap()).unwrap());
+        let output = analyze_case(manifest, parser, &analysis_limits().unwrap()).unwrap();
+        let mut document = output.document().clone();
+        score_document(&document, manifest, answer).unwrap();
+        let source = embedded_source("rust/main.rs").unwrap();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == answer.call_path)
+            .unwrap()
+            .id;
+        let receiver = document
+            .occurrences
+            .iter_mut()
+            .find(|occurrence| {
+                let span = occurrence.source.span();
+                occurrence.role == OccurrenceRole::CallSite
+                    && occurrence.file == file
+                    && source.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    ) == Some(b"receiver.fixture_node_09".as_slice())
+            })
+            .unwrap();
+        assert_eq!(
+            receiver.syntactic_text_hash,
+            content_hash(b"receiver.fixture_node_09")
+        );
+        receiver.syntactic_text_hash = content_hash(b"fixture_node_09");
+        assert!(score_document(&document, manifest, answer).is_err());
     }
 
     #[test]

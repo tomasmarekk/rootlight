@@ -63,6 +63,8 @@ mod reexports;
 mod rust_bindings;
 #[path = "project_semantic_adapters/rust_module_calls.rs"]
 mod rust_module_calls;
+#[path = "project_semantic_adapters/rust_trait_candidates.rs"]
+mod rust_trait_candidates;
 #[path = "project_semantic_adapters/type_parameters.rs"]
 mod type_parameters;
 

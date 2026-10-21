@@ -1900,6 +1900,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     rust_bindings: BTreeMap<(SourceSpan, OccurrenceRole), Option<u64>>,
     rust_direct_calls: BTreeMap<SourceSpan, RustDirectCallDraft>,
     rust_module_calls: BTreeMap<SourceSpan, rust_modules::CallProof>,
+    rust_trait_calls: BTreeMap<SourceSpan, rust_modules::TraitCallProof>,
     rust_local_symbols: BTreeSet<SymbolId>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
@@ -1934,6 +1935,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             rust_bindings: BTreeMap::new(),
             rust_direct_calls: BTreeMap::new(),
             rust_module_calls: BTreeMap::new(),
+            rust_trait_calls: BTreeMap::new(),
             rust_local_symbols: BTreeSet::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
@@ -1954,6 +1956,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         if self.analyzer.language == SemanticProjectLanguage::Rust {
             let module_calls = rust_modules::resolve(&self)?;
             self.rust_module_calls = module_calls.proofs;
+            self.rust_trait_calls = module_calls.trait_calls;
             for span in module_calls.generic_gaps {
                 let input = self.input_for_file(span.file())?.clone();
                 self.push_source_gap(
@@ -3346,6 +3349,15 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             };
             let target = occurrence_target(&draft.name, &resolution);
             self.materialize_rust_direct_call(&draft)?;
+            if self.rust_trait_calls.contains_key(&draft.source.span()) {
+                let input = self.input_for_file(draft.file)?.clone();
+                self.push_source_gap(
+                    &input,
+                    draft.source.span(),
+                    FactDomain::Relations,
+                    "rust-trait-dispatch-runtime-implementation-unverified",
+                )?;
+            }
             if self.rust_module_calls.contains_key(&draft.source.span()) {
                 let input = self.input_for_file(draft.file)?.clone();
                 self.push_source_gap(
@@ -3401,6 +3413,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 evidence: direct_evidence(draft.source.clone()),
             };
             if let Some(proof) = self.rust_module_calls.get(&record.source.span()) {
+                record.evidence.derivation = proof.derivation.clone();
+            } else if let Some(proof) = self.rust_trait_calls.get(&record.source.span()) {
                 record.evidence.derivation = proof.derivation.clone();
             }
             record.id = derive_occurrence_record_id(&record)
@@ -4451,6 +4465,12 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         if self.analyzer.language == SemanticProjectLanguage::Rust
             && occurrence.role == OccurrenceRole::CallSite
         {
+            if let Some(proof) = self.rust_trait_calls.get(&occurrence.source.span()) {
+                return ResolutionCandidates {
+                    symbols: proof.symbols.clone(),
+                    kind: ResolutionKind::DynamicDispatch,
+                };
+            }
             return ResolutionCandidates {
                 symbols: self
                     .rust_module_calls
@@ -5013,6 +5033,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .rust_module_calls
                     .get(&source.span())
                     .map(|proof| proof.derivation.clone())
+                    .or_else(|| {
+                        self.rust_trait_calls
+                            .get(&source.span())
+                            .map(|proof| proof.derivation.clone())
+                    })
                     .unwrap_or_default(),
                 source: Some(source),
             },

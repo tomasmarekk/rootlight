@@ -203,6 +203,13 @@ fn project_predecessor_cannot_reuse_deep_provider_contexts() {
             .provider_set_hash(FirstSliceIndexMode::Deep)
             .unwrap();
         assert_ne!(current, predecessor);
+        let preceding_trait_candidates = hash_static_components(&[
+            b"rootlight.first-slice.project-provider/24",
+            structural.as_bytes(),
+            project,
+        ])
+        .unwrap();
+        assert_ne!(current, preceding_trait_candidates);
         assert_ne!(current, structural);
     }
     assert_eq!(
