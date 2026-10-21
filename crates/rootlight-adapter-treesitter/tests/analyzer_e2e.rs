@@ -3516,27 +3516,123 @@ fn reviewed_terminal_call_names_keep_complete_call_evidence() {
                     && occurrence.syntactic_text_hash == expected_hash
             })
             .unwrap_or_else(|| panic!("{} terminal call is captured", case.name));
-        assert_eq!(
-            call.target,
-            OccurrenceTarget::Unresolved {
-                text_hash: expected_hash
+        if case.name == "php" {
+            let document = output.document();
+            let target = symbol_id_named(document, terminal);
+            let owner = symbol_id_named(document, "build");
+            let method = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == target)
+                .unwrap();
+            assert_eq!(method.kind, EntityKind::Method);
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.role == OccurrenceRole::Definition
+                        && occurrence.target == (OccurrenceTarget::Resolved { symbol: target })
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let definition = definitions[0];
+            let definition_span = definition.source.span();
+            assert_eq!(
+                source.get(
+                    usize::try_from(definition_span.start_byte()).unwrap()
+                        ..usize::try_from(definition_span.end_byte()).unwrap()
+                ),
+                Some(terminal)
+            );
+            assert_eq!(
+                definition.source.content_hash(),
+                fixture.source.content_hash()
+            );
+            assert_eq!(call.target, OccurrenceTarget::Resolved { symbol: target });
+            assert_eq!(call.enclosing, Some(owner));
+            let relations: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|relation| {
+                    matches!(
+                        relation.predicate,
+                        RelationPredicate::Calls | RelationPredicate::DispatchCandidate
+                    )
+                })
+                .collect();
+            assert_eq!(relations.len(), 1);
+            assert_eq!(relations[0].predicate, RelationPredicate::Calls);
+            assert_eq!(relations[0].subject, RelationEndpoint::Entity(owner));
+            assert_eq!(relations[0].object, RelationEndpoint::Entity(target));
+            assert_eq!(relations[0].evidence.source.as_ref(), Some(&call.source));
+            for parent in [
+                rootlight_ir::FactRef::Entity(owner),
+                rootlight_ir::FactRef::Entity(target),
+                rootlight_ir::FactRef::Fact(call.id),
+            ] {
+                assert!(relations[0].evidence.derivation.contains(&parent));
             }
-        );
+        } else {
+            assert_eq!(
+                call.target,
+                OccurrenceTarget::Unresolved {
+                    text_hash: expected_hash
+                }
+            );
+        }
         let span = call.source.span();
         let start = usize::try_from(span.start_byte()).expect("call start fits");
         let end = usize::try_from(span.end_byte()).expect("call end fits");
-        assert_eq!(
-            source.get(start..end),
-            Some(complete_call),
-            "{} retains receiver and argument evidence",
-            case.name
-        );
-        assert!(output.document().relations.iter().all(|relation| {
-            !matches!(
-                relation.predicate,
-                RelationPredicate::Calls | RelationPredicate::DispatchCandidate
-            )
-        }));
+        if case.name == "php" {
+            assert_eq!(source.get(start..end), Some(terminal));
+            let full_calls: Vec<_> = output
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    let span = site.source.span();
+                    site.role == OccurrenceRole::CallSite
+                        && site.syntax_kind == "php.unproven_this_method.call"
+                        && source.get(
+                            usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap(),
+                        ) == Some(complete_call)
+                })
+                .collect();
+            assert_eq!(
+                full_calls.len(),
+                1,
+                "complete receiver and argument evidence"
+            );
+            let full_call = full_calls[0];
+            assert!(matches!(
+                full_call.target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            assert_eq!(full_call.provenance, call.provenance);
+            assert_eq!(
+                full_call.source.content_hash(),
+                fixture.source.content_hash()
+            );
+            assert_eq!(full_call.source.generation(), fixture.source.generation());
+            assert!(full_call.source.span().start_byte() < call.source.span().start_byte());
+            assert!(full_call.source.span().end_byte() > call.source.span().end_byte());
+        } else {
+            assert_eq!(
+                source.get(start..end),
+                Some(complete_call),
+                "{} retains receiver and argument evidence",
+                case.name
+            );
+        }
+        if case.name != "php" {
+            assert!(output.document().relations.iter().all(|relation| {
+                !matches!(
+                    relation.predicate,
+                    RelationPredicate::Calls | RelationPredicate::DispatchCandidate
+                )
+            }));
+        }
     }
 }
 
