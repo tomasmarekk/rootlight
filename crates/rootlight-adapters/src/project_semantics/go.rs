@@ -171,10 +171,10 @@ pub(super) fn resolve(
                 .ok_or(SinkError::AccountingOverflow)?;
             for function in sibling.functions.values() {
                 builder.cancellation.check()?;
-                if same(function.name, token.bytes, builder.cancellation)? {
-                    if target.replace((sibling, function)).is_some() {
-                        count = count.saturating_add(1);
-                    }
+                if same(function.name, token.bytes, builder.cancellation)?
+                    && target.replace((sibling, function)).is_some()
+                {
+                    count = count.saturating_add(1);
                 }
             }
         }
