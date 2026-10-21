@@ -1961,6 +1961,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             let module_calls = rust_modules::resolve(&self)?;
             self.rust_module_calls = module_calls.proofs;
             self.rust_trait_calls = module_calls.trait_calls;
+            rust_modules::materialize_test_imports(&mut self, module_calls.test_imports)?;
             for span in module_calls.generic_gaps {
                 let input = self.input_for_file(span.file())?.clone();
                 self.push_source_gap(

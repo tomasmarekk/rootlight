@@ -217,6 +217,13 @@ fn project_predecessor_cannot_reuse_deep_provider_contexts() {
         ])
         .unwrap();
         assert_ne!(current, preceding_package_functions);
+        let preceding_test_imports = hash_static_components(&[
+            b"rootlight.first-slice.project-provider/26",
+            structural.as_bytes(),
+            project,
+        ])
+        .unwrap();
+        assert_ne!(current, preceding_test_imports);
         assert_ne!(current, structural);
     }
     assert_eq!(

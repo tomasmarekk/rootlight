@@ -356,7 +356,10 @@ fn write_semantic_truth_repositories(root: &Path) {
         fs::create_dir_all(root.join(path)).expect("semantic fixture directory is created");
     }
     for (path, source) in [
-        ("rust/src/lib.rs", "pub mod commands;\n"),
+        (
+            "rust/src/lib.rs",
+            "pub mod commands;\n#[cfg(test)]\n#[path = \"../tests/commands.rs\"]\nmod command_tests;\n",
+        ),
         (
             "rust/src/commands.rs",
             concat!(

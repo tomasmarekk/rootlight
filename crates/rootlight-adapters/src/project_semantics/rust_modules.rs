@@ -10,7 +10,9 @@ use super::{
 };
 use rootlight_adapter_sdk::{SyntaxKindLabel, canonical_rust_identifier};
 
+mod test_imports;
 mod trait_candidates;
+pub(super) use test_imports::TestImport;
 pub(super) use trait_candidates::TraitCallProof;
 
 /// A unique foreign free-function binding with authenticated source dependencies.
@@ -24,6 +26,7 @@ pub(super) struct ModuleCalls {
     pub(super) proofs: BTreeMap<SourceSpan, CallProof>,
     pub(super) generic_gaps: Vec<SourceSpan>,
     pub(super) trait_calls: BTreeMap<SourceSpan, TraitCallProof>,
+    pub(super) test_imports: Vec<TestImport>,
 }
 
 struct FileSyntax<'a> {
@@ -42,6 +45,7 @@ struct Module {
     parent: Option<usize>,
     name: Option<String>,
     directory: String,
+    path_override: bool,
     visibility: Visibility,
     witnesses: Vec<SourceRef>,
 }
@@ -416,13 +420,29 @@ pub(super) fn resolve(
         proofs,
         generic_gaps: generic_gaps.into_iter().collect(),
         trait_calls: trait_candidates::resolve(builder, &files, &graph)?,
+        test_imports: test_imports::resolve(builder, &files)?,
     })
+}
+
+pub(super) fn materialize_test_imports(
+    builder: &mut ProjectFactsBuilder<'_, '_, '_>,
+    proofs: Vec<TestImport>,
+) -> Result<(), AdapterError> {
+    test_imports::materialize(builder, proofs)
 }
 
 impl Graph {
     fn new(
         builder: &ProjectFactsBuilder<'_, '_, '_>,
         files: &BTreeMap<FileId, FileSyntax<'_>>,
+    ) -> Result<Self, AdapterError> {
+        Self::with_policy(builder, files, false)
+    }
+
+    fn with_policy(
+        builder: &ProjectFactsBuilder<'_, '_, '_>,
+        files: &BTreeMap<FileId, FileSyntax<'_>>,
+        written_test_imports: bool,
     ) -> Result<Self, AdapterError> {
         let mut graph = Self {
             modules: Vec::new(),
@@ -433,7 +453,12 @@ impl Graph {
         };
         for (&file, syntax) in files {
             let path = &builder.path_by_file[&file];
-            if !syntax.opaque && matches!(path.rsplit('/').next(), Some("lib.rs" | "main.rs")) {
+            let admitted = if written_test_imports {
+                test_imports::admits_file(syntax, builder)?
+            } else {
+                !syntax.opaque
+            };
+            if admitted && matches!(path.rsplit('/').next(), Some("lib.rs" | "main.rs")) {
                 let root = graph.modules.len();
                 graph.insert(Module {
                     file,
@@ -446,6 +471,7 @@ impl Graph {
                         .map_or("", |(directory, _)| directory)
                         .to_owned(),
                     visibility: Visibility::Public,
+                    path_override: false,
                     witnesses: vec![builder.input_for_file(file)?.source().source_ref().clone()],
                 });
             }
@@ -498,6 +524,7 @@ impl Graph {
                 fact.kind() == SyntaxFactKind::Module
                     && fact.syntax_kind().as_str() == "rust.module.module"
                     && item_module(fact, &syntax.facts) == Some(parent.scope)
+                    && !parent.path_override
             }) {
                 builder.cancellation.check()?;
                 let Some(written) = syntax.text.text(fact.span()).and_then(tokens) else {
@@ -528,48 +555,62 @@ impl Graph {
                     builder.input_for_file(parent.file)?,
                     fact.span(),
                 ));
+                let paths = if written_test_imports {
+                    test_imports::module_paths(syntax, fact, &parent, &directory, builder)?
+                } else {
+                    vec![format!("{directory}.rs"), format!("{directory}/mod.rs")]
+                };
+                // Overridden module directories require additional Rust path
+                // rules. Retain the flat file's imports, without treating its
+                // logical module name as a nested physical-directory proof.
                 let child = match written.get(mod_at + 2).map(String::as_str) {
-                    Some("{") => Some(Module {
+                    Some("{") if !written_test_imports || paths.len() == 2 => Some(Module {
                         file: parent.file,
                         scope: fact.local_id(),
                         root: parent.root,
                         parent: Some(index),
                         name: Some(name.to_string()),
                         directory,
+                        path_override: false,
                         visibility,
                         witnesses,
                     }),
                     Some(";") if written.len() == mod_at + 3 && name.is_ascii() => {
-                        let paths = [format!("{directory}.rs"), format!("{directory}/mod.rs")];
                         let targets: Vec<_> = builder
                             .path_by_file
                             .iter()
                             .filter(|(_, path)| paths.contains(path))
                             .collect();
                         if let &[(&file, _)] = targets.as_slice() {
-                            files
-                                .get(&file)
-                                .filter(|syntax| !syntax.opaque)
-                                .map(|syntax| {
-                                    witnesses.push(
-                                        builder
-                                            .input_for_file(file)
-                                            .expect("retained file has a request input")
-                                            .source()
-                                            .source_ref()
-                                            .clone(),
-                                    );
-                                    Module {
-                                        file,
-                                        scope: syntax.root,
-                                        root: parent.root,
-                                        parent: Some(index),
-                                        name: Some(name.to_string()),
-                                        directory,
-                                        visibility,
-                                        witnesses,
-                                    }
+                            if let Some(syntax) = files.get(&file)
+                                && if written_test_imports {
+                                    test_imports::admits_file(syntax, builder)?
+                                } else {
+                                    !syntax.opaque
+                                }
+                            {
+                                witnesses.push(
+                                    builder
+                                        .input_for_file(file)
+                                        .expect("retained file has a request input")
+                                        .source()
+                                        .source_ref()
+                                        .clone(),
+                                );
+                                Some(Module {
+                                    file,
+                                    scope: syntax.root,
+                                    root: parent.root,
+                                    parent: Some(index),
+                                    name: Some(name.to_string()),
+                                    directory,
+                                    path_override: written_test_imports && paths.len() == 1,
+                                    visibility,
+                                    witnesses,
                                 })
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
