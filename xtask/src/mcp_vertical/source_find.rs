@@ -832,7 +832,9 @@ fn storage_failures(
             temporary,
             transcript,
         )?;
-        let base = index_repository(
+        // Keep one deep provider frame across restart. A structural head may
+        // gain a semantic child and evict the predecessor under retention two.
+        let base = index_repository_deep(
             &format!("literal.{state}.base"),
             &mut process,
             &catalog,
@@ -844,7 +846,7 @@ fn storage_failures(
             action: "update isolated storage-fault fixture",
             source,
         })?;
-        let index = index_repository(
+        let index = index_repository_deep(
             &format!("literal.{state}.head"),
             &mut process,
             &catalog,
@@ -966,6 +968,8 @@ fn storage_failures(
             &manifest,
             Some(&outcome.structured),
         )?;
+        // Publication may precede terminal journal state; status must observe both.
+        wait_until_journal_idle(&paths.operation_journal_path())?;
         let status = call_tool(
             &format!("literal.{state}.recovery-status"),
             &mut process,
@@ -1167,21 +1171,75 @@ fn storage_record<'a>(
     Ok(record)
 }
 
-fn head_activation<'a>(snapshot: &'a Value, generation: &str) -> Result<&'a Value, VerticalError> {
+fn head_activation<'a>(
+    snapshot: &'a Value,
+    generation: &str,
+    operation: Option<&str>,
+) -> Result<&'a Value, VerticalError> {
     let records = snapshot["repository_manifests"]
         .as_array()
         .ok_or(VerticalError::Invariant(
             "storage trace omitted activation inventory",
         ))?;
-    let mut matching = records.iter().filter(|record| {
-        record["name"] == "activation.json" && record["value"]["generation"] == generation
-    });
-    let record = matching.next().ok_or(VerticalError::Invariant(
+    let mut sequences = BTreeSet::new();
+    let mut directories = BTreeSet::new();
+    let mut head = None;
+    let mut selected_operation = None;
+    for record in records
+        .iter()
+        .filter(|record| record["name"] == "activation.json")
+    {
+        let sequence = record["value"]["global_activation_sequence"]
+            .as_u64()
+            .filter(|sequence| *sequence > 0)
+            .ok_or(VerticalError::Invariant(
+                "storage trace activation omitted its publication sequence",
+            ))?;
+        let directory = record["directory"]
+            .as_str()
+            .filter(|value| !value.is_empty());
+        let recorded_generation = record["value"]["generation"]
+            .as_str()
+            .filter(|value| !value.is_empty());
+        let recorded_operation = record["value"]["operation"]["operation"]
+            .as_str()
+            .filter(|value| !value.is_empty());
+        if directory.is_none()
+            || recorded_generation.is_none()
+            || recorded_operation.is_none()
+            || !sequences.insert(sequence)
+            || !directories.insert(directory)
+        {
+            return Err(VerticalError::Invariant(
+                "storage trace has invalid or ambiguous head activations",
+            ));
+        }
+        if head.is_none_or(|(previous, _)| sequence > previous) {
+            head = Some((sequence, record));
+        }
+        if recorded_generation == Some(generation)
+            && operation.is_some()
+            && recorded_operation == operation
+            && selected_operation.replace(record).is_some()
+        {
+            return Err(VerticalError::Invariant(
+                "storage trace repeats the requested activation operation",
+            ));
+        }
+    }
+    // A no-op can reactivate the same generation under a new operation. Only the
+    // highest publication sequence is the current head, not every historical ID.
+    let (_, record) = head.ok_or(VerticalError::Invariant(
         "storage trace omitted the head activation",
     ))?;
-    if matching.next().is_some() {
+    if record["value"]["generation"] != generation
+        || operation.is_some_and(|expected| {
+            record["value"]["operation"]["operation"] != expected
+                || selected_operation != Some(record)
+        })
+    {
         return Err(VerticalError::Invariant(
-            "storage trace has ambiguous head activations",
+            "storage trace head activation changed its requested identity",
         ));
     }
     Ok(record)
@@ -1346,8 +1404,8 @@ fn verify_storage_recovery(
             "logical sidecar did not authenticate the expected recovery inputs",
         ));
     }
-    let previous = head_activation(before, &index.generation)?;
-    let published = head_activation(recovered, &index.generation)?;
+    let previous = head_activation(before, &index.generation, Some(&index.operation))?;
+    let published = head_activation(recovered, &index.generation, None)?;
     let old_sequence = previous["value"]["global_activation_sequence"]
         .as_u64()
         .ok_or(VerticalError::Invariant(
@@ -1696,6 +1754,54 @@ mod tests {
             let mut reused_invalid = recovered;
             reused_invalid["repository_manifests"][0] = altered["repository_manifests"][0].clone();
             assert!(verify(&reused_invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn storage_head_selection_binds_operation_and_latest_publication_sequence() {
+        use serde_json::{Value, json};
+        let activation = |directory: &str, generation: &str, sequence: u64, operation: &str| {
+            json!({"directory":directory,"name":"activation.json","value":{
+                "generation":generation,"global_activation_sequence":sequence,
+                "operation":{"operation":operation}}})
+        };
+        let snapshot = json!({"repository_manifests":[
+            activation("activation-1", "predecessor", 1, "base-operation"),
+            activation("activation-2", "head", 2, "first-operation"),
+            activation("activation-3", "head", 3, "requested-operation"),
+        ]});
+        let selected =
+            super::head_activation(&snapshot, "head", Some("requested-operation")).unwrap();
+        assert_eq!(selected["directory"], "activation-3");
+        assert_eq!(
+            super::head_activation(&snapshot, "head", None).unwrap(),
+            selected
+        );
+        assert!(super::head_activation(&snapshot, "head", Some("first-operation")).is_err());
+        assert!(super::head_activation(&snapshot, "head", Some("missing-operation")).is_err());
+        for extra in [
+            activation("activation-3", "head", 3, "requested-operation"),
+            activation("activation-tie", "head", 3, "different-operation"),
+            activation("activation-4", "foreign", 4, "different-operation"),
+            activation("activation-0", "head", 0, "different-operation"),
+            activation("activation-repeat", "head", 4, "requested-operation"),
+        ] {
+            let mut invalid = snapshot.clone();
+            invalid["repository_manifests"]
+                .as_array_mut()
+                .unwrap()
+                .push(extra);
+            assert!(super::head_activation(&invalid, "head", Some("requested-operation")).is_err());
+        }
+        for pointer in [
+            "/repository_manifests/2/value/global_activation_sequence",
+            "/repository_manifests/2/value/generation",
+            "/repository_manifests/2/value/operation/operation",
+            "/repository_manifests/2/directory",
+        ] {
+            let mut invalid = snapshot.clone();
+            *invalid.pointer_mut(pointer).unwrap() = Value::Null;
+            assert!(super::head_activation(&invalid, "head", Some("requested-operation")).is_err());
         }
     }
 
