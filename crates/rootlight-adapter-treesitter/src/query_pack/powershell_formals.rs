@@ -309,9 +309,9 @@ impl<'source> CaptureCache<'source> {
                             if !self.step(cancel)?
                                 || attribute.kind() != "attribute"
                                 || attribute.named_child_count() != 1
-                                || !attribute
+                                || attribute
                                     .named_child(0)
-                                    .is_some_and(|node| node.kind() == "type_literal")
+                                    .is_none_or(|node| node.kind() != "type_literal")
                             {
                                 return Ok(proof);
                             }
@@ -390,9 +390,9 @@ impl<'source> CaptureCache<'source> {
                     | "flow_control_statement" => {}
                     "expression_with_unary_operator" => {
                         if node.named_child_count() != 1
-                            || !node
+                            || node
                                 .named_child(0)
-                                .is_some_and(|child| child.kind() == "cast_expression")
+                                .is_none_or(|child| child.kind() != "cast_expression")
                         {
                             return Ok(proof);
                         }
@@ -404,18 +404,18 @@ impl<'source> CaptureCache<'source> {
                         else {
                             return Ok(proof);
                         };
-                        if !value
+                        if value
                             .named_child(0)
-                            .is_some_and(|child| child.kind() == "hash_literal_expression")
+                            .is_none_or(|child| child.kind() != "hash_literal_expression")
                         {
                             return Ok(proof);
                         }
                     }
                     "member_name" => {
                         if node.named_child_count() != 1
-                            || !node
+                            || node
                                 .named_child(0)
-                                .is_some_and(|child| child.kind() == "simple_name")
+                                .is_none_or(|child| child.kind() != "simple_name")
                         {
                             return Ok(proof);
                         }
@@ -465,8 +465,8 @@ impl<'source> CaptureCache<'source> {
             return Ok(false);
         }
         let context = role == StructuralRole::Expression && node.kind() == "function_statement";
-        if !context
-            && !(node.kind() == "variable"
+        if !(context
+            || node.kind() == "variable"
                 && matches!(role, StructuralRole::Reference | StructuralRole::Signature))
         {
             return Ok(true);

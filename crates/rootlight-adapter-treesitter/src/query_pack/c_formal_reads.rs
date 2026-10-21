@@ -317,9 +317,9 @@ impl<'source> CaptureCache<'source> {
         }
         // Only direct argument identifiers can receive this certificate. Global
         // initializers and other names keep ordinary syntax without walking owners.
-        if !node
+        if node
             .parent()
-            .is_some_and(|parent| parent.kind() == "argument_list")
+            .is_none_or(|parent| parent.kind() != "argument_list")
         {
             return Ok(role != StructuralRole::Signature);
         }

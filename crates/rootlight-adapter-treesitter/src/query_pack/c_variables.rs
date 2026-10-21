@@ -160,7 +160,7 @@ impl<'source> CaptureCache<'source> {
                 || node.is_missing()
                 || (node.kind().starts_with("preproc_")
                     && node.kind() != "preproc_include"
-                    && !node.parent().is_some_and(|p| p.kind() == "preproc_include"))
+                    && node.parent().is_none_or(|p| p.kind() != "preproc_include"))
                 || matches!(
                     node.kind(),
                     "type_definition" | "struct_specifier" | "union_specifier" | "enum_specifier"
@@ -487,7 +487,7 @@ impl<'source> CaptureCache<'source> {
             return Ok(Some(false));
         }
         if role == StructuralRole::Reference
-            && !node.parent().is_some_and(|p| p.kind() == "argument_list")
+            && node.parent().is_none_or(|p| p.kind() != "argument_list")
         {
             candidate.syntax = "c.unproven_variable";
             return Ok(Some(true));

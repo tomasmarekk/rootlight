@@ -541,8 +541,8 @@ impl<'source> CaptureCache<'source> {
             return Ok(self.context(owner, cancel)?.is_some());
         }
         let context = role == StructuralRole::Signature && node.kind() == "function_definition";
-        if !context
-            && !(node.kind() == "identifier"
+        if !(context
+            || node.kind() == "identifier"
                 && matches!(role, StructuralRole::Reference | StructuralRole::Signature))
         {
             return Ok(true);

@@ -100,7 +100,7 @@ fn formal_names<'tree>(
             _ => return Ok(None),
         }
     }
-    Ok((!names.is_empty() && (implicit || (colon && ty)) && (!colon || ty)).then_some(names))
+    Ok((!names.is_empty() && (implicit || colon) && (!colon || ty)).then_some(names))
 }
 
 struct Definition<'tree> {
