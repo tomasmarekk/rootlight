@@ -175,7 +175,7 @@ pub(super) fn resolve(
         let Some(trait_text) = trait_file.text.text(trait_item.span) else {
             continue;
         };
-        if !trait_declares(trait_text, &trait_item.name, method, builder.cancellation)? {
+        if !trait_declares(trait_text, trait_item.name, method, builder.cancellation)? {
             continue;
         }
 
