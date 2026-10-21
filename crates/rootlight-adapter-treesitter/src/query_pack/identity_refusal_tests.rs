@@ -6,20 +6,32 @@ use super::*;
 
 #[test]
 fn c_formal_work_refusal_is_not_reported_as_capture_records() {
-    let source = b"void forward(int value) { sink(value); }\n";
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&language_for(GrammarFamily::C))
-        .unwrap();
-    let tree = parser.parse(source, None).unwrap();
-    assert!(!tree.root_node().has_error());
-    let registry = QueryPackRegistry::audited().unwrap();
-    let pack = registry.get(GrammarFamily::C).unwrap();
-    let error = pack
-        .extract_identity(GrammarFamily::C, &tree, source, 8, &Cancellation::new())
-        .unwrap_err();
-    assert!(matches!(error, AdapterError::ProviderFailed { code }
-        if code.as_str() == "query-identity-c-formal-reads-limit"));
+    // The variable census runs first; a typedef makes it decline without
+    // spending the formal helper's independent eight-step allowance.
+    for (source, expected) in [
+        (
+            b"void forward(int value) { sink(value); }\n".as_slice(),
+            "query-identity-c-written-variables-limit",
+        ),
+        (
+            b"typedef int Alias; void forward(int value) { sink(value); }\n".as_slice(),
+            "query-identity-c-formal-reads-limit",
+        ),
+    ] {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::C))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::C).unwrap();
+        let error = pack
+            .extract_identity(GrammarFamily::C, &tree, source, 8, &Cancellation::new())
+            .unwrap_err();
+        assert!(matches!(error, AdapterError::ProviderFailed { code }
+        if code.as_str() == expected));
+    }
 }
 
 #[test]
@@ -69,41 +81,53 @@ fn native_capture_allowance_accepts_exact_max_and_refuses_the_next_capture() {
 
 #[test]
 fn real_c_formal_refusal_measures_helper_work_separately_from_native_captures() {
-    let source = b"void forward(int value) { sink(value); }\n";
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&language_for(GrammarFamily::C))
-        .unwrap();
-    let tree = parser.parse(source, None).unwrap();
-    let registry = QueryPackRegistry::audited().unwrap();
-    let pack = registry.get(GrammarFamily::C).unwrap();
-    let mut witness = None;
-    let limit = pack
-        .scan_query_with_refusal(
-            &pack.identity_query,
-            QueryInput {
-                family: GrammarFamily::C,
-                tree: &tree,
-                source,
-                cancellation: &Cancellation::new(),
-                normalize_calls: false,
-            },
-            QueryScanLimits {
-                matches: 128,
-                captures: 128,
-                body_nodes: 8,
-            },
-            |_| Ok(()),
-            Some(&mut witness),
-        )
-        .unwrap();
-    assert_eq!(limit, Some(QueryLimit::Capture));
-    let details = witness.unwrap().details();
-    assert_eq!(details.origin(), "query-identity-c-formal-reads-limit");
-    assert_eq!((details.observed(), details.limit()), (Some(9), Some(8)));
-    assert!(details.progress().0.unwrap() < 128);
-    assert!(details.progress().1.unwrap() < 128);
-    assert_eq!(details.progress().2, Some(0));
+    // The variable census runs first; a typedef makes it decline without
+    // spending the formal helper's independent eight-step allowance.
+    for (source, expected) in [
+        (
+            b"void forward(int value) { sink(value); }\n".as_slice(),
+            "query-identity-c-written-variables-limit",
+        ),
+        (
+            b"typedef int Alias; void forward(int value) { sink(value); }\n".as_slice(),
+            "query-identity-c-formal-reads-limit",
+        ),
+    ] {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::C))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::C).unwrap();
+        let mut witness = None;
+        let limit = pack
+            .scan_query_with_refusal(
+                &pack.identity_query,
+                QueryInput {
+                    family: GrammarFamily::C,
+                    tree: &tree,
+                    source,
+                    cancellation: &Cancellation::new(),
+                    normalize_calls: false,
+                },
+                QueryScanLimits {
+                    matches: 128,
+                    captures: 128,
+                    body_nodes: 8,
+                },
+                |_| Ok(()),
+                Some(&mut witness),
+            )
+            .unwrap();
+        assert_eq!(limit, Some(QueryLimit::Capture));
+        let details = witness.unwrap().details();
+        assert_eq!(details.origin(), expected);
+        assert_eq!((details.observed(), details.limit()), (Some(9), Some(8)));
+        assert!(details.progress().0.unwrap() < 128);
+        assert!(details.progress().1.unwrap() < 128);
+        assert_eq!(details.progress().2, Some(0));
+    }
 }
 
 #[test]

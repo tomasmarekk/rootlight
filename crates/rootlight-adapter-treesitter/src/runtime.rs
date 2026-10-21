@@ -4390,8 +4390,8 @@ mod tests {
         .unwrap();
         let provider = TreeSitterProvider::with_query_packs(config, registry).unwrap();
         assert_eq!(registry.initialized_count(), 0);
-        assert_eq!(provider.registry.descriptors().len(), 84);
-        assert_eq!(provider.capabilities.languages().len(), 84);
+        assert_eq!(provider.registry.descriptors().len(), 100);
+        assert_eq!(provider.capabilities.languages().len(), 100);
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
         let debug = format!("{provider:?}");

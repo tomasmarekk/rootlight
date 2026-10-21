@@ -17441,13 +17441,44 @@ mod python_parameter_qualification_tests {
             .unwrap();
         let bounded_limits = limits(IrLimits::default(), 4096, nodes);
         let bounded = fixture.request(&bounded_limits);
+        let error = analyzer
+            .prepare_artifact(&bounded, &Cancellation::new())
+            .unwrap_err();
+        assert!(matches!(error, AdapterError::ProviderFailed { code }
+            if code.as_str() == "query-identity-python-parameter-reads-limit"));
+
+        // Native helper refusal aborts its transaction. Replay real retained
+        // facts separately to verify that bounded coverage cannot certify them.
+        let mock = rootlight_adapter_sdk::testkit::MockParseProvider::new(
+            analyzer.parser.capabilities().clone(),
+            complete.parse_output.facts().to_vec(),
+            complete.parse_output.diagnostics().to_vec(),
+            CoverageReport::new(
+                AnalysisTier::TierD,
+                CoverageStatus::Bounded,
+                text.len(),
+                text.len(),
+                1,
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .with_syntax_nodes(complete.parse_output.report().resources().syntax_nodes());
+        let analyzer = TreeSitterAnalyzer::new(
+            Arc::new(mock),
+            analyzer.descriptor.identity().clone(),
+            LanguageId::new("python").unwrap(),
+            &analyzer.frontend_version,
+            analyzer.binary_digest,
+        )
+        .unwrap();
         let artifact = analyzer
             .prepare_artifact(&bounded, &Cancellation::new())
             .unwrap();
         assert_ne!(
             artifact.parse_output.report().coverage().status(),
             CoverageStatus::Complete,
-            "fixture must reach the actual native proof-work refusal"
+            "replayed partial coverage must not become complete"
         );
         assert!(
             artifact

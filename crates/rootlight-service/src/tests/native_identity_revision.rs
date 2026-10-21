@@ -853,7 +853,25 @@ fn go_function_value_references_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/326"
+        b"rootlight.first-slice.treesitter-structural/327"
+    );
+    assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
+}
+
+#[test]
+fn complete_native_query_captures_invalidate_preceding_parser_identity() {
+    let grammar = first_slice_grammar_revision_hash().unwrap();
+    let previous = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        b"rootlight.first-slice.treesitter-structural/326",
+        grammar.as_bytes(),
+    ])
+    .unwrap();
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/327"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }

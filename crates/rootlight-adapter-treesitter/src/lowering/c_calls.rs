@@ -210,12 +210,67 @@ mod tests {
             .iter()
             .filter(|fact| structural_entity_kind(fact).is_some())
             .count();
+        // Native C also retains unproved written references beside the call.
+        // Admission reserves their possible edges before binding is decided.
+        let reference_count = parsed
+            .facts()
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    occurrence_role(fact),
+                    Some(OccurrenceRole::Reference | OccurrenceRole::CallSite)
+                )
+            })
+            .count();
+        let relation_count = entity_count + reference_count;
+        assert!(reference_count >= 1);
+        let mut exact_ir = IrLimits::default();
+        exact_ir.max_relations = relation_count;
+        let exact_limits = limits(exact_ir);
+        let exact_request = AnalysisRequest::new(
+            GenerationBoundSnapshot::new(&snapshot, &source_ref).unwrap(),
+            LanguageId::new("c").unwrap(),
+            AnalysisTier::TierD,
+            BuildContextIdentity::new(content_hash(b"capacity-build")),
+            &exact_limits,
+        )
+        .unwrap()
+        .with_generated_status(false);
+        preflight_lowering_limits(
+            &exact_request,
+            &parsed,
+            &producer,
+            "native-module-capacity",
+            &[],
+            &cancellation,
+        )
+        .unwrap();
+        let output = execute_analysis(
+            &PreparsedTreeSitterAnalyzer {
+                analyzer: &analyzer,
+                parse_output: &parsed,
+            },
+            &exact_request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(
+            output
+                .document()
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::Calls)
+                .count(),
+            1
+        );
         for per_record in [true, false] {
             let mut ir = IrLimits::default();
             if per_record {
                 ir.max_nested_items_per_record = 2;
             } else {
-                ir.max_relations = entity_count;
+                ir.max_relations = relation_count - 1;
             }
             let budget = limits(ir);
             let request = AnalysisRequest::new(
@@ -246,7 +301,7 @@ mod tests {
                 ));
             } else {
                 assert!(
-                    matches!(rejected, Err(AdapterError::Sink(SinkError::StreamLimit {resource: ResourceKind::Records, observed, limit})) if observed == entity_count + 1 && limit == entity_count)
+                    matches!(rejected, Err(AdapterError::Sink(SinkError::StreamLimit {resource: ResourceKind::Records, observed, limit})) if observed == relation_count && limit == relation_count - 1)
                 );
             }
         }
