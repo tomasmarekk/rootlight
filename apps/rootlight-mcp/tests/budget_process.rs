@@ -30,7 +30,7 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const MIN_RESPONSE_TOKEN_LIMIT: u64 = 100;
 const MIN_CONTEXT_TOKEN_LIMIT: u64 = 500;
-const EXPECTED_TOOLS: [&str; 14] = [
+const EXPECTED_TOOLS: [&str; 15] = [
     "code.locate",
     "symbol.explain",
     "symbol.relationships",
@@ -44,6 +44,7 @@ const EXPECTED_TOOLS: [&str; 14] = [
     "plan.change",
     "context.pack",
     "source.read",
+    "source.find",
     "query.advanced",
 ];
 
@@ -287,6 +288,15 @@ fn tool_cases(
                 ],
                 "include_line_numbers": true,
                 "encoding": "utf8_lossless_when_valid"
+            }),
+        ),
+        ToolCase::new(
+            "source.find",
+            json!({
+                "repository": repository(),
+                "generation": generation(),
+                "file_id": entry.source_ref["span"]["file"],
+                "literal": "budget_entry"
             }),
         ),
         ToolCase::new(

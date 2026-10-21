@@ -38,7 +38,7 @@ const NORMALIZATION: &str = "none_exact_utf8";
 const FRAMING: &str = "canonical_compact_json_without_accounting_measurement";
 const RUNTIME_REPORT_SCHEMA: &str = "rootlight.mcp-budget-runtime/1";
 const CANCELLATION_REPORT_SCHEMA: &str = "rootlight.mcp-cancellation-process/1";
-const RUNTIME_COVERED_TOOLS: [&str; 14] = [
+const RUNTIME_COVERED_TOOLS: [&str; 15] = [
     "code.locate",
     "symbol.explain",
     "symbol.relationships",
@@ -52,6 +52,7 @@ const RUNTIME_COVERED_TOOLS: [&str; 14] = [
     "plan.change",
     "context.pack",
     "source.read",
+    "source.find",
     "query.advanced",
 ];
 

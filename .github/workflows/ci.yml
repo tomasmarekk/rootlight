@@ -82,6 +82,7 @@ jobs:
           python -B scripts/test_patch_npm_source_fixture.py
           python -B scripts/test_verify_local_npm_sources.py
           python -B -m unittest discover -s scripts -p 'test_*lightning_producer_sources.py' -v
+          python -B scripts/test_verify_native_producer_sources.py
           python -B -m unittest discover -s scripts -p 'test_*lightning_yarn_sources.py' -v
           python -B scripts/test_restore_lightning_source_inputs.py
           python -B scripts/test_install_lightning_from_archives.py
@@ -146,13 +147,13 @@ jobs:
               "schema": "rootlight.mcp-capability-parity/1",
               "sourceRevision": revision,
               "status": "passed",
-              "toolCount": 19,
-              "reviewedInputFields": 542,
-              "schemaGoldenPairs": 19,
+              "toolCount": 20,
+              "reviewedInputFields": 555,
+              "schemaGoldenPairs": 20,
               "profileCounts": {
-                  "scout": 6,
-                  "analysis": 13,
-                  "developer": 19,
+                  "scout": 7,
+                  "analysis": 14,
+                  "developer": 20,
               },
               "blockedGaps": 0,
           }
@@ -1063,10 +1064,10 @@ jobs:
                   "5bb7e5b81113de74a623448f926dc074"
               ),
               "sample_record_count": 44,
-              "sample_record_bytes": 7200,
+              "sample_record_bytes": 7211,
               "sample_record_sha256": (
-                  "d933da8d64ff5d6350dd4bc7257a452"
-                  "7115dd7d555edee7be41e740ae8828c3d"
+                  "919e9ed35514090576db95c82cdc257c3"
+                  "cb9a2e2c8fea00e1cc36a9b9614f046"
               ),
           }
           observed = {key: envelope.get(key) for key in expected}
@@ -1900,15 +1901,15 @@ jobs:
                   raise SystemExit(f"{name} revision differs")
               if (root / name).stat().st_size > ceiling:
                   raise SystemExit(f"{name} exceeds its byte ceiling")
-          if len(runtime.get("cases", [])) != 14:
-              raise SystemExit("runtime evidence does not cover all 14 budget tools")
+          if len(runtime.get("cases", [])) != 15:
+              raise SystemExit("runtime evidence does not cover all 15 budget tools")
           if len(cancellation.get("cases", [])) != 2:
               raise SystemExit("cancellation evidence differs")
           measured = [
               tool for tool in conformance.get("tools", [])
               if tool.get("runtime_trigger_coverage") == "covered_real_process"
           ]
-          if len(measured) != 14:
+          if len(measured) != 15:
               raise SystemExit("conformance report does not accept all runtime cases")
           if any(
               tool.get("runtime_trigger_coverage") == "not_measured"
