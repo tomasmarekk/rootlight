@@ -1039,7 +1039,10 @@ impl QueryPack {
                     || (family == GrammarFamily::Chapel
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
-                        && candidate.syntax == "chapel.formal_initializer")
+                        && matches!(
+                            candidate.syntax,
+                            "chapel.formal_initializer" | "chapel.typed_local_call"
+                        ))
                     || (family == GrammarFamily::Java
                         && candidate.required
                         && candidate.role == StructuralRole::Reference

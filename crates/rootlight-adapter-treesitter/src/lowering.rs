@@ -15,6 +15,7 @@ mod c_formal_reads;
 mod c_variables;
 mod capnp;
 mod chapel;
+mod chapel_calls;
 mod chapel_formals;
 mod clojure;
 mod cmake;
@@ -906,6 +907,7 @@ fn required_syntax_fact_count_from_output(
             || sed::required(fact)
             || idris::required(fact)
             || chapel_formals::required(fact)
+            || chapel_calls::required(fact)
             || meson_bindings::required(fact)
             || dockerfile::required(fact)
             || java_local_receivers::required(fact)
@@ -1665,6 +1667,14 @@ fn preflight_lowering_limits(
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 2)?;
                 field_relation_derivations = checked_add(field_relation_derivations, 3)?;
             }
+            if chapel_calls::required(fact) {
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+            }
             if request.language().as_str() == "sed"
                 && fact.syntax_kind().as_str() == "sed.written_branch.reference"
             {
@@ -1722,7 +1732,7 @@ fn preflight_lowering_limits(
                     || (request.language().as_str() == "chapel"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
-                        && chapel_formals::required(fact))
+                        && (chapel_formals::required(fact) || chapel_calls::required(fact)))
                     || (request.language().as_str() == "java"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3170,6 +3180,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
         {
             Some(csharp_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let chapel_calls = if self.request.language().as_str() == "chapel"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(chapel_calls::Targets::new(
                 self.coordinates.facts(),
                 &materialized,
                 self.full_source,
@@ -4636,6 +4662,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("java-local-receiver-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &chapel_calls
+                    && let Some(symbol) =
+                        targets.resolve(fact, &occurrence, enclosing_entity, text, cancellation)?
+                    && let Some(owner) = enclosing_entity
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("chapel-call-occurrence-identity"))?;
+                    let relation =
+                        chapel_calls::relation(&occurrence, owner, symbol, cancellation)?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(parameters) = &chapel_formals
@@ -11886,13 +11924,20 @@ fn markdown_language_for_syntax(syntax: &str) -> Option<&str> {
         "objective_c" => Some("objective-c"),
         "common_lisp" => Some("common-lisp"),
         "ocaml_interface" => Some("ocaml-interface"),
+        "sml" => Some("standard-ml"),
+        "wat" => Some("webassembly"),
+        "json_schema" => Some("json-schema"),
         "rust" | "javascript" | "typescript" | "python" | "c" | "cpp" | "csharp" | "go"
         | "java" | "groovy" | "haskell" | "kotlin" | "lua" | "php" | "ruby" | "swift" | "css"
         | "bash" | "json" | "jsonc" | "toml" | "yaml" | "html" | "sql" | "r" | "nix" | "matlab"
         | "perl" | "solidity" | "scala" | "dart" | "powershell" | "astro" | "vba" | "fortran"
         | "plsql" | "sas" | "apex" | "pascal" | "assembly" | "scheme" | "glsl" | "hlsl"
         | "wgsl" | "xml" | "dtd" | "ocaml" | "cmake" | "coq" | "julia" | "eiffel" | "verilog"
-        | "systemverilog" | "v" => Some(language),
+        | "systemverilog" | "v" | "idris" | "lean" | "sed" | "wolfram" | "pug" | "coffeescript"
+        | "dockerfile" | "meson" | "gdscript" | "chapel" | "qsharp" | "mojo" | "ring" | "hare"
+        | "haxe" | "qml" | "modelica" | "ada" | "hcl" | "d" | "zig" | "crystal" | "cue"
+        | "pony" | "fish" | "nim" | "clojure" | "racket" | "vhdl" | "graphql" | "elixir"
+        | "protobuf" | "thrift" | "capnp" => Some(language),
         _ => None,
     }
 }

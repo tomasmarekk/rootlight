@@ -10,6 +10,7 @@ use std::ops::Range;
 use tree_sitter::Node;
 
 mod formal_reads;
+mod typed_calls;
 
 struct Declaration {
     name: Range<usize>,
@@ -23,6 +24,7 @@ pub(super) struct CaptureCache<'s> {
     remaining: usize,
     exhausted: bool,
     initializer_proofs: HashMap<usize, Option<formal_reads::Proof>>,
+    typed_calls: HashMap<usize, Option<typed_calls::Proof>>,
 }
 
 impl<'s> CaptureCache<'s> {
@@ -33,6 +35,7 @@ impl<'s> CaptureCache<'s> {
             remaining: maximum.min(HARD_MAX_QUERY_CAPTURES).saturating_mul(32),
             exhausted: false,
             initializer_proofs: HashMap::new(),
+            typed_calls: HashMap::new(),
         }
     }
     pub(super) const fn exhausted(&self) -> bool {
@@ -284,18 +287,35 @@ pub(super) fn candidate(
             "chapel.file"
         }
     } else if role == StructuralRole::Signature && node.kind() == "identifier" {
-        if !cache.initializer_site(node, cancel)? {
-            return Ok(None);
+        if cache.typed_call(node, cancel)?.is_some() {
+            role = StructuralRole::Reference;
+            required = true;
+            "chapel.typed_local_call"
+        } else {
+            if !cache.initializer_site(node, cancel)? {
+                return Ok(None);
+            }
+            role = StructuralRole::Reference;
+            required = true;
+            "chapel.formal_initializer"
         }
-        role = StructuralRole::Reference;
-        required = true;
-        "chapel.formal_initializer"
     } else if role == StructuralRole::Signature && node.kind() == "block_statement" {
-        let Some(owner) = cache.initializer_context(node, cancel)? else {
+        if let Some(owner) = cache.typed_call_owner(node, cancel)? {
+            range = owner;
+            "chapel.typed_local_call_owner_context"
+        } else {
+            let Some(owner) = cache.initializer_context(node, cancel)? else {
+                return Ok(None);
+            };
+            range = owner;
+            "chapel.formal_initializer_context"
+        }
+    } else if role == StructuralRole::Signature && node.kind() == "call_expression" {
+        let Some(proof) = cache.typed_call(node, cancel)? else {
             return Ok(None);
         };
-        range = owner;
-        "chapel.formal_initializer_context"
+        range = proof.call;
+        "chapel.typed_local_call_context"
     } else if node.kind() == "unsupported_keyword_statement" && role == StructuralRole::Signature {
         "chapel.unsupported_context"
     } else if matches!(
@@ -322,7 +342,7 @@ pub(super) fn candidate(
     } else if role == StructuralRole::Reference {
         // Only the required native carrier owns a certified site's occurrence.
         // Uncertified names retain their ordinary optional Reference path.
-        if cache.initializer_site(node, cancel)? {
+        if cache.typed_call(node, cancel)?.is_some() || cache.initializer_site(node, cancel)? {
             return Ok(None);
         }
         if !cache.name(node, cancel)? {

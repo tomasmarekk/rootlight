@@ -536,10 +536,11 @@ fn initializer_read(
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].evidence.source.as_ref(), Some(&sites[0].source));
     assert!(
-        !document
-            .relations
-            .iter()
-            .any(|edge| edge.predicate == RelationPredicate::Calls)
+        !document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.evidence.source.as_ref() == Some(&sites[0].source)
+        }),
+        "the initializer Read must never donate a Calls relation"
     );
     for domain in [
         FactDomain::Entities,
@@ -1050,4 +1051,563 @@ fn raw_definition_declaration_context_cardinality_and_current_source_are_require
         context.syntax_kind().clone(),
     );
     denied(facts);
+}
+
+#[test]
+fn typed_unsigned_local_selects_the_unique_written_same_module_overload() {
+    let text = "module Scalar { proc route(arg: uint(16)) {} proc route(arg: string) {} proc run() { var value: uint(16) = 1; value += 1; return route(value); } }";
+    let result = output(CHAPEL, text.as_bytes(), EncodingId::utf8());
+    let document = result.document();
+    let target_at = u64::try_from(text.find("route").unwrap()).unwrap();
+    let caller_at = u64::try_from(text.find("run").unwrap()).unwrap();
+    let call_at = u64::try_from(text.rfind("route").unwrap()).unwrap();
+    let target = entity_at(
+        document,
+        "route",
+        EntityKind::Function,
+        target_at,
+        target_at + 5,
+    );
+    let caller = entity_at(
+        document,
+        "run",
+        EntityKind::Function,
+        caller_at,
+        caller_at + 3,
+    );
+    resolved_at(
+        document,
+        OccurrenceRole::CallSite,
+        call_at,
+        call_at + 5,
+        target,
+    );
+    exact_call(document, caller, target, call_at, call_at + 5);
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.source.span().start_byte() == call_at
+                && site.source.span().end_byte() == call_at + 5
+        })
+        .collect();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].syntax_kind, "chapel.typed_local_call.reference");
+    let edge = document
+        .relations
+        .iter()
+        .find(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.subject == RelationEndpoint::Entity(caller)
+                && edge.object == RelationEndpoint::Entity(target)
+        })
+        .unwrap();
+    for parent in [
+        rootlight_ir::FactRef::Entity(caller),
+        rootlight_ir::FactRef::Entity(target),
+        rootlight_ir::FactRef::Fact(sites[0].id),
+    ] {
+        assert!(edge.evidence.derivation.contains(&parent));
+    }
+    assert_eq!(edge.evidence.source.as_ref(), Some(&sites[0].source));
+    assert!(
+        document
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.domain == FactDomain::Relations
+                && gap.detail.contains("runtime-semantics-unavailable"))
+    );
+}
+
+#[test]
+fn typed_local_overloads_refuse_ambiguity_shadowing_inference_and_foreign_scopes() {
+    for text in [
+        "module W { proc route(arg: uint(32)) {} proc route(arg: uint(32)) {} proc run() { var value: uint(32) = 1; return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value = 1; return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value: uint(16) = 1; return route(value); } }",
+        "module W { proc route(arg) {} proc run() { var value: uint(32) = 1; return route(value); } }",
+        "module W { proc route(arg: Alias) {} proc run() { var value: uint(32) = 1; return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value: uint(32) = 1; var route = 1; return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value: uint(32) = 1; for value in 1..2 {} return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value: uint(32) = 1; { var value: uint(32) = 2; } return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run(value: uint(32)) { return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value: uint(32) = 1; return W.route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value: uint(32) = 1; for step in 1..2 { route(value); } } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { route(1); } }",
+        "module A { proc route(arg: uint(32)) {} } module B { proc run() { var value: uint(32) = 1; return route(value); } }",
+        "module W { proc route(arg: uint(32)) {} proc run() { var value: uint(32) = 1; // route(value)\n return value; } }",
+    ] {
+        let result = output(CHAPEL, text.as_bytes(), EncodingId::utf8());
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls),
+            "{text}"
+        );
+        assert!(
+            !result
+                .document()
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::CallSite
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn complete_original_typed_call_keeps_bom_and_both_utf16_physical_evidence() {
+    let text = std::str::from_utf8(ORIGINAL).unwrap();
+    for encoding in 0..3 {
+        let (raw, encoding_id) = if encoding == 0 {
+            (format!("\u{feff}{text}").into_bytes(), EncodingId::utf8())
+        } else {
+            let little = encoding == 1;
+            let mut raw = if little {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in text.encode_utf16() {
+                raw.extend_from_slice(&if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            (
+                raw,
+                EncodingId::new(if little { "utf-16le" } else { "utf-16be" }).unwrap(),
+            )
+        };
+        let physical = |at| {
+            if encoding == 0 {
+                u64::try_from(at + 3).unwrap()
+            } else {
+                u64::try_from(2 + 2 * text[..at].encode_utf16().count()).unwrap()
+            }
+        };
+        let result = output(CHAPEL, &raw, encoding_id);
+        let target = entity_at(
+            result.document(),
+            "genHashKey32",
+            EntityKind::Function,
+            physical(165),
+            physical(177),
+        );
+        let caller = entity_at(
+            result.document(),
+            "genHashKey32",
+            EntityKind::Function,
+            physical(461),
+            physical(473),
+        );
+        resolved_at(
+            result.document(),
+            OccurrenceRole::CallSite,
+            physical(637),
+            physical(649),
+            target,
+        );
+        exact_call(
+            result.document(),
+            caller,
+            target,
+            physical(637),
+            physical(649),
+        );
+        assert!(
+            result
+                .document()
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::Calls)
+                .all(|edge| edge
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.content_hash() == content_hash(&raw)))
+        );
+    }
+}
+
+#[test]
+fn typed_call_required_artifact_exact_rebind_one_less_and_cancellation_are_atomic() {
+    let native = Arc::new(provider());
+    let frontend = analyzer(&native, CHAPEL);
+    let fixture = Fixture::new(CHAPEL, ORIGINAL);
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, CHAPEL, &bounds);
+    let full = frontend.prepare_artifact(&input, &deadline()).unwrap();
+    let required = full.required_syntax_fact_count(&deadline()).unwrap();
+    assert_eq!(
+        required,
+        native
+            .required_syntax_fact_count(&input.to_parse_request(), &deadline())
+            .unwrap()
+    );
+    let exact = limits_with_syntax_records(required);
+    let (result, retained) = frontend
+        .analyze_and_capture(
+            &request(&fixture.snapshot, &fixture.source, CHAPEL, &exact),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let (target, _, caller) = original_structure(result.document());
+    resolved_at(
+        result.document(),
+        OccurrenceRole::CallSite,
+        637,
+        649,
+        target,
+    );
+    exact_call(result.document(), caller, target, 637, 649);
+    assert_eq!(
+        retained.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    let next = fixture.next_generation();
+    let next_input = request(&next.snapshot, &next.source, CHAPEL, &exact);
+    let reused = frontend
+        .analyze_from_artifact(
+            &next_input,
+            &retained,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        reused.document(),
+        analyze(&frontend, &next_input, &ExtensionSupport::default()).document()
+    );
+    let (target, _, caller) = original_structure(reused.document());
+    exact_call(reused.document(), caller, target, 637, 649);
+    let small = limits_with_syntax_records(required - 1);
+    let error = frontend
+        .prepare_artifact(
+            &request(&fixture.snapshot, &fixture.source, CHAPEL, &small),
+            &deadline(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error,AdapterError::Sink(SinkError::StreamLimit{resource:ResourceKind::RequiredSyntaxFacts,observed,limit}) if observed==required && limit==required-1),
+        "{error:?}"
+    );
+    let stopped = Cancellation::new();
+    assert!(stopped.cancel(CancellationReason::ClientRequest));
+    assert!(matches!(
+        frontend.analyze_from_artifact(
+            &input,
+            &retained,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &stopped
+        ),
+        Err(AdapterError::Cancelled {
+            reason: CancellationReason::ClientRequest
+        })
+    ));
+    let changed = fixture.rewrite(
+        &ORIGINAL
+            .iter()
+            .copied()
+            .chain(b"\n".iter().copied())
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        matches!(frontend.analyze_from_artifact(&request(&changed.snapshot,&changed.source,CHAPEL,&exact),&retained,ExtensionSupport::default(),MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,&deadline()),Err(AdapterError::ProviderFailed{code}) if code.as_str()=="treesitter-structural-artifact-mismatch")
+    );
+}
+
+#[test]
+fn typed_call_raw_owner_target_and_source_certificates_are_independently_required() {
+    use rootlight_adapter_sdk::{
+        SyntaxFact, SyntaxFactKind, SyntaxKindLabel, testkit::MockParseProvider,
+    };
+    let native = provider();
+    let fixture = Fixture::new(CHAPEL, ORIGINAL);
+    let budget = limits();
+    let input = request(&fixture.snapshot, &fixture.source, CHAPEL, &budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &native,
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let replay = |fixture: &Fixture, facts: Vec<SyntaxFact>| {
+        let parser = MockParseProvider::new(
+            native.capabilities().clone(),
+            facts,
+            parsed.diagnostics().to_vec(),
+            parsed.report().coverage().clone(),
+        );
+        let frontend = TreeSitterAnalyzer::new(
+            Arc::new(parser),
+            producer_identity(),
+            language(CHAPEL),
+            CHAPEL.frontend,
+            content_hash(BINARY_SEED),
+        )
+        .unwrap();
+        execute_analysis(
+            &frontend,
+            &request(&fixture.snapshot, &fixture.source, CHAPEL, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap()
+    };
+    let baseline = replay(&fixture, parsed.facts().to_vec());
+    let (target, _, caller) = original_structure(baseline.document());
+    exact_call(baseline.document(), caller, target, 637, 649);
+    let deny = |facts| {
+        let result = replay(&fixture, facts);
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls)
+        );
+    };
+    let site = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.syntax_kind().as_str() == "chapel.typed_local_call.reference")
+        .unwrap();
+    let contexts: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact.syntax_kind().as_str(),
+                "chapel.typed_local_call_context.signature"
+                    | "chapel.typed_local_call_owner_context.signature"
+            )
+        })
+        .collect();
+    assert_eq!(contexts.len(), 2);
+    for witness in contexts {
+        deny(
+            parsed
+                .facts()
+                .iter()
+                .filter(|fact| fact.local_id() != witness.local_id())
+                .cloned()
+                .collect(),
+        );
+        let mut facts = parsed.facts().to_vec();
+        let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+        facts.push(SyntaxFact::new(
+            next,
+            witness.parent(),
+            SyntaxFactKind::Signature,
+            witness.span(),
+            witness.depth(),
+            SyntaxKindLabel::new("rust.function.signature").unwrap(),
+        ));
+        deny(facts);
+    }
+    let definition = parsed
+        .facts()
+        .iter()
+        .find(|fact| {
+            fact.syntax_kind().as_str() == "chapel.name.definition"
+                && fact.span().start_byte() == 165
+        })
+        .unwrap();
+    deny(
+        parsed
+            .facts()
+            .iter()
+            .filter(|fact| fact.local_id() != definition.local_id())
+            .cloned()
+            .collect(),
+    );
+    let declaration = parsed
+        .facts()
+        .iter()
+        .find(|fact| Some(fact.local_id()) == definition.parent())
+        .unwrap();
+    let mut facts = parsed.facts().to_vec();
+    let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+    facts.push(SyntaxFact::new(
+        next,
+        declaration.parent(),
+        SyntaxFactKind::Declaration,
+        declaration.span(),
+        declaration.depth(),
+        SyntaxKindLabel::new("rust.function.declaration").unwrap(),
+    ));
+    deny(facts);
+    let root = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.kind() == SyntaxFactKind::Root)
+        .unwrap();
+    let facts = parsed
+        .facts()
+        .iter()
+        .map(|fact| {
+            if fact.local_id() == site.local_id() {
+                SyntaxFact::new(
+                    fact.local_id(),
+                    Some(root.local_id()),
+                    fact.kind(),
+                    fact.span(),
+                    fact.depth(),
+                    fact.syntax_kind().clone(),
+                )
+            } else {
+                fact.clone()
+            }
+        })
+        .collect();
+    deny(facts);
+    let module_scope = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.syntax_kind().as_str() == "chapel.module.scope")
+        .unwrap();
+    let mut facts = parsed.facts().to_vec();
+    let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+    facts.push(SyntaxFact::new(
+        next,
+        module_scope.parent(),
+        SyntaxFactKind::Scope,
+        module_scope.span(),
+        module_scope.depth(),
+        SyntaxKindLabel::new("rust.module.scope").unwrap(),
+    ));
+    deny(facts);
+    let mut changed = ORIGINAL.to_vec();
+    let at = std::str::from_utf8(ORIGINAL)
+        .unwrap()
+        .find("h: uint(32)")
+        .unwrap()
+        + 8;
+    assert_eq!(&changed[at..at + 2], b"32");
+    changed[at..at + 2].copy_from_slice(b"16");
+    let changed = fixture.rewrite(&changed);
+    let result = replay(&changed, parsed.facts().to_vec());
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls)
+    );
+}
+
+#[test]
+fn first_formal_callee_shadow_cannot_adopt_a_replayed_native_call_certificate() {
+    use rootlight_adapter_sdk::{execute_parse, testkit::MockParseProvider};
+    let good=b"module W { proc route(arg: uint(32)) {} proc run(other: uint(32)) { var value: uint(32) = 1; return route(value); } }";
+    let bad=b"module W { proc route(arg: uint(32)) {} proc run(route: uint(32)) { var value: uint(32) = 1; return route(value); } }";
+    assert_eq!(good.len(), bad.len());
+    let native = provider();
+    let fixture = Fixture::new(CHAPEL, good);
+    let changed = fixture.rewrite(bad);
+    let budget = limits();
+    let input = request(&fixture.snapshot, &fixture.source, CHAPEL, &budget);
+    let parsed = execute_parse(
+        &native,
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let bad_input = request(&changed.snapshot, &changed.source, CHAPEL, &budget);
+    let declined = execute_parse(
+        &native,
+        &bad_input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(
+        parsed
+            .facts()
+            .iter()
+            .any(|fact| fact.syntax_kind().as_str() == "chapel.typed_local_call.reference")
+    );
+    assert!(
+        !declined
+            .facts()
+            .iter()
+            .any(|fact| fact.syntax_kind().as_str() == "chapel.typed_local_call.reference")
+    );
+    let replay = |fixture: &Fixture| {
+        let parser = MockParseProvider::new(
+            native.capabilities().clone(),
+            parsed.facts().to_vec(),
+            parsed.diagnostics().to_vec(),
+            parsed.report().coverage().clone(),
+        );
+        let frontend = TreeSitterAnalyzer::new(
+            Arc::new(parser),
+            producer_identity(),
+            language(CHAPEL),
+            CHAPEL.frontend,
+            content_hash(BINARY_SEED),
+        )
+        .unwrap();
+        execute_analysis(
+            &frontend,
+            &request(&fixture.snapshot, &fixture.source, CHAPEL, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap()
+    };
+    let baseline = replay(&fixture);
+    assert_eq!(
+        baseline
+            .document()
+            .relations
+            .iter()
+            .filter(|edge| edge.predicate == RelationPredicate::Calls)
+            .count(),
+        1
+    );
+    // All retained native positions and marker edges still fit the current bytes;
+    // the independent source consumer must notice the changed first formal.
+    let refused = replay(&changed);
+    assert!(
+        !refused
+            .document()
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls)
+    );
+    let sites: Vec<_> = refused
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "chapel.typed_local_call.reference")
+        .collect();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].role, OccurrenceRole::CallSite);
+    assert!(matches!(
+        sites[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert_eq!(sites[0].source.content_hash(), content_hash(bad));
+    assert!(
+        refused
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.source == sites[0].source
+                && gap.detail == "chapel-typed-local-overload-current-source-proof-unavailable")
+    );
 }

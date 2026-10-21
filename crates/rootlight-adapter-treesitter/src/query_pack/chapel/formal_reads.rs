@@ -10,7 +10,7 @@ pub(super) struct Proof {
 }
 
 impl<'s> CaptureCache<'s> {
-    fn word(
+    pub(super) fn word(
         &mut self,
         node: Node<'_>,
         cancel: &Cancellation,
@@ -24,7 +24,7 @@ impl<'s> CaptureCache<'s> {
             .and_then(|bytes| std::str::from_utf8(bytes).ok()))
     }
 
-    fn same_word(
+    pub(super) fn same_word(
         &mut self,
         left: &str,
         right: &str,
@@ -55,7 +55,7 @@ impl<'s> CaptureCache<'s> {
         Ok(false)
     }
 
-    fn children<'t>(
+    pub(super) fn children<'t>(
         &mut self,
         node: Node<'t>,
         cancel: &Cancellation,
@@ -77,7 +77,7 @@ impl<'s> CaptureCache<'s> {
         Ok(children)
     }
 
-    fn direct_identifier<'t>(
+    pub(super) fn direct_identifier<'t>(
         &mut self,
         node: Node<'t>,
         cancel: &Cancellation,
@@ -89,7 +89,7 @@ impl<'s> CaptureCache<'s> {
         })
     }
 
-    fn local_name<'t>(
+    pub(super) fn local_name<'t>(
         &mut self,
         declaration: Node<'t>,
         cancel: &Cancellation,

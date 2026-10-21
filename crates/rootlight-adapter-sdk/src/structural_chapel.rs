@@ -149,6 +149,7 @@ pub(super) fn captured_name_for_fact<'a>(
             "chapel.name.definition"
                 | "chapel.unresolved_name.reference"
                 | "chapel.formal_initializer.reference"
+                | "chapel.typed_local_call.reference"
         )
     {
         return None;
@@ -261,6 +262,59 @@ mod initializer_read_tests {
             (SyntaxFactKind::Occurrence, "rust.identifier.reference"),
         ] {
             assert_eq!(captured_name_for_fact(&fact(kind, label), "value", 5), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod typed_call_tests {
+    use super::*;
+
+    #[test]
+    fn typed_call_name_requires_the_exact_occurrence_label_and_byte_limit() {
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                rootlight_ir::SourceSpan::new(rootlight_ids::FileId::from_bytes([7; 20]), 0, 5)
+                    .unwrap(),
+                0,
+                crate::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let site = fact(
+            SyntaxFactKind::Occurrence,
+            "chapel.typed_local_call.reference",
+        );
+        assert_eq!(captured_name_for_fact(&site, "route", 5), Some("route"));
+        assert_eq!(captured_name_for_fact(&site, "route", 4), None);
+        for value in ["proc", "_", "obj.route", "route()", "λ"] {
+            assert_eq!(captured_name_for_fact(&site, value, 128), None);
+        }
+        for (kind, label) in [
+            (
+                SyntaxFactKind::Declaration,
+                "chapel.typed_local_call.reference",
+            ),
+            (
+                SyntaxFactKind::Signature,
+                "chapel.typed_local_call.reference",
+            ),
+            (
+                SyntaxFactKind::Occurrence,
+                "chapel.typed_local_call.reference.extra",
+            ),
+            (
+                SyntaxFactKind::Occurrence,
+                "chapel.typed_local_call_context.signature",
+            ),
+            (
+                SyntaxFactKind::Occurrence,
+                "rust.typed_local_call.reference",
+            ),
+        ] {
+            assert_eq!(captured_name_for_fact(&fact(kind, label), "route", 5), None);
         }
     }
 }

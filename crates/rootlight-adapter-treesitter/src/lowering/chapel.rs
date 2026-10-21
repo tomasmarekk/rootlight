@@ -28,11 +28,19 @@ pub(super) fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         {
             Some(OccurrenceRole::Read)
         }
+        SyntaxFactKind::Occurrence
+            if fact.syntax_kind().as_str() == "chapel.typed_local_call.reference" =>
+        {
+            Some(OccurrenceRole::CallSite)
+        }
         _ => None,
     }
 }
 pub(super) fn source_gap(fact: &SyntaxFact) -> Option<&'static str> {
     match (fact.kind(), fact.syntax_kind().as_str()) {
+        (SyntaxFactKind::Occurrence, "chapel.typed_local_call.reference") => {
+            Some("chapel-typed-local-overload-current-source-proof-unavailable")
+        }
         (SyntaxFactKind::Occurrence, "chapel.formal_initializer.reference") => {
             Some("chapel-native-own-formal-initializer-binding-unavailable")
         }
