@@ -6055,24 +6055,68 @@ fn named_signature_argument_contracts_have_leaf_parameter_gaps() {
 #[test]
 fn cancellation_and_node_limits_keep_the_existing_runtime_contract() {
     let fixture = Fixture::new("fsharp", include_str!("fixtures/fsharp/structural.fs"));
+    let parser = provider();
+    let parse = |max_nodes, cancellation: &Cancellation| {
+        let limits = limits(max_nodes);
+        let request = ParseRequest::new(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            fixture.language.clone(),
+            EncodingId::utf8(),
+            Vec::new(),
+            &limits,
+        )
+        .unwrap();
+        execute_parse(
+            parser.as_ref(),
+            &request,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            cancellation,
+        )
+    };
     let cancellation = deadline();
-    cancellation.cancel(CancellationReason::ClientRequest);
+    assert!(cancellation.cancel(CancellationReason::ClientRequest));
     assert!(matches!(
-        fixture.parse(4096, &cancellation),
-        Err(rootlight_adapter_sdk::AdapterError::Cancelled { .. })
+        parse(4096, &cancellation),
+        Err(rootlight_adapter_sdk::AdapterError::Cancelled {
+            reason: CancellationReason::ClientRequest
+        })
     ));
-    let limited = fixture.parse(8, &deadline()).unwrap();
-    assert_eq!(
-        limited.report().coverage().status(),
-        CoverageStatus::Bounded
-    );
+    assert_eq!(parser.stats().checked_out_parsers, 0);
+    // Native input/progress work can refuse before bounded extraction has a tree.
+    match parse(8, &deadline()) {
+        Ok(limited) => {
+            assert_eq!(
+                limited.report().coverage().status(),
+                CoverageStatus::Bounded
+            );
+            assert!(limited.report().resources().syntax_nodes() <= 8);
+            assert!(
+                limited
+                    .facts()
+                    .iter()
+                    .all(|fact| fact.kind() != SyntaxFactKind::Declaration)
+            );
+            assert!(!limited.diagnostics().is_empty());
+        }
+        Err(rootlight_adapter_sdk::AdapterError::ProviderFailed { code }) => {
+            assert_eq!(code.as_str(), "syntax-node-parse-work-limit");
+        }
+        other => panic!("unexpected node-limited F# outcome: {other:?}"),
+    }
+    assert_eq!(parser.stats().checked_out_parsers, 0);
+    let recovered =
+        parse(4096, &deadline()).expect("same parser recovers after cancellation and bounded work");
     assert!(
-        limited
+        recovered
             .facts()
             .iter()
-            .all(|fact| fact.kind() != SyntaxFactKind::Declaration)
+            .any(|fact| fact.kind() == SyntaxFactKind::Declaration)
     );
-    assert!(!limited.diagnostics().is_empty());
+    assert!(recovered.facts().iter().all(|fact| {
+        fact.span().file() == fixture.source.span().file()
+            && fact.span().end_byte() <= fixture.source.span().end_byte()
+    }));
+    assert_eq!(parser.stats().checked_out_parsers, 0);
 }
 
 #[test]

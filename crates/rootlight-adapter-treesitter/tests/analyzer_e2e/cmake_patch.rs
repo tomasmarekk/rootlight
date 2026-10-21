@@ -39,12 +39,15 @@ fn selected<'a>(source: &'a str, reference: &SourceRef) -> &'a str {
 }
 
 fn output(source: &str) -> AnalysisOutput {
+    output_with_limits(source, &limits())
+}
+
+fn output_with_limits(source: &str, budget: &AnalysisLimits) -> AnalysisOutput {
     let provider = Arc::new(provider());
     let fixture = Fixture::new(PATCH, source.as_bytes());
-    let budget = limits();
     let result = analyze(
         &analyzer(&provider, PATCH),
-        &request(&fixture.snapshot, &fixture.source, PATCH, &budget),
+        &request(&fixture.snapshot, &fixture.source, PATCH, budget),
         &ExtensionSupport::default(),
     );
     validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
@@ -427,10 +430,24 @@ fn cmake_patch_utf16_and_utf8_boms_keep_headings_and_rows_on_original_bytes() {
 
 #[test]
 fn cmake_patch_oversize_hunk_heading_keeps_exact_rows_and_a_resource_gap() {
-    let maximum = limits().ir().max_string_bytes;
+    let defaults = limits();
+    let mut ir = defaults.ir().clone();
+    ir.max_string_bytes = 128;
+    let budget = AnalysisLimits::new(
+        defaults.max_source_bytes(),
+        defaults.max_syntax_nodes(),
+        defaults.max_syntax_depth(),
+        defaults.max_embedded_ranges(),
+        defaults.max_reported_memory_bytes(),
+        defaults.syntax_stream().clone(),
+        defaults.ir_stream().clone(),
+        ir,
+    )
+    .unwrap();
+    let maximum = budget.ir().max_string_bytes;
     let heading = format!("@@ -1 +1 @@ {}", "h".repeat(maximum + 1));
     let source = format!("--- a\n+++ b\n{heading}\n-set(old yes)\n+set(new yes)\n");
-    let result = output(&source);
+    let result = output_with_limits(&source, &budget);
     let document = result.document();
     assert_eq!(
         document

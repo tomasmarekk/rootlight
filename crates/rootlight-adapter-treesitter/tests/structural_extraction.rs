@@ -976,24 +976,32 @@ fn deep_and_wide_inputs_stop_at_bounds_and_leave_the_provider_reusable() {
         "rust",
         Vec::new(),
     );
-    let wide_output = execute_parse(
+    match execute_parse(
         &provider,
         &wide_request,
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
-    )
-    .expect("wide node-limited input commits");
-    assert_eq!(
-        wide_output.report().coverage().status(),
-        CoverageStatus::Bounded
-    );
-    assert!(wide_output.facts().is_empty());
-    assert!(
-        wide_output
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code().as_str() == "syntax-node-limit")
-    );
+    ) {
+        Ok(wide_output) => {
+            assert_eq!(
+                wide_output.report().coverage().status(),
+                CoverageStatus::Bounded
+            );
+            assert!(wide_output.facts().is_empty());
+            assert!(
+                wide_output
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code().as_str() == "syntax-node-limit")
+            );
+            assert!(wide_output.report().resources().syntax_nodes() <= 256);
+        }
+        Err(AdapterError::ProviderFailed { code }) => {
+            assert_eq!(code.as_str(), "syntax-node-parse-work-limit");
+        }
+        other => panic!("unexpected wide bounded-work outcome: {other:?}"),
+    }
+    assert_eq!(provider.stats().checked_out_parsers, 0);
 
     let mut deep = "fn deep() {".to_owned();
     deep.push_str(&"(".repeat(2000));
@@ -1009,24 +1017,32 @@ fn deep_and_wide_inputs_stop_at_bounds_and_leave_the_provider_reusable() {
         "rust",
         Vec::new(),
     );
-    let deep_output = execute_parse(
+    match execute_parse(
         &provider,
         &deep_request,
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
-    )
-    .expect("deep depth-limited input commits");
-    assert_eq!(
-        deep_output.report().coverage().status(),
-        CoverageStatus::Bounded
-    );
-    assert!(deep_output.facts().is_empty());
-    assert!(
-        deep_output
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code().as_str() == "syntax-depth-limit")
-    );
+    ) {
+        Ok(deep_output) => {
+            assert_eq!(
+                deep_output.report().coverage().status(),
+                CoverageStatus::Bounded
+            );
+            assert!(deep_output.facts().is_empty());
+            assert!(
+                deep_output
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code().as_str() == "syntax-depth-limit")
+            );
+            assert!(deep_output.report().resources().max_syntax_depth() <= 16);
+        }
+        Err(AdapterError::ProviderFailed { code }) => {
+            assert_eq!(code.as_str(), "syntax-depth-parse-work-limit");
+        }
+        other => panic!("unexpected deep bounded-work outcome: {other:?}"),
+    }
+    assert_eq!(provider.stats().checked_out_parsers, 0);
 
     let cleanup = Fixture::new("cleanup.rs", b"fn cleanup() {}\n");
     let cleanup_limits = limits(4096, 128);
@@ -1037,13 +1053,23 @@ fn deep_and_wide_inputs_stop_at_bounds_and_leave_the_provider_reusable() {
         "rust",
         Vec::new(),
     );
-    execute_parse(
+    let output = execute_parse(
         &provider,
         &cleanup_request,
         MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
         &deadline(),
     )
     .expect("provider remains reusable after bounded stress");
+    assert!(
+        output
+            .facts()
+            .iter()
+            .any(|fact| fact.kind() == SyntaxFactKind::Declaration)
+    );
+    assert!(output.facts().iter().all(|fact| {
+        fact.span().file() == cleanup.source.span().file()
+            && fact.span().end_byte() <= cleanup.source.span().end_byte()
+    }));
     assert_eq!(provider.stats().checked_out_parsers, 0);
 }
 
@@ -1072,16 +1098,20 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("rust.value.reference", 3),
         ],
         "python" => &[
+            ("python.assignment_binding_unavailable.signature", 1),
             ("python.block.scope", 2),
             ("python.call.call", 1),
             ("python.class.declaration", 1),
             ("python.file.module", 1),
             ("python.function.declaration", 1),
             ("python.identifier.definition", 4),
-            ("python.identifier.reference", 5),
+            ("python.identifier.reference", 4),
             ("python.import.import", 1),
             ("python.module.root", 1),
+            ("python.module_binding_context.signature", 1),
             ("python.parameter.declaration", 2),
+            ("python.parameter_binding_context.signature", 1),
+            ("python.parameter_body.reference", 1),
             ("python.parameters.signature", 1),
             ("python.string.documentation", 3),
             ("python.string.string", 5),
@@ -1124,6 +1154,7 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("java.parameter.declaration", 1),
             ("java.parameters.signature", 2),
             ("java.program.root", 1),
+            ("java.setter_binding_context.signature", 1),
             ("java.string.string", 1),
         ],
         "go" => &[
@@ -1132,22 +1163,25 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("go.call_name.call_name", 1),
             ("go.comment.comment", 1),
             ("go.comment.documentation", 2),
+            ("go.composite_formal_context.signature", 1),
             ("go.constant.declaration", 1),
             ("go.field_identifier.definition", 1),
             ("go.field_identifier.reference", 3),
             ("go.file.root", 1),
-            ("go.identifier.definition", 2),
-            ("go.identifier.reference", 7),
+            ("go.identifier.definition", 3),
+            ("go.identifier.reference", 5),
             ("go.import.import", 1),
             ("go.method.declaration", 1),
             ("go.package.module", 1),
             ("go.package_identifier.definition", 1),
+            ("go.parameter.declaration", 1),
             ("go.parameters.signature", 1),
             ("go.raw_string.string", 1),
             ("go.string.string", 2),
             ("go.type.declaration", 1),
             ("go.type_identifier.definition", 1),
             ("go.type_identifier.reference", 4),
+            ("go.unproven_call_formal.reference", 1),
             ("go.variable.declaration", 1),
         ],
         "typescript" => &[
@@ -1186,17 +1220,18 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("c.call.call", 1),
             ("c.call_name.call_name", 1),
             ("c.comment.documentation", 1),
-            ("c.field_identifier.reference", 1),
             ("c.file.root", 1),
+            ("c.formal_binding_context.signature", 1),
             ("c.function.declaration", 1),
-            ("c.identifier.definition", 1),
-            ("c.identifier.reference", 3),
+            ("c.identifier.definition", 2),
             ("c.include.import", 1),
             ("c.include.module", 1),
+            ("c.parameter.declaration", 1),
             ("c.parameters.signature", 1),
             ("c.string.string", 1),
             ("c.struct.declaration", 1),
             ("c.type_identifier.definition", 1),
+            ("c.unproven_variable.reference", 3),
         ],
         "cpp" => &[
             ("cpp.block.scope", 1),
@@ -1226,11 +1261,13 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("csharp.comment.documentation", 1),
             ("csharp.file.root", 1),
             ("csharp.file_namespace.module", 1),
-            ("csharp.identifier.definition", 2),
-            ("csharp.identifier.reference", 5),
+            ("csharp.identifier.definition", 3),
+            ("csharp.identifier.reference", 3),
             ("csharp.method.declaration", 1),
+            ("csharp.parameter.declaration", 1),
             ("csharp.parameters.signature", 1),
             ("csharp.string.string", 1),
+            ("csharp.unproven_formal.reference", 1),
             ("csharp.using.import", 1),
         ],
         "kotlin" => &[
@@ -1443,6 +1480,24 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
                 }
                 continue;
             }
+            if fact.syntax_kind().as_str() == "python.module_binding_context.signature" {
+                assert_eq!(parent.kind(), SyntaxFactKind::Module);
+                assert_eq!(parent.syntax_kind().as_str(), "python.file.module");
+                assert_eq!(parent.span(), fact.span());
+                assert_eq!(fact.span().start_byte(), 0);
+                continue;
+            }
+            if fact.syntax_kind().as_str() == "python.parameter_binding_context.signature" {
+                assert_eq!(parent.kind(), SyntaxFactKind::Declaration);
+                assert_eq!(parent.syntax_kind().as_str(), "python.function.declaration");
+                assert_eq!(parent.span(), fact.span());
+                continue;
+            }
+            if fact.syntax_kind().as_str() == "python.assignment_binding_unavailable.signature" {
+                assert_eq!(parent.kind(), SyntaxFactKind::Scope);
+                assert_eq!(parent.syntax_kind().as_str(), "python.block.scope");
+                continue;
+            }
             if matches!(
                 fact.syntax_kind().as_str(),
                 "groovy.value_read.expression" | "groovy.value_write.expression"
@@ -1582,8 +1637,10 @@ fn assert_python_parameter_bindings(output: &ParseOutput, source: &[u8]) {
             (121, 125, "name"),
         ]
     );
-    let references = spans("python.identifier.reference");
-    assert!(references.contains(&(211, 215, "name")));
+    let body_references = spans("python.parameter_body.reference");
+    assert_eq!(body_references, [(211, 215, "name")]);
+    let mut references = spans("python.identifier.reference");
+    references.extend(body_references);
     let mut written = references
         .iter()
         .map(|reference| reference.2)

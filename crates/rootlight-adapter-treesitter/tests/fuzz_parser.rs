@@ -296,13 +296,27 @@ fn cleanup_fixtures_fit_the_bounded_parser_budget() {
     for (name, language) in FUZZ_ROUTES {
         let fixture = Fixture::new(name, cleanup_source(name, language));
         let request = request(&fixture, &limits, language);
+        let required = provider
+            .required_syntax_fact_count(&request, &deadline())
+            .unwrap();
+        assert!(
+            required <= 8,
+            "{name}: cleanup needs {required} required facts"
+        );
         let result = execute_parse(
             &provider,
             &request,
             MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
             &deadline(),
         );
-        assert!(result.is_ok(), "{name}: {result:?}");
+        let output = result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert!(output.report().resources().syntax_nodes() <= 256);
+        assert!(output.report().resources().max_syntax_depth() <= 32);
+        assert!(output.facts().len() <= 8);
+        assert!(output.facts().iter().all(|fact| {
+            fact.span().file() == fixture.source.span().file()
+                && fact.span().end_byte() <= fixture.source.span().end_byte()
+        }));
         assert_eq!(provider.stats().checked_out_parsers, 0);
     }
 }
@@ -463,9 +477,14 @@ proptest! {
                         prop_assert!(diagnostic.code().as_str().len() <= 64);
                     }
                 }
-                Err(AdapterError::ProviderFailed { code }) => {
-                    prop_assert_eq!(code.as_str(), "invalid-utf8");
+                Err(AdapterError::ProviderFailed { code }) if code.as_str() == "invalid-utf8" => {
                     prop_assert!(std::str::from_utf8(&input).is_err());
+                }
+                Err(AdapterError::ProviderFailed { code }) => {
+                    prop_assert!(std::str::from_utf8(&input).is_ok());
+                    prop_assert!(matches!(code.as_str(),
+                        "syntax-node-parse-work-limit" | "syntax-depth-parse-work-limit"),
+                        "{name}: unexpected bounded parse error: {code:?}");
                 }
                 Err(AdapterError::Cancelled {
                     reason: CancellationReason::DeadlineExceeded,
@@ -490,6 +509,7 @@ proptest! {
                 }
             }
 
+            prop_assert_eq!(provider.stats().checked_out_parsers, 0);
             let cancelled = deadline();
             prop_assert!(cancelled.cancel(CancellationReason::ClientRequest));
             let cancellation_observed = matches!(
@@ -504,6 +524,7 @@ proptest! {
                 })
             );
             prop_assert!(cancellation_observed);
+            prop_assert_eq!(provider.stats().checked_out_parsers, 0);
 
             let cleanup_bytes = cleanup_source(name, language);
             let cleanup = Fixture::new(name, cleanup_bytes);
@@ -614,7 +635,8 @@ fn deadline() -> Cancellation {
 // otherwise shrinking the unrelated adversarial input cannot explain failure.
 fn cleanup_source(name: &str, language: &str) -> &'static [u8] {
     if name.ends_with(".tsx") {
-        return b"function Cleanup() { return <span />; }\n";
+        // Keep a real TSX element without the function's additional required proof facts.
+        return b"<span />;\n";
     }
     match language {
         "dart" => b"void cleanup() {}\n",
@@ -632,7 +654,7 @@ fn cleanup_source(name: &str, language: &str) -> &'static [u8] {
         "lua" => b"local function cleanup() return 1 end\n",
         "ruby" => b"def cleanup()\nend\n",
         "swift" => b"func cleanup() {}\n",
-        "css" => b".cleanup { color: red; }\n",
+        "css" => b".cleanup {}\n",
         "bash" => b"cleanup() { :; }\n",
         "perl" => b"sub cleanup {}\n",
         "groovy" => b"def cleanup() {}\n",
