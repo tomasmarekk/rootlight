@@ -120,3 +120,47 @@ test("plain and null-prototype records preserve minification without inherited c
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout.trim()).transform_calls, 2);
 });
+
+test("disabled own data placeholders preserve the native minification interface", () => {
+  const result = run(`
+    const native=Object.values(require.cache).find((entry) => /lightningcss\\..*\\.node$/.test(entry.filename)).exports;
+    for (const prototype of [Object.prototype,null]) {
+      const options=Object.assign(Object.create(prototype),{code:Buffer.from('a{color:red}'),
+        filename:'fixture.css',minify:true,targets:{},visitor:undefined,customAtRules:undefined});
+      const result=css.transform(options);
+      if (!Buffer.isBuffer(result.code) || !Object.hasOwn(options,'visitor') ||
+          !Object.hasOwn(options,'customAtRules')) throw new Error('invalid result or mutated caller options');
+    }
+    native.transform({code:Buffer.from('a{}'),filename:'fixture.css',minify:true,
+      visitor:undefined,customAtRules:undefined});`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout.trim()).transform_calls, 3);
+});
+
+test("nonundefined visitor and custom rule values cannot reach native code", () => {
+  const base = "const options={code:Buffer.from('a{}'),filename:'fixture.css',minify:true,targets:{}};";
+  for (const name of ["visitor", "customAtRules"]) {
+    for (const value of ["null", "false", "{}", "()=>{sideEffects++;}",
+      "new Proxy({},{get(){sideEffects++;return undefined;},ownKeys(){sideEffects++;return [];}})"]) {
+      assertRejectedWithoutSideEffects(base + `options.${name}=${value};`);
+    }
+  }
+});
+
+test("disabled placeholders still reject accessors hidden properties proxies and symbols", () => {
+  const base = "const options={code:Buffer.from('a{}'),filename:'fixture.css',minify:true,targets:{}};";
+  for (const name of ["visitor", "customAtRules"]) {
+    assertRejectedWithoutSideEffects(base +
+      `Object.defineProperty(options,'${name}',{enumerable:true,get(){sideEffects++;return undefined;}});`);
+    assertRejectedWithoutSideEffects(base + `Object.defineProperty(options,'${name}',{value:undefined});`);
+    assertRejectedWithoutSideEffects(base + `options[Symbol('${name}')]=undefined;`);
+    assertRejectedWithoutSideEffects(base +
+      `const native=Object.values(require.cache).find((entry) => /lightningcss\\..*\\.node$/.test(entry.filename)).exports;
+       Object.defineProperty(options,'${name}',{enumerable:true,get(){sideEffects++;return undefined;}});`,
+      "native.transform(options)");
+  }
+  assertRejectedWithoutSideEffects(`const options=new Proxy(
+    {code:Buffer.from('a{}'),filename:'fixture.css',minify:true,visitor:undefined,customAtRules:undefined},
+    {getPrototypeOf(target){sideEffects++;return Reflect.getPrototypeOf(target);},
+     ownKeys(target){sideEffects++;return Reflect.ownKeys(target);}});`);
+});

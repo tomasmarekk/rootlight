@@ -27,7 +27,7 @@ for (const distribution of closure.packages.filter((entry) => entry.name === "li
 const observations = [];
 const selectedArchiveInputs = new Map();
 let calls = 0;
-const optionNames = new Set(["code", "cssModules", "filename", "minify", "targets"]);
+const optionNames = new Set(["code", "cssModules", "customAtRules", "filename", "minify", "targets", "visitor"]);
 const browserNames = new Set(["android", "chrome", "edge", "firefox", "ie", "ios_saf", "opera", "safari", "samsung"]);
 
 function filenameKey(filename) {
@@ -144,9 +144,14 @@ function copyDataRecord(value, allowedNames) {
 
 function reviewedOptions(value) {
   const options = copyDataRecord(value, optionNames);
-  if (options.cssModules !== undefined || options.minify !== true ||
+  if (options.cssModules !== undefined || options.visitor !== undefined ||
+      options.customAtRules !== undefined || options.minify !== true ||
       typeof options.filename !== "string" || types.isProxy(options.code) ||
       !Buffer.isBuffer(options.code)) rejectInvocation();
+  // Vite supplies disabled own data placeholders. Remove them from the fresh
+  // record so neither the upstream wrapper nor native code receives those APIs.
+  delete options.visitor;
+  delete options.customAtRules;
   if (options.targets !== undefined) {
     options.targets = copyDataRecord(options.targets, browserNames);
     for (const version of Object.values(options.targets)) {
