@@ -1014,6 +1014,22 @@ fn storage_failures(
                 "recovered predecessor scan did not complete",
             ));
         }
+        let status = wait_until_storage_predecessor(
+            state,
+            &mut process,
+            &catalog,
+            transcript,
+            &index,
+            &base,
+        )?;
+        record_storage_trace(
+            storage_trace,
+            state,
+            "after_verified_predecessor_status",
+            &index,
+            &manifest,
+            Some(&status.structured),
+        )?;
         if status.structured["data"]["publication_state"] != "published"
             || status.structured["data"]["repository_state"] != "ready"
             || status.structured["data"]["resolved_generation"] != base.generation
@@ -1310,6 +1326,80 @@ fn head_activation<'a>(
         ));
     }
     Ok(record)
+}
+
+fn wait_until_storage_predecessor(
+    state: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    index: &IndexReceipt,
+    base: &IndexReceipt,
+) -> Result<ToolOutcome, VerticalError> {
+    let deadline = Instant::now()
+        .checked_add(REQUEST_TIMEOUT)
+        .ok_or(VerticalError::Clock)?;
+    let mut attempt = 1_u64;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(VerticalError::RequestTimedOut);
+        }
+        let status = call_tool(
+            &format!("literal.{state}.predecessor-status-{attempt}"),
+            process,
+            catalog,
+            transcript,
+            "repo.status",
+            json!({"repository":{"repository_id":index.repository},"response_profile":"compact"}),
+        )?;
+        require_tool_success(&status, "repo.status")?;
+        if Instant::now() >= deadline {
+            return Err(VerticalError::RequestTimedOut);
+        }
+        if storage_predecessor_is_active(
+            &status.structured,
+            &index.repository,
+            &index.generation,
+            &base.generation,
+        )? {
+            return Ok(status);
+        }
+        attempt = attempt.saturating_add(1);
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn storage_predecessor_is_active(
+    status: &Value,
+    repository: &str,
+    head: &str,
+    predecessor: &str,
+) -> Result<bool, VerticalError> {
+    let data = &status["data"];
+    if status["repository"]["repository_id"] != repository
+        || data["publication_state"] != "published"
+        || data["repository_state"] != "ready"
+    {
+        return Err(VerticalError::Invariant(
+            "storage recovery status did not retain its repository and publication",
+        ));
+    }
+    let active = &data["active_generation"];
+    if data["resolved_generation"] == predecessor && active["generation_id"] == predecessor {
+        return Ok(true);
+    }
+    // Source-only reads can precede semantic recovery's atomic pointer update.
+    // Only the known stale head may remain visible until that update completes.
+    if data["resolved_generation"] == head
+        && active["generation_id"] == head
+        && active["parent_generation"] == predecessor
+        && active["semantic_freshness"] == "stale"
+    {
+        return Ok(false);
+    }
+    Err(VerticalError::Invariant(
+        "storage recovery status did not select its verified predecessor",
+    ))
 }
 
 fn verify_storage_republication_receipt(
@@ -1702,6 +1792,66 @@ mod tests {
             .collect();
         foreign.validate().unwrap();
         assert!(verify(&foreign).is_err());
+    }
+
+    #[test]
+    fn storage_predecessor_status_requires_a_fresh_exact_fallback() {
+        use serde_json::{Value, json};
+
+        let classify = |status: &Value| {
+            super::storage_predecessor_is_active(status, "repository", "head", "predecessor")
+        };
+        let captured = json!({
+            "repository": {"repository_id": "repository"},
+            "data": {
+                "publication_state": "published",
+                "repository_state": "ready",
+                "resolved_generation": "head",
+                "active_generation": {
+                    "generation_id": "head",
+                    "parent_generation": "predecessor",
+                    "semantic_freshness": "stale"
+                }
+            }
+        });
+        assert!(!classify(&captured).unwrap());
+        let source_only_page = json!({
+            "repository": {"repository_id": "repository"},
+            "generation": "predecessor",
+            "data": {"stop": "end_of_source", "matches": []}
+        });
+        assert!(classify(&source_only_page).is_err());
+        assert!(
+            !classify(&captured).unwrap(),
+            "a source-only predecessor read cannot update a captured status"
+        );
+        let mut fresh = captured.clone();
+        fresh["data"]["resolved_generation"] = json!("predecessor");
+        fresh["data"]["active_generation"]["generation_id"] = json!("predecessor");
+        fresh["data"]["active_generation"]["parent_generation"] = Value::Null;
+        fresh["data"]["active_generation"]["semantic_freshness"] = json!("current");
+        assert!(classify(&fresh).unwrap());
+        for mutation in 0..9 {
+            let mut candidate = captured.clone();
+            match mutation {
+                0 => candidate["repository"]["repository_id"] = json!("foreign"),
+                1 => candidate["data"]["publication_state"] = json!("retained"),
+                2 => candidate["data"]["repository_state"] = json!("indexing"),
+                3 => candidate["data"]["resolved_generation"] = json!("predecessor"),
+                4 => candidate["data"]["active_generation"]["generation_id"] = json!("foreign"),
+                5 => candidate["data"]["active_generation"]["parent_generation"] = json!("foreign"),
+                6 => {
+                    candidate["data"]["active_generation"]["semantic_freshness"] = json!("current")
+                }
+                7 => candidate["data"]["active_generation"] = Value::Null,
+                8 => candidate["data"]["resolved_generation"] = Value::Null,
+                _ => unreachable!(),
+            }
+            assert!(classify(&candidate).is_err(), "mutation {mutation}");
+        }
+        let mut foreign = fresh;
+        foreign["repository"]["repository_id"] = json!("foreign");
+        assert!(classify(&foreign).is_err());
     }
 
     #[test]
