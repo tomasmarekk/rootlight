@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export versioned Rust, npm and producer inputs without acquisition or caches.
 
-The tracked registry sources and original archives cover workspace, native-test,
+The authenticated registry inventories and versioned archives cover workspace, native-test,
 and fuzz locks, plus the reviewed producer lock when its complete tree is present.
 Local npm distributions retain declared fixture provenance;
 Optional producer trees retain authored source and publisher association evidence;
@@ -10,6 +10,7 @@ Export proves neither transitive preferred closure nor third-party authorship.
 """
 
 import argparse
+from contextlib import nullcontext
 import gzip
 import hashlib
 import json
@@ -19,6 +20,7 @@ import re
 import stat
 import subprocess
 import tarfile
+import tempfile
 import tomllib
 
 from verify_cargo_source_bundle import verify_bundle
@@ -217,13 +219,99 @@ def _versioned_closure(root: Path, *, lock_paths: tuple[str, ...] = LOCK_PATHS) 
     locks = [regular_source(root, name) for name in lock_paths]
     closure = verify_bundle(root / VENDOR_PATH, locks, archives=root / ARCHIVES_PATH)
     modes = _cargo_file_modes(closure)
+    _check_cargo_report(root, closure, modes)
+    return closure, modes
+
+
+def _check_cargo_report(root: Path, closure: dict, modes: dict[str, int]) -> None:
     report = {**closure, "file_modes": modes,
               "frontend_external_source_closure_verified": False,
               "build_and_packaging_acceptance_verified": False}
     expected = (json.dumps(report, sort_keys=True, indent=2) + "\n").encode("utf-8")
     if regular_source(root, CLOSURE_PATH).read_bytes() != expected:
         raise ValueError("versioned Cargo dependency report differs from verified source inputs")
-    return closure, modes
+
+
+def _cargo_member_provenance(closure: dict) -> dict[str, dict]:
+    records = {}
+    for package in closure["packages"]:
+        archive = f"{ARCHIVES_PATH}/{package['name']}-{package['version']}.crate"
+        executable = set(package["archive_executable_files"])
+        for member in package["files"]:
+            name = f"{VENDOR_PATH}/{package['vendor_path']}/{member['path']}"
+            records[name] = {"path": name, "sha256": member["sha256"],
+                             "archive": archive, "archive_sha256": package["package_checksum"],
+                             "member": member["path"],
+                             "mode": 0o755 if member["path"] in executable else 0o644}
+    return records
+
+
+def _check_cargo_checkout(root: Path, staged_vendor: Path,
+                          modes: dict[str, int], tracked: set[str]) -> dict[str, str]:
+    vendor = root / VENDOR_PATH
+    if not vendor.is_dir() or any(linked_path(path) for path in (vendor, *vendor.parents)):
+        raise ValueError("Cargo checkout requires an unlinked vendor directory")
+    expected = {name for name in modes if name.startswith(VENDOR_PATH + "/")}
+    packages = {path.name for path in staged_vendor.iterdir()}
+    observed = {}
+    def walk_error(error):
+        raise error
+
+    for directory, directories, files in os.walk(vendor, followlinks=False, onerror=walk_error):
+        for leaf in directories + files:
+            path = Path(directory) / leaf
+            if linked_path(path):
+                raise ValueError(f"linked Cargo checkout member: {path.relative_to(root).as_posix()}")
+            if Path(directory) == vendor and leaf not in packages:
+                raise ValueError(f"extra Cargo checkout package: {leaf}")
+        for leaf in files:
+            path = Path(directory) / leaf
+            name = path.relative_to(root).as_posix()
+            if name not in expected:
+                raise ValueError(f"extra Cargo checkout member: {name}")
+            actual = digest(regular_source(root, name))
+            staged = staged_vendor / path.relative_to(vendor)
+            if actual != digest(staged):
+                raise ValueError(f"changed Cargo checkout member: {name}")
+            observed[name] = actual
+    missing_tracked = sorted((expected & tracked) - observed.keys())
+    if missing_tracked:
+        raise ValueError(f"missing tracked Cargo checkout members: {missing_tracked}")
+    return observed
+
+
+def _archive_cargo_inputs(root: Path, stage: Path, tracked: set[str],
+                           lock_paths: tuple[str, ...]) -> tuple[dict, dict[str, int], dict[str, Path], list[dict]]:
+    # Upstream ignore rules cannot authorize checkout repair. Only the fresh export
+    # may gain published members absent from the project's tracked inventory.
+    for name in (*lock_paths, CLOSURE_PATH):
+        if name not in tracked:
+            raise ValueError(f"untracked required Cargo input: {name}")
+    packages = registry_inputs(root, lock_paths=lock_paths)
+    staged_vendor = stage / VENDOR_PATH
+    staged_vendor.mkdir(parents=True)
+    for (name, version), checksum in packages.items():
+        archive = f"{ARCHIVES_PATH}/{name}-{version}.crate"
+        if archive not in tracked:
+            raise ValueError(f"untracked required Cargo archive: {archive}")
+        metadata = f"{VENDOR_PATH}/{name}-{version}/.cargo-checksum.json"
+        if metadata not in tracked:
+            raise ValueError(f"untracked required Cargo checksum metadata: {metadata}")
+        checksum_source = regular_source(root, metadata)
+        materialize_archive(regular_source(root, archive), staged_vendor, name, version, checksum)
+        # The report binds checksum-file bytes, including historical formatting.
+        # Strict verification below authenticates the copied metadata and members.
+        (stage / relative_path(metadata)).write_bytes(checksum_source.read_bytes())
+    closure = verify_bundle(staged_vendor, [regular_source(root, name) for name in lock_paths],
+                            archives=root / ARCHIVES_PATH)
+    modes = _cargo_file_modes(closure)
+    _check_cargo_report(root, closure, modes)
+    provenance = _cargo_member_provenance(closure)
+    derived = sorted(set(modes) - tracked)
+    if not set(derived).issubset(provenance):
+        raise ValueError("only published Cargo archive members may be derived for export")
+    return (closure, modes, {name: stage / relative_path(name) for name in derived},
+            [provenance[name] for name in derived])
 
 
 def _npm_distribution_inputs(root: Path) -> tuple[dict, dict[str, int], dict[str, str]]:
@@ -414,7 +502,8 @@ def regular_source(root: Path, name: str) -> Path:
     return path
 
 
-def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict:
+def create_bundle(root: Path, destination: Path, *, allow_network: bool,
+                  derive_cargo_members: bool = False) -> dict:
     """Copy tracked project and verified dependency sources into a fresh export.
 
     Args:
@@ -423,6 +512,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
             canonical frontend files and offline mapping.
         destination: New directory with no linked ancestors.
         allow_network: Retained CLI/API compatibility flag; true is rejected.
+        derive_cargo_members: Explicitly derive untracked published Cargo members
+            from versioned archives in a temporary tree, never in the checkout.
 
     Returns:
         Whole-project manifest after exact allowlist and archive verification.
@@ -435,6 +526,15 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
 
     No dependency home is consulted and no Cargo, npm or network command runs.
     """
+    staging = (tempfile.TemporaryDirectory(prefix="rootlight-cargo-export-")
+               if derive_cargo_members else nullcontext(None))
+    with staging as directory:
+        return _create_bundle(root, destination, allow_network=allow_network,
+                              cargo_stage=Path(directory) if directory is not None else None)
+
+
+def _create_bundle(root: Path, destination: Path, *, allow_network: bool,
+                   cargo_stage: Path | None) -> dict:
     if allow_network:
         raise ValueError("--allow-network is inappropriate for export; prepare versioned sources separately")
     root, destination = root.absolute(), destination.absolute()
@@ -464,10 +564,17 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     lock_paths = (*LOCK_PATHS, LIGHTNING_LOCK_PATH) if producer_inputs is not None else LOCK_PATHS
     if native_inputs is not None:
         lock_paths = (*lock_paths, LIGHTNING_NATIVE_LOCK_PATH)
-    closure, cargo_modes = _versioned_closure(root, lock_paths=lock_paths)
-    missing = sorted(set(cargo_modes) - names)
-    if missing:
-        raise ValueError(f"untracked Cargo source inputs: {missing}")
+    derived_sources, derived_records = {}, []
+    if cargo_stage is None:
+        closure, cargo_modes = _versioned_closure(root, lock_paths=lock_paths)
+        missing = sorted(set(cargo_modes) - names)
+        if missing:
+            raise ValueError(f"untracked Cargo source inputs: {missing}")
+    else:
+        closure, cargo_modes, derived_sources, derived_records = _archive_cargo_inputs(
+            root, cargo_stage, names, lock_paths)
+    cargo_checkout = (_check_cargo_checkout(root, cargo_stage / VENDOR_PATH, cargo_modes, names)
+                      if cargo_stage is not None else None)
     npm_inputs, npm_modes, npm_hashes = _npm_distribution_inputs(root)
     if not set(npm_hashes).issubset(names):
         raise ValueError("untracked npm distribution or frontend inputs")
@@ -480,6 +587,7 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     source_directories = producer_directories | yarn_directories | native_directories
     empty_directories = _source_input_empty_directories(root, source_directories)
     source_hashes = {name: digest(regular_source(root, name)) for name, _executable in inventory}
+    source_hashes.update({name: digest(path) for name, path in derived_sources.items()})
     if any(source_hashes[name] != checksum for name, checksum in npm_hashes.items()):
         raise ValueError("npm distribution inputs changed before export")
     if any(source_hashes[name] != checksum for name, checksum in producer_hashes.items()):
@@ -500,8 +608,8 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         (destination / relative_path(name)).mkdir(parents=True, exist_ok=True)
     source_files = []
     file_modes = {}
-    for name, executable in inventory:
-        source = regular_source(root, name)
+    for name, executable in sorted(inventory + [(name, False) for name in derived_sources]):
+        source = derived_sources[name] if name in derived_sources else regular_source(root, name)
         target = destination / relative_path(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         with source.open("rb") as input_stream, target.open("xb") as output_stream:
@@ -522,6 +630,10 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
     exported_closure, _exported_modes = _versioned_closure(destination, lock_paths=lock_paths)
     if exported_closure != closure:
         raise ValueError("exported Cargo source closure differs from versioned inputs")
+    if cargo_stage is not None and _check_cargo_checkout(
+        root, cargo_stage / VENDOR_PATH, cargo_modes, names
+    ) != cargo_checkout:
+        raise ValueError("Cargo checkout changed during archive-derived export")
     for check_root in (root, destination):
         checked_report, checked_modes, checked_hashes = _npm_distribution_inputs(check_root)
         if checked_report != npm_inputs or checked_modes != npm_modes or checked_hashes != npm_hashes:
@@ -545,6 +657,7 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool) -> dict
         "file_modes": file_modes,
         "cargo_config_sha256": digest(destination / ".cargo/config.toml"),
         "cargo_source_closure": closure,
+        "archive_derived_cargo_members": derived_records,
         "npm_distribution_inputs": npm_inputs,
         "npm_distribution_inputs_verified": True,
         "lightning_producer_inputs": producer_inputs,
@@ -609,6 +722,13 @@ def verify_project_bundle(root: Path) -> dict:
     closure, cargo_modes = _versioned_closure(root, lock_paths=lock_paths)
     if closure != manifest["cargo_source_closure"]:
         raise ValueError("Cargo source closure differs from bundle manifest")
+    derived = manifest.get("archive_derived_cargo_members", [])
+    provenance = _cargo_member_provenance(closure)
+    if (not isinstance(derived, list)
+        or any(not isinstance(row, dict) or not isinstance(row.get("path"), str)
+               or row != provenance.get(row["path"]) for row in derived)
+        or [row["path"] for row in derived] != sorted({row["path"] for row in derived})):
+        raise ValueError("invalid archive-derived Cargo member provenance")
     npm_inputs, npm_modes, npm_hashes = _npm_distribution_inputs(root)
     if not set(npm_hashes).issubset(expected):
         raise ValueError("bundle manifest omits required npm input sources")
@@ -694,6 +814,8 @@ def main() -> None:
     parser.add_argument("--allow-network", action="store_true",
                         help="unsupported for export; acquire reviewed versioned sources separately")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--derive-cargo-members-from-archives", action="store_true",
+                        help="derive only untracked published Cargo members in a fresh export")
     arguments = parser.parse_args()
     try:
         if arguments.allow_network:
@@ -701,7 +823,8 @@ def main() -> None:
         destination = arguments.destination.absolute()
         manifest = (verify_project_bundle(destination) if arguments.verify_only else
                     create_bundle(arguments.root.absolute(), destination,
-                                  allow_network=arguments.allow_network))
+                                  allow_network=arguments.allow_network,
+                                  derive_cargo_members=arguments.derive_cargo_members_from_archives))
         if arguments.archive:
             archive_bundle(destination, arguments.archive.absolute())
         print(json.dumps({"schema": manifest["schema"],

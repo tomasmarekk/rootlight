@@ -374,7 +374,8 @@ class RustSourceBundleTests(unittest.TestCase):
         (source / bundle.NPM_REPORT_PATH).write_bytes(encode(npm.verify_local_bundle(source)))
 
     def export_project(self, source: Path, inventory: list[tuple[str, bool]],
-                       destination: Path | None = None) -> tuple[Path, dict]:
+                       destination: Path | None = None, *,
+                       derive_cargo_members: bool = False) -> tuple[Path, dict]:
         destination = destination or self.root / "portable-project"
         empty_home = self.root / "empty-cargo-home"
         empty_home.mkdir(exist_ok=True)
@@ -389,8 +390,10 @@ class RustSourceBundleTests(unittest.TestCase):
             patch.object(bundle.subprocess, "check_output", return_value="a" * 40 + "\n"), \
             patch.object(bundle.subprocess, "run", side_effect=provenance_only) as run, \
             patch.dict(os.environ, {"CARGO_HOME": str(empty_home)}), \
-            patch.object(bundle, "materialize_archive", side_effect=AssertionError("export must not unpack")):
-            manifest = bundle.create_bundle(source, destination, allow_network=False)
+            (contextlib.nullcontext() if derive_cargo_members else
+             patch.object(bundle, "materialize_archive", side_effect=AssertionError("export must not unpack"))):
+            manifest = bundle.create_bundle(source, destination, allow_network=False,
+                                            derive_cargo_members=derive_cargo_members)
             self.assertEqual(run.call_count, 1)
             self.assertEqual(run.call_args.args[0], ["git", "diff", "--quiet", "HEAD", "--"])
         self.assertEqual(list(empty_home.iterdir()), [])
@@ -398,6 +401,162 @@ class RustSourceBundleTests(unittest.TestCase):
 
     def create_project(self) -> tuple[Path, dict]:
         return self.export_project(*self.create_checkout())
+
+    def _ignored_cargo_checkout(self):
+        self.members["Cargo.lock"] = (b"version = 4\n# published dependency lock\n", 0o644)
+        self.members[".gitignore"] = (b"/Cargo.lock\n", 0o644)
+        source, inventory = self.create_checkout()
+        name = f"{bundle.VENDOR_PATH}/sample-1.0.0/Cargo.lock"
+        return source, [row for row in inventory if row[0] != name], name
+
+    def test_explicit_archive_export_restores_ignored_published_members_only_in_export(self) -> None:
+        source, inventory, name = self._ignored_cargo_checkout()
+        original_report = (source / bundle.CLOSURE_PATH).read_bytes()
+        (source / name).unlink()
+        project, manifest = self.export_project(source, inventory, derive_cargo_members=True)
+        self.assertFalse((source / name).exists())
+        self.assertEqual((source / bundle.CLOSURE_PATH).read_bytes(), original_report)
+        self.assertEqual((project / name).read_bytes(), self.members["Cargo.lock"][0])
+        self.assertEqual((project / bundle.VENDOR_PATH / "sample-1.0.0/.gitignore").read_bytes(),
+                         self.members[".gitignore"][0])
+        self.assertEqual(manifest["archive_derived_cargo_members"], [{
+            "path": name, "sha256": hashlib.sha256(self.members["Cargo.lock"][0]).hexdigest(),
+            "archive": f"{bundle.ARCHIVES_PATH}/sample-1.0.0.crate",
+            "archive_sha256": bundle.digest(self.archive), "member": "Cargo.lock", "mode": 0o644,
+        }])
+        self.assertEqual(bundle.verify_project_bundle(project), manifest)
+        self.assertFalse(manifest["frontend_external_source_closure_verified"])
+        _verify_with_exported_scripts(self, project)
+
+    def test_explicit_archive_export_checks_existing_ignored_member_and_preserves_mode(self) -> None:
+        source, inventory, name = self._ignored_cargo_checkout()
+        tool = f"{bundle.VENDOR_PATH}/sample-1.0.0/bin/tool"
+        inventory = [row for row in inventory if row[0] != tool]
+        project, manifest = self.export_project(source, inventory, derive_cargo_members=True)
+        self.assertEqual((project / name).read_bytes(), (source / name).read_bytes())
+        self.assertEqual(manifest["file_modes"][tool], 0o755)
+        self.assertEqual([row["path"] for row in manifest["archive_derived_cargo_members"]],
+                         sorted([name, tool]))
+
+    def test_default_export_still_rejects_untracked_published_member(self) -> None:
+        source, inventory, _name = self._ignored_cargo_checkout()
+        with self.assertRaisesRegex(ValueError, "untracked Cargo source inputs"):
+            self.export_project(source, inventory)
+
+    def test_archive_export_does_not_repair_missing_tracked_file_or_checksum(self) -> None:
+        source, inventory, _name = self._ignored_cargo_checkout()
+        for index, member in enumerate(("src/lib.rs", ".cargo-checksum.json")):
+            path = source / bundle.VENDOR_PATH / "sample-1.0.0" / member
+            original = path.read_bytes()
+            path.unlink()
+            diagnostic = ("missing regular source input" if member == ".cargo-checksum.json"
+                          else "missing tracked Cargo")
+            with self.subTest(member=member), self.assertRaisesRegex(ValueError, diagnostic):
+                self.export_project(source, inventory, self.root / f"missing-{index}",
+                                    derive_cargo_members=True)
+            self.assertFalse(path.exists())
+            path.write_bytes(original)
+
+    def test_archive_export_rejects_changed_ignored_member_and_extra_file(self) -> None:
+        source, inventory, name = self._ignored_cargo_checkout()
+        (source / name).write_bytes(b"changed published lock\n")
+        with self.assertRaisesRegex(ValueError, "changed Cargo checkout member"):
+            self.export_project(source, inventory, derive_cargo_members=True)
+        (source / name).write_bytes(self.members["Cargo.lock"][0])
+        extra = source / bundle.VENDOR_PATH / "sample-1.0.0/foreign.txt"
+        extra.write_bytes(b"not published\n")
+        with self.assertRaisesRegex(ValueError, "extra Cargo checkout member"):
+            self.export_project(source, inventory, derive_cargo_members=True)
+        self.assertTrue(extra.is_file())
+
+    def test_archive_export_requires_versioned_archives_report_locks_and_checksum(self) -> None:
+        source, inventory, _name = self._ignored_cargo_checkout()
+        for index, name in enumerate((f"{bundle.ARCHIVES_PATH}/sample-1.0.0.crate",
+                                      bundle.CLOSURE_PATH, bundle.LOCK_PATHS[0],
+                                      f"{bundle.VENDOR_PATH}/sample-1.0.0/.cargo-checksum.json")):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "untracked|only published"):
+                self.export_project(source, [row for row in inventory if row[0] != name],
+                                    self.root / f"untracked-{index}", derive_cargo_members=True)
+
+    def test_archive_derived_provenance_is_reauthenticated_after_restore(self) -> None:
+        source, inventory, _name = self._ignored_cargo_checkout()
+        project, manifest = self.export_project(source, inventory, derive_cargo_members=True)
+        for field, value in (("archive_sha256", "0" * 64), ("member", "src/lib.rs"),
+                             ("mode", 0o755)):
+            changed = copy.deepcopy(manifest)
+            changed["archive_derived_cargo_members"][0][field] = value
+            (project / bundle.MANIFEST_PATH).write_text(json.dumps(changed), encoding="utf-8")
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "member provenance"):
+                bundle.verify_project_bundle(project)
+
+    def test_archive_export_preserves_authenticated_compact_checksum_bytes(self) -> None:
+        source, inventory, name = self._ignored_cargo_checkout()
+        metadata = source / bundle.VENDOR_PATH / "sample-1.0.0/.cargo-checksum.json"
+        compact = json.dumps(json.loads(metadata.read_bytes()), separators=(",", ":")).encode()
+        metadata.write_bytes(compact)
+        closure = bundle.verify_bundle(source / bundle.VENDOR_PATH,
+                                        [source / lock for lock in bundle.LOCK_PATHS],
+                                        archives=source / bundle.ARCHIVES_PATH)
+        report = {**closure, "file_modes": bundle._cargo_file_modes(closure),
+                  "frontend_external_source_closure_verified": False,
+                  "build_and_packaging_acceptance_verified": False}
+        (source / bundle.CLOSURE_PATH).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n",
+                                                 encoding="utf-8", newline="\n")
+        (source / name).unlink()
+        project, manifest = self.export_project(source, inventory, derive_cargo_members=True)
+        self.assertEqual((project / metadata.relative_to(source)).read_bytes(), compact)
+        self.assertEqual(metadata.read_bytes(), compact)
+        self.assertFalse((source / name).exists())
+        self.assertEqual(bundle.verify_project_bundle(project), manifest)
+
+    def test_archive_export_rejects_checksum_byte_change_without_rebinding_report(self) -> None:
+        source, inventory, _name = self._ignored_cargo_checkout()
+        metadata = source / bundle.VENDOR_PATH / "sample-1.0.0/.cargo-checksum.json"
+        metadata.write_bytes(json.dumps(json.loads(metadata.read_bytes()), separators=(",", ":")).encode())
+        with self.assertRaisesRegex(ValueError, "dependency report differs"):
+            self.export_project(source, inventory, derive_cargo_members=True)
+
+    def test_archive_export_rejects_linked_checkout_members_and_ancestors(self) -> None:
+        source, inventory, name = self._ignored_cargo_checkout()
+        original_linked_path = bundle.linked_path
+        for index, linked in enumerate((source / name, source / bundle.VENDOR_PATH / "sample-1.0.0")):
+            # A reparse attribute is host metadata, independent of file bytes.
+            diagnostic = "linked source input" if index == 1 else "linked Cargo checkout member"
+            with self.subTest(linked=linked), patch.object(
+                bundle, "linked_path", side_effect=lambda path: path == linked or original_linked_path(path)
+            ), self.assertRaisesRegex(ValueError, diagnostic):
+                self.export_project(source, inventory, self.root / f"linked-{index}",
+                                    derive_cargo_members=True)
+
+    def test_archive_export_rejects_extra_empty_package_and_changed_archive_or_report(self) -> None:
+        source, inventory, _name = self._ignored_cargo_checkout()
+        extra = source / bundle.VENDOR_PATH / "unpublished-1.0.0"
+        extra.mkdir()
+        with self.assertRaisesRegex(ValueError, "extra Cargo checkout package"):
+            self.export_project(source, inventory, derive_cargo_members=True)
+        extra.rmdir()
+        for name in (f"{bundle.ARCHIVES_PATH}/sample-1.0.0.crate", bundle.CLOSURE_PATH):
+            path = source / name
+            original = path.read_bytes()
+            path.write_bytes(original + b"changed")
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "archive checksum|dependency report"):
+                self.export_project(source, inventory, derive_cargo_members=True)
+            path.write_bytes(original)
+
+    def test_archive_export_rechecks_present_and_absent_checkout_members_before_publication(self) -> None:
+        source, inventory, name = self._ignored_cargo_checkout()
+        (source / name).unlink()
+        check = bundle._check_cargo_checkout
+
+        def introduce_member(*args):
+            observed = check(*args)
+            (source / name).write_bytes(self.members["Cargo.lock"][0])
+            return observed
+
+        with patch.object(bundle, "_check_cargo_checkout", side_effect=introduce_member), \
+            self.assertRaisesRegex(ValueError, "Cargo checkout changed during"):
+            self.export_project(source, inventory, derive_cargo_members=True)
+        self.assertFalse((self.root / "portable-project" / bundle.MANIFEST_PATH).exists())
 
     def test_complete_project_bundle_keeps_original_locks_and_archive_provenance(self) -> None:
         project, manifest = self.create_project()

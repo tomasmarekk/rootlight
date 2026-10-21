@@ -23,6 +23,15 @@ import vendor_rust_sources as vendor
 
 class VendorRustSourcesTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Initial-import fixtures have no producer tree; additional-lock cases
+        # explicitly select a fresh Cargo-only destination instead.
+        locks = ("Cargo.lock", "tests/native-grammars/Cargo.lock", "fuzz/Cargo.lock")
+        catalogue = patch.object(vendor, "LOCK_PATHS", locks)
+        catalogue.start()
+        self.addCleanup(catalogue.stop)
+        defaults = patch.dict(vendor.vendor_sources.__kwdefaults__, {"lock_paths": locks})
+        defaults.start()
+        self.addCleanup(defaults.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name)

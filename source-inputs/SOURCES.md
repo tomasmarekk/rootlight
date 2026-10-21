@@ -40,6 +40,21 @@ Cargo inputs without replacing existing Rust, npm, or producer sources.
 `scripts/prepare_rust_source_bundle.py` exports already versioned inputs without
 consulting a dependency cache or fetching, resolving, or compiling code.
 
+The explicit `--derive-cargo-members-from-archives` export option reconstructs
+the complete Cargo directory inventory in a fresh temporary tree from versioned,
+lock-authenticated `.crate` archives. It requires the versioned closure report to
+match the unchanged strict verifier's result. This permits published members
+omitted by upstream ignore rules to enter the fresh export without force-adding
+them or changing upstream bytes. Locks, archives, the report, generated checksum
+manifests, and every tracked source remain required versioned inputs. Missing
+tracked files, changed present files, extra files, and linked checkout members
+reject; the option never repairs the checkout. The export manifest records each
+derived member's archive, checksum, physical member path, bytes hash, and mode;
+restored verification authenticates that provenance again. The ordinary export
+default still requires every expanded member to be tracked. `prepare-offline.sh`
+selects the explicit archive-derived option before the strict restored-source
+gate; no acquisition, dependency resolution, or build occurs during preparation.
+
 ## Advisory data
 
 `advisory-databases/` retains a reviewed crates.io OSV data snapshot and its
@@ -179,7 +194,7 @@ On POSIX, explicitly permit authenticated file-mode normalization before export:
 ```sh
 python3 -B scripts/restore_lightning_source_inputs.py --project . --restore-file-modes
 python3 -B scripts/verify_lightning_yarn_sources.py --project .
-python3 -B scripts/prepare_rust_source_bundle.py --destination <fresh-export-directory>
+python3 -B scripts/prepare_rust_source_bundle.py --derive-cargo-members-from-archives --destination <fresh-export-directory>
 ```
 
 On Windows, `python -B scripts/restore_lightning_source_inputs.py --project .`
@@ -204,7 +219,7 @@ failure may leave only already authenticated directory or mode changes, and a sa
 rerun reauthenticates them. No acquisition, dependency cache, installer, package
 execution or Git-index operation occurs in the utility.
 
-Exporters and verifiers never invoke restoration implicitly and remain strict
+Exporters and verifiers never invoke Lightning metadata restoration implicitly and remain strict
 about missing directories and POSIX file modes. The CI checkout/export callers
 invoke this preparation explicitly; restored tar exports already retain their
 verified empty-directory inventory and archive-derived file intent. Restoration
@@ -284,7 +299,7 @@ this invocation's authenticated local Cargo inputs. Local absolute paths occur
 only in generated work-tree data. Export and restored-bundle verification bind
 both original and effective Cargo locks, every derivative file and every archive.
 
-`scripts/audit_npm_dependencies.py --project .` audits all 331 distinct pinned
+`scripts/audit_npm_dependencies.py --project .` audits all distinct pinned
 frontend/native npm versions, including development and optional dependencies,
 using npm's documented bulk advisory endpoint. It submits only registry package
 names and exact versions; any advisory, malformed response or network error
