@@ -34,8 +34,19 @@ class AdvisoryTests(unittest.TestCase):
             self.assertEqual(audit.main([]), 1)
             self.assertEqual(json.loads(output.getvalue())["advisories"], finding)
 
+    def test_response_key_binds_records_without_redundant_package_names(self):
+        finding = {"sample": [{"id": 42, "vulnerable_versions": "<2.0.0",
+                               "severity": "high", "title": "Source audit regression"}]}
+        with patch.object(audit, "package_inventory", return_value={"sample": ["1.0.0"]}), \
+             patch.object(audit, "urlopen", return_value=self.response(finding)), \
+             patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(audit.main([]), 1)
+            self.assertEqual(json.loads(output.getvalue())["advisories"], finding)
+
     def test_malformed_foreign_and_redirected_responses_reject(self):
-        for payload in ([], {"foreign": []}, {"sample": []}, {"sample": [{"id": 1}]}):
+        for payload in ([], {"foreign": []}, {"sample": []}, {"sample": [{"id": 1}]},
+                        *({"sample": [{"id": 1, "vulnerable_versions": "<2.0.0", "name": name}]}
+                          for name in ("foreign", None, 17))):
             with self.subTest(payload=payload), patch.object(audit, "urlopen", return_value=self.response(payload)):
                 with self.assertRaises(ValueError):
                     audit.query_advisories({"sample": ["1.0.0"]})

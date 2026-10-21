@@ -47,8 +47,8 @@ def package_inventory(project: Path) -> dict[str, list[str]]:
 def query_advisories(inventory: dict[str, list[str]]) -> dict:
     """Query only known registry package names and exact locked versions over TLS.
 
-    npm documents this endpoint under its audit command. Returned advisories
-    match submitted versions; every severity fails, with no suppression list.
+    The response map supplies each package identity; an optional record name
+    must agree with it. Every severity fails, with no suppression list.
     HTTP failures and bounded JSON validation failures propagate to the caller.
     """
     payload = json.dumps(inventory, sort_keys=True).encode()
@@ -66,7 +66,7 @@ def query_advisories(inventory: dict[str, list[str]]) -> dict:
         if name not in inventory or not isinstance(advisories, list) or not advisories:
             raise ValueError("invalid npm advisory package")
         for row in advisories:
-            if (not isinstance(row, dict) or row.get("name") != name
+            if (not isinstance(row, dict) or ("name" in row and row["name"] != name)
                 or not isinstance(row.get("id"), int)
                 or not isinstance(row.get("vulnerable_versions"), str)):
                 raise ValueError("invalid npm advisory record")
