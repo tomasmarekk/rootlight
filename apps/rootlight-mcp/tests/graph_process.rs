@@ -61,7 +61,13 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
 
     assert_deterministic_graph_outputs(&mut mcp, &index, &symbol_id, &outputs);
     assert_standalone_batch_parity(&mut mcp, &index, &symbol_id, &outputs);
-    assert_context_provider_parity(&mut mcp, &index, &symbol_id);
+    // Positive caller parity needs project analysis of an authored crate root.
+    // Keep the transport matrix on its independent structural generation.
+    let context_root = fixture.path().join("context-repository");
+    write_context_repository_fixture(&context_root);
+    let context_index = index_repository_with_mode(&mut mcp, &context_root, "deep");
+    let caller_seed = locate_symbol(&mut mcp, &context_index, "context_leaf");
+    assert_context_provider_parity(&mut mcp, &context_index, &caller_seed);
     assert_relationship_pagination(&mut mcp, &index, &symbol_id);
     assert_relationship_contract_versions(&mut mcp, &index, &symbol_id, &outputs);
     assert_five_tool_capability_matrix(&outputs);
@@ -118,13 +124,24 @@ fn graph_tools_preserve_bounded_truthful_contracts_across_processes() {
         .expect("architecture.cycles returns cycles")
         .is_empty()
     {
-        assert!(
-            descriptions["architecture.cycles"]
-                .as_str()
-                .expect("architecture.cycles has a description")
-                .contains("static"),
-            "an empty cycle result must remain scoped to static evidence"
-        );
+        // Catalog prose summarizes supported selectors; negative claims must
+        // remain qualified by the evidence actually returned for this request.
+        assert_eq!(cycles["data"]["projection"]["relations"], json!(["calls"]));
+        assert_eq!(cycles["data"]["projection"]["level"], "symbol");
+        let warnings = cycles["warnings"]
+            .as_array()
+            .expect("an empty cycle result retains its evidence qualifications");
+        for code in ["static_projection_only", "dynamic_edges_unobserved"] {
+            assert!(
+                warnings.iter().any(|warning| {
+                    warning["code"] == code
+                        && warning["message"]
+                            .as_str()
+                            .is_some_and(|message| !message.trim().is_empty())
+                }),
+                "an empty cycle result must retain {code}: {cycles:#}"
+            );
+        }
     }
 
     let dead = &outputs["code.dead"];
@@ -284,6 +301,7 @@ fn assert_context_provider_parity(mcp: &mut McpProcess, index: &IndexReceipt, sy
             "generation": index.generation_id,
             "symbol_ids": [symbol_id],
             "relations": ["calls", "references"],
+            "direction": "both",
             "max_results": 8,
             "min_confidence": 0
         }),
@@ -351,7 +369,9 @@ fn assert_context_provider_parity(mcp: &mut McpProcess, index: &IndexReceipt, sy
     );
     assert!(
         observed_callers.is_subset(&expected_callers),
-        "the relationships context provider invented caller evidence"
+        "the relationships context provider invented caller evidence; \
+         observed={observed_callers:#?}, expected={expected_callers:#?}, \
+         standalone={relationships:#}, context={context:#}"
     );
 
     let architecture_scores = context["data"]["items"]
@@ -1076,6 +1096,23 @@ fn write_repository_fixture(root: &Path) {
     .expect("partial-language fixture source is written");
 }
 
+fn write_context_repository_fixture(root: &Path) {
+    fs::create_dir_all(root.join("src")).expect("context fixture source directory is created");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"graph_context_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("context fixture manifest is written");
+    fs::write(
+        root.join("src/lib.rs"),
+        concat!(
+            "fn context_leaf() -> usize { 4 }\n",
+            "pub fn context_caller() -> usize { context_leaf() }\n",
+        ),
+    )
+    .expect("context fixture source is written");
+}
+
 fn write_negative_repository_fixture(root: &Path) {
     fs::create_dir_all(root.join("src")).expect("negative fixture source directory is created");
     fs::write(
@@ -1098,7 +1135,11 @@ fn index_repository(mcp: &mut McpProcess, root: &Path) -> IndexReceipt {
     // Graph-tool transport coverage is independent of project-adapter
     // selection; structural mode keeps this process test bounded while the
     // dedicated adapter-isolation suites exercise deep mode.
-    let arguments = json!({"root": root, "mode": "structural", "detached": false});
+    index_repository_with_mode(mcp, root, "structural")
+}
+
+fn index_repository_with_mode(mcp: &mut McpProcess, root: &Path, mode: &str) -> IndexReceipt {
+    let arguments = json!({"root": root, "mode": mode, "detached": false});
     let response = process_support::retry_transient_busy("index", |attempt_id| {
         mcp.call(attempt_id, "repo.index", arguments.clone())
     });
