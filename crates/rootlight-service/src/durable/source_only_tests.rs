@@ -217,6 +217,36 @@ fn legacy_v4_keeps_full_restore_and_source_bytes_remain_hash_verified() {
 }
 
 #[test]
+fn source_context_distinguishes_absent_repositories_from_missing_generations() {
+    let (_storage, _fixture, paths, receipt, _, _) = source_only_reopen_fixture();
+    let cancellation = Cancellation::new();
+    let memory = FirstSliceService::new(2).unwrap();
+    let (cold, _restore) = FirstSliceService::open_durable_deferred(2, paths.state_dir()).unwrap();
+    let absent = rootlight_ids::RepositoryId::from_bytes([238; 16]);
+    assert_ne!(absent, receipt.repository);
+    for service in [&memory, &cold] {
+        for selected in [None, Some(receipt.generation)] {
+            assert!(matches!(
+                service.resolve_source_context(absent, selected, &cancellation),
+                Err(crate::FirstSliceError::RepositoryNotFound)
+            ));
+        }
+    }
+    assert_eq!(
+        cold.resolve_source_context(receipt.repository, None, &cancellation)
+            .unwrap()
+            .generation,
+        receipt.generation
+    );
+    let missing = GenerationId::from_bytes([239; 20]);
+    assert_ne!(missing, receipt.generation);
+    assert!(matches!(
+        cold.resolve_source_context(receipt.repository, Some(missing), &cancellation),
+        Err(crate::FirstSliceError::GenerationNotFound)
+    ));
+}
+
+#[test]
 fn source_publication_context_retains_superseded_parent_and_exact_language() {
     let (_storage, fixture, paths, first, reference, _) = source_only_reopen_fixture();
     let cancellation = Cancellation::new();

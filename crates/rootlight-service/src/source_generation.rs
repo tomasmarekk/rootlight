@@ -174,7 +174,8 @@ impl FirstSliceService {
     /// Resolves publication metadata without claiming that semantic recovery is ready.
     ///
     /// # Errors
-    /// Rejects absent, foreign, corrupt or inadmissible v5 source authority.
+    /// Preserves missing-repository and missing-generation errors, and rejects
+    /// foreign, corrupt or inadmissible v5 source authority.
     pub fn resolve_source_context(
         &self,
         repository: RepositoryId,
@@ -182,19 +183,19 @@ impl FirstSliceService {
         cancellation: &Cancellation,
     ) -> Result<FirstSliceGenerationContext, FirstSliceError> {
         check_cancellation(cancellation)?;
-        if let Ok(context) = self.resolve_generation(repository, selected) {
-            return Ok(context);
-        }
-        let durable = self
-            .durable
-            .as_ref()
-            .ok_or(FirstSliceError::GenerationNotFound)?;
+        let selection_error = match self.resolve_generation(repository, selected) {
+            Ok(context) => return Ok(context),
+            Err(error) => error,
+        };
+        let Some(durable) = self.durable.as_ref() else {
+            return Err(selection_error);
+        };
         let active = durable
             .active_restore_targets()?
             .into_iter()
             .find(|target| target.repository() == repository)
             .map(|target| target.generation())
-            .ok_or(FirstSliceError::GenerationNotFound)?;
+            .ok_or(selection_error)?;
         let generation = selected.unwrap_or(active);
         let lease = self
             .source_only_lease(generation, cancellation)?
