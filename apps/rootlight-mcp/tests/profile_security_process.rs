@@ -25,6 +25,7 @@ const SCOUT_TOOLS: &[&str] = &[
     "context.pack",
     "source.read",
     "query.batch",
+    "source.find",
 ];
 
 const ANALYSIS_TOOLS: &[&str] = &[
@@ -41,6 +42,7 @@ const ANALYSIS_TOOLS: &[&str] = &[
     "context.pack",
     "source.read",
     "query.batch",
+    "source.find",
 ];
 
 const DEVELOPER_TOOLS: &[&str] = &[
@@ -63,6 +65,7 @@ const DEVELOPER_TOOLS: &[&str] = &[
     "source.read",
     "query.advanced",
     "query.batch",
+    "source.find",
 ];
 
 #[test]

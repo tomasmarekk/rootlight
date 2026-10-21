@@ -256,18 +256,18 @@ fn tools_list_payloads_match_all_profile_goldens_across_the_process_boundary() {
     let expected = [
         (
             ExposureProfile::Scout,
-            249_311,
-            "7acc9f3508e253b474945fa332f065944254b56218fc25f00873dd76ffc46562",
+            277_180,
+            "17ed95b5fa9ac1f10f684dea14bd5b6fcdab1ee2dad019018ab6d9942055947b",
         ),
         (
             ExposureProfile::Analysis,
-            519_070,
-            "cea895cd366ea99ae5d30e73c22d0f6c49fe3d0c9b2ad4c94b89480e1ee1589e",
+            546_939,
+            "18b1695040e3c86e696f82076fb400374106bce4c4c71b6d1db206fa19a4cdce",
         ),
         (
             ExposureProfile::Developer,
-            723_450,
-            "dd9fcf97e06ad0d0fc2291d24ee2b1e2ae7c5786d225325c69e4b602b3eb70f0",
+            751_540,
+            "7e2c873331edcdb536f875255973ccb70aaeeb02b58f9b6583f42983ae8250ad",
         ),
     ];
     for (profile, expected_bytes, expected_hash) in expected {
@@ -396,7 +396,7 @@ fn scout_process_rejects_hidden_tool_invocation_after_profile_clamping() {
         }),
     );
     let listed = read_response(&mut output);
-    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(6));
+    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(7));
 
     write_message(
         &mut input,

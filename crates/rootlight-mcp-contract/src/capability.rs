@@ -2035,6 +2035,7 @@ mod tests {
                             | McpTool::ContextPack
                             | McpTool::CodeLocate
                             | McpTool::SourceRead
+                            | McpTool::SourceFind
                             | McpTool::QueryAdvanced
                     )
                 })

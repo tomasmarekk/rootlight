@@ -461,6 +461,7 @@ mod tests {
                     | McpTool::ContextPack
                     | McpTool::CodeLocate
                     | McpTool::SourceRead
+                    | McpTool::SourceFind
                     | McpTool::QueryAdvanced
             ) {
                 assert_eq!(tool.contract_version(), crate::MCP_SCHEMA_VERSION);
@@ -477,6 +478,10 @@ mod tests {
         assert_eq!(
             McpTool::SourceRead.contract_version(),
             crate::source_recovery::SOURCE_READ_RECOVERY_VERSION
+        );
+        assert_eq!(
+            McpTool::SourceFind.contract_version(),
+            crate::source_find::SOURCE_FIND_VERSION
         );
         assert_eq!(
             McpTool::QueryAdvanced.contract_version(),
