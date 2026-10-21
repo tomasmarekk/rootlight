@@ -2490,6 +2490,339 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
                 body_before: "display 'first'.",
                 body_after: "display 'second'.",
             },
+            LanguageCase {
+                name: "idris",
+                path: "written.idr",
+                frontend: "tree-sitter-idris-0.0.1",
+                source: "-- marker λ😀\r\nglobal : Type\r\nglobal = Type\r\nreader : Type\r\nreader = global\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "lean",
+                path: "written.lean",
+                frontend: "tree-sitter-lean-0.2.0",
+                source: "-- marker λ😀\r\ndef owned (value : Nat) := value\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "sed",
+                path: "written.sed",
+                frontend: "tree-sitter-gsed-0.4.0",
+                source: "# marker λ😀\r\n:entry\r\nb entry\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "wolfram",
+                path: "written.wl",
+                frontend: "tree-sitter-wolfram-0.0.1",
+                source: "(* marker λ😀 *)\r\nowned[value_String] := Module[{}, external[value]];\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "pug",
+                path: "written.pug",
+                frontend: "tree-sitter-pug-0.0.1",
+                source: "// marker λ😀\r\ninput(type='text', disabled)\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "coffeescript",
+                path: "written.coffee",
+                frontend: "tree-sitter-coffeescript-1.0.0",
+                source: "# marker λ😀\r\nclass Written\r\n  measure: ->\r\n    value = 1\r\n    value\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "dockerfile",
+                path: "Dockerfile",
+                frontend: "tree-sitter-dockerfile-0.2.0",
+                source: "# marker λ😀\r\nFROM scratch AS written\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "meson",
+                path: "meson.build",
+                frontend: "tree-sitter-meson-1.0.0",
+                source: "# marker λ😀\r\nitems = [1]\r\nforeach item : items\r\nendforeach\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "gdscript",
+                path: "written.gd",
+                frontend: "tree-sitter-gdscript-6.1.0",
+                source: "# marker λ😀\r\nclass_name Written\r\nfunc measure():\r\n    return 1\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "chapel",
+                path: "written.chpl",
+                frontend: "tree-sitter-chapel-0.0.1",
+                source: "// marker λ😀\r\nmodule Written { proc measure(value: int) { return value; } }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "qsharp",
+                path: "written.qs",
+                frontend: "tree-sitter-qsharp-0.2.0",
+                source: "// marker λ😀\r\nnamespace Written { operation Measure(value : Int) : Unit { External(value); } }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "standard-ml",
+                path: "written.sml",
+                frontend: "tree-sitter-sml-0.25.0",
+                source: "(* marker λ😀 *)\r\nfun measure value = value;\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "webassembly",
+                path: "written.wat",
+                frontend: "tree-sitter-wat-0.1.0",
+                source: "(; marker λ😀 ;)\r\n(module $written (func $measure (param $value i32) local.get $value))\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "mojo",
+                path: "written.mojo",
+                frontend: "tree-sitter-mojo-0.25.0",
+                source: "# marker λ😀\r\nstruct Written:\r\n    var value: Int\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "ring",
+                path: "written.ring",
+                frontend: "tree-sitter-ring-1.1.1",
+                source: "# marker λ😀\r\nclass Written\r\nfunc measure value { consume(value) }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "hare",
+                path: "written.ha",
+                frontend: "tree-sitter-hare-1.0.0",
+                source: "// marker λ😀\r\nfn target() void = {};\r\nfn caller() void = { target(); };\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "haxe",
+                path: "written.hx",
+                frontend: "tree-sitter-haxe-0.13.0",
+                source: "// marker λ😀\r\nclass Written { static function measure() { var value = 1; consume(value); } }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "qml",
+                path: "measurement.qml",
+                frontend: "tree-sitter-qmljs-0.3.1",
+                source: "// marker λ😀\r\nimport QtQuick\r\nItem { id: root; property int value: 1; function measure() { return value; } }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "modelica",
+                path: "measurement.mo",
+                frontend: "tree-sitter-modelica-0.0.1",
+                source: "// marker λ😀\r\nwithin Neutral;\r\nfunction measure\r\n input Real value;\r\n output Real result;\r\nalgorithm\r\n result := value;\r\nend measure;\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "json-schema",
+                path: "measurement.schema.json",
+                frontend: "tree-sitter-json-0.24.8",
+                source: r##"{"$schema":"https://json-schema.org/draft/2020-12/schema","description":"marker λ😀","$defs":{"Measurement":{"type":"object","properties":{"value":{"type":"number"}}}},"properties":{"result":{"$ref":"#/$defs/Measurement"}}}"##,
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "ada",
+                path: "sample.adb",
+                frontend: "tree-sitter-ada-0.9.1",
+                source: "-- marker \u{03bb}\u{1f600}\r\nprocedure Sample is begin null; end Sample;\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "hcl",
+                path: "source.tf",
+                frontend: "tree-sitter-hcl-1.2.0",
+                source: "# marker \u{03bb}\u{1f600}\r\nwritten = { nested = 1 }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "d",
+                path: "source.d",
+                frontend: "tree-sitter-d-0.8.2",
+                source: "// marker \u{03bb}\u{1f600}\r\nmodule sample; void measure(int value) {}\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "zig",
+                path: "source.zig",
+                frontend: "tree-sitter-zig-1.1.2",
+                source: "// marker \u{03bb}\u{1f600}\r\npub fn written() void { var value: u8 = 1; _ = &value; }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "crystal",
+                path: "source.cr",
+                frontend: "tree-sitter-crystal-0.0.1",
+                source: "# marker \u{03bb}\u{1f600}\r\nclass Written\r\n  def value\r\n    1\r\n  end\r\nend\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "cue",
+                path: "source.cue",
+                frontend: "tree-sitter-cue-0.2.0",
+                source: "// marker \u{03bb}\u{1f600}\r\npackage sample\r\nparent: {child: string}\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "pony",
+                path: "source.pony",
+                frontend: "tree-sitter-pony-0.0.3",
+                source: "// marker \u{03bb}\u{1f600}\r\nclass Written\r\n  fun ref value(): U32 => 1\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "fish",
+                path: "source.fish",
+                frontend: "tree-sitter-fish-3.7.0",
+                source: "# marker \u{03bb}\u{1f600}\r\nfunction measure\r\n echo value\r\nend\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "nim",
+                path: "source.nim",
+                frontend: "tree-sitter-nim-0.6.2",
+                source: "# marker \u{03bb}\u{1f600}\r\nproc measure(value: int): int = value\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "clojure",
+                path: "written.clj",
+                frontend: "tree-sitter-clojure-0.0.8",
+                source: "; marker λ😀\r\n(ns written) (defn measure [value] value)\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "racket",
+                path: "written.rkt",
+                frontend: "tree-sitter-racket-0.25.0",
+                source: "#lang racket/base\n; marker λ😀\r\n(define (measure value) value)\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "vhdl",
+                path: "written.vhdl",
+                frontend: "tree-sitter-vhdl-2.0.3",
+                source: "-- marker λ😀\r\nentity Written is port (Clock : in bit); end Written;\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "graphql",
+                path: "schema.graphql",
+                frontend: "tree-sitter-graphql-0.0.1",
+                source: "type Query { value: String }\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "elixir",
+                path: "sample.ex",
+                frontend: "tree-sitter-elixir-0.3.5",
+                source: "defmodule Sample do\n def value, do: 1\nend\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "protobuf",
+                path: "schema.proto",
+                frontend: "tree-sitter-proto-0.0.1",
+                source: "// marker λ🙂\r\nsyntax = \"proto3\"; message Record { string value = 1; }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "thrift",
+                path: "schema.thrift",
+                frontend: "tree-sitter-thrift-0.5.0",
+                source: "// λ🙂\r\nstruct Record { 1: string value; }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
+            LanguageCase {
+                name: "capnp",
+                path: "schema.capnp",
+                frontend: "tree-sitter-capnp-1.5.0",
+                source: "# marker λ😀\r\nstruct Item { value @0 :Text; }\r\n",
+                generated: false,
+                body_before: "",
+                body_after: "",
+            },
         ])
         .collect();
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()
@@ -4633,4 +4966,514 @@ fn markdown_repeated_headings_remain_distinct_and_body_edits_preserve_identity()
     );
     assert_eq!(identities(&before).len(), 6);
     assert_eq!(identities(&before), identities(&after));
+}
+
+#[test]
+fn markdown_native_file_censuses_use_only_their_fence_and_keep_host_identity() {
+    for ending in ["\n", "\r\n"] {
+        let first = format!("owned : Type{ending}owned = Type{ending}");
+        let second = format!(
+            "owned : Type{ending}owned = Type{ending}reader : Type{ending}reader = owned{ending}"
+        );
+        let source = format!(
+            "# Examples λ😀{ending}{ending}~~~idris{ending}{first}~~~{ending}{ending}~~~idris{ending}{second}~~~{ending}"
+        );
+        let starts = [source.find(&first).unwrap(), source.find(&second).unwrap()];
+        let bodies = [
+            starts[0]..starts[0] + first.len(),
+            starts[1]..starts[1] + second.len(),
+        ];
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, MARKDOWN);
+        let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+        let budget = limits();
+        let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, &budget);
+        let demand = provider
+            .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+            .unwrap();
+        let (result, artifact) = analyzer
+            .analyze_and_capture(
+                &initial,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default()).unwrap();
+        assert_eq!(
+            artifact.required_syntax_fact_count(&deadline()).unwrap(),
+            demand
+        );
+        assert_eq!(result.document().files.len(), 1);
+        assert_eq!(result.document().files[0].language, "markdown");
+        let mut symbols = BTreeSet::new();
+        for (index, body) in bodies.iter().enumerate() {
+            let definitions: Vec<_> = result
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    let span = site.source.span();
+                    site.role == OccurrenceRole::Definition
+                        && span.start_byte() >= u64::try_from(body.start).unwrap()
+                        && span.end_byte() <= u64::try_from(body.end).unwrap()
+                })
+                .collect();
+            assert_eq!(definitions.len(), if index == 0 { 1 } else { 2 });
+            for site in definitions {
+                let OccurrenceTarget::Resolved { symbol } = site.target else {
+                    panic!("written function definition is resolved")
+                };
+                assert!(
+                    symbols.insert(symbol),
+                    "separate fences retain distinct owners"
+                );
+                let entity = result
+                    .document()
+                    .entities
+                    .iter()
+                    .find(|entity| entity.id == symbol)
+                    .unwrap();
+                assert_eq!(entity.language, "idris");
+                assert_eq!(entity.kind, EntityKind::Function);
+                let span = site.source.span();
+                assert_eq!(
+                    &source[usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()],
+                    entity.canonical_name
+                );
+                assert_eq!(
+                    site.syntactic_text_hash,
+                    content_hash(entity.canonical_name.as_bytes())
+                );
+                assert_eq!(site.source.content_hash(), fixture.source.content_hash());
+                assert_eq!(site.source.generation(), fixture.source.generation());
+                assert_eq!(site.source.span().file(), fixture.source.span().file());
+            }
+        }
+        assert_eq!(symbols.len(), 3);
+        assert!(
+            result
+                .document()
+                .relations
+                .iter()
+                .all(|edge| edge.predicate != RelationPredicate::Calls)
+        );
+        let changed = fixture.next_generation();
+        let next = request(&changed.snapshot, &changed.source, MARKDOWN, &budget);
+        let replay = analyzer
+            .analyze_from_artifact(
+                &next,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let (fresh, _) = analyzer
+            .analyze_and_capture(
+                &next,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(replay.document(), fresh.document());
+        assert_eq!(replay.report(), fresh.report());
+        assert_eq!(provider.stats().checked_out_parsers, 0);
+    }
+}
+
+#[test]
+fn markdown_child_file_text_policy_keeps_physical_names_across_fences_and_encodings() {
+    fn request_for<'a>(
+        fixture: &'a Fixture,
+        budget: &'a AnalysisLimits,
+        encoding: &str,
+    ) -> AnalysisRequest<'a> {
+        AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            language(MARKDOWN),
+            EncodingId::new(if encoding.starts_with("utf-8") {
+                "utf-8"
+            } else {
+                encoding
+            })
+            .unwrap(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            build_context(),
+            budget,
+        )
+        .unwrap()
+        .with_generated_status(false)
+    }
+    for ending in ["\n", "\r\n"] {
+        let mut text = format!("# Examples λ😀{ending}{ending}");
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            text.push_str(&format!("~~~sed{ending}"));
+            let start = text.len();
+            text.push_str(&format!(":entry{ending}b entry{ending}"));
+            bodies.push(start..text.len());
+            text.push_str(&format!("~~~{ending}{ending}"));
+        }
+        text.push_str(&format!(
+            "~~~python{ending}def adjacent():{ending}    return 1{ending}~~~{ending}"
+        ));
+        for encoding in ["utf-8", "utf-8-bom", "utf-16le", "utf-16be"] {
+            let mut bytes = match encoding {
+                "utf-8" => Vec::new(),
+                "utf-8-bom" => vec![0xef, 0xbb, 0xbf],
+                "utf-16le" => vec![0xff, 0xfe],
+                "utf-16be" => vec![0xfe, 0xff],
+                _ => unreachable!(),
+            };
+            if encoding.starts_with("utf-8") {
+                bytes.extend_from_slice(text.as_bytes());
+            } else {
+                for unit in text.encode_utf16() {
+                    bytes.extend_from_slice(&if encoding == "utf-16le" {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+            }
+            let physical = |offset| match encoding {
+                "utf-8" => offset,
+                "utf-8-bom" => 3 + offset,
+                _ => 2 + 2 * text.get(..offset).unwrap().encode_utf16().count(),
+            };
+            let body_spans = bodies
+                .iter()
+                .map(|body| physical(body.start)..physical(body.end))
+                .collect::<Vec<_>>();
+            let provider = Arc::new(provider());
+            let analyzer = analyzer(&provider, MARKDOWN);
+            let fixture = Fixture::new(MARKDOWN, &bytes);
+            let budget = limits();
+            let initial = request_for(&fixture, &budget, encoding);
+            let required = provider
+                .required_syntax_fact_count(&initial.to_parse_request(), &deadline())
+                .unwrap();
+            let (result, artifact) = analyzer
+                .analyze_and_capture(
+                    &initial,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            validate_ir_document(result.document(), budget.ir(), &ExtensionSupport::default())
+                .unwrap();
+            assert_eq!(
+                artifact.required_syntax_fact_count(&deadline()).unwrap(),
+                required
+            );
+            assert_eq!(result.document().files.len(), 1);
+            assert_eq!(result.document().files[0].language, "markdown");
+            let labels: Vec<_> = result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.language == "sed" && entity.kind == EntityKind::StatementLabel
+                })
+                .collect();
+            assert_eq!(labels.len(), 2, "{encoding}; {ending:?}");
+            assert_ne!(labels[0].id, labels[1].id);
+            let mut occupied = BTreeSet::new();
+            for label in labels {
+                assert_eq!(label.canonical_name, "entry");
+                let site = result
+                    .document()
+                    .occurrences
+                    .iter()
+                    .find(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target == (OccurrenceTarget::Resolved { symbol: label.id })
+                    })
+                    .unwrap();
+                let span = site.source.span();
+                let start = usize::try_from(span.start_byte()).unwrap();
+                let end = usize::try_from(span.end_byte()).unwrap();
+                let body = body_spans
+                    .iter()
+                    .position(|body| body.start <= start && end <= body.end)
+                    .unwrap();
+                assert!(occupied.insert(body));
+                let written: Vec<u8> = if encoding.starts_with("utf-8") {
+                    b"entry".to_vec()
+                } else {
+                    "entry"
+                        .encode_utf16()
+                        .flat_map(|unit| {
+                            if encoding == "utf-16le" {
+                                unit.to_le_bytes()
+                            } else {
+                                unit.to_be_bytes()
+                            }
+                        })
+                        .collect()
+                };
+                assert_eq!(&bytes[start..end], written);
+                // Spelling hashes use decoded UTF-8; physical bytes and spans remain exact above.
+                assert_eq!(site.syntactic_text_hash, content_hash(b"entry"));
+                assert_eq!(site.source.content_hash(), fixture.source.content_hash());
+                assert_eq!(site.source.generation(), fixture.source.generation());
+            }
+            assert_eq!(
+                result
+                    .document()
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        entity.language == "python"
+                            && entity.kind == EntityKind::Function
+                            && entity.canonical_name == "adjacent"
+                    })
+                    .count(),
+                1
+            );
+            assert!(
+                result
+                    .document()
+                    .relations
+                    .iter()
+                    .all(|edge| edge.predicate != RelationPredicate::Calls)
+            );
+            let changed = fixture.next_generation();
+            let next = request_for(&changed, &budget, encoding);
+            let replay = analyzer
+                .analyze_from_artifact(
+                    &next,
+                    &artifact,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            let (fresh, _) = analyzer
+                .analyze_and_capture(
+                    &next,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(replay.document(), fresh.document());
+            assert_eq!(replay.report(), fresh.report());
+            assert_eq!(provider.stats().checked_out_parsers, 0);
+        }
+    }
+    let result = output("~~~sed\n:wrong\rname\nb wrong\rname\n~~~\n");
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|entity| entity.language == "sed" && entity.kind == EntityKind::StatementLabel)
+    );
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "sed-plain-ascii-written-label-surface-unavailable")
+    );
+}
+
+#[test]
+fn markdown_sml_written_parameters_require_their_own_closed_body_frames() {
+    use rootlight_adapter_sdk::{
+        SyntaxFact, SyntaxFactKind, execute_parse, testkit::MockParseProvider,
+    };
+
+    let source = concat!(
+        "# Examples\n\n```standard-ml\nfun measure value = value;\n```\n\n",
+        "```standard-ml\nfun count amount = amount;\n```\n",
+    );
+    let native = provider();
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let limits = limits();
+    let request = request(&fixture.snapshot, &fixture.source, MARKDOWN, &limits);
+    let parsed = execute_parse(
+        &native,
+        &request.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let replay = |facts: Vec<SyntaxFact>| {
+        let parser = MockParseProvider::new(
+            native.capabilities().clone(),
+            facts,
+            parsed.diagnostics().to_vec(),
+            parsed.report().coverage().clone(),
+        )
+        .with_syntax_nodes(parsed.report().resources().syntax_nodes());
+        let analyzer = TreeSitterAnalyzer::new(
+            Arc::new(parser),
+            ProducerIdentity::new(
+                "markdown-sml-frame-replay",
+                "1.0",
+                content_hash(b"markdown-sml-frame-replay"),
+            )
+            .unwrap(),
+            language(MARKDOWN),
+            MARKDOWN.frontend,
+            content_hash(b"markdown-sml-frame-replay-binary"),
+        )
+        .unwrap();
+        execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+    };
+    let parameter = |result: &AnalysisOutput, name: &str| {
+        result
+            .document()
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.language == "standard-ml"
+                    && entity.canonical_name == name
+            })
+            .map(|entity| entity.id)
+    };
+    let baseline = replay(parsed.facts().to_vec()).unwrap();
+    for name in ["value", "amount"] {
+        let target = parameter(&baseline, name).unwrap_or_else(|| {
+            panic!(
+                "native body retains its written parameter {name}: {:#?}",
+                parsed.facts()
+            )
+        });
+        let start = u64::try_from(source.find(name).unwrap()).unwrap();
+        let definitions: Vec<_> = baseline
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + u64::try_from(name.len()).unwrap()
+                    && matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == target)
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(
+            definitions[0].source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        assert_eq!(
+            definitions[0].source.generation(),
+            fixture.source.generation()
+        );
+    }
+    let markers: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| {
+            fact.kind() == SyntaxFactKind::Signature
+                && fact.syntax_kind().as_str() == "sml.closed_standard_basis_context.signature"
+        })
+        .collect();
+    assert_eq!(markers.len(), 2);
+    let first = *markers
+        .iter()
+        .min_by_key(|fact| fact.span().start_byte())
+        .unwrap();
+    let root = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.kind() == SyntaxFactKind::Root)
+        .unwrap();
+    let fresh_id = parsed
+        .facts()
+        .iter()
+        .map(SyntaxFact::local_id)
+        .max()
+        .unwrap()
+        .checked_add(1)
+        .unwrap();
+    for mode in 0..4 {
+        let mut facts = parsed.facts().to_vec();
+        match mode {
+            0 => facts.retain(|fact| fact.local_id() != first.local_id()),
+            1 => facts.push(SyntaxFact::new(
+                fresh_id,
+                first.parent(),
+                first.kind(),
+                first.span(),
+                first.depth(),
+                first.syntax_kind().clone(),
+            )),
+            2 | 3 => {
+                let slot = facts
+                    .iter_mut()
+                    .find(|fact| fact.local_id() == first.local_id())
+                    .unwrap();
+                *slot = SyntaxFact::new(
+                    first.local_id(),
+                    if mode == 2 {
+                        Some(root.local_id())
+                    } else {
+                        first.parent()
+                    },
+                    first.kind(),
+                    first.span(),
+                    if mode == 2 {
+                        root.depth() + 1
+                    } else {
+                        first.depth()
+                    },
+                    if mode == 3 {
+                        rootlight_adapter_sdk::SyntaxKindLabel::new("wat.header.signature").unwrap()
+                    } else {
+                        first.syntax_kind().clone()
+                    },
+                );
+            }
+            _ => unreachable!(),
+        }
+        let changed = replay(facts).unwrap();
+        assert!(
+            parameter(&changed, "value").is_none(),
+            "first body mode{mode}"
+        );
+        assert!(
+            parameter(&changed, "amount").is_some(),
+            "independent second body mode{mode}"
+        );
+    }
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        for marker in &markers {
+            assert!(baseline.document().skipped_regions.iter().any(|gap| {
+                gap.domain == domain
+                    && gap.detail == "sml-standalone-standard-basis-profile-only-incoming-and-project-basis-unqualified"
+                    && gap.source.span() == marker.span()
+            }));
+        }
+    }
+    assert!(!baseline.document().occurrences.iter().any(|site| {
+        site.role == OccurrenceRole::Read
+            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+    }));
+    assert!(
+        !baseline
+            .document()
+            .relations
+            .iter()
+            .any(|relation| relation.predicate == RelationPredicate::Calls)
+    );
 }

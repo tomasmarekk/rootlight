@@ -22,6 +22,8 @@ impl TreeSitterProvider {
             .max_embedded_ranges()
             .min(self.config.max_included_ranges());
         let mut limited = EmbeddedExtractionLimits::default();
+        let mut file_text_source = None;
+
         for index in 0..candidates.len() {
             cancellation.check()?;
             let candidate = candidates[index];
@@ -118,15 +120,41 @@ impl TreeSitterProvider {
                 ranges,
                 &limits,
             )?;
-            // The host already admitted its text view and supplies the exact native
-            // point; revalidating or rescanning its prefix per fence is redundant.
-            context.range_origin = (body.start_byte(), body.start_position());
+            let policy = LineEndingPolicy::for_language(child_request.language().as_str());
+            if policy != source.line_ending_policy() && file_text_source.is_none() {
+                // A child's declared file-text interpretation must match its standalone
+                // parser. Retain one admitted projection, with physical evidence unchanged.
+                file_text_source = Some(NativeSourceView::new_with_policy(
+                    request.source().bytes(),
+                    request.encoding().as_str(),
+                    policy,
+                    request.limits().max_source_bytes(),
+                    request
+                        .limits()
+                        .max_reported_memory_bytes()
+                        .saturating_sub(source.owned_bytes()),
+                    cancellation,
+                )?);
+            }
+            let child_source = if policy == source.line_ending_policy() {
+                source
+            } else {
+                file_text_source
+                    .as_ref()
+                    .ok_or_else(|| provider_failure("markdown-child-source-policy"))?
+            };
+            let child_body_range = child_source
+                .to_projected_offset(source.to_physical_offset(body.start_byte())?)?
+                ..child_source.to_projected_offset(source.to_physical_offset(body.end_byte())?)?;
+            // CRLF folding preserves row counts and body columns; the native byte
+            // origin follows the child's projection without rescanning the prefix.
+            context.range_origin = (child_body_range.start, body.start_position());
             let parsed = match self.parse_native_tree_with_input(
                 &child_request,
                 &language_for(native_family),
                 None,
                 self.config.default_settings(),
-                source,
+                child_source,
                 Some(&mut *context),
                 None,
                 0,
@@ -151,12 +179,12 @@ impl TreeSitterProvider {
             let child = inspect_parsed_tree(
                 &parsed,
                 &child_request,
-                source,
+                child_source,
                 remaining_nodes,
                 limits.max_syntax_depth(),
                 cancellation,
             )?;
-            let child_tree = parsed.tree;
+            let mut child_tree = parsed.tree;
             traversal.processed_nodes = traversal
                 .processed_nodes
                 .checked_add(child.processed_nodes)
@@ -228,11 +256,42 @@ impl TreeSitterProvider {
                 .query_packs
                 .get_for_native(family, family, cancellation)
                 .map_err(|error| error.into_adapter_error("embedded-query-pack"))?;
+            let body_range = child_body_range;
+            // FSharp whole-file context is intentionally unavailable in examples;
+            // retain its host frame rather than promoting a fragment to that proof.
+            let isolated_body = !matches!(
+                family,
+                GrammarFamily::FSharp | GrammarFamily::FSharpSignature
+            ) && matches!(child_tree.included_ranges().as_slice(), [range]
+                if range.start_byte == body_range.start && range.end_byte == body_range.end)
+                && child_tree.root_node().start_byte() >= body_range.start
+                && child_tree.root_node().end_byte() <= body_range.end;
+            // Whole-file binding censuses must see only this independent example.
+            // The prefix edit changes coordinates outside the parsed body; every
+            // retained capture is checked and restored to host coordinates below.
+            let query_source = if isolated_body {
+                cancellation.check()?;
+                child_tree.edit(&InputEdit {
+                    start_byte: 0,
+                    old_end_byte: body_range.start,
+                    new_end_byte: 0,
+                    start_position: Point::new(0, 0),
+                    old_end_position: body.start_position(),
+                    new_end_position: Point::new(0, 0),
+                });
+                cancellation.check()?;
+                child_source
+                    .as_bytes()
+                    .get(body_range.clone())
+                    .ok_or_else(|| provider_failure("markdown-code-body-source"))?
+            } else {
+                child_source.as_bytes()
+            };
             let mut captures = if let Some(maximum) = max_facts {
                 let extraction = pack.extract(
                     family,
                     &child_tree,
-                    source.as_bytes(),
+                    query_source,
                     remaining_nodes,
                     maximum.saturating_sub(candidates.len()),
                     cancellation,
@@ -243,11 +302,27 @@ impl TreeSitterProvider {
                 pack.extract_identity(
                     family,
                     &child_tree,
-                    source.as_bytes(),
+                    query_source,
                     remaining_nodes,
                     cancellation,
                 )?
             };
+            if isolated_body {
+                for capture in &mut captures {
+                    cancellation.check()?;
+                    rebase_embedded_capture(capture, &body_range)?;
+                }
+                // Replacement extraction still consumes the original host frame.
+                child_tree.edit(&InputEdit {
+                    start_byte: 0,
+                    old_end_byte: 0,
+                    new_end_byte: body_range.start,
+                    start_position: Point::new(0, 0),
+                    old_end_position: Point::new(0, 0),
+                    new_end_position: body.start_position(),
+                });
+                cancellation.check()?;
+            }
             if family == GrammarFamily::Perl {
                 limited.merge(self.extract_perl_replacements(
                     &child_tree,
@@ -261,6 +336,15 @@ impl TreeSitterProvider {
                     Some(&mut *context),
                     cancellation,
                 )?);
+            }
+            if policy != source.line_ending_policy() {
+                for capture in &mut captures {
+                    cancellation.check()?;
+                    capture.start = source
+                        .to_projected_offset(child_source.to_physical_offset(capture.start)?)?;
+                    capture.end = source
+                        .to_projected_offset(child_source.to_physical_offset(capture.end)?)?;
+                }
             }
             captures.retain(|capture| capture.role != StructuralRole::Root);
             ensure_embedded_data_module(family, body.byte_range(), &mut captures, cancellation)?;
@@ -278,6 +362,26 @@ impl TreeSitterProvider {
         }
         Ok(limited)
     }
+}
+
+fn rebase_embedded_capture(
+    capture: &mut QueryCandidate,
+    body: &std::ops::Range<usize>,
+) -> Result<(), AdapterError> {
+    if capture.start > capture.end || capture.end > body.len() {
+        return Err(provider_failure("markdown-code-capture-span"));
+    }
+    let start = body
+        .start
+        .checked_add(capture.start)
+        .ok_or(SinkError::AccountingOverflow)?;
+    let end = body
+        .start
+        .checked_add(capture.end)
+        .ok_or(SinkError::AccountingOverflow)?;
+    capture.start = start;
+    capture.end = end;
+    Ok(())
 }
 
 fn bind_embedded_capture(
@@ -524,6 +628,38 @@ mod tests {
                 assert_eq!(capture, expected);
             }
         }
+    }
+
+    #[test]
+    fn isolated_body_capture_rebase_rejects_foreign_or_reversed_ranges() {
+        for (start, end) in [(0, 18), (5, 4), (17, 18)] {
+            let mut capture = QueryCandidate {
+                start,
+                end,
+                role: StructuralRole::Definition,
+                syntax: "idris.function_name",
+                required: true,
+                native_depth: 0,
+            };
+            let original = capture;
+            assert!(matches!(
+                rebase_embedded_capture(&mut capture, &(8..25)),
+                Err(AdapterError::ProviderFailed { code })
+                    if code.as_str() == "markdown-code-capture-span"
+            ));
+            assert_eq!(capture, original);
+        }
+        let mut capture = QueryCandidate {
+            start: 3,
+            end: 7,
+            role: StructuralRole::Definition,
+            syntax: "idris.function_name",
+            required: true,
+            native_depth: 0,
+        };
+        rebase_embedded_capture(&mut capture, &(8..25)).unwrap();
+        assert_eq!((capture.start, capture.end), (11, 15));
+        bind_embedded_capture(&mut capture, &(8..25), 64).unwrap();
     }
 
     #[test]
