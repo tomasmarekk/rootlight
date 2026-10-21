@@ -20,7 +20,7 @@ jobs:
     name: analyze / ${{ matrix.language }}
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.language == 'rust' && 120 || 30 }}
     permissions:
       actions: read
       contents: read
@@ -54,7 +54,7 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           config-file: .github/codeql/source.yml
       - name: Analyze maintained source
-        timeout-minutes: 25
+        timeout-minutes: ${{ matrix.language == 'rust' && 110 || 25 }}
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:${{ matrix.language }}
@@ -82,7 +82,7 @@ jobs:
     name: analyze pull request / ${{ matrix.language }}
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.language == 'rust' && 120 || 30 }}
     permissions:
       actions: read
       contents: read
@@ -115,7 +115,7 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           config-file: .github/codeql/source.yml
       - name: Analyze pull request without privileged upload
-        timeout-minutes: 25
+        timeout-minutes: ${{ matrix.language == 'rust' && 110 || 25 }}
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: /language:${{ matrix.language }}
