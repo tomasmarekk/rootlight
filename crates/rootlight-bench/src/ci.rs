@@ -39,13 +39,13 @@ const MAX_SYNTAX_ITEMS_PER_SAMPLE: u64 = 250_000;
 const EXPECTED_DATASET_RECORD_BYTES: u64 = 825;
 const EXPECTED_DATASET_RECORD_SHA256: &str =
     "990f996b75507cd26bef61dbaeace8975bb7e5b81113de74a623448f926dc074";
-const EXPECTED_SAMPLE_RECORD_BYTES: u64 = 7_200;
+const EXPECTED_SAMPLE_RECORD_BYTES: u64 = 7_211;
 const EXPECTED_SAMPLE_RECORD_SHA256: &str =
-    "d933da8d64ff5d6350dd4bc7257a4527115dd7d555edee7be41e740ae8828c3d";
+    "919e9ed35514090576db95c82cdc257c3cb9a2e2c8fea00e1cc36a9b9614f046";
 const EXPECTED_TOTAL_SOURCE_BYTES: u64 = 2_497;
 const EXPECTED_TOTAL_PHYSICAL_LINES: u64 = 121;
 const EXPECTED_TOTAL_SYNTAX_NODES: u64 = 1_287;
-const EXPECTED_TOTAL_SYNTAX_FACTS: u64 = 517;
+const EXPECTED_TOTAL_SYNTAX_FACTS: u64 = 638;
 
 const EXPECTED_DATASET: [ExpectedDatasetRecord; EXPECTED_DATASET_RECORDS] = [
     ExpectedDatasetRecord {
@@ -1004,10 +1004,10 @@ mod tests {
             .map(|(ordinal, dataset_index)| {
                 let dataset = EXPECTED_DATASET[dataset_index];
                 let (syntax_nodes, syntax_facts) = match dataset_index {
-                    0 => (37, 11),
+                    0 => (37, 14),
                     1 => (24, 14),
-                    2 => (29, 13),
-                    3 => (27, 9),
+                    2 => (29, 17),
+                    3 => (27, 13),
                     _ => unreachable!("the fixed schedule uses four datasets"),
                 };
                 RawSample {

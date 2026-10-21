@@ -609,9 +609,9 @@ mod tests {
         assert_eq!(
             observed,
             [
-                ("python-basic", 29, 13),
-                ("rust-basic", 27, 9),
-                ("java-basic", 37, 11),
+                ("python-basic", 29, 17),
+                ("rust-basic", 27, 13),
+                ("java-basic", 37, 14),
                 ("javascript-basic", 24, 14),
             ]
         );
