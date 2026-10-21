@@ -1,0 +1,12 @@
+# Rust / tree-sitter build artifacts
+target/
+Cargo.lock
+
+# Node
+node_modules/
+
+# Generated bindings build output
+build/
+*.wasm
+*.obj
+*.o

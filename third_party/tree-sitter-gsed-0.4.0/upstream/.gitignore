@@ -1,0 +1,10 @@
+.DS_Store
+
+*.dylib
+*.o
+
+build/
+
+node_modules/
+
+target/

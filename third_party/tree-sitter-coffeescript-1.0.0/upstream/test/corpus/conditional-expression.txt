@@ -1,0 +1,99 @@
+================================================================================
+if as expression
+================================================================================
+
+x = if a then 1 else 2
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (if_statement
+            (expression
+              (identifier))
+            (block
+              (inline_block
+                (statement
+                  (expression_statement
+                    (expression
+                      (number
+                        (decimal_number)))))))
+            (statement
+              (expression_statement
+                (expression
+                  (number
+                    (decimal_number)))))))))))
+
+================================================================================
+switch as expression
+================================================================================
+
+label = switch n
+  when 1 then "one"
+  else "many"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (switch_statement
+            (expression
+              (identifier))
+            (when_clause
+              (expression
+                (number
+                  (decimal_number)))
+              (block
+                (inline_block
+                  (statement
+                    (expression_statement
+                      (expression
+                        (string
+                          (double_quoted_string
+                            (double_quoted_content)))))))))
+            (else_clause
+              (statement
+                (expression_statement
+                  (expression
+                    (string
+                      (double_quoted_string
+                        (double_quoted_content)))))))))))))
+
+================================================================================
+bare else body
+================================================================================
+
+if ready then go() else stop()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (if_statement
+        (expression
+          (identifier))
+        (block
+          (inline_block
+            (statement
+              (expression_statement
+                (expression
+                  (function_call
+                    (expression
+                      (identifier))))))))
+        (statement
+          (expression_statement
+            (expression
+              (function_call
+                (expression
+                  (identifier))))))))))

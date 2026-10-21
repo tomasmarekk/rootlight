@@ -1,0 +1,5 @@
+This local derivative retains all 92 upstream Git blobs and their modes.
+The MIT grant and original Max Brunsfeld, Maskhjarna, postsolar, Hideaki Kawai
+and kayhide notices are preserved. The upstream repository metadata and source
+headers retain their own attribution; local vendoring does not claim authorship.
+The checked active scanner and owned Rust bridge are disclosed local derivatives.

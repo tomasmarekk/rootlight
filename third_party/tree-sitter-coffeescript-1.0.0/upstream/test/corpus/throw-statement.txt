@@ -1,0 +1,22 @@
+================================================================================
+throw statement
+================================================================================
+
+throw new Error("boom")
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (throw_statement
+        (expression
+          (new_expression
+            (expression
+              (function_call
+                (expression
+                  (identifier))
+                (expression
+                  (string
+                    (double_quoted_string
+                      (double_quoted_content))))))))))))

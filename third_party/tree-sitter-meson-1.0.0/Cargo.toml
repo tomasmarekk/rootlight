@@ -1,0 +1,18 @@
+[package]
+name = "tree-sitter-meson"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/staysail/tree-sitter-meson"
+description = "Pinned Meson native parser with an offline LanguageFn wrapper"
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

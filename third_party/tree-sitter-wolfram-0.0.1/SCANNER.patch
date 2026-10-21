@@ -1,0 +1,371 @@
+diff --git a/src/scanner.c b/src/scanner.c
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -1,94 +1,132 @@
++/* Bounded derivative of WolframResearch/tree-sitter-wolfram 15b3244e, MIT.
++ * The scanner is stateless; request refusal stays outside parser rollback.
++ * A host must finish its exclusive scope before accepting any recovered tree. */
+ #include "tree_sitter/parser.h"
+-
++#include "rootlight_wolfram_status.h"
+ #include <wctype.h>
+ 
+-enum TokenType {
+-  COMMENT,
+-  STATEMENT_SEP
+-};
++enum TokenType { COMMENT, STATEMENT_SEP };
++enum { WOLFRAM_MAX_COMMENT_DEPTH = 1024 };
++
++static bool scalar_valid(const TSLexer *lexer) {
++  const int32_t scalar = lexer->lookahead;
++  if (scalar == 0 && !lexer->eof(lexer)) {
++    rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_UNSUPPORTED_NUL);
++    return false;
++  }
++  if (scalar < 0 || scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff)) {
++    rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_INVALID_SCALAR);
++    return false;
++  }
++  return true;
++}
++
++static bool advance(TSLexer *lexer, bool skip) {
++  if (!rootlight_wolfram_scope_step()) return false;
++  lexer->advance(lexer, skip);
++  return scalar_valid(lexer);
++}
++
++static bool whitespace(int32_t scalar) {
++  /* Windows wint_t cannot represent supplementary scalars. Truncating one
++   * could misclassify its low word as whitespace and silently discard it. */
++  return scalar >= 0 && scalar <= 0xffff && iswspace((wint_t)scalar) != 0;
++}
+ 
+ static bool scan_comment(TSLexer *lexer) {
+-  int depth = 1;
+-
++  unsigned depth = 1;
+   while (!lexer->eof(lexer)) {
+     switch (lexer->lookahead) {
+       case '*':
+-        lexer->advance(lexer, false);
++        if (!advance(lexer, false)) return false;
+         if (lexer->lookahead == ')') {
+-          depth--;
+-          if (depth == 0) {
++          if (!advance(lexer, false)) return false;
++          if (--depth == 0) {
+             lexer->result_symbol = COMMENT;
+-            lexer->advance(lexer, false);
+             lexer->mark_end(lexer);
+             return true;
+           }
+         }
+         break;
+-
+       case '(':
+-        lexer->advance(lexer, false);
++        if (!advance(lexer, false)) return false;
+         if (lexer->lookahead == '*') {
+-          depth++;
++          if (depth == WOLFRAM_MAX_COMMENT_DEPTH) {
++            rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_CAPACITY);
++            return false;
++          }
++          /* Consume both opening scalars: its star cannot also close it. */
++          if (!advance(lexer, false)) return false;
++          ++depth;
+         }
+         break;
+-
+       default:
+-        lexer->advance(lexer, false);
++        if (!advance(lexer, false)) return false;
+         break;
+     }
+   }
+-
+   return false;
+ }
+ 
++/* No scanner allocation or persistent state is required. Even NULL payloads
++ * must be used inside an active scope, including native parser creation. */
+ void *tree_sitter_wolfram_external_scanner_create(void) {
++  rootlight_wolfram_scope_step();
+   return NULL;
+ }
+ 
++/* The stateless payload owns nothing; parser destruction may follow finish. */
+ void tree_sitter_wolfram_external_scanner_destroy(void *payload) {
++  (void)payload;
+ }
+ 
++/* The only supported serialized state is empty; status is never serialized. */
+ unsigned tree_sitter_wolfram_external_scanner_serialize(void *payload, char *buffer) {
++  (void)buffer;
++  if (payload != NULL) rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_MALFORMED_STATE);
++  rootlight_wolfram_scope_step();
+   return 0;
+ }
+ 
++/* Reject foreign state instead of allowing rollback to clear a refusal. */
+ void tree_sitter_wolfram_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
++  (void)buffer;
++  if (payload != NULL || length != 0) {
++    rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_MALFORMED_STATE);
++  }
++  rootlight_wolfram_scope_step();
+ }
+ 
++/* Charge entry and each scalar advance. A false token result alone never
++ * proves successful scanning: only matching scope finish can admit syntax. */
+ bool tree_sitter_wolfram_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
+-  // Skip horizontal whitespace, but stop at a newline. A newline at a position
+-  // where a statement separator is valid (i.e. between complete top-level
+-  // expressions) is significant: it splits statements rather than acting as the
+-  // whitespace glue that would otherwise form an implicit_times. Inside brackets
+-  // STATEMENT_SEP is never valid, so newlines there remain insignificant.
++  if (!rootlight_wolfram_scope_step()) return false;
++  if (payload != NULL || !lexer || !valid_symbols || !lexer->advance || !lexer->mark_end || !lexer->eof) {
++    rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_MALFORMED_STATE);
++    return false;
++  }
++  if (!scalar_valid(lexer)) return false;
+   while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+-         lexer->lookahead == '\r' || lexer->lookahead == '\f' ||
+-         lexer->lookahead == '\v') {
+-    lexer->advance(lexer, true);
++         lexer->lookahead == '\r' || lexer->lookahead == '\f' || lexer->lookahead == '\v') {
++    if (!advance(lexer, true)) return false;
+   }
+-
+   if (valid_symbols[STATEMENT_SEP] && lexer->lookahead == '\n') {
+-    while (iswspace(lexer->lookahead)) {
+-      lexer->advance(lexer, false);
++    while (whitespace(lexer->lookahead)) {
++      if (!advance(lexer, false)) return false;
+     }
+     lexer->result_symbol = STATEMENT_SEP;
+     lexer->mark_end(lexer);
+     return true;
+   }
+-
+-  // Newline is not significant here (mid-expression, or inside brackets): treat
+-  // all remaining whitespace as ordinary extras before checking for a comment.
+-  while (iswspace(lexer->lookahead)) {
+-    lexer->advance(lexer, true);
++  while (whitespace(lexer->lookahead)) {
++    if (!advance(lexer, true)) return false;
+   }
+-
+-  if (lexer->lookahead == '(') {
+-    lexer->advance(lexer, false);
++  if (valid_symbols[COMMENT] && lexer->lookahead == '(') {
++    if (!advance(lexer, false)) return false;
+     if (lexer->lookahead == '*') {
+-      lexer->advance(lexer, false);
++      if (!advance(lexer, false)) return false;
+       return scan_comment(lexer);
+     }
+   }
+-
+   return false;
+ }
+diff --git a/src/rootlight_wolfram_status.c b/src/rootlight_wolfram_status.c
+new file mode 100644
+--- /dev/null
++++ b/src/rootlight_wolfram_status.c
+@@ -0,0 +1,134 @@
++/* Preserve the first refusal outside scanner snapshots and parser rollback.
++ * Callback ownership is thread-local and must be held by a thread-affine host
++ * guard; numeric tokens are not globally unique capabilities. */
++#include "rootlight_wolfram_status.h"
++#include <stddef.h>
++
++_Static_assert(sizeof(RootlightWolframStatus) == sizeof(int), "status ABI requires C int enum");
++
++#if defined(_MSC_VER)
++#define ROOTLIGHT_WOLFRAM_TLS __declspec(thread)
++#else
++#define ROOTLIGHT_WOLFRAM_TLS _Thread_local
++#endif
++
++static ROOTLIGHT_WOLFRAM_TLS uint64_t next_token;
++static ROOTLIGHT_WOLFRAM_TLS uint64_t active_token;
++static ROOTLIGHT_WOLFRAM_TLS uint64_t work_limit;
++static ROOTLIGHT_WOLFRAM_TLS uint64_t work_used;
++static ROOTLIGHT_WOLFRAM_TLS RootlightWolframStatus refusal;
++static ROOTLIGHT_WOLFRAM_TLS RootlightWolframStatus strict_refusal;
++static ROOTLIGHT_WOLFRAM_TLS RootlightWolframCancelled cancelled;
++static ROOTLIGHT_WOLFRAM_TLS void *cancel_context;
++static ROOTLIGHT_WOLFRAM_TLS bool callback_active;
++
++void rootlight_wolfram_scope_refuse(RootlightWolframStatus status) {
++    if (refusal == ROOTLIGHT_WOLFRAM_OK) refusal = status;
++    if (strict_refusal == ROOTLIGHT_WOLFRAM_OK && status != ROOTLIGHT_WOLFRAM_OK
++        && status != ROOTLIGHT_WOLFRAM_CAPACITY && status != ROOTLIGHT_WOLFRAM_WORK_LIMIT) {
++        strict_refusal = status;
++    }
++}
++
++uint64_t rootlight_wolfram_scope_begin(uint64_t limit) {
++    if (callback_active || active_token != 0 || next_token == UINT64_MAX) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT);
++        return 0;
++    }
++    active_token = ++next_token;
++    work_limit = limit;
++    work_used = 0;
++    refusal = limit ? ROOTLIGHT_WOLFRAM_OK : ROOTLIGHT_WOLFRAM_WORK_LIMIT;
++    strict_refusal = ROOTLIGHT_WOLFRAM_OK;
++    cancelled = NULL;
++    cancel_context = NULL;
++    return active_token;
++}
++
++static bool poll_cancel(bool final_check);
++
++bool rootlight_wolfram_scope_set_cancel(uint64_t token,
++    RootlightWolframCancelled callback, void *context) {
++    if (callback_active || token == 0 || active_token != token) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT);
++        return false;
++    }
++    cancelled = callback;
++    cancel_context = context;
++    return poll_cancel(true);
++}
++
++static bool poll_cancel(bool final_check) {
++    if (callback_active) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT);
++        return false;
++    }
++    if (active_token == 0) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_MISSING);
++        return false;
++    }
++    if ((final_check || refusal == ROOTLIGHT_WOLFRAM_OK) && cancelled) {
++        callback_active = true;
++        bool stop = cancelled(cancel_context);
++        callback_active = false;
++        if (stop) rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_CANCELLED);
++    }
++    return refusal == ROOTLIGHT_WOLFRAM_OK && strict_refusal == ROOTLIGHT_WOLFRAM_OK;
++}
++
++bool rootlight_wolfram_scope_poll(void) {
++    return poll_cancel(false);
++}
++
++bool rootlight_wolfram_scope_step(void) {
++    if (!rootlight_wolfram_scope_poll()) return false;
++    if (work_used == work_limit) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_WORK_LIMIT);
++        return false;
++    }
++    ++work_used;
++    return true;
++}
++
++uint64_t rootlight_wolfram_scope_work(uint64_t token) {
++    if (token == 0 || active_token != token) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT);
++        return 0;
++    }
++    return work_used;
++}
++
++bool rootlight_wolfram_scope_context_active(const void *context) {
++    return active_token != 0 && cancelled != NULL && cancel_context == context;
++}
++
++RootlightWolframStatus rootlight_wolfram_scope_status(uint64_t token) {
++    if (token == 0 || active_token != token) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT);
++        return ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT;
++    }
++    rootlight_wolfram_scope_poll();
++    return strict_refusal != ROOTLIGHT_WOLFRAM_OK ? strict_refusal : refusal;
++}
++
++RootlightWolframStatus rootlight_wolfram_scope_finish(uint64_t token) {
++    if (callback_active) {
++        /* Detach before releasing the C-held Rc, while leaving the operation
++         * occupied so reentry cannot begin a fresh successful transaction. */
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT);
++        cancelled = NULL;
++        cancel_context = NULL;
++        return ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT;
++    }
++    if (token == 0 || active_token != token) {
++        rootlight_wolfram_scope_refuse(ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT);
++        return ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT;
++    }
++    /* A soft work/capacity decline cannot suppress final cancellation or
++     * lifecycle checks before the host considers exact-source fallback. */
++    poll_cancel(true);
++    active_token = 0;
++    cancelled = NULL;
++    cancel_context = NULL;
++    return strict_refusal != ROOTLIGHT_WOLFRAM_OK ? strict_refusal : refusal;
++}
+diff --git a/src/rootlight_wolfram_status.h b/src/rootlight_wolfram_status.h
+new file mode 100644
+--- /dev/null
++++ b/src/rootlight_wolfram_status.h
+@@ -0,0 +1,53 @@
++/* Request-local refusal, cancellation and work credit for the Wolfram scanner.
++ * A recovered native tree is admissible only after its exclusive synchronous
++ * scope finishes successfully. Tokens identify operations on one OS thread. */
++#ifndef ROOTLIGHT_WOLFRAM_STATUS_H
++#define ROOTLIGHT_WOLFRAM_STATUS_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++typedef enum {
++    ROOTLIGHT_WOLFRAM_OK = 0,
++    ROOTLIGHT_WOLFRAM_ALLOCATION = 1,
++    ROOTLIGHT_WOLFRAM_CAPACITY = 2,
++    ROOTLIGHT_WOLFRAM_MALFORMED_STATE = 3,
++    ROOTLIGHT_WOLFRAM_SCOPE_MISSING = 4,
++    ROOTLIGHT_WOLFRAM_SCOPE_CONFLICT = 5,
++    ROOTLIGHT_WOLFRAM_INVALID_SCALAR = 6,
++    ROOTLIGHT_WOLFRAM_CANCELLED = 7,
++    ROOTLIGHT_WOLFRAM_WORK_LIMIT = 8,
++    ROOTLIGHT_WOLFRAM_UNSUPPORTED_NUL = 9,
++    ROOTLIGHT_WOLFRAM_CALLBACK_PANICKED = 11
++} RootlightWolframStatus;
++
++typedef bool (*RootlightWolframCancelled)(void *context);
++
++/* Begin one synchronous operation with finite logical scanner work credit.
++ * Zero refuses ownership; nested begin cannot reset the outer operation. */
++uint64_t rootlight_wolfram_scope_begin(uint64_t work_limit);
++
++/* The caller owns a stable context until matching finish clears the callback.
++ * It runs synchronously on this OS thread and must never unwind or throw. */
++bool rootlight_wolfram_scope_set_cancel(uint64_t token,
++    RootlightWolframCancelled cancelled, void *context);
++
++/* Matching finish polls cancellation even after work/capacity and clears the
++ * callback. The first strict refusal outranks an earlier work/capacity decline.
++ * Mismatched finish preserves ownership; reentrant finish detaches the callback
++ * and keeps the operation occupied. */
++RootlightWolframStatus rootlight_wolfram_scope_status(uint64_t token);
++RootlightWolframStatus rootlight_wolfram_scope_finish(uint64_t token);
++
++/* After attempted cleanup, this exact pointer check lets an FFI owner retain
++ * storage if callback release could not be proven. It grants no scope ownership. */
++bool rootlight_wolfram_scope_context_active(const void *context);
++
++/* Poll cancellation without spending credit, or charge one finite logical
++ * unit. Scanner entry, scalar advance and state/keyword visits are charged. */
++bool rootlight_wolfram_scope_poll(void);
++bool rootlight_wolfram_scope_step(void);
++void rootlight_wolfram_scope_refuse(RootlightWolframStatus status);
++uint64_t rootlight_wolfram_scope_work(uint64_t token);
++
++#endif

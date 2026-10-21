@@ -1,0 +1,31 @@
+{
+  "upstream": "https://github.com/kayhide/tree-sitter-idris",
+  "commit": "9fe334fb603fdce0e84349ed78f41ae3d2f7036b",
+  "tree": "082ef28a99a41742e2a19f81b9a8ec76462f149d",
+  "upstream_version": "0.0.1",
+  "upstream_metadata_repository": "https://github.com/tree-sitter/tree-sitter-idris",
+  "package_identity": "Local operational derivative; not a pristine registry publication",
+  "upstream_files": 92,
+  "upstream_bytes": 12863788,
+  "archive": {
+    "bytes": 613691,
+    "sha256": "e267326114f6825b9f2a938b289c3db575618dd434755df6640b131fb426bef7"
+  },
+  "license": "MIT",
+  "generated_abi": 14,
+  "generator_executed": false,
+  "build_downloads": false,
+  "scanner_contract": "idris-scanner-fixed-state/1;wire=version1-header4-u32le-total255;token-bytes=1024;parser=f7b1b33a679d91a69187c2847d691e7b168a1d4349e9d0fc546a2d1c64dc3a10;scanner=b10b7218839b510dd7ef427ae2802bb500177b82731c14156e8bef135c6b0f8d;status=08a32258c098c936226fb85cede29be5f6c78e140eb27d45c725ee670bb8f9b4;header=9f74de2c05a1b557aa0505fe06b9afb212feb2ba625b9a714565147c4357933a;host-placeholder-body=f81c71e9c2bb45d956c916c5e24f36595ef82b1896b91848df7756c987bf6209",
+  "host_derivation": "Existing owned Rc lifecycle; namespace/parser inventory/status9/metadata changes only",
+  "base_host_sha256": "6dbf719525525021ba652113622452c467d038d988eb06ae780339bd04e48563",
+  "normalized_host_sha256": "f81c71e9c2bb45d956c916c5e24f36595ef82b1896b91848df7756c987bf6209",
+  "isolated_c_readback": {
+    "bytes": 17741,
+    "sha256": "f5bf627fee8864f03a184b4b0511e03bdd3c44c1a90d40a7b60460bfd77cb6df"
+  },
+  "c_assertions": 63,
+  "native_observations": 9,
+  "rust_executed": false,
+  "production_admission": false,
+  "scanner_successor": "Valid-symbol guard and constant-state transaction; false/refused scans preserve payload and result symbol"
+}

@@ -1,0 +1,36 @@
+=====================
+string literal 2
+=====================
+
+a = "string literal";
+
+-------------
+
+(source_file
+  (assignment_statement
+    (lvalue_expression
+      (variable_expression
+        (identifier)))
+    (assignment_operator)
+    (literal_expression
+      (string_literal
+        (interpreted_string_literal)))))
+
+
+=====================
+string literal 2
+=====================
+
+a = '$tr1ng_"literAl"';
+
+-------------
+
+(source_file
+  (assignment_statement
+    (lvalue_expression
+      (variable_expression
+        (identifier)))
+    (assignment_operator)
+    (literal_expression
+      (string_literal
+        (interpreted_string_literal)))))

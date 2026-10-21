@@ -1,0 +1,3398 @@
+==================
+Raw brackets and numeric escapes — "s/[a\\x5d/]/x/\ns/\\x5b/x/\ns/\\c//x/\ns2\\x2x2\ns$\\$$x$\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+s/[a\x5d/]/x/
+s/\x5b/x/
+s/\c//x/
+s2\x2x2
+s$\$$x$
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (bracket_character
+                  (literal))
+                (character_escape))
+              (regex_character
+                (literal))
+              (regex_character
+                (literal)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (character_escape)
+                (syntax_issue
+                  (invalid_syntax
+                    (missing_bracket_element)))
+                (syntax_issue
+                  (invalid_syntax
+                    (missing_closing_delimiter)))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (character_escape)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (escape)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (anchor
+                (escape)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Range issues retain endpoints — "s/[a-b-c]/x/\ns/[[:alpha:]-z]/x/\ns/[a-[=z=]]/x/\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+s/[a-b-c]/x/
+s/[[:alpha:]-z]/x/
+s/[a-[=z=]]/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (range
+                  (bracket_character
+                    (literal))
+                  (range_operator)
+                  (bracket_character
+                    (literal))
+                  (syntax_issue
+                    (invalid_syntax
+                      (invalid_range_operator
+                        (range_operator))))
+                  (bracket_character
+                    (literal)))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (range
+                  (syntax_issue
+                    (invalid_syntax
+                      (invalid_range_endpoint
+                        (character_class
+                          (class_open)
+                          (compound_marker)
+                          (class_name
+                            (class_name_text))
+                          (compound_marker)
+                          (class_close)))))
+                  (range_operator)
+                  (bracket_character
+                    (literal)))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (range
+                  (bracket_character
+                    (literal))
+                  (range_operator)
+                  (syntax_issue
+                    (invalid_syntax
+                      (invalid_range_endpoint
+                        (equivalence_class
+                          (equivalence_open)
+                          (compound_marker)
+                          (collating_element
+                            (collating_text))
+                          (compound_marker)
+                          (equivalence_close))))))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Misplaced class and ordinary colon brackets — "s/[:alpha:]/x/\ns/[^:alpha:]/x/\ns/[\\x3a\\x61lpha\\x3a]/x/\ns/[::]/x/\ns/[:a-b:]/x/\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+s/[:alpha:]/x/
+s/[^:alpha:]/x/
+s/[\x3a\x61lpha\x3a]/x/
+s/[::]/x/
+s/[:a-b:]/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (syntax_issue
+                  (invalid_syntax
+                    (misplaced_character_class
+                      (compound_marker)
+                      (class_name
+                        (class_name_text))
+                      (compound_marker))))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (regex_operator)
+                (syntax_issue
+                  (invalid_syntax
+                    (misplaced_character_class
+                      (compound_marker)
+                      (class_name
+                        (class_name_text))
+                      (compound_marker))))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (syntax_issue
+                  (invalid_syntax
+                    (misplaced_character_class
+                      (character_escape)
+                      (class_name
+                        (character_escape)
+                        (class_name_text))
+                      (character_escape))))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (bracket_character
+                  (literal))
+                (bracket_character
+                  (literal))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                (bracket_open)
+                (bracket_character
+                  (literal))
+                (range
+                  (bracket_character
+                    (literal))
+                  (range_operator)
+                  (bracket_character
+                    (literal)))
+                (bracket_character
+                  (literal))
+                (bracket_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Three hyphens form a range between independent letters
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[a---c]/p
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:9          address: address_clause
+0:0  - 0:9            address
+0:0  - 0:9              regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:8                regular_expression
+0:1  - 0:8                  alternation
+0:1  - 0:8                    regex_branch
+0:1  - 0:8                      bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:3                        bracket_character
+0:2  - 0:3                          literal `a`
+0:3  - 0:6                        range
+0:3  - 0:4                          start: bracket_character
+0:3  - 0:4                            literal `-`
+0:4  - 0:5                          range_operator `-`
+0:5  - 0:6                          end: bracket_character
+0:5  - 0:6                            literal `-`
+0:6  - 0:7                        bracket_character
+0:6  - 0:7                          literal `c`
+0:7  - 0:8                        closing: bracket_close `]`
+0:8  - 0:9                closing: delimiter `/`
+0:9  - 0:10         simple_command
+0:9  - 0:10           name: command_name `p`
+
+==================
+Classes ranges and numeric syntax — "s/\\x5e[[:alpha:]a-z]*/\\U&\\E/g\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+s/\x5e[[:alpha:]a-z]*/\U&\E/g
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        name: (command_name)
+        opening: (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (anchor
+                (character_escape))
+              (repetition
+                expression: (bracket_expression
+                  opening: (bracket_open)
+                  (character_class
+                    (class_open)
+                    (compound_marker)
+                    name: (class_name
+                      (class_name_text))
+                    (compound_marker)
+                    (class_close))
+                  (range
+                    start: (bracket_character
+                      (literal))
+                    (range_operator)
+                    end: (bracket_character
+                      (literal)))
+                  closing: (bracket_close))
+                operator: (regex_operator)))))
+        separator: (delimiter)
+        (replacement
+          (case_conversion)
+          (matched_text_reference)
+          (case_conversion))
+        closing: (delimiter)
+        (substitution_flags
+          (flag))))
+    (command_separator)))
+
+==================
+Character class and range — "/[[:alpha:]a-z]/p\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:alpha:]a-z]/p
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:17       command
+0:0  - 0:16         address: address_clause
+0:0  - 0:16           address
+0:0  - 0:16             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:15               regular_expression
+0:1  - 0:15                 alternation
+0:1  - 0:15                   regex_branch
+0:1  - 0:15                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:11                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:9                          name: class_name
+0:4  - 0:9                            class_name_text `alpha`
+0:9  - 0:10                         compound_marker `:`
+0:10 - 0:11                         class_close `]`
+0:11 - 0:14                       range
+0:11 - 0:12                         start: bracket_character
+0:11 - 0:12                           literal `a`
+0:12 - 0:13                         range_operator `-`
+0:13 - 0:14                         end: bracket_character
+0:13 - 0:14                           literal `z`
+0:14 - 0:15                       closing: bracket_close `]`
+0:15 - 0:16               closing: delimiter `/`
+0:16 - 0:17         simple_command
+0:16 - 0:17           name: command_name `p`
+0:17 - 1:0        command_separator
+0:17 - 0:18         `\n`
+
+==================
+Delimiter inside bracket — "s/[/]/x/\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[/]/x/
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:5           regular_expression
+0:2 - 0:5             alternation
+0:2 - 0:5               regex_branch
+0:2 - 0:5                 bracket_expression
+0:2 - 0:3                   opening: bracket_open `[`
+0:3 - 0:4                   bracket_character
+0:3 - 0:4                     literal `/`
+0:4 - 0:5                   closing: bracket_close `]`
+0:5 - 0:6           separator: delimiter `/`
+0:6 - 0:7           replacement
+0:6 - 0:7             literal `x`
+0:7 - 0:8           closing: delimiter `/`
+0:8 - 1:0       command_separator
+0:8 - 0:9         `\n`
+
+==================
+Three hyphens form a range between independent punctuation and digit
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[!---0]/p
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:9          address: address_clause
+0:0  - 0:9            address
+0:0  - 0:9              regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:8                regular_expression
+0:1  - 0:8                  alternation
+0:1  - 0:8                    regex_branch
+0:1  - 0:8                      bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:3                        bracket_character
+0:2  - 0:3                          literal `!`
+0:3  - 0:6                        range
+0:3  - 0:4                          start: bracket_character
+0:3  - 0:4                            literal `-`
+0:4  - 0:5                          range_operator `-`
+0:5  - 0:6                          end: bracket_character
+0:5  - 0:6                            literal `-`
+0:6  - 0:7                        bracket_character
+0:6  - 0:7                          literal `0`
+0:7  - 0:8                        closing: bracket_close `]`
+0:8  - 0:9                closing: delimiter `/`
+0:9  - 0:10         simple_command
+0:9  - 0:10           name: command_name `p`
+
+==================
+Three hyphens start a separate range after a letter range
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[a-b---c]/p
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:11         address: address_clause
+0:0  - 0:11           address
+0:0  - 0:11             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:10               regular_expression
+0:1  - 0:10                 alternation
+0:1  - 0:10                   regex_branch
+0:1  - 0:10                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:5                        range
+0:2  - 0:3                          start: bracket_character
+0:2  - 0:3                            literal `a`
+0:3  - 0:4                          range_operator `-`
+0:4  - 0:5                          end: bracket_character
+0:4  - 0:5                            literal `b`
+0:5  - 0:8                        range
+0:5  - 0:6                          start: bracket_character
+0:5  - 0:6                            literal `-`
+0:6  - 0:7                          range_operator `-`
+0:7  - 0:8                          end: bracket_character
+0:7  - 0:8                            literal `-`
+0:8  - 0:9                        bracket_character
+0:8  - 0:9                          literal `c`
+0:9  - 0:10                       closing: bracket_close `]`
+0:10 - 0:11               closing: delimiter `/`
+0:11 - 0:12         simple_command
+0:11 - 0:12           name: command_name `p`
+
+==================
+An encoded middle hyphen is the operator of the separate range
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[a-\x2d-c]/p
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:12         address: address_clause
+0:0  - 0:12           address
+0:0  - 0:12             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:11               regular_expression
+0:1  - 0:11                 alternation
+0:1  - 0:11                   regex_branch
+0:1  - 0:11                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:3                        bracket_character
+0:2  - 0:3                          literal `a`
+0:3  - 0:9                        range
+0:3  - 0:4                          start: bracket_character
+0:3  - 0:4                            literal `-`
+0:4  - 0:8                          character_escape `\\x2d`
+0:8  - 0:9                          end: bracket_character
+0:8  - 0:9                            literal `-`
+0:9  - 0:10                       bracket_character
+0:9  - 0:10                         literal `c`
+0:10 - 0:11                       closing: bracket_close `]`
+0:11 - 0:12               closing: delimiter `/`
+0:12 - 0:13         simple_command
+0:12 - 0:13           name: command_name `p`
+
+==================
+An encoded final hyphen is the endpoint of the separate range
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[a--\x2dc]/p
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:12         address: address_clause
+0:0  - 0:12           address
+0:0  - 0:12             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:11               regular_expression
+0:1  - 0:11                 alternation
+0:1  - 0:11                   regex_branch
+0:1  - 0:11                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:3                        bracket_character
+0:2  - 0:3                          literal `a`
+0:3  - 0:9                        range
+0:3  - 0:4                          start: bracket_character
+0:3  - 0:4                            literal `-`
+0:4  - 0:5                          range_operator `-`
+0:5  - 0:9                          end: bracket_character
+0:5  - 0:9                            character_escape `\\x2d`
+0:9  - 0:10                       bracket_character
+0:9  - 0:10                         literal `c`
+0:10 - 0:11                       closing: bracket_close `]`
+0:11 - 0:12               closing: delimiter `/`
+0:12 - 0:13         simple_command
+0:12 - 0:13           name: command_name `p`
+
+==================
+Consecutive range endpoints "ac-e" — "/[a-c-e]/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[a-c-e]/p
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:9          address: address_clause
+0:0  - 0:9            address
+0:0  - 0:9              regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:8                regular_expression
+0:1  - 0:8                  alternation
+0:1  - 0:8                    regex_branch
+0:1  - 0:8                      bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:7                        range
+0:2  - 0:3                          start: bracket_character
+0:2  - 0:3                            literal `a`
+0:3  - 0:4                          range_operator `-`
+0:4  - 0:5                          end: bracket_character
+0:4  - 0:5                            literal `c`
+0:5  - 0:6                          issue: syntax_issue
+0:5  - 0:6                            invalid_syntax
+0:5  - 0:6                              invalid_range_operator
+0:5  - 0:6                                range_operator `-`
+0:6  - 0:7                          end: bracket_character
+0:6  - 0:7                            literal `e`
+0:7  - 0:8                        closing: bracket_close `]`
+0:8  - 0:9                closing: delimiter `/`
+0:9  - 0:10         simple_command
+0:9  - 0:10           name: command_name `p`
+
+==================
+Consecutive range endpoints "ab--" — "/[a-b--c]/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[a-b--c]/p
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:10         address: address_clause
+0:0  - 0:10           address
+0:0  - 0:10             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:9                regular_expression
+0:1  - 0:9                  alternation
+0:1  - 0:9                    regex_branch
+0:1  - 0:9                      bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:7                        range
+0:2  - 0:3                          start: bracket_character
+0:2  - 0:3                            literal `a`
+0:3  - 0:4                          range_operator `-`
+0:4  - 0:5                          end: bracket_character
+0:4  - 0:5                            literal `b`
+0:5  - 0:6                          issue: syntax_issue
+0:5  - 0:6                            invalid_syntax
+0:5  - 0:6                              invalid_range_operator
+0:5  - 0:6                                range_operator `-`
+0:6  - 0:7                          end: bracket_character
+0:6  - 0:7                            literal `-`
+0:7  - 0:8                        bracket_character
+0:7  - 0:8                          literal `c`
+0:8  - 0:9                        closing: bracket_close `]`
+0:9  - 0:10               closing: delimiter `/`
+0:10 - 0:11         simple_command
+0:10 - 0:11           name: command_name `p`
+
+==================
+Unknown character class — "s/[[:unknown:]]/b/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[:unknown:]]/b/
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:18         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:15           regular_expression
+0:2  - 0:15             alternation
+0:2  - 0:15               regex_branch
+0:2  - 0:15                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:14                   character_class
+0:3  - 0:4                      class_open `[`
+0:4  - 0:5                      compound_marker `:`
+0:5  - 0:12                     issue: syntax_issue
+0:5  - 0:12                       invalid_syntax
+0:5  - 0:12                         unknown_character_class
+0:5  - 0:12                           class_name
+0:5  - 0:12                             class_name_text `unknown`
+0:12 - 0:13                     compound_marker `:`
+0:13 - 0:14                     class_close `]`
+0:14 - 0:15                   closing: bracket_close `]`
+0:15 - 0:16           separator: delimiter `/`
+0:16 - 0:17           replacement
+0:16 - 0:17             literal `b`
+0:17 - 0:18           closing: delimiter `/`
+
+==================
+Misplaced character class [false,"alpha"] — "s/[:alpha:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:alpha:]/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:10                   issue: syntax_issue
+0:3  - 0:10                     invalid_syntax
+0:3  - 0:10                       misplaced_character_class
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:9                          class_name
+0:4  - 0:9                            class_name_text `alpha`
+0:9  - 0:10                         compound_marker `:`
+0:10 - 0:11                   closing: bracket_close `]`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Misplaced character class [true,"alpha"] — "s/[^:alpha:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[^:alpha:]/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    regex_operator `^`
+0:4  - 0:11                   issue: syntax_issue
+0:4  - 0:11                     invalid_syntax
+0:4  - 0:11                       misplaced_character_class
+0:4  - 0:5                          compound_marker `:`
+0:5  - 0:10                         class_name
+0:5  - 0:10                           class_name_text `alpha`
+0:10 - 0:11                         compound_marker `:`
+0:11 - 0:12                   closing: bracket_close `]`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Misplaced character class [false,"unknown"] — "s/[:unknown:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:unknown:]/x/
+------------------
+0:0  - 0:16   script
+0:0  - 0:16     command_list
+0:0  - 0:16       command
+0:0  - 0:16         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:13           regular_expression
+0:2  - 0:13             alternation
+0:2  - 0:13               regex_branch
+0:2  - 0:13                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:12                   issue: syntax_issue
+0:3  - 0:12                     invalid_syntax
+0:3  - 0:12                       misplaced_character_class
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:11                         class_name
+0:4  - 0:11                           class_name_text `unknown`
+0:11 - 0:12                         compound_marker `:`
+0:12 - 0:13                   closing: bracket_close `]`
+0:13 - 0:14           separator: delimiter `/`
+0:14 - 0:15           replacement
+0:14 - 0:15             literal `x`
+0:15 - 0:16           closing: delimiter `/`
+
+==================
+Misplaced character class [false,"[alpha"] — "s/[:[alpha:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:[alpha:]/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:11                   issue: syntax_issue
+0:3  - 0:11                     invalid_syntax
+0:3  - 0:11                       misplaced_character_class
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:10                         class_name
+0:4  - 0:10                           class_name_text `[alpha`
+0:10 - 0:11                         compound_marker `:`
+0:11 - 0:12                   closing: bracket_close `]`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Encoded misplaced class — "s/[\\x3a\\x61lpha\\x3a]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[\x3a\x61lpha\x3a]/x/
+------------------
+0:0  - 0:23   script
+0:0  - 0:23     command_list
+0:0  - 0:23       command
+0:0  - 0:23         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:20           regular_expression
+0:2  - 0:20             alternation
+0:2  - 0:20               regex_branch
+0:2  - 0:20                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:19                   issue: syntax_issue
+0:3  - 0:19                     invalid_syntax
+0:3  - 0:19                       misplaced_character_class
+0:3  - 0:7                          character_escape `\\x3a`
+0:7  - 0:15                         class_name
+0:7  - 0:11                           character_escape `\\x61`
+0:11 - 0:15                           class_name_text `lpha`
+0:15 - 0:19                         character_escape `\\x3a`
+0:19 - 0:20                   closing: bracket_close `]`
+0:20 - 0:21           separator: delimiter `/`
+0:21 - 0:22           replacement
+0:21 - 0:22             literal `x`
+0:22 - 0:23           closing: delimiter `/`
+
+==================
+Ordinary colon bracket :: — "s/[::]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[::]/x/
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:6               regex_branch
+0:2 - 0:6                 bracket_expression
+0:2 - 0:3                   opening: bracket_open `[`
+0:3 - 0:4                   bracket_character
+0:3 - 0:4                     literal `:`
+0:4 - 0:5                   bracket_character
+0:4 - 0:5                     literal `:`
+0:5 - 0:6                   closing: bracket_close `]`
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Ordinary colon bracket ::: — "s/[:::]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:::]/x/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `:`
+0:4  - 0:5                    bracket_character
+0:4  - 0:5                      literal `:`
+0:5  - 0:6                    bracket_character
+0:5  - 0:6                      literal `:`
+0:6  - 0:7                    closing: bracket_close `]`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Ordinary colon bracket a:alpha: — "s/[a:alpha:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[a:alpha:]/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `a`
+0:4  - 0:5                    bracket_character
+0:4  - 0:5                      literal `:`
+0:5  - 0:6                    bracket_character
+0:5  - 0:6                      literal `a`
+0:6  - 0:7                    bracket_character
+0:6  - 0:7                      literal `l`
+0:7  - 0:8                    bracket_character
+0:7  - 0:8                      literal `p`
+0:8  - 0:9                    bracket_character
+0:8  - 0:9                      literal `h`
+0:9  - 0:10                   bracket_character
+0:9  - 0:10                     literal `a`
+0:10 - 0:11                   bracket_character
+0:10 - 0:11                     literal `:`
+0:11 - 0:12                   closing: bracket_close `]`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Ordinary colon bracket :alpha:x — "s/[:alpha:x]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:alpha:x]/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `:`
+0:4  - 0:5                    bracket_character
+0:4  - 0:5                      literal `a`
+0:5  - 0:6                    bracket_character
+0:5  - 0:6                      literal `l`
+0:6  - 0:7                    bracket_character
+0:6  - 0:7                      literal `p`
+0:7  - 0:8                    bracket_character
+0:7  - 0:8                      literal `h`
+0:8  - 0:9                    bracket_character
+0:8  - 0:9                      literal `a`
+0:9  - 0:10                   bracket_character
+0:9  - 0:10                     literal `:`
+0:10 - 0:11                   bracket_character
+0:10 - 0:11                     literal `x`
+0:11 - 0:12                   closing: bracket_close `]`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Escaped colon between literal colons — "s/[:\\x3a:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:\x3a:]/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `:`
+0:4  - 0:8                    bracket_character
+0:4  - 0:8                      character_escape `\\x3a`
+0:8  - 0:9                    bracket_character
+0:8  - 0:9                      literal `:`
+0:9  - 0:10                   closing: bracket_close `]`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Colon bracket with range — "s/[:a-b:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:a-b:]/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `:`
+0:4  - 0:7                    range
+0:4  - 0:5                      start: bracket_character
+0:4  - 0:5                        literal `a`
+0:5  - 0:6                      range_operator `-`
+0:6  - 0:7                      end: bracket_character
+0:6  - 0:7                        literal `b`
+0:7  - 0:8                    bracket_character
+0:7  - 0:8                      literal `:`
+0:8  - 0:9                    closing: bracket_close `]`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Class nested between literal colons — "s/[:[:alpha:]:]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[:[:alpha:]:]/x/
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:18         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:15           regular_expression
+0:2  - 0:15             alternation
+0:2  - 0:15               regex_branch
+0:2  - 0:15                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `:`
+0:4  - 0:13                   character_class
+0:4  - 0:5                      class_open `[`
+0:5  - 0:6                      compound_marker `:`
+0:6  - 0:11                     name: class_name
+0:6  - 0:11                       class_name_text `alpha`
+0:11 - 0:12                     compound_marker `:`
+0:12 - 0:13                     class_close `]`
+0:13 - 0:14                   bracket_character
+0:13 - 0:14                     literal `:`
+0:14 - 0:15                   closing: bracket_close `]`
+0:15 - 0:16           separator: delimiter `/`
+0:16 - 0:17           replacement
+0:16 - 0:17             literal `x`
+0:17 - 0:18           closing: delimiter `/`
+
+==================
+Escaped class name letter — "s/[[:\\x61lpha:]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[:\x61lpha:]]/x/
+------------------
+0:0  - 0:19   script
+0:0  - 0:19     command_list
+0:0  - 0:19       command
+0:0  - 0:19         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:16           regular_expression
+0:2  - 0:16             alternation
+0:2  - 0:16               regex_branch
+0:2  - 0:16                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:15                   character_class
+0:3  - 0:4                      class_open `[`
+0:4  - 0:5                      compound_marker `:`
+0:5  - 0:13                     name: class_name
+0:5  - 0:9                        character_escape `\\x61`
+0:9  - 0:13                       class_name_text `lpha`
+0:13 - 0:14                     compound_marker `:`
+0:14 - 0:15                     class_close `]`
+0:15 - 0:16                   closing: bracket_close `]`
+0:16 - 0:17           separator: delimiter `/`
+0:17 - 0:18           replacement
+0:17 - 0:18             literal `x`
+0:18 - 0:19           closing: delimiter `/`
+
+==================
+Encoded character class delimiters — "s/[\\x5b\\x3aalpha\\x3a\\x5d]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[\x5b\x3aalpha\x3a\x5d]/x/
+------------------
+0:0  - 0:28   script
+0:0  - 0:28     command_list
+0:0  - 0:28       command
+0:0  - 0:28         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:25           regular_expression
+0:2  - 0:25             alternation
+0:2  - 0:25               regex_branch
+0:2  - 0:25                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:24                   character_class
+0:3  - 0:7                      character_escape `\\x5b`
+0:7  - 0:11                     character_escape `\\x3a`
+0:11 - 0:16                     name: class_name
+0:11 - 0:16                       class_name_text `alpha`
+0:16 - 0:20                     character_escape `\\x3a`
+0:20 - 0:24                     character_escape `\\x5d`
+0:24 - 0:25                   closing: bracket_close `]`
+0:25 - 0:26           separator: delimiter `/`
+0:26 - 0:27           replacement
+0:26 - 0:27             literal `x`
+0:27 - 0:28           closing: delimiter `/`
+
+==================
+Encoded collating element — "s/[[.\\x61.]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[.\x61.]]/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:11                   collating_symbol
+0:3  - 0:4                      collating_open `[`
+0:4  - 0:5                      compound_marker `.`
+0:5  - 0:9                      element: collating_element
+0:5  - 0:9                        character_escape `\\x61`
+0:9  - 0:10                     compound_marker `.`
+0:10 - 0:11                     collating_close `]`
+0:11 - 0:12                   closing: bracket_close `]`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Missing compound bracket payload : — "s/[[::]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[::]]/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:7                    character_class
+0:3  - 0:4                      class_open `[`
+0:4  - 0:5                      compound_marker `:`
+0:5  - 0:5                      issue: syntax_issue
+0:5  - 0:5                        invalid_syntax
+0:5  - 0:5                          missing_bracket_element
+0:5  - 0:6                      compound_marker `:`
+0:6  - 0:7                      class_close `]`
+0:7  - 0:8                    closing: bracket_close `]`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Missing compound bracket payload . — "s/[[..]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[..]]/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:7                    collating_symbol
+0:3  - 0:4                      collating_open `[`
+0:4  - 0:5                      compound_marker `.`
+0:5  - 0:5                      issue: syntax_issue
+0:5  - 0:5                        invalid_syntax
+0:5  - 0:5                          missing_bracket_element
+0:5  - 0:6                      compound_marker `.`
+0:6  - 0:7                      collating_close `]`
+0:7  - 0:8                    closing: bracket_close `]`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Shared range endpoint — "s/[a-b-c]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[a-b-c]/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:8                    range
+0:3  - 0:4                      start: bracket_character
+0:3  - 0:4                        literal `a`
+0:4  - 0:5                      range_operator `-`
+0:5  - 0:6                      end: bracket_character
+0:5  - 0:6                        literal `b`
+0:6  - 0:7                      issue: syntax_issue
+0:6  - 0:7                        invalid_syntax
+0:6  - 0:7                          invalid_range_operator
+0:6  - 0:7                            range_operator `-`
+0:7  - 0:8                      end: bracket_character
+0:7  - 0:8                        literal `c`
+0:8  - 0:9                    closing: bracket_close `]`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Class cannot start a range — "s/[[:alpha:]-z]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[:alpha:]-z]/x/
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:18         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:15           regular_expression
+0:2  - 0:15             alternation
+0:2  - 0:15               regex_branch
+0:2  - 0:15                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:14                   range
+0:3  - 0:12                     issue: syntax_issue
+0:3  - 0:12                       invalid_syntax
+0:3  - 0:12                         invalid_range_endpoint
+0:3  - 0:12                           character_class
+0:3  - 0:4                              class_open `[`
+0:4  - 0:5                              compound_marker `:`
+0:5  - 0:10                             name: class_name
+0:5  - 0:10                               class_name_text `alpha`
+0:10 - 0:11                             compound_marker `:`
+0:11 - 0:12                             class_close `]`
+0:12 - 0:13                     range_operator `-`
+0:13 - 0:14                     end: bracket_character
+0:13 - 0:14                       literal `z`
+0:14 - 0:15                   closing: bracket_close `]`
+0:15 - 0:16           separator: delimiter `/`
+0:16 - 0:17           replacement
+0:16 - 0:17             literal `x`
+0:17 - 0:18           closing: delimiter `/`
+
+==================
+Class before two hyphens at EOF can still become independent — "/[[:alpha:]--"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:alpha:]--
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         address: address_clause
+0:0  - 0:13           address
+0:0  - 0:13             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:13               regular_expression
+0:1  - 0:13                 alternation
+0:1  - 0:13                   regex_branch
+0:1  - 0:13                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:13                       range
+0:2  - 0:11                         issue: syntax_issue
+0:2  - 0:11                           incomplete_syntax
+0:2  - 0:11                             invalid_range_endpoint
+0:2  - 0:11                               character_class
+0:2  - 0:3                                  class_open `[`
+0:3  - 0:4                                  compound_marker `:`
+0:4  - 0:9                                  name: class_name
+0:4  - 0:9                                    class_name_text `alpha`
+0:9  - 0:10                                 compound_marker `:`
+0:10 - 0:11                                 class_close `]`
+0:11 - 0:12                         range_operator `-`
+0:12 - 0:13                         end: bracket_character
+0:12 - 0:13                           literal `-`
+0:13 - 0:13                       issue: syntax_issue
+0:13 - 0:13                         incomplete_syntax
+0:13 - 0:13                           missing_closing_delimiter
+0:13 - 0:13               issue: syntax_issue
+0:13 - 0:13                 incomplete_syntax
+0:13 - 0:13                   unterminated_regex
+0:13 - 0:13         issue: syntax_issue
+0:13 - 0:13           incomplete_syntax
+0:13 - 0:13             missing_command
+
+==================
+Equivalence class cannot end a range — "s/[a-[=z=]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[a-[=z=]]/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:10                   range
+0:3  - 0:4                      start: bracket_character
+0:3  - 0:4                        literal `a`
+0:4  - 0:5                      range_operator `-`
+0:5  - 0:10                     issue: syntax_issue
+0:5  - 0:10                       invalid_syntax
+0:5  - 0:10                         invalid_range_endpoint
+0:5  - 0:10                           equivalence_class
+0:5  - 0:6                              equivalence_open `[`
+0:6  - 0:7                              compound_marker `=`
+0:7  - 0:8                              element: collating_element
+0:7  - 0:8                                collating_text `z`
+0:8  - 0:9                              compound_marker `=`
+0:9  - 0:10                             equivalence_close `]`
+0:10 - 0:11                   closing: bracket_close `]`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Collating symbol ends a range — "s/[a-[.z.]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[a-[.z.]]/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:10                   range
+0:3  - 0:4                      start: bracket_character
+0:3  - 0:4                        literal `a`
+0:4  - 0:5                      range_operator `-`
+0:5  - 0:10                     end: collating_symbol
+0:5  - 0:6                        collating_open `[`
+0:6  - 0:7                        compound_marker `.`
+0:7  - 0:8                        element: collating_element
+0:7  - 0:8                          collating_text `z`
+0:8  - 0:9                        compound_marker `.`
+0:9  - 0:10                       collating_close `]`
+0:10 - 0:11                   closing: bracket_close `]`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Decoded closer leaves a literal hyphen — "s/[a-\\x5d]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[a-\x5d]/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:9                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `a`
+0:4  - 0:5                    bracket_character
+0:4  - 0:5                      literal `-`
+0:5  - 0:9                    closing: character_escape `\\x5d`
+0:9  - 0:10                 regex_character
+0:9  - 0:10                   literal `]`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Encoded range operator — "s/[a\\x2dz]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[a\x2dz]/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:9                    range
+0:3  - 0:4                      start: bracket_character
+0:3  - 0:4                        literal `a`
+0:4  - 0:8                      character_escape `\\x2d`
+0:8  - 0:9                      end: bracket_character
+0:8  - 0:9                        literal `z`
+0:9  - 0:10                   closing: bracket_close `]`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Encoded backslash escapes wildcard inside bracket — "s/[\\x5c*]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[\x5c*]/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:7                    bracket_character
+0:3  - 0:7                      character_escape `\\x5c`
+0:7  - 0:8                    bracket_character
+0:7  - 0:8                      literal `*`
+0:8  - 0:9                    closing: bracket_close `]`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Backslash escape hides the next escape — "s/[\\\\n]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[\\n]/x/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:5                    bracket_character
+0:3  - 0:5                      escape `\\\\`
+0:5  - 0:6                    bracket_character
+0:5  - 0:6                      literal `n`
+0:6  - 0:7                    closing: bracket_close `]`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Digitless escape inside class name — "s/[[:\\digit:]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[:\digit:]]/x/
+------------------
+0:0  - 0:17   script
+0:0  - 0:17     command_list
+0:0  - 0:17       command
+0:0  - 0:17         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:14           regular_expression
+0:2  - 0:14             alternation
+0:2  - 0:14               regex_branch
+0:2  - 0:14                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:13                   character_class
+0:3  - 0:4                      class_open `[`
+0:4  - 0:5                      compound_marker `:`
+0:5  - 0:11                     name: class_name
+0:5  - 0:7                        escape `\\d`
+0:7  - 0:11                       class_name_text `igit`
+0:11 - 0:12                     compound_marker `:`
+0:12 - 0:13                     class_close `]`
+0:13 - 0:14                   closing: bracket_close `]`
+0:14 - 0:15           separator: delimiter `/`
+0:15 - 0:16           replacement
+0:15 - 0:16             literal `x`
+0:16 - 0:17           closing: delimiter `/`
+
+==================
+Digitless escape inside collating element — "s/[[.a\\ob.]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[.a\ob.]]/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:11                   collating_symbol
+0:3  - 0:4                      collating_open `[`
+0:4  - 0:5                      compound_marker `.`
+0:5  - 0:9                      element: collating_element
+0:5  - 0:6                        collating_text `a`
+0:6  - 0:8                        escape `\\o`
+0:8  - 0:9                        collating_text `b`
+0:9  - 0:10                     compound_marker `.`
+0:10 - 0:11                     collating_close `]`
+0:11 - 0:12                   closing: bracket_close `]`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Escaped UTF-8 bracket element — "s/[\\xce\\xa3]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[\xce\xa3]/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:11                   bracket_character
+0:3  - 0:7                      character_escape `\\xce`
+0:7  - 0:11                     character_escape `\\xa3`
+0:11 - 0:12                   closing: bracket_close `]`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Escaped delimiter inside encoded bracket — "s/\\x5b\\/]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/\x5b\/]/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  bracket_expression
+0:2  - 0:6                    opening: character_escape `\\x5b`
+0:6  - 0:8                    bracket_character
+0:6  - 0:8                      escape `\\/`
+0:8  - 0:9                    closing: bracket_close `]`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Escaped delimiter closes encoded bracket — "s]\\x5ba\\]]x]"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s]\x5ba\]]x]
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `]`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  bracket_expression
+0:2  - 0:6                    opening: character_escape `\\x5b`
+0:6  - 0:7                    bracket_character
+0:6  - 0:7                      literal `a`
+0:7  - 0:9                    closing: escape `\\]`
+0:9  - 0:10           separator: delimiter `]`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `]`
+
+==================
+Escaped delimiter is a range operator — "s-\\x5ba\\-z]-x-"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s-\x5ba\-z]-x-
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `-`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 bracket_expression
+0:2  - 0:6                    opening: character_escape `\\x5b`
+0:6  - 0:10                   range
+0:6  - 0:7                      start: bracket_character
+0:6  - 0:7                        literal `a`
+0:7  - 0:9                      escape `\\-`
+0:9  - 0:10                     end: bracket_character
+0:9  - 0:10                       literal `z`
+0:10 - 0:11                   closing: bracket_close `]`
+0:11 - 0:12           separator: delimiter `-`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `-`
+
+==================
+Escaped delimiter is a class marker — "s:\\x5b\\x5b\\:alpha\\:\\x5d\\x5d:x:"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s:\x5b\x5b\:alpha\:\x5d\x5d:x:
+------------------
+0:0  - 0:30   script
+0:0  - 0:30     command_list
+0:0  - 0:30       command
+0:0  - 0:30         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `:`
+0:2  - 0:27           regular_expression
+0:2  - 0:27             alternation
+0:2  - 0:27               regex_branch
+0:2  - 0:27                 bracket_expression
+0:2  - 0:6                    opening: character_escape `\\x5b`
+0:6  - 0:23                   character_class
+0:6  - 0:10                     character_escape `\\x5b`
+0:10 - 0:12                     escape `\\:`
+0:12 - 0:17                     name: class_name
+0:12 - 0:17                       class_name_text `alpha`
+0:17 - 0:19                     escape `\\:`
+0:19 - 0:23                     character_escape `\\x5d`
+0:23 - 0:27                   closing: character_escape `\\x5d`
+0:27 - 0:28           separator: delimiter `:`
+0:28 - 0:29           replacement
+0:28 - 0:29             literal `x`
+0:29 - 0:30           closing: delimiter `:`
+
+==================
+Collating and equivalence terms — "s/[[.a.][=b=]]/x/\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[.a.][=b=]]/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:17       command
+0:0  - 0:17         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:14           regular_expression
+0:2  - 0:14             alternation
+0:2  - 0:14               regex_branch
+0:2  - 0:14                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:8                    collating_symbol
+0:3  - 0:4                      collating_open `[`
+0:4  - 0:5                      compound_marker `.`
+0:5  - 0:6                      element: collating_element
+0:5  - 0:6                        collating_text `a`
+0:6  - 0:7                      compound_marker `.`
+0:7  - 0:8                      collating_close `]`
+0:8  - 0:13                   equivalence_class
+0:8  - 0:9                      equivalence_open `[`
+0:9  - 0:10                     compound_marker `=`
+0:10 - 0:11                     element: collating_element
+0:10 - 0:11                       collating_text `b`
+0:11 - 0:12                     compound_marker `=`
+0:12 - 0:13                     equivalence_close `]`
+0:13 - 0:14                   closing: bracket_close `]`
+0:14 - 0:15           separator: delimiter `/`
+0:15 - 0:16           replacement
+0:15 - 0:16             literal `x`
+0:16 - 0:17           closing: delimiter `/`
+0:17 - 1:0        command_separator
+0:17 - 0:18         `\n`
+
+==================
+Literal closing bracket caret and hyphen — "s/[]^-]/x/\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[]^-]/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `]`
+0:4  - 0:5                    bracket_character
+0:4  - 0:5                      literal `^`
+0:5  - 0:6                    bracket_character
+0:5  - 0:6                      literal `-`
+0:6  - 0:7                    closing: bracket_close `]`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+0:10 - 1:0        command_separator
+0:10 - 0:11         `\n`
+
+==================
+Generated bracket opening at delimiter — "s/\\x5b/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/\x5b/x/
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:6               regex_branch
+0:2 - 0:6                 bracket_expression
+0:2 - 0:6                   opening: character_escape `\\x5b`
+0:6 - 0:6                   issue: syntax_issue
+0:6 - 0:6                     invalid_syntax
+0:6 - 0:6                       missing_bracket_element
+0:6 - 0:6                   issue: syntax_issue
+0:6 - 0:6                     invalid_syntax
+0:6 - 0:6                       missing_closing_delimiter
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Control operand does not open host bracket — "s[\\c[[x["
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s[\c[[x[
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `[`
+0:2 - 0:5           regular_expression
+0:2 - 0:5             alternation
+0:2 - 0:5               regex_branch
+0:2 - 0:5                 regex_character
+0:2 - 0:5                   character_escape `\\c[`
+0:5 - 0:6           separator: delimiter `[`
+0:6 - 0:7           replacement
+0:6 - 0:7             literal `x`
+0:7 - 0:8           closing: delimiter `[`
+
+==================
+Host delimiter after decoded closer — "s@[a\\x5d@]@x@"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s@[a\x5d@]@x@
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `@`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:8                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:4                    bracket_character
+0:3  - 0:4                      literal `a`
+0:4  - 0:8                    closing: character_escape `\\x5d`
+0:8  - 0:9                  regex_character
+0:8  - 0:9                    literal `@`
+0:9  - 0:10                 regex_character
+0:9  - 0:10                   literal `]`
+0:10 - 0:11           separator: delimiter `@`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `@`
+
+==================
+Escaped delimiter digits form bracket structure — "s5\\x\\5ba\\x\\5d5X5"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s5\x\5ba\x\5d5X5
+------------------
+0:0  - 0:16   script
+0:0  - 0:16     command_list
+0:0  - 0:16       command
+0:0  - 0:16         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `5`
+0:2  - 0:13           regular_expression
+0:2  - 0:13             alternation
+0:2  - 0:13               regex_branch
+0:2  - 0:13                 bracket_expression
+0:2  - 0:7                    opening: character_escape `\\x\\5b`
+0:7  - 0:8                    bracket_character
+0:7  - 0:8                      literal `a`
+0:8  - 0:13                   closing: character_escape `\\x\\5d`
+0:13 - 0:14           separator: delimiter `5`
+0:14 - 0:15           replacement
+0:14 - 0:15             literal `X`
+0:15 - 0:16           closing: delimiter `5`
+
+==================
+Bracket escape with backslash delimiter — "s\\[\\t]\\X\\p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s\[\t]\X\p
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `\\`
+0:2  - 0:6            regular_expression
+0:2  - 0:6              alternation
+0:2  - 0:6                regex_branch
+0:2  - 0:6                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:5                    bracket_character
+0:3  - 0:5                      character_escape `\\t`
+0:5  - 0:6                    closing: bracket_close `]`
+0:6  - 0:7            separator: delimiter `\\`
+0:7  - 0:8            replacement
+0:7  - 0:8              literal `X`
+0:8  - 0:9            closing: delimiter `\\`
+0:9  - 0:10           substitution_flags
+0:9  - 0:10             flag `p`
+
+==================
+Numeric escape opens a bracket after paired control backslash — "sx\\c\\\\\\\\x5bxYx"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+sx\c\\\\x5bxYx
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `x`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:6                  regex_character
+0:2  - 0:6                    character_escape `\\c\\\\`
+0:6  - 0:11                 bracket_expression
+0:6  - 0:11                   opening: character_escape `\\\\x5b`
+0:11 - 0:11                   issue: syntax_issue
+0:11 - 0:11                     invalid_syntax
+0:11 - 0:11                       missing_bracket_element
+0:11 - 0:11                   issue: syntax_issue
+0:11 - 0:11                     invalid_syntax
+0:11 - 0:11                       missing_closing_delimiter
+0:11 - 0:12           separator: delimiter `x`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `Y`
+0:13 - 0:14           closing: delimiter `x`
+
+==================
+Escaped letter delimiter before unclosed encoded bracket — "st\\x5b\\c\\\\\\tQt"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+st\x5b\c\\\tQt
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `t`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 bracket_expression
+0:2  - 0:6                    opening: character_escape `\\x5b`
+0:6  - 0:10                   bracket_character
+0:6  - 0:10                     character_escape `\\c\\\\`
+0:10 - 0:11                   bracket_character
+0:10 - 0:11                     literal `\\`
+0:11 - 0:11                   issue: syntax_issue
+0:11 - 0:11                     invalid_syntax
+0:11 - 0:11                       missing_closing_delimiter
+0:11 - 0:12           separator: delimiter `t`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `Q`
+0:13 - 0:14           closing: delimiter `t`
+
+==================
+Unclosed address bracket at EOF — "/[a"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[a
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:3               regular_expression
+0:1 - 0:3                 alternation
+0:1 - 0:3                   regex_branch
+0:1 - 0:3                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:3                       bracket_character
+0:2 - 0:3                         literal `a`
+0:3 - 0:3                       issue: syntax_issue
+0:3 - 0:3                         incomplete_syntax
+0:3 - 0:3                           missing_closing_delimiter
+0:3 - 0:3               issue: syntax_issue
+0:3 - 0:3                 incomplete_syntax
+0:3 - 0:3                   unterminated_regex
+0:3 - 0:3         issue: syntax_issue
+0:3 - 0:3           incomplete_syntax
+0:3 - 0:3             missing_command
+
+==================
+Bracket backslash at EOF is literal — "/[\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[\
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:3               regular_expression
+0:1 - 0:3                 alternation
+0:1 - 0:3                   regex_branch
+0:1 - 0:3                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:3                       bracket_character
+0:2 - 0:3                         literal `\\`
+0:3 - 0:3                       issue: syntax_issue
+0:3 - 0:3                         incomplete_syntax
+0:3 - 0:3                           missing_closing_delimiter
+0:3 - 0:3               issue: syntax_issue
+0:3 - 0:3                 incomplete_syntax
+0:3 - 0:3                   unterminated_regex
+0:3 - 0:3         issue: syntax_issue
+0:3 - 0:3           incomplete_syntax
+0:3 - 0:3             missing_command
+
+==================
+Bracket control escape at EOF — "/[\\c"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[\c
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:4           address
+0:0 - 0:4             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:4               regular_expression
+0:1 - 0:4                 alternation
+0:1 - 0:4                   regex_branch
+0:1 - 0:4                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:4                       issue: syntax_issue
+0:2 - 0:4                         incomplete_syntax
+0:2 - 0:4                           missing_escape_character `\\c`
+0:4 - 0:4                       issue: syntax_issue
+0:4 - 0:4                         incomplete_syntax
+0:4 - 0:4                           missing_closing_delimiter
+0:4 - 0:4               issue: syntax_issue
+0:4 - 0:4                 incomplete_syntax
+0:4 - 0:4                   unterminated_regex
+0:4 - 0:4         issue: syntax_issue
+0:4 - 0:4           incomplete_syntax
+0:4 - 0:4             missing_command
+
+==================
+Bracket control escape before newline — "s/[\\c\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[\c
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:5       command
+0:0 - 0:5         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:5           regular_expression
+0:2 - 0:5             alternation
+0:2 - 0:5               regex_branch
+0:2 - 0:5                 bracket_expression
+0:2 - 0:3                   opening: bracket_open `[`
+0:3 - 0:5                   issue: syntax_issue
+0:3 - 0:5                     invalid_syntax
+0:3 - 0:5                       missing_escape_character `\\c`
+0:5 - 0:5                   issue: syntax_issue
+0:5 - 0:5                     invalid_syntax
+0:5 - 0:5                       missing_closing_delimiter
+0:5 - 0:5           issue: syntax_issue
+0:5 - 0:5             invalid_syntax
+0:5 - 0:5               unterminated_regex
+0:5 - 0:5           issue: syntax_issue
+0:5 - 0:5             invalid_syntax
+0:5 - 0:5               unterminated_operand
+0:5 - 1:0       command_separator
+0:5 - 0:6         `\n`
+
+==================
+Range operator before incomplete numeric escape "\\x" — "/[0-z-\\x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[0-z-\x
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         address: address_clause
+0:0 - 0:8           address
+0:0 - 0:8             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:8               regular_expression
+0:1 - 0:8                 alternation
+0:1 - 0:8                   regex_branch
+0:1 - 0:8                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:8                       range
+0:2 - 0:3                         start: bracket_character
+0:2 - 0:3                           literal `0`
+0:3 - 0:4                         range_operator `-`
+0:4 - 0:5                         end: bracket_character
+0:4 - 0:5                           literal `z`
+0:5 - 0:6                         issue: syntax_issue
+0:5 - 0:6                           incomplete_syntax
+0:5 - 0:6                             invalid_range_operator
+0:5 - 0:6                               range_operator `-`
+0:6 - 0:8                         end: bracket_character
+0:6 - 0:8                           escape `\\x`
+0:8 - 0:8                       issue: syntax_issue
+0:8 - 0:8                         incomplete_syntax
+0:8 - 0:8                           missing_closing_delimiter
+0:8 - 0:8               issue: syntax_issue
+0:8 - 0:8                 incomplete_syntax
+0:8 - 0:8                   unterminated_regex
+0:8 - 0:8         issue: syntax_issue
+0:8 - 0:8           incomplete_syntax
+0:8 - 0:8             missing_command
+
+==================
+Range operator before incomplete numeric escape "\\x6" — "/[0-z-\\x6"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[0-z-\x6
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         address: address_clause
+0:0 - 0:9           address
+0:0 - 0:9             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:9               regular_expression
+0:1 - 0:9                 alternation
+0:1 - 0:9                   regex_branch
+0:1 - 0:9                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:9                       range
+0:2 - 0:3                         start: bracket_character
+0:2 - 0:3                           literal `0`
+0:3 - 0:4                         range_operator `-`
+0:4 - 0:5                         end: bracket_character
+0:4 - 0:5                           literal `z`
+0:5 - 0:6                         issue: syntax_issue
+0:5 - 0:6                           invalid_syntax
+0:5 - 0:6                             invalid_range_operator
+0:5 - 0:6                               range_operator `-`
+0:6 - 0:9                         end: bracket_character
+0:6 - 0:9                           character_escape `\\x6`
+0:9 - 0:9                       issue: syntax_issue
+0:9 - 0:9                         incomplete_syntax
+0:9 - 0:9                           missing_closing_delimiter
+0:9 - 0:9               issue: syntax_issue
+0:9 - 0:9                 incomplete_syntax
+0:9 - 0:9                   unterminated_regex
+0:9 - 0:9         issue: syntax_issue
+0:9 - 0:9           incomplete_syntax
+0:9 - 0:9             missing_command
+
+==================
+Host bracket scan retains apparent separators — "s/[[...]]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[...]]/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:9                  bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:8                    collating_symbol
+0:3  - 0:4                      collating_open `[`
+0:4  - 0:5                      compound_marker `.`
+0:5  - 0:6                      element: collating_element
+0:5  - 0:6                        collating_text `.`
+0:6  - 0:7                      compound_marker `.`
+0:7  - 0:8                      collating_close `]`
+0:8  - 0:9                    closing: bracket_close `]`
+0:9  - 0:10                 regex_character
+0:9  - 0:10                   literal `/`
+0:10 - 0:11                 regex_character
+0:10 - 0:11                   literal `x`
+0:11 - 0:12                 regex_character
+0:11 - 0:12                   literal `/`
+0:12 - 0:12           issue: syntax_issue
+0:12 - 0:12             incomplete_syntax
+0:12 - 0:12               unterminated_regex
+0:12 - 0:12           issue: syntax_issue
+0:12 - 0:12             incomplete_syntax
+0:12 - 0:12               unterminated_operand
+
+==================
+Unclosed compound term and bracket — "s/[[=a=[]/]/x/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/[[=a=[]/]/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 bracket_expression
+0:2  - 0:3                    opening: bracket_open `[`
+0:3  - 0:11                   equivalence_class
+0:3  - 0:4                      equivalence_open `[`
+0:4  - 0:5                      compound_marker `=`
+0:5  - 0:11                     element: collating_element
+0:5  - 0:6                        collating_text `a`
+0:6  - 0:7                        collating_text `=`
+0:7  - 0:11                       collating_text `[]/]`
+0:11 - 0:11                     issue: syntax_issue
+0:11 - 0:11                       invalid_syntax
+0:11 - 0:11                         missing_closing_delimiter
+0:11 - 0:11                   issue: syntax_issue
+0:11 - 0:11                     invalid_syntax
+0:11 - 0:11                       missing_closing_delimiter
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Character class escape at EOF "a\\c" — "/[[:a\\c"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\c
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:7           address
+0:0 - 0:7             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:7               regular_expression
+0:1 - 0:7                 alternation
+0:1 - 0:7                   regex_branch
+0:1 - 0:7                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:7                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:7                         issue: syntax_issue
+0:4 - 0:7                           incomplete_syntax
+0:4 - 0:7                             unknown_character_class
+0:4 - 0:7                               class_name
+0:4 - 0:5                                 class_name_text `a`
+0:5 - 0:7                                 issue: syntax_issue
+0:5 - 0:7                                   incomplete_syntax
+0:5 - 0:7                                     missing_escape_character `\\c`
+0:7 - 0:7                         issue: syntax_issue
+0:7 - 0:7                           incomplete_syntax
+0:7 - 0:7                             missing_closing_delimiter
+0:7 - 0:7                       issue: syntax_issue
+0:7 - 0:7                         incomplete_syntax
+0:7 - 0:7                           missing_closing_delimiter
+0:7 - 0:7               issue: syntax_issue
+0:7 - 0:7                 incomplete_syntax
+0:7 - 0:7                   unterminated_regex
+0:7 - 0:7         issue: syntax_issue
+0:7 - 0:7           incomplete_syntax
+0:7 - 0:7             missing_command
+
+==================
+Completed character class escape "\\c," — "/[[:a\\c,pha:]]/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\c,pha:]]/p
+------------------
+0:0  - 0:16   script
+0:0  - 0:16     command_list
+0:0  - 0:16       command
+0:0  - 0:15         address: address_clause
+0:0  - 0:15           address
+0:0  - 0:15             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:14               regular_expression
+0:1  - 0:14                 alternation
+0:1  - 0:14                   regex_branch
+0:1  - 0:14                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:13                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:11                         name: class_name
+0:4  - 0:5                            class_name_text `a`
+0:5  - 0:8                            character_escape `\\c,`
+0:8  - 0:11                           class_name_text `pha`
+0:11 - 0:12                         compound_marker `:`
+0:12 - 0:13                         class_close `]`
+0:13 - 0:14                       closing: bracket_close `]`
+0:14 - 0:15               closing: delimiter `/`
+0:15 - 0:16         simple_command
+0:15 - 0:16           name: command_name `p`
+
+==================
+Character class escape at EOF "a\\" — "/[[:a\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         address: address_clause
+0:0 - 0:6           address
+0:0 - 0:6             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:6               regular_expression
+0:1 - 0:6                 alternation
+0:1 - 0:6                   regex_branch
+0:1 - 0:6                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:6                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:6                         issue: syntax_issue
+0:4 - 0:6                           incomplete_syntax
+0:4 - 0:6                             unknown_character_class
+0:4 - 0:6                               class_name
+0:4 - 0:5                                 class_name_text `a`
+0:5 - 0:6                                 class_name_text `\\`
+0:6 - 0:6                         issue: syntax_issue
+0:6 - 0:6                           incomplete_syntax
+0:6 - 0:6                             missing_closing_delimiter
+0:6 - 0:6                       issue: syntax_issue
+0:6 - 0:6                         incomplete_syntax
+0:6 - 0:6                           missing_closing_delimiter
+0:6 - 0:6               issue: syntax_issue
+0:6 - 0:6                 incomplete_syntax
+0:6 - 0:6                   unterminated_regex
+0:6 - 0:6         issue: syntax_issue
+0:6 - 0:6           incomplete_syntax
+0:6 - 0:6             missing_command
+
+==================
+Completed character class escape "\\x6c" — "/[[:a\\x6cpha:]]/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\x6cpha:]]/p
+------------------
+0:0  - 0:17   script
+0:0  - 0:17     command_list
+0:0  - 0:17       command
+0:0  - 0:16         address: address_clause
+0:0  - 0:16           address
+0:0  - 0:16             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:15               regular_expression
+0:1  - 0:15                 alternation
+0:1  - 0:15                   regex_branch
+0:1  - 0:15                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:14                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:12                         name: class_name
+0:4  - 0:5                            class_name_text `a`
+0:5  - 0:9                            character_escape `\\x6c`
+0:9  - 0:12                           class_name_text `pha`
+0:12 - 0:13                         compound_marker `:`
+0:13 - 0:14                         class_close `]`
+0:14 - 0:15                       closing: bracket_close `]`
+0:15 - 0:16               closing: delimiter `/`
+0:16 - 0:17         simple_command
+0:16 - 0:17           name: command_name `p`
+
+==================
+Character class escape at EOF "a\\x6" — "/[[:a\\x6"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\x6
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         address: address_clause
+0:0 - 0:8           address
+0:0 - 0:8             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:8               regular_expression
+0:1 - 0:8                 alternation
+0:1 - 0:8                   regex_branch
+0:1 - 0:8                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:8                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:8                         issue: syntax_issue
+0:4 - 0:8                           incomplete_syntax
+0:4 - 0:8                             unknown_character_class
+0:4 - 0:8                               class_name
+0:4 - 0:5                                 class_name_text `a`
+0:5 - 0:8                                 character_escape `\\x6`
+0:8 - 0:8                         issue: syntax_issue
+0:8 - 0:8                           incomplete_syntax
+0:8 - 0:8                             missing_closing_delimiter
+0:8 - 0:8                       issue: syntax_issue
+0:8 - 0:8                         incomplete_syntax
+0:8 - 0:8                           missing_closing_delimiter
+0:8 - 0:8               issue: syntax_issue
+0:8 - 0:8                 incomplete_syntax
+0:8 - 0:8                   unterminated_regex
+0:8 - 0:8         issue: syntax_issue
+0:8 - 0:8           incomplete_syntax
+0:8 - 0:8             missing_command
+
+==================
+Character class escape at EOF "a\\o1" — "/[[:a\\o1"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\o1
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         address: address_clause
+0:0 - 0:8           address
+0:0 - 0:8             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:8               regular_expression
+0:1 - 0:8                 alternation
+0:1 - 0:8                   regex_branch
+0:1 - 0:8                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:8                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:8                         issue: syntax_issue
+0:4 - 0:8                           incomplete_syntax
+0:4 - 0:8                             unknown_character_class
+0:4 - 0:8                               class_name
+0:4 - 0:5                                 class_name_text `a`
+0:5 - 0:8                                 character_escape `\\o1`
+0:8 - 0:8                         issue: syntax_issue
+0:8 - 0:8                           incomplete_syntax
+0:8 - 0:8                             missing_closing_delimiter
+0:8 - 0:8                       issue: syntax_issue
+0:8 - 0:8                         incomplete_syntax
+0:8 - 0:8                           missing_closing_delimiter
+0:8 - 0:8               issue: syntax_issue
+0:8 - 0:8                 incomplete_syntax
+0:8 - 0:8                   unterminated_regex
+0:8 - 0:8         issue: syntax_issue
+0:8 - 0:8           incomplete_syntax
+0:8 - 0:8             missing_command
+
+==================
+Completed character class escape "\\o154" — "/[[:a\\o154pha:]]/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\o154pha:]]/p
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:17         address: address_clause
+0:0  - 0:17           address
+0:0  - 0:17             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:16               regular_expression
+0:1  - 0:16                 alternation
+0:1  - 0:16                   regex_branch
+0:1  - 0:16                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:15                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:13                         name: class_name
+0:4  - 0:5                            class_name_text `a`
+0:5  - 0:10                           character_escape `\\o154`
+0:10 - 0:13                           class_name_text `pha`
+0:13 - 0:14                         compound_marker `:`
+0:14 - 0:15                         class_close `]`
+0:15 - 0:16                       closing: bracket_close `]`
+0:16 - 0:17               closing: delimiter `/`
+0:17 - 0:18         simple_command
+0:17 - 0:18           name: command_name `p`
+
+==================
+Character class escape at EOF "a\\d1" — "/[[:a\\d1"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\d1
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         address: address_clause
+0:0 - 0:8           address
+0:0 - 0:8             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:8               regular_expression
+0:1 - 0:8                 alternation
+0:1 - 0:8                   regex_branch
+0:1 - 0:8                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:8                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:8                         issue: syntax_issue
+0:4 - 0:8                           incomplete_syntax
+0:4 - 0:8                             unknown_character_class
+0:4 - 0:8                               class_name
+0:4 - 0:5                                 class_name_text `a`
+0:5 - 0:8                                 character_escape `\\d1`
+0:8 - 0:8                         issue: syntax_issue
+0:8 - 0:8                           incomplete_syntax
+0:8 - 0:8                             missing_closing_delimiter
+0:8 - 0:8                       issue: syntax_issue
+0:8 - 0:8                         incomplete_syntax
+0:8 - 0:8                           missing_closing_delimiter
+0:8 - 0:8               issue: syntax_issue
+0:8 - 0:8                 incomplete_syntax
+0:8 - 0:8                   unterminated_regex
+0:8 - 0:8         issue: syntax_issue
+0:8 - 0:8           incomplete_syntax
+0:8 - 0:8             missing_command
+
+==================
+Completed character class escape "\\d108" — "/[[:a\\d108pha:]]/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\d108pha:]]/p
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:17         address: address_clause
+0:0  - 0:17           address
+0:0  - 0:17             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:16               regular_expression
+0:1  - 0:16                 alternation
+0:1  - 0:16                   regex_branch
+0:1  - 0:16                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:15                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:13                         name: class_name
+0:4  - 0:5                            class_name_text `a`
+0:5  - 0:10                           character_escape `\\d108`
+0:10 - 0:13                           class_name_text `pha`
+0:13 - 0:14                         compound_marker `:`
+0:14 - 0:15                         class_close `]`
+0:15 - 0:16                       closing: bracket_close `]`
+0:16 - 0:17               closing: delimiter `/`
+0:17 - 0:18         simple_command
+0:17 - 0:18           name: command_name `p`
+
+==================
+Character class escape at EOF "a\\x" — "/[[:a\\x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\x
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:7           address
+0:0 - 0:7             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:7               regular_expression
+0:1 - 0:7                 alternation
+0:1 - 0:7                   regex_branch
+0:1 - 0:7                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:7                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:7                         issue: syntax_issue
+0:4 - 0:7                           incomplete_syntax
+0:4 - 0:7                             unknown_character_class
+0:4 - 0:7                               class_name
+0:4 - 0:5                                 class_name_text `a`
+0:5 - 0:7                                 escape `\\x`
+0:7 - 0:7                         issue: syntax_issue
+0:7 - 0:7                           incomplete_syntax
+0:7 - 0:7                             missing_closing_delimiter
+0:7 - 0:7                       issue: syntax_issue
+0:7 - 0:7                         incomplete_syntax
+0:7 - 0:7                           missing_closing_delimiter
+0:7 - 0:7               issue: syntax_issue
+0:7 - 0:7                 incomplete_syntax
+0:7 - 0:7                   unterminated_regex
+0:7 - 0:7         issue: syntax_issue
+0:7 - 0:7           incomplete_syntax
+0:7 - 0:7             missing_command
+
+==================
+Character class escape at EOF "z\\c" — "/[[:z\\c"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:z\c
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:7           address
+0:0 - 0:7             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:7               regular_expression
+0:1 - 0:7                 alternation
+0:1 - 0:7                   regex_branch
+0:1 - 0:7                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:7                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:7                         issue: syntax_issue
+0:4 - 0:7                           invalid_syntax
+0:4 - 0:7                             unknown_character_class
+0:4 - 0:7                               class_name
+0:4 - 0:5                                 class_name_text `z`
+0:5 - 0:7                                 issue: syntax_issue
+0:5 - 0:7                                   incomplete_syntax
+0:5 - 0:7                                     missing_escape_character `\\c`
+0:7 - 0:7                         issue: syntax_issue
+0:7 - 0:7                           incomplete_syntax
+0:7 - 0:7                             missing_closing_delimiter
+0:7 - 0:7                       issue: syntax_issue
+0:7 - 0:7                         incomplete_syntax
+0:7 - 0:7                           missing_closing_delimiter
+0:7 - 0:7               issue: syntax_issue
+0:7 - 0:7                 incomplete_syntax
+0:7 - 0:7                   unterminated_regex
+0:7 - 0:7         issue: syntax_issue
+0:7 - 0:7           incomplete_syntax
+0:7 - 0:7             missing_command
+
+==================
+Character class escape at EOF "a\\xF" — "/[[:a\\xF"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:a\xF
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         address: address_clause
+0:0 - 0:8           address
+0:0 - 0:8             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:8               regular_expression
+0:1 - 0:8                 alternation
+0:1 - 0:8                   regex_branch
+0:1 - 0:8                     bracket_expression
+0:1 - 0:2                       opening: bracket_open `[`
+0:2 - 0:8                       character_class
+0:2 - 0:3                         class_open `[`
+0:3 - 0:4                         compound_marker `:`
+0:4 - 0:8                         issue: syntax_issue
+0:4 - 0:8                           invalid_syntax
+0:4 - 0:8                             unknown_character_class
+0:4 - 0:8                               class_name
+0:4 - 0:5                                 class_name_text `a`
+0:5 - 0:8                                 character_escape `\\xF`
+0:8 - 0:8                         issue: syntax_issue
+0:8 - 0:8                           incomplete_syntax
+0:8 - 0:8                             missing_closing_delimiter
+0:8 - 0:8                       issue: syntax_issue
+0:8 - 0:8                         incomplete_syntax
+0:8 - 0:8                           missing_closing_delimiter
+0:8 - 0:8               issue: syntax_issue
+0:8 - 0:8                 incomplete_syntax
+0:8 - 0:8                   unterminated_regex
+0:8 - 0:8         issue: syntax_issue
+0:8 - 0:8           incomplete_syntax
+0:8 - 0:8             missing_command
+
+==================
+Character class escape at EOF "alph\\d97" — "/[[:alph\\d97"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:alph\d97
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         address: address_clause
+0:0  - 0:12           address
+0:0  - 0:12             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:12               regular_expression
+0:1  - 0:12                 alternation
+0:1  - 0:12                   regex_branch
+0:1  - 0:12                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:12                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:12                         name: class_name
+0:4  - 0:8                            class_name_text `alph`
+0:8  - 0:12                           character_escape `\\d97`
+0:12 - 0:12                         issue: syntax_issue
+0:12 - 0:12                           incomplete_syntax
+0:12 - 0:12                             missing_closing_delimiter
+0:12 - 0:12                       issue: syntax_issue
+0:12 - 0:12                         incomplete_syntax
+0:12 - 0:12                           missing_closing_delimiter
+0:12 - 0:12               issue: syntax_issue
+0:12 - 0:12                 incomplete_syntax
+0:12 - 0:12                   unterminated_regex
+0:12 - 0:12         issue: syntax_issue
+0:12 - 0:12           incomplete_syntax
+0:12 - 0:12             missing_command
+
+==================
+Completed character class escape "\\d97" — "/[[:alph\\d97:]]/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:alph\d97:]]/p
+------------------
+0:0  - 0:17   script
+0:0  - 0:17     command_list
+0:0  - 0:17       command
+0:0  - 0:16         address: address_clause
+0:0  - 0:16           address
+0:0  - 0:16             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:15               regular_expression
+0:1  - 0:15                 alternation
+0:1  - 0:15                   regex_branch
+0:1  - 0:15                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:14                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:12                         name: class_name
+0:4  - 0:8                            class_name_text `alph`
+0:8  - 0:12                           character_escape `\\d97`
+0:12 - 0:13                         compound_marker `:`
+0:13 - 0:14                         class_close `]`
+0:14 - 0:15                       closing: bracket_close `]`
+0:15 - 0:16               closing: delimiter `/`
+0:16 - 0:17         simple_command
+0:16 - 0:17           name: command_name `p`
+
+==================
+Character class escape at EOF "alpha\\d58" — "/[[:alpha\\d58"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+/[[:alpha\d58
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         address: address_clause
+0:0  - 0:13           address
+0:0  - 0:13             regex_address
+0:0  - 0:1                opening: delimiter `/`
+0:1  - 0:13               regular_expression
+0:1  - 0:13                 alternation
+0:1  - 0:13                   regex_branch
+0:1  - 0:13                     bracket_expression
+0:1  - 0:2                        opening: bracket_open `[`
+0:2  - 0:13                       character_class
+0:2  - 0:3                          class_open `[`
+0:3  - 0:4                          compound_marker `:`
+0:4  - 0:9                          name: class_name
+0:4  - 0:9                            class_name_text `alpha`
+0:9  - 0:13                         character_escape `\\d58`
+0:13 - 0:13                         issue: syntax_issue
+0:13 - 0:13                           incomplete_syntax
+0:13 - 0:13                             missing_closing_delimiter
+0:13 - 0:13                       issue: syntax_issue
+0:13 - 0:13                         incomplete_syntax
+0:13 - 0:13                           missing_closing_delimiter
+0:13 - 0:13               issue: syntax_issue
+0:13 - 0:13                 incomplete_syntax
+0:13 - 0:13                   unterminated_regex
+0:13 - 0:13         issue: syntax_issue
+0:13 - 0:13           incomplete_syntax
+0:13 - 0:13             missing_command
+
+==================
+Three hyphens leave a following character class outside the range
+:language(gsed)
+:language(gsed_ere)
+==================
+/[!---[:xdigit:]]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (bracket_character
+                      (literal))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (character_class
+                      (class_open)
+                      (compound_marker)
+                      name: (class_name
+                        (class_name_text))
+                      (compound_marker)
+                      (class_close))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+Three hyphens leave a following equivalence class outside the range
+:language(gsed)
+:language(gsed_ere)
+==================
+/[a---[=a=]]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (bracket_character
+                      (literal))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (equivalence_class
+                      (equivalence_open)
+                      (compound_marker)
+                      element: (collating_element
+                        (collating_text))
+                      (compound_marker)
+                      (equivalence_close))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+A character class before three hyphens is an independent element
+:language(gsed)
+:language(gsed_ere)
+==================
+/[[:alpha:]---c]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (character_class
+                      (class_open)
+                      (compound_marker)
+                      name: (class_name
+                        (class_name_text))
+                      (compound_marker)
+                      (class_close))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (bracket_character
+                      (literal))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+An equivalence class before three hyphens is an independent element
+:language(gsed)
+:language(gsed_ere)
+==================
+/[[=a=]---c]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (equivalence_class
+                      (equivalence_open)
+                      (compound_marker)
+                      element: (collating_element
+                        (collating_text))
+                      (compound_marker)
+                      (equivalence_close))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (bracket_character
+                      (literal))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+Four hyphens make a following character class an invalid endpoint
+:language(gsed)
+:language(gsed_ere)
+==================
+/[a----[:alpha:]]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (bracket_character
+                      (literal))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal))
+                      (range_operator)
+                      issue: (syntax_issue
+                        (invalid_syntax
+                          (invalid_range_endpoint
+                            (character_class
+                              (class_open)
+                              (compound_marker)
+                              name: (class_name
+                                (class_name_text))
+                              (compound_marker)
+                              (class_close))))))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+Four hyphens make a following equivalence class an invalid endpoint
+:language(gsed)
+:language(gsed_ere)
+==================
+/[a----[=a=]]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (bracket_character
+                      (literal))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal))
+                      (range_operator)
+                      issue: (syntax_issue
+                        (invalid_syntax
+                          (invalid_range_endpoint
+                            (equivalence_class
+                              (equivalence_open)
+                              (compound_marker)
+                              element: (collating_element
+                                (collating_text))
+                              (compound_marker)
+                              (equivalence_close))))))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+Five hyphens share their middle endpoint and leave the class independent
+:language(gsed)
+:language(gsed_ere)
+==================
+/[a-----[:alpha:]]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (bracket_character
+                      (literal))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (character_class
+                      (class_open)
+                      (compound_marker)
+                      name: (class_name
+                        (class_name_text))
+                      (compound_marker)
+                      (class_close))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+Five hyphens leave a following equivalence class independent
+:language(gsed)
+:language(gsed_ere)
+==================
+/[a-----[=a=]]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (bracket_character
+                      (literal))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (equivalence_class
+                      (equivalence_open)
+                      (compound_marker)
+                      element: (collating_element
+                        (collating_text))
+                      (compound_marker)
+                      (equivalence_close))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+Three hyphens keep the surrounding ordinary ranges independent
+:language(gsed)
+:language(gsed_ere)
+==================
+/[a-b---c-d]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (range_operator)
+                      end: (bracket_character
+                        (literal)))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))
+
+==================
+A numeric escape in a hyphen run keeps both adjacent classes independent
+:language(gsed)
+:language(gsed_ere)
+==================
+/[[=a=]-\x2d-[:xdigit:]]/p
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (bracket_expression
+                    opening: (bracket_open)
+                    (equivalence_class
+                      (equivalence_open)
+                      (compound_marker)
+                      element: (collating_element
+                        (collating_text))
+                      (compound_marker)
+                      (equivalence_close))
+                    (range
+                      start: (bracket_character
+                        (literal))
+                      (character_escape)
+                      end: (bracket_character
+                        (literal)))
+                    (character_class
+                      (class_open)
+                      (compound_marker)
+                      name: (class_name
+                        (class_name_text))
+                      (compound_marker)
+                      (class_close))
+                    closing: (bracket_close)))))
+            closing: (delimiter))))
+      (simple_command
+        name: (command_name)))))

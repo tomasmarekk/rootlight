@@ -1,0 +1,329 @@
+================
+Slot - bare
+================
+
+#
+
+---
+
+(source_file
+  (slot))
+
+================
+Slot - numbered
+================
+
+#1
+
+---
+
+(source_file
+  (slot))
+
+================
+Slot - named
+================
+
+#name
+
+---
+
+(source_file
+  (slot))
+
+================
+SlotSequence - bare
+================
+
+##
+
+---
+
+(source_file
+  (slot_sequence))
+
+================
+SlotSequence - numbered
+================
+
+##2
+
+---
+
+(source_file
+  (slot_sequence))
+
+================
+Out - last result
+================
+
+%
+
+---
+
+(source_file
+  (out))
+
+================
+Out - second to last
+================
+
+%%
+
+---
+
+(source_file
+  (out))
+
+================
+Out - numbered
+================
+
+%3
+
+---
+
+(source_file
+  (out))
+
+================
+Slot in function body
+================
+
+f[#1 + #2] &
+
+---
+
+(source_file
+  (postfix
+    (call
+      head: (symbol)
+      arguments: (infix
+        (slot)
+        (slot)))))
+
+================
+MessageName
+================
+
+f::usage
+
+---
+
+(source_file
+  (message_name
+    (symbol)
+    (message_tag)))
+
+================
+MessageName - System
+================
+
+Sin::argx
+
+---
+
+(source_file
+  (message_name
+    (symbol)
+    (message_tag)))
+
+================
+MessageName - context-qualified
+================
+
+System`Sin::argx
+
+---
+
+(source_file
+  (message_name
+    (symbol)
+    (message_tag)))
+
+================
+Tilde infix
+================
+
+a ~f~ b
+
+---
+
+(source_file
+  (tilde
+    (symbol)
+    function: (symbol)
+    (symbol)))
+
+================
+Tilde infix - call form
+================
+
+{1, 2, 3} ~Join~ {4, 5}
+
+---
+
+(source_file
+  (tilde
+    (group
+      (infix
+        (infix
+          (integer)
+          (integer))
+        (integer)))
+    function: (symbol)
+    (group
+      (infix
+        (integer)
+        (integer)))))
+
+================
+Named character - standalone
+================
+
+\[Alpha]
+
+---
+
+(source_file
+  (named_character))
+
+================
+Named character - in list
+================
+
+{\[Alpha], \[Beta]}
+
+---
+
+(source_file
+  (group
+    (infix
+      (named_character)
+      (named_character))))
+
+================
+Named character - Rule operator
+================
+
+a \[Rule] b
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (symbol)))
+
+================
+Named character - Times operator
+================
+
+a \[Times] b
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Named character - And operator
+================
+
+a \[And] b
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Named character - Not prefix
+================
+
+\[Not] x
+
+---
+
+(source_file
+  (prefix
+    (symbol)))
+
+================
+Named character - Transpose postfix
+================
+
+m \[Transpose]
+
+---
+
+(source_file
+  (postfix
+    (symbol)))
+
+================
+Named character - Sqrt prefix
+================
+
+\[Sqrt] x
+
+---
+
+(source_file
+  (prefix
+    (symbol)))
+
+================
+Named character - DirectedEdge
+================
+
+a \[DirectedEdge] b
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (symbol)))
+
+================
+Get operator
+================
+
+<<"file.m"
+
+---
+
+(source_file
+  (prefix
+    (string)))
+
+================
+Put operator
+================
+
+x >> "file.m"
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (string)))
+
+================
+PutAppend operator
+================
+
+x >>> "file.m"
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (string)))

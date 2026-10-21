@@ -1,0 +1,37 @@
+================================================================================
+boolean aliases
+================================================================================
+
+enabled = yes
+lights_on = on
+disabled = no
+powered = off
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (boolean))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (boolean))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (boolean))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (boolean))))))

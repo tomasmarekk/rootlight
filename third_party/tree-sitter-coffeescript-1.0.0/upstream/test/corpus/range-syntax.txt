@@ -1,0 +1,35 @@
+================================================================================
+range syntax
+================================================================================
+
+values = [1..3]
+others = [0...3]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (range
+            (expression
+              (number
+                (decimal_number)))
+            (expression
+              (number
+                (decimal_number)))))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (range
+            (expression
+              (number
+                (decimal_number)))
+            (expression
+              (number
+                (decimal_number)))))))))

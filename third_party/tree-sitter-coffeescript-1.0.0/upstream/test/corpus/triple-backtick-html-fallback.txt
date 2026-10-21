@@ -1,0 +1,20 @@
+================================================================================
+embedded html fallback
+================================================================================
+
+template = ```
+<section>
+  <p>Fallback</p>
+</section>
+```
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (embedded_html))))))

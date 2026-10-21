@@ -1,0 +1,265 @@
+{
+  "files": [
+    {
+      "original_path": "upstream/.gitignore",
+      "retained_path": "upstream/.gitignore.upstream",
+      "bytes": 18,
+      "sha256": "1b7e7c05b850f9f536c4350796b4cfea362cd43716d3dc696b21ad360dc33389",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/add_node_modules_to_PATH.sh",
+      "retained_path": "upstream/add_node_modules_to_PATH.sh",
+      "bytes": 52,
+      "sha256": "78732ab77700c9d6f2bf141bb2c5ae670b11e38b2b723431eeb9ca8e1596b49a",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/binding.gyp",
+      "retained_path": "upstream/binding.gyp",
+      "bytes": 389,
+      "sha256": "f763c5e30250d7472cc255ea6c352416576043769f0494e73da90621d0f946d6",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/bindings/node/binding.cc",
+      "retained_path": "upstream/bindings/node/binding.cc",
+      "bytes": 917,
+      "sha256": "de8b7f23cea5cc3f146785b46dfd7b41db3429f084e35d85b579e44cb1a0f052",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/bindings/node/index.js",
+      "retained_path": "upstream/bindings/node/index.js",
+      "bytes": 487,
+      "sha256": "9e7116f1a70bfab5d890f5e53c82af4e733bbe3afd4aab97b0824f435665a327",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/bindings/rust/build.rs",
+      "retained_path": "upstream/bindings/rust/build.rs",
+      "bytes": 1319,
+      "sha256": "44d8d49d7e8b45571e7d221c7b4d8d3100d18a0d8889aba360931fd7caf402fd",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/bindings/rust/lib.rs",
+      "retained_path": "upstream/bindings/rust/lib.rs",
+      "bytes": 2021,
+      "sha256": "c2057cbae6993675ab7ebdc7364eecbd93288ae498f06d695d7897c34d807c5a",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/Cargo.toml",
+      "retained_path": "upstream/Cargo.toml",
+      "bytes": 579,
+      "sha256": "fad9b1c3d684972d9d7d6ed9ca462025bbac5dd43fad38f6a8b7c269de31164f",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/contributing.md",
+      "retained_path": "upstream/contributing.md",
+      "bytes": 1989,
+      "sha256": "da2542c3cfb9e160f0c7bcfa62c4f973b501da1951bb65e97a9e5889034b6311",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/examples/assignment.chpl",
+      "retained_path": "upstream/examples/assignment.chpl",
+      "bytes": 28,
+      "sha256": "74dd9559cfd1608620de0fcffb557ae2664f3b606e6e22ba38cbfe9da660f3d9",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/examples/binary.chpl",
+      "retained_path": "upstream/examples/binary.chpl",
+      "bytes": 28,
+      "sha256": "74dd9559cfd1608620de0fcffb557ae2664f3b606e6e22ba38cbfe9da660f3d9",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/examples/comments.chpl",
+      "retained_path": "upstream/examples/comments.chpl",
+      "bytes": 62,
+      "sha256": "cfd1311f6e828d380d5b617fbf91d540e33cb1a0ca4b34668c9178a4ceebb12a",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/examples/declaration.chpl",
+      "retained_path": "upstream/examples/declaration.chpl",
+      "bytes": 132,
+      "sha256": "cf5952e06d5a22a05bbe2dbd55f4d11ff6635682a1918ff640c3fd0e02f823a2",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/grammar.js",
+      "retained_path": "upstream/grammar.js",
+      "bytes": 8706,
+      "sha256": "de55b7e61afa292e07d31f49fcfe8e45a1759eb47d7c8ba605161b3909a30d46",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/LICENSE",
+      "retained_path": "upstream/LICENSE",
+      "bytes": 1070,
+      "sha256": "d8fe0c544dea7c7169167c719f96867ba31bad18609bc7036b196a5b8f5dea0b",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/package-lock.json",
+      "retained_path": "upstream/package-lock.json",
+      "bytes": 1111,
+      "sha256": "bbb17fd3f8ab2cdd73526262826b64ad6453582c42d4a3f3dee854d69aa875cb",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/package.json",
+      "retained_path": "upstream/package.json",
+      "bytes": 561,
+      "sha256": "37adb3c6ca360e835fc0d30b91b086869ab085d8a3c85abed73b3c06637aefd7",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/readme.md",
+      "retained_path": "upstream/readme.md",
+      "bytes": 307,
+      "sha256": "cc066224b1d45bf2b6ce4b101eb57f9b819c69db10213b494b1392d79ae73883",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/src/grammar.json",
+      "retained_path": "upstream/src/grammar.json",
+      "bytes": 22720,
+      "sha256": "20cd9e483d70e25f7ed9d74fced98a9732ae12e1bbe55fd3a37e4a97ece91212",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/src/node-types.json",
+      "retained_path": "upstream/src/node-types.json",
+      "bytes": 11060,
+      "sha256": "cf6c91eedb8bc3da42c7063641cf9741be3564a8f1a856ff7f7b4c61e27c3f48",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/src/parser.c",
+      "retained_path": "upstream/src/parser.c",
+      "bytes": 97883,
+      "sha256": "fb045eccdbf212e046bc8b31a62836551a1d7188a1550b2ac13050fe12692a10",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/src/tree_sitter/parser.h",
+      "retained_path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 5378,
+      "sha256": "ab104936984904469572a4e868149f7a22fb2929347f837ae6a1f9b790f1b173",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/test/corpus/comments.txt",
+      "retained_path": "upstream/test/corpus/comments.txt",
+      "bytes": 279,
+      "sha256": "943ecac79046feaf5d5c163150cc74d04787f1e32dbf72f3bd0892409045fb14",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/test/corpus/literals.txt",
+      "retained_path": "upstream/test/corpus/literals.txt",
+      "bytes": 650,
+      "sha256": "1e5f418cb4becfbdc6e84e97865c4c442d12287fe554c58ead928de808c1cb44",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/test/corpus/statements.txt",
+      "retained_path": "upstream/test/corpus/statements.txt",
+      "bytes": 581,
+      "sha256": "8c876575d41be15662133122250f8fd0919dbbbd725b3f520cd565a9cd85a692",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/test/template.txt",
+      "retained_path": "upstream/test/template.txt",
+      "bytes": 119,
+      "sha256": "b1796305dcc6f8a2cc5c22f32cfb9c243c6ce56bf09e6d5b9b314fccbec8dd66",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "upstream/todo.md",
+      "retained_path": "upstream/todo.md",
+      "bytes": 501,
+      "sha256": "e32e9b9fd5efdac0188d3f37e67314013ccdf50df74be23eba2eba671c7ea335",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/COPYRIGHT",
+      "retained_path": "official-references/COPYRIGHT",
+      "bytes": 128,
+      "sha256": "ff2012dd2d224680e95c8f083396a5c23985f7681fe214260b2a1b7b13280db9",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/doc/rst/language/spec/lexical-structure.rst",
+      "retained_path": "official-references/doc/rst/language/spec/lexical-structure.rst",
+      "bytes": 15069,
+      "sha256": "1a4fd51ecf2a900726a6957de9dfb3b1c7f7a9e03e8e96cf61899492174ce2cf",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/doc/rst/language/spec/modules.rst",
+      "retained_path": "official-references/doc/rst/language/spec/modules.rst",
+      "bytes": 40978,
+      "sha256": "68173af0effd28bf86b8fef8b1b784deef74c55bf09dfb33de5e9eef93adaa5a",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/doc/rst/language/spec/procedures.rst",
+      "retained_path": "official-references/doc/rst/language/spec/procedures.rst",
+      "bytes": 62599,
+      "sha256": "cec1eae136f4e593429ae8c29d7d932a159d7f1ba33e47118d1a500031f5485c",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/frontend/CMakeLists.txt",
+      "retained_path": "official-references/frontend/CMakeLists.txt",
+      "bytes": 5778,
+      "sha256": "74750377802ba17fd8e7a136675d115d406b3e0f466a0c03ee04a5fca6e9431a",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/frontend/lib/parsing/chpl.lex",
+      "retained_path": "official-references/frontend/lib/parsing/chpl.lex",
+      "bytes": 14775,
+      "sha256": "edadf0e67c55cf1eeed02f2e419f5f28ea7ee21b8ff6b7feaf5d2a9c7a106366",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/frontend/lib/parsing/chpl.ypp",
+      "retained_path": "official-references/frontend/lib/parsing/chpl.ypp",
+      "bytes": 120853,
+      "sha256": "42b7a4bc46a1506c9bb6eaa5a22dd6008992f7890767d90061c26bc266cd7c1b",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/frontend/lib/parsing/CMakeLists.txt",
+      "retained_path": "official-references/frontend/lib/parsing/CMakeLists.txt",
+      "bytes": 2234,
+      "sha256": "dc64b35bb775c6dbccf11c6955c286701725de840b788dfda546654b1d96de84",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/LICENSE",
+      "retained_path": "official-references/LICENSE",
+      "bytes": 7141,
+      "sha256": "57b90724c2e93220ef9590a05bdd00f193dd52df42e4d42b9a89c38d5b3c9c4f",
+      "authored_bytes_unchanged": true
+    },
+    {
+      "original_path": "official-references/LICENSE.chapel",
+      "retained_path": "official-references/LICENSE.chapel",
+      "bytes": 11357,
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+      "authored_bytes_unchanged": true
+    }
+  ],
+  "upstream_commit": "630bdd0b01200eb6ebff82037f9bc5355491f965",
+  "official_commit": "62678344fd7e64d9bdcb8b6b8928f7c8fd1c7ca4"
+}

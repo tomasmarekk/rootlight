@@ -1,0 +1,563 @@
+{
+  "schema": "rootlight.dockerfile-native-source/1",
+  "files": [
+    {
+      "path": "Cargo.toml",
+      "bytes": 422,
+      "sha256": "b1b827833f853de5a7d18b42501051a87b6e73f474109dd9d3d30d91a9a336b1",
+      "git_mode": "100644"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1080,
+      "sha256": "806b8fcd19c1cdf23e178eb25942acc844a38669e36b2c896c7baf5f8bcecbb4",
+      "git_mode": "100644"
+    },
+    {
+      "path": "LOCAL_CHANGES.md",
+      "bytes": 2072,
+      "sha256": "b45701562cc8a849fefcb11a10ae949bc839e32115aad41f15c6ce5f4362894e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "SOURCE-PROVENANCE.json",
+      "bytes": 5938,
+      "sha256": "2df1e7c57e862b4954ef49391dec1e760de7a8fc60c4a5f841be24ef432189b1",
+      "git_mode": "100644"
+    },
+    {
+      "path": "UPSTREAM-INVENTORY.json",
+      "bytes": 26736,
+      "sha256": "163cb260abda5fe694e39989313c7a9d855dc1a7ea97a549e968a6b55e9add8b",
+      "git_mode": "100644"
+    },
+    {
+      "path": "active-src/rootlight_dockerfile_status.c",
+      "bytes": 3460,
+      "sha256": "2df17e68c0c3e4e718963c4f37bd7e9f38b2394a947b88de47347e49a707ec06",
+      "git_mode": "100644"
+    },
+    {
+      "path": "active-src/rootlight_dockerfile_status.h",
+      "bytes": 2051,
+      "sha256": "07b250b0eff3dbae6bf194084560632321a5bd00d6b04fd0c27f5631a9219ac0",
+      "git_mode": "100644"
+    },
+    {
+      "path": "active-src/scanner.c",
+      "bytes": 12997,
+      "sha256": "76f04e79df9e21d82fbb0b98460dbe549db44ffbcf10373827e3175255d70595",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 933,
+      "sha256": "811d3be42499bd9b1b1445a86077fd679c31e93bc98691f469a7370772942193",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 9424,
+      "sha256": "62d7e89059c16ac78682385e5f8191e58bb08b0a5301efba7565163feef0decc",
+      "git_mode": "100644"
+    },
+    {
+      "path": "bindings/rust/tests.rs",
+      "bytes": 3103,
+      "sha256": "7b990f126580fac702ded405abf590a7f8030cb058651dc1d3b6f17c48837cdc",
+      "git_mode": "100644"
+    },
+    {
+      "path": "generated/grammar.js",
+      "bytes": 12875,
+      "sha256": "09b1afde6d7a22a8786a0ed49054d32ad51b7082b3af940554c60c8eabede189",
+      "git_mode": "100644"
+    },
+    {
+      "path": "generated/src/grammar.json",
+      "bytes": 43712,
+      "sha256": "b1b6913ecad62005aa157eed632fba0ee81dd7e7802803f006016cf7ebd4f478",
+      "git_mode": "100644"
+    },
+    {
+      "path": "generated/src/node-types.json",
+      "bytes": 18808,
+      "sha256": "e9f1d5500db327a6c0fb4fc2c38d735cd594bf2fd6cf89405214be8b6d8a7186",
+      "git_mode": "100644"
+    },
+    {
+      "path": "generated/src/parser.c",
+      "bytes": 261231,
+      "sha256": "95a06be957b58f1121ddf523cc8361d8a8c9f256ce0953c62c67bebbe1727612",
+      "git_mode": "100644"
+    },
+    {
+      "path": "generated/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "git_mode": "100644"
+    },
+    {
+      "path": "generated/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "git_mode": "100644"
+    },
+    {
+      "path": "generated/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/.clang-format",
+      "bytes": 15,
+      "sha256": "21fa3ee02baec5cb9a8014452ba37b729d7968c5860ee27cb528d5c32a725440",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/.editorconfig",
+      "bytes": 470,
+      "sha256": "3fa917137ebfb8a34a11bde6cc5a3898c3e4b242134c2e0de7dd0c6d30bd7e1e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/.gitattributes.upstream",
+      "bytes": 266,
+      "sha256": "fe17aaa634b5b625393d17915f507e4410961b663a2be9cd505503f57008fb17",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/.github/workflows/ci.yml",
+      "bytes": 972,
+      "sha256": "05e2794e94e537f242dcb046c6018891ddd2a67e8e2bf9351b347ebc96a0bf9e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/.github/workflows/publish.yml",
+      "bytes": 585,
+      "sha256": "cf23e53c908f14676d3aebf5c1f372994211816a3cadca960eb3a5c977604343",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/.gitignore.upstream",
+      "bytes": 148,
+      "sha256": "d37e32cb988ebf8a32fc3139e5e53d469606651a72d7d347dbdc9af2b9f3694c",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/Cargo.toml",
+      "bytes": 544,
+      "sha256": "4c0e75a43b4c1df3464c68155fc9d169ac7f9d6829f000a16b2613d374e864b8",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/LICENSE",
+      "bytes": 1080,
+      "sha256": "806b8fcd19c1cdf23e178eb25942acc844a38669e36b2c896c7baf5f8bcecbb4",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/Makefile",
+      "bytes": 3664,
+      "sha256": "29737bf2e81a961c5bdcbef06f3e644c69259cd988c993356bbcd6081b0e198a",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/Package.swift",
+      "bytes": 1152,
+      "sha256": "5b37a6fac5ec0a9c4758f763e40eed9481300ee43173310341e1aa11dec5495c",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/README.md",
+      "bytes": 362,
+      "sha256": "de19e2e2901c101fb135d72863d6a1d79e33fe37f59b04b047f11f7799c1f6cf",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/binding.gyp",
+      "bytes": 605,
+      "sha256": "bef7b10b10d5d7ae9fc2201f5a08cd6117758eee43df35219f45cf2a607d9695",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter-dockerfile.pc.in",
+      "bytes": 270,
+      "sha256": "7b9721198c49dfa28c3ff3be9153781173c0402e6f2b5a1c0bbed2bc11f20426",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter.h.in",
+      "bytes": 279,
+      "sha256": "ebb283ebe814f5cbd6c742d0ce5fc7ad1682fcfdfd7bc3232d12196236e29180",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/c/tree-sitter.pc.in",
+      "bytes": 302,
+      "sha256": "12cc650a0de07d96f991ac478c847834cf97b5da07fb74160319d2066dd05788",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/go/binding.go",
+      "bytes": 295,
+      "sha256": "035e99d468ceeb656cdc340a057b7ec956e5648c61ab239e3990a5484d4f3997",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/go/binding_test.go",
+      "bytes": 368,
+      "sha256": "d12b4b7a4fb69ac6f699d95f90a1a9fd08e5380c8777a4718490fdbc8c2863a8",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/go/go.mod",
+      "bytes": 140,
+      "sha256": "89732c60fea7317899fd70e319b8c6d2c5fbbd2f27813c04520d494d00256220",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/node/binding.cc",
+      "bytes": 599,
+      "sha256": "6efb1b8e0d0a2a4050647431160507206d705006f1446d52deb155183f07d884",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/node/index.d.ts",
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/node/index.js",
+      "bytes": 201,
+      "sha256": "609bdf22b8fd183025b3c24e8587f6211d50358e8f2e4c526b9217349ed9dbc0",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_dockerfile/__init__.py",
+      "bytes": 93,
+      "sha256": "4cc2980ee9a37ae4d79cdfc43ca61b85a4fd9202fae8174df5f34bd941671a18",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_dockerfile/__init__.pyi",
+      "bytes": 27,
+      "sha256": "f317fb6d8d6cce00d8f47449ec5277dba4a8e121603224917c20782c00e44e95",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_dockerfile/binding.c",
+      "bytes": 644,
+      "sha256": "8dc50fed6d1c5f3fb3059ad492b9ff0175cdf79dc485b3e607b49577fed8564a",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/python/tree_sitter_dockerfile/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/rust/build.rs",
+      "bytes": 1367,
+      "sha256": "eac015f244525c09228f029a683c5e00b51488940478c16bbafec414d8e84f1b",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/rust/lib.rs",
+      "bytes": 1973,
+      "sha256": "9b18c1fb264843025a7f663e02b3e3b5c55515c6cc2321d6bab4ee32b8988311",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/bindings/swift/TreeSitterDockerfile/dockerfile.h",
+      "bytes": 259,
+      "sha256": "4317bb877621f9bf8f240f42466ee68ad8ee40cdb0ec101ba3c581337e6d61d9",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/1",
+      "bytes": 4800,
+      "sha256": "813f984fdc2e2d35be838ee8f483ba4faf77d6f0704412c28ae90112f3143f6d",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/2",
+      "bytes": 1556,
+      "sha256": "aa8f2dd8ee325be3ec63f235814666bcc16160654f2ab7ec4ca2d3980a83659f",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/3",
+      "bytes": 127,
+      "sha256": "0ac7d21f342e56cbeb30ac886cb5fb6ce3fe2445c59542c9f2f9c6ab8425b2f7",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/4",
+      "bytes": 4882,
+      "sha256": "e9f2b596f9d02ff39f8e5c904c1db11adfcb8bcc8cdc221f3ada06d2bf7efe9d",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/5",
+      "bytes": 2127,
+      "sha256": "f2752b83cbad16b0125453a6ef487e3f090b0045977395fc7f55b62e7307631c",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/6",
+      "bytes": 328,
+      "sha256": "3353cc3499c0b959eb82dd7354866f86482c3a29144ab4031e93acb30c317306",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/7",
+      "bytes": 841,
+      "sha256": "06c208f08a98b5ec3713e8207020cc10ab6a9aa203d4396b36f605d0be0bff7e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/8",
+      "bytes": 84,
+      "sha256": "4ba01fbe1882c237051ee8e3cde41bb87086b9e8985982c65df80f407adb870c",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/examples/9",
+      "bytes": 903,
+      "sha256": "1f9456864adc233a303ab9034e89ad2643fb819221acc23ca44bb74db1be550d",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/grammar.js",
+      "bytes": 12867,
+      "sha256": "9b1d516b80fd3261757eddaa2d8e99e628643937232af93a1ea576911aa1e960",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/package.json",
+      "bytes": 859,
+      "sha256": "774f255041df841799d177b52c658e71841d8f37705904c7830bc2b2563fc3f0",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/pnpm-lock.yaml",
+      "bytes": 6442,
+      "sha256": "9329435eb7f2513fff71ec85b755e734b8341f683b01d62a6a7e4fcd354283a8",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/pyproject.toml",
+      "bytes": 760,
+      "sha256": "fda63df606ed1e24e3d847db04fd17040fe26c9c4db9e78d99bfc7b4b18ce97e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/queries/highlights.scm",
+      "bytes": 609,
+      "sha256": "665444fb7c8099602c78f9563525dedc23bb227fb0a6323820eb10be2592b318",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/setup.py",
+      "bytes": 1642,
+      "sha256": "5a01b48fc21e64a1fd4772ab0e370ba387fc71dcd50038256324ce8134c388f6",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/src/grammar.json",
+      "bytes": 43680,
+      "sha256": "c7248d23cd9f143958eb25829a7447a864bf7751791ca56660354b04513b4ac8",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/src/node-types.json",
+      "bytes": 18770,
+      "sha256": "1a68d713a6d8f3ff10e25a674f7b5eb8083cd1851da64e4cd7bb73bd585e9497",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/src/parser.c",
+      "bytes": 260247,
+      "sha256": "4265eb2433dd67d270e4a901312d7050f686e6a45dca9e7879fdd2d49e7ed501",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/src/scanner.c",
+      "bytes": 9319,
+      "sha256": "1080c2eb2ac41f102974e009cb62f644d9d638dd2468d0a700674d07d346fde7",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/src/tree_sitter/array.h",
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/src/tree_sitter/parser.h",
+      "bytes": 7039,
+      "sha256": "a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/add.txt",
+      "bytes": 589,
+      "sha256": "48c2595c262901735c4316f3fff4546777e5e83c097779d7bf99bbdbe4bdc8e4",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/arg.txt",
+      "bytes": 463,
+      "sha256": "83d7ede07ddff7b6154d7837e38d051d62cd5645c4a689adf3b7463b523d9453",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/cmd.txt",
+      "bytes": 731,
+      "sha256": "d8ba045755dd708a824d9d808d6fe441d6835a457c016bd51cb28931c4c39b73",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/combo.txt",
+      "bytes": 1248,
+      "sha256": "0037147629cc844422360a45dce199bf1f8aa705a2c470c4dadd54b70b5c384e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/comment.txt",
+      "bytes": 103,
+      "sha256": "a6d3ed6e535ffc80492b7721bfab55a50acb2d9de0cb8256f8183220b9f51533",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/copy.txt",
+      "bytes": 597,
+      "sha256": "7723ac31e341e0eb29d72f569a03c98fa923d1ff392a98fc2d7a7d90ceffa185",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/cross_build.txt",
+      "bytes": 142,
+      "sha256": "c3d9b15dcab03338dd670177b77793d55d5a90240362cbda0692879132fc6e30",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/entrypoint.txt",
+      "bytes": 797,
+      "sha256": "7f7c570a13a5cb604f222afea98bcad498f8a8820bb221f1967ad466a7e67da3",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/env.txt",
+      "bytes": 4276,
+      "sha256": "5ae75e9bd32c36f1f39c6547b46af2160c9bc19164ac543f9b19ad3dedc6bdec",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/expose.txt",
+      "bytes": 418,
+      "sha256": "2c9b65522491eddf1be55f81c502c6d2cc638e25c19a95e54b590fa3b09414fa",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/from.txt",
+      "bytes": 3158,
+      "sha256": "80fb1cc7c348ce684a29ff4a6a5491a063eabddfc4cbccb3f771cbda2c71b124",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/healthcheck.txt",
+      "bytes": 535,
+      "sha256": "5f7bd9b13a1c06f9fa1505ea9f640667024c2f49c9f4d938e45244232620e71b",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/heredoc.txt",
+      "bytes": 7095,
+      "sha256": "68e2039a87685330330481021ed878837f438a406c213cbb306ac0c0e9ef5f8d",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/label.txt",
+      "bytes": 1540,
+      "sha256": "4bc5a84f1c0130aa19c909a7b0545eaca38741ad1f32ae7a9444a1cda2e51232",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/maintainer.txt",
+      "bytes": 122,
+      "sha256": "006405f9f7684de8499f7bb85afc8e3674b1268c1dbd701a6d8e034cb00fc6e3",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/onbuild.txt",
+      "bytes": 365,
+      "sha256": "ce1544f4a1082d3a1e28b1c2f80f92c8347f427aab5e5f00e7793713ac259d4d",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/run.txt",
+      "bytes": 1648,
+      "sha256": "df1979749df6e5c3c88288e8135b1733294053b5aebe7ee30fcc2f49d54755e6",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/shell_instruction.txt",
+      "bytes": 176,
+      "sha256": "1f73e20374bac45b9b9d2d30529e23d4c58c67e89f88920a57af420480fe73c5",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/stopsignal.txt",
+      "bytes": 1196,
+      "sha256": "811de383472dd394495d0c7da23162c01b3e9a7e0b839ad75850f35f92585bb6",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/strings.txt",
+      "bytes": 2921,
+      "sha256": "aafb38fd7ae2d9aecedc714cb7514016341dae29f28e9e5f76553050f72b5ba4",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/user.txt",
+      "bytes": 875,
+      "sha256": "854198dc4f79842f631ce9935ce494840bd856d6c03d6389b7eaa6455ecb689e",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/vars.txt",
+      "bytes": 6740,
+      "sha256": "cfd819ce4c0d19d49a3ffae16678029ca1238656883fa12707541cc2c6a73ada",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/volume.txt",
+      "bytes": 801,
+      "sha256": "b951ce8c144a5253d8ba63b574246336f8a920b71df3a3552393106c42aeae42",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/test/corpus/workdir.txt",
+      "bytes": 117,
+      "sha256": "d651775e24b8c4d54b023b5c660e2cdcbd5ef9f2bb52cfeccdabf4514eb9a600",
+      "git_mode": "100644"
+    },
+    {
+      "path": "upstream/tree-sitter.json",
+      "bytes": 822,
+      "sha256": "995c8b46f0c995ed092ed22a416140a79372629198f8326b16c5fcc785df6c70",
+      "git_mode": "100644"
+    }
+  ]
+}

@@ -1,0 +1,1098 @@
+================
+Function call - no arguments
+================
+
+f[]
+
+---
+
+(source_file
+  (call
+    head: (symbol)))
+
+================
+Function call - single argument
+================
+
+f[x]
+
+---
+
+(source_file
+  (call
+    head: (symbol)
+    arguments: (symbol)))
+
+================
+Function call - multiple arguments
+================
+
+f[x, y]
+
+---
+
+(source_file
+  (call
+    head: (symbol)
+    arguments: (infix
+      (symbol)
+      (symbol))))
+
+================
+Part extraction
+================
+
+a[[1]]
+
+---
+
+(source_file
+  (part
+    head: (symbol)
+    arguments: (integer)))
+
+================
+Part extraction - multiple indices
+================
+
+a[[1, 2]]
+
+---
+
+(source_file
+  (part
+    head: (symbol)
+    arguments: (infix
+      (integer)
+      (integer))))
+
+================
+Span - both bounds
+================
+
+a[[1;;4]]
+
+---
+
+(source_file
+  (part
+    head: (symbol)
+    arguments: (span
+      (integer)
+      (integer))))
+
+================
+Span - start only
+================
+
+a[[1;;]]
+
+---
+
+(source_file
+  (part
+    head: (symbol)
+    arguments: (span
+      (integer))))
+
+================
+Span - end only
+================
+
+a[[;;4]]
+
+---
+
+(source_file
+  (part
+    head: (symbol)
+    arguments: (span
+      (integer))))
+
+================
+Span - no bounds
+================
+
+a[[;;]]
+
+---
+
+(source_file
+  (part
+    head: (symbol)
+    arguments: (span)))
+
+================
+Span - infix left bound (plus)
+================
+
+a+b;;c
+
+---
+
+(source_file
+  (span
+    (infix
+      (symbol)
+      (symbol))
+    (symbol)))
+
+================
+Span - infix left bound (minus)
+================
+
+a-b;;c
+
+---
+
+(source_file
+  (span
+    (infix
+      (symbol)
+      (symbol))
+    (symbol)))
+
+================
+Span - implicit times left bound
+================
+
+a b;;c
+
+---
+
+(source_file
+  (span
+    (implicit_times
+      (symbol)
+      (symbol))
+    (symbol)))
+
+================
+Span - prefix left bound
+================
+
++b;;c
+
+---
+
+(source_file
+  (span
+    (prefix
+      (symbol))
+    (symbol)))
+
+================
+Nested function call
+================
+
+f[g[x]]
+
+---
+
+(source_file
+  (call
+    head: (symbol)
+    arguments: (call
+      head: (symbol)
+      arguments: (symbol))))
+
+================
+Addition
+================
+
+x + y
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Assignment - Set
+================
+
+x = 5
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (integer)))
+
+================
+Assignment - SetDelayed
+================
+
+f[x] := x
+
+---
+
+(source_file
+  (binary
+    (call
+      head: (symbol)
+      arguments: (symbol))
+    (symbol)))
+
+================
+Prefix - Not
+================
+
+!x
+
+---
+
+(source_file
+  (prefix
+    (symbol)))
+
+================
+Postfix - Function
+================
+
+x &
+
+---
+
+(source_file
+  (postfix
+    (symbol)))
+
+================
+Logical And
+================
+
+x && y
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Comparison - Equal
+================
+
+x == y
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Rule operator
+================
+
+a -> 1
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (integer)))
+
+================
+Postfix application
+================
+
+x // f
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (symbol)))
+
+================
+Apply
+================
+
+f @@ {1, 2}
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (group
+      (infix
+        (integer)
+        (integer)))))
+
+================
+Association
+================
+
+<|a -> 1, b -> 2|>
+
+---
+
+(source_file
+  (group
+    (infix
+      (binary
+        (symbol)
+        (integer))
+      (binary
+        (symbol)
+        (integer)))))
+
+================
+List
+================
+
+{1, 2, 3}
+
+---
+
+(source_file
+  (group
+    (infix
+      (infix
+        (integer)
+        (integer))
+      (integer))))
+
+================
+Parenthesized expression
+================
+
+(x + y)
+
+---
+
+(source_file
+  (group
+    (infix
+      (symbol)
+      (symbol))))
+
+================
+String in function call
+================
+
+f["hello"]
+
+---
+
+(source_file
+  (call
+    head: (symbol)
+    arguments: (string)))
+
+================
+Compound expression
+================
+
+x; y
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Compound expression - trailing semicolon
+================
+
+x;
+
+---
+
+(source_file
+  (infix
+    (symbol)))
+
+================
+Compound expression - trailing semicolon with rhs
+================
+
+x; y;
+
+---
+
+(source_file
+  (infix
+    (infix
+      (symbol)
+      (symbol))))
+
+================
+Unset
+================
+
+x =.
+
+---
+
+(source_file
+  (postfix
+    (symbol)))
+
+================
+TagUnset
+================
+
+f /: f[x_] =.
+
+---
+
+(source_file
+  (postfix
+    (binary
+      (symbol)
+      (call
+        head: (symbol)
+        arguments: (pattern
+          name: (symbol)
+          constraint: (blank))))))
+
+================
+TagSetDelayed
+================
+
+f /: f[x_] := 1
+
+---
+
+(source_file
+  (binary
+    (binary
+      (symbol)
+      (call
+        head: (symbol)
+        arguments: (pattern
+          name: (symbol)
+          constraint: (blank))))
+    (integer)))
+
+================
+TagSet
+================
+
+f /: f[x_] = 1
+
+---
+
+(source_file
+  (binary
+    (binary
+      (symbol)
+      (call
+        head: (symbol)
+        arguments: (pattern
+          name: (symbol)
+          constraint: (blank))))
+    (integer)))
+
+================
+MessageName - simple
+================
+
+f::usage
+
+---
+
+(source_file
+  (message_name
+    (symbol)
+    (message_tag)))
+
+================
+MessageName - with language
+================
+
+f::usage::English
+
+---
+
+(source_file
+  (message_name
+    (symbol)
+    (message_tag)
+    (message_tag)))
+
+================
+MessageName - dollar prefix tag
+================
+
+f::$Failed
+
+---
+
+(source_file
+  (message_name
+    (symbol)
+    (message_tag)))
+
+================
+MessageName - complex LHS
+================
+
+f[x]::usage
+
+---
+
+(source_file
+  (message_name
+    (call
+      head: (symbol)
+      arguments: (symbol))
+    (message_tag)))
+
+================
+FreeformEvaluate - simple
+================
+
+=[hello]
+
+---
+
+(source_file
+  (freeform_evaluate
+    (freeform_content)))
+
+================
+FreeformEvaluate - with spaces
+================
+
+=[hello world]
+
+---
+
+(source_file
+  (freeform_evaluate
+    (freeform_content)))
+
+================
+FreeformEvaluate - empty
+================
+
+=[]
+
+---
+
+(source_file
+  (freeform_evaluate))
+
+================
+TypeSpecifier - string shortform
+================
+
+"ListVector"::["String"]
+
+---
+
+(source_file
+  (type_specifier
+    (string)
+    arguments: (string)))
+
+================
+TypeSpecifier - multiple arguments
+================
+
+"PackedArray"::["Real64", 1]
+
+---
+
+(source_file
+  (type_specifier
+    (string)
+    arguments: (infix
+      (string)
+      (integer))))
+
+================
+TypeSpecifier - symbol head
+================
+
+a::[c, d, =[e]]
+
+---
+
+(source_file
+  (type_specifier
+    (symbol)
+    arguments: (infix
+      (infix
+        (symbol)
+        (symbol))
+      (freeform_evaluate
+        (freeform_content)))))
+
+================
+Implicit times - adjacent symbols
+================
+
+x y
+
+---
+
+(source_file
+  (implicit_times
+    (symbol)
+    (symbol)))
+
+================
+Implicit times - coefficient
+================
+
+2x
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (symbol)))
+
+================
+Implicit times - multiline
+================
+
+a::[21
+123123]
+
+---
+
+(source_file
+  (type_specifier
+    (symbol)
+    arguments: (implicit_times
+      (integer)
+      (integer))))
+
+================
+Implicit times - does not capture infix +
+================
+
+a + b
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Implicit times - prefix then implicit times
+================
+
+-a b
+
+---
+
+(source_file
+  (implicit_times
+    (prefix
+      (symbol))
+    (symbol)))
+
+================
+Implicit times - groups
+================
+
+(x+1)(y+2)
+
+---
+
+(source_file
+  (implicit_times
+    (group
+      (infix
+        (symbol)
+        (integer)))
+    (group
+      (infix
+        (symbol)
+        (integer)))))
+
+================
+Newline separates top-level statements
+================
+
+f[]
+
+g[]
+
+---
+
+(source_file
+  (call
+    head: (symbol))
+  (call
+    head: (symbol)))
+
+================
+Newline separates - three statements
+================
+
+a
+b
+c
+
+---
+
+(source_file
+  (symbol)
+  (symbol)
+  (symbol))
+
+================
+Newline separates - assignment then value
+================
+
+r = 2
+3
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (integer))
+  (integer))
+
+================
+Newline does not separate inside group
+================
+
+(a
+b)
+
+---
+
+(source_file
+  (group
+    (implicit_times
+      (symbol)
+      (symbol))))
+
+================
+Newline does not separate inside call arguments
+================
+
+f[a
+b]
+
+---
+
+(source_file
+  (call
+    head: (symbol)
+    arguments: (implicit_times
+      (symbol)
+      (symbol))))
+
+================
+Trailing infix operator continues across newline
+================
+
+a +
+b
+
+---
+
+(source_file
+  (infix
+    (symbol)
+    (symbol)))
+
+================
+Leading prefix operator on new line is a new statement
+================
+
+a
++b
+
+---
+
+(source_file
+  (symbol)
+  (prefix
+    (symbol)))
+
+================
+Newline after semicolon separates statements
+================
+
+a;
+b
+
+---
+
+(source_file
+  (infix
+    (symbol))
+  (symbol))
+
+================
+Newline after semicolon - multiple statements
+================
+
+a;
+b;
+c
+
+---
+
+(source_file
+  (infix
+    (symbol))
+  (infix
+    (symbol))
+  (symbol))
+
+================
+Implicit times - power binds to right operand
+================
+
+2x^2
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (binary
+      (symbol)
+      (integer))))
+
+================
+Implicit times - power binds to right operand (symbols)
+================
+
+a b^c
+
+---
+
+(source_file
+  (implicit_times
+    (symbol)
+    (binary
+      (symbol)
+      (symbol))))
+
+================
+Implicit times - chain then power on last factor
+================
+
+x y z^2
+
+---
+
+(source_file
+  (implicit_times
+    (implicit_times
+      (symbol)
+      (symbol))
+    (binary
+      (symbol)
+      (integer))))
+
+================
+Implicit times - division binds to right operand
+================
+
+2 x/y
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (binary
+      (symbol)
+      (symbol))))
+
+================
+Implicit times - dot binds to right operand
+================
+
+2 x . y
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (infix
+      (symbol)
+      (symbol))))
+
+================
+Implicit times - prefix application binds to right operand
+================
+
+2 f@x
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (binary
+      (symbol)
+      (symbol))))
+
+================
+Implicit times - postfix factorial binds to right operand
+================
+
+2 a!
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (postfix
+      (symbol))))
+
+================
+Implicit times - derivative binds to right operand
+================
+
+2 x'
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (postfix
+      (symbol))))
+
+================
+Implicit times - call binds to right operand
+================
+
+2 a[b]
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (call
+      head: (symbol)
+      arguments: (symbol))))
+
+================
+Implicit times - part binds to right operand
+================
+
+2 a[[1]]
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (part
+      head: (symbol)
+      arguments: (integer))))
+
+================
+Implicit times - message name binds to right operand
+================
+
+2 a::b
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (message_name
+      (symbol)
+      (message_tag))))
+
+================
+Implicit times - power on slot binds to right operand
+================
+
+2#^2
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (binary
+      (slot)
+      (integer))))
+
+================
+Implicit times - string join binds to right operand
+================
+
+2 a<>b
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (infix
+      (symbol)
+      (symbol))))
+
+================
+Implicit times - ternary tilde binds to right operand
+================
+
+2 a~f~b
+
+---
+
+(source_file
+  (implicit_times
+    (integer)
+    (tilde
+      (symbol)
+      function: (symbol)
+      (symbol))))
+
+================
+Implicit times - postfix on left factor
+================
+
+a!b
+
+---
+
+(source_file
+  (implicit_times
+    (postfix
+      (symbol))
+    (symbol)))
+
+================
+Implicit times - lower-precedence plus wraps product
+================
+
+2 x + 3
+
+---
+
+(source_file
+  (infix
+    (implicit_times
+      (integer)
+      (symbol))
+    (integer)))

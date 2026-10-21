@@ -1,0 +1,1888 @@
+==================
+Commands and GNU address forms — "0,/a/!{p;d}\n1~2p;3,+2d;4,~3p\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+0,/a/!{p;d}
+1~2p;3,+2d;4,~3p
+
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number)))
+        (address_separator)
+        (address
+          (regex_address
+            opening: (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (regex_character
+                    (literal)))))
+            closing: (delimiter))))
+      negation: (negation)
+      (block
+        (command_list
+          (command
+            (simple_command
+              name: (command_name)))
+          (command_separator)
+          (command
+            (simple_command
+              name: (command_name))))))
+    (command_separator)
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number)
+            (address_operator)
+            step: (number))))
+      (simple_command
+        name: (command_name)))
+    (command_separator)
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number)))
+        (address_separator)
+        (relative_address
+          (address_operator)
+          count: (number)))
+      (simple_command
+        name: (command_name)))
+    (command_separator)
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number)))
+        (address_separator)
+        (relative_address
+          (address_operator)
+          count: (number)))
+      (simple_command
+        name: (command_name)))
+    (command_separator)))
+
+==================
+Optional address counts and first relative addresses — "+p;~0p;+3p;1~p;1,+p\n{+}\n"
+:language(gsed)
+:language(gsed_ere)
+==================
++p;~0p;+3p;1~p;1,+p
+{+}
+
+------------------
+(script
+  (command_list
+    (command
+      (address_clause
+        (relative_address
+          (address_operator)))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (address_clause
+        (relative_address
+          (address_operator)
+          (number)))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (address_clause
+        (relative_address
+          (address_operator)
+          (syntax_issue
+            (invalid_syntax
+              (invalid_relative_address
+                (number))))))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (address_clause
+        (address
+          (line_address
+            (number)
+            (address_operator))))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (address_clause
+        (address
+          (line_address
+            (number)))
+        (address_separator)
+        (relative_address
+          (address_operator)))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (block
+        (syntax_issue
+          (invalid_syntax
+            (excess_address
+              (address_clause
+                (relative_address
+                  (address_operator))))))))
+    (command_separator)))
+
+==================
+Address count and zero restrictions — "0p;1,2q;1,2,3p;1:label\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+0p;1,2q;1,2,3p;1:label
+
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            issue: (syntax_issue
+              (invalid_syntax
+                (invalid_zero_address
+                  (number)))))))
+      (simple_command
+        name: (command_name)))
+    (command_separator)
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number)))
+        issue: (syntax_issue
+          (invalid_syntax
+            (excess_address
+              (address_separator)
+              (address
+                (line_address
+                  first: (number)))))))
+      (numeric_command
+        name: (command_name)))
+    (command_separator)
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number)))
+        (address_separator)
+        (address
+          (line_address
+            first: (number)))
+        issue: (syntax_issue
+          (invalid_syntax
+            (excess_address
+              (address_separator)
+              (address
+                (line_address
+                  first: (number)))))))
+      (simple_command
+        name: (command_name)))
+    (command_separator)
+    (command
+      issue: (syntax_issue
+        (invalid_syntax
+          (excess_address
+            address: (address_clause
+              (address
+                (line_address
+                  first: (number)))))))
+      (label_command
+        name: (command_name)
+        label: (label
+          (label_text))))
+    (command_separator)))
+
+==================
+Missing address and separator — "1,p;pd\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+1,p;pd
+
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number)))
+        (address_separator)
+        issue: (syntax_issue
+          (invalid_syntax
+            (missing_address))))
+      (simple_command
+        name: (command_name)))
+    (command_separator)
+    (command
+      (simple_command
+        name: (command_name))
+      issue: (syntax_issue
+        (invalid_syntax
+          (missing_command_separator))))
+    (command
+      (simple_command
+        name: (command_name)))
+    (command_separator)))
+
+==================
+GNU address forms — "0,/a/Ip;1~2p;3,+2d;4,~3p\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0,/a/Ip;1~2p;3,+2d;4,~3p
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:7        command
+0:0  - 0:6          address: address_clause
+0:0  - 0:1            address
+0:0  - 0:1              line_address
+0:0  - 0:1                first: number `0`
+0:1  - 0:2            address_separator `,`
+0:2  - 0:6            address
+0:2  - 0:6              regex_address
+0:2  - 0:3                opening: delimiter `/`
+0:3  - 0:4                regular_expression
+0:3  - 0:4                  alternation
+0:3  - 0:4                    regex_branch
+0:3  - 0:4                      regex_character
+0:3  - 0:4                        literal `a`
+0:4  - 0:5                closing: delimiter `/`
+0:5  - 0:6                address_modifier `I`
+0:6  - 0:7          simple_command
+0:6  - 0:7            name: command_name `p`
+0:7  - 0:8        command_separator `;`
+0:8  - 0:12       command
+0:8  - 0:11         address: address_clause
+0:8  - 0:11           address
+0:8  - 0:11             line_address
+0:8  - 0:9                first: number `1`
+0:9  - 0:10               address_operator `~`
+0:10 - 0:11               step: number `2`
+0:11 - 0:12         simple_command
+0:11 - 0:12           name: command_name `p`
+0:12 - 0:13       command_separator `;`
+0:13 - 0:18       command
+0:13 - 0:17         address: address_clause
+0:13 - 0:14           address
+0:13 - 0:14             line_address
+0:13 - 0:14               first: number `3`
+0:14 - 0:15           address_separator `,`
+0:15 - 0:17           relative_address
+0:15 - 0:16             address_operator `+`
+0:16 - 0:17             count: number `2`
+0:17 - 0:18         simple_command
+0:17 - 0:18           name: command_name `d`
+0:18 - 0:19       command_separator `;`
+0:19 - 0:24       command
+0:19 - 0:23         address: address_clause
+0:19 - 0:20           address
+0:19 - 0:20             line_address
+0:19 - 0:20               first: number `4`
+0:20 - 0:21           address_separator `,`
+0:21 - 0:23           relative_address
+0:21 - 0:22             address_operator `~`
+0:22 - 0:23             count: number `3`
+0:23 - 0:24         simple_command
+0:23 - 0:24           name: command_name `p`
+0:24 - 1:0        command_separator
+0:24 - 0:25         `\n`
+
+==================
+Modifier on empty regex address — "//Mp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+//Mp
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:2               closing: delimiter `/`
+0:2 - 0:3               issue: syntax_issue
+0:2 - 0:3                 invalid_syntax
+0:2 - 0:3                   modifier_on_empty_regexp
+0:2 - 0:3                     address_modifier `M`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Missing or invalid address delimiter "Σ" — "\\Σp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+\Σp
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             regex_address
+0:0 - 0:1               opening: delimiter `\\`
+0:1 - 0:3               issue: syntax_issue
+0:1 - 0:3                 invalid_syntax
+0:1 - 0:3                   invalid_delimiter `Σ`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Missing or invalid address delimiter "" — "\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+\
+------------------
+0:0 - 0:1   script
+0:0 - 0:1     command_list
+0:0 - 0:1       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             regex_address
+0:0 - 0:1               opening: delimiter `\\`
+0:1 - 0:1               issue: syntax_issue
+0:1 - 0:1                 incomplete_syntax
+0:1 - 0:1                   missing_opening_delimiter
+0:1 - 0:1         issue: syntax_issue
+0:1 - 0:1           incomplete_syntax
+0:1 - 0:1             missing_command
+
+==================
+Missing or invalid address delimiter "\n" — "\\\np"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+\
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:1       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             regex_address
+0:0 - 0:1               opening: delimiter `\\`
+0:1 - 0:1               issue: syntax_issue
+0:1 - 0:1                 invalid_syntax
+0:1 - 0:1                   missing_opening_delimiter
+0:1 - 0:1         issue: syntax_issue
+0:1 - 0:1           invalid_syntax
+0:1 - 0:1             missing_command
+0:1 - 1:0       command_separator
+0:1 - 0:2         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+
+==================
+NUL address delimiter — "\\\u0000p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+\ p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:2           address
+0:0 - 0:2             regex_address
+0:0 - 0:1               opening: delimiter `\\`
+0:1 - 0:2               issue: syntax_issue
+0:1 - 0:2                 invalid_syntax
+0:1 - 0:2                   invalid_delimiter `\0`
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+Zero address "0p" — "0p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0p
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 invalid_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2         simple_command
+0:1 - 0:2           name: command_name `p`
+
+==================
+Zero address "0!r file\n" — "0!r file\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0!r file
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:8       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 invalid_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2         negation: negation
+0:1 - 0:2           "!"
+0:2 - 0:8         file_command
+0:2 - 0:3           name: command_name `r`
+0:4 - 0:8           file: filename
+0:4 - 0:8             filename_text `file`
+0:8 - 1:0       command_separator
+0:8 - 0:9         `\n`
+
+==================
+Zero address "0~2p" — "0~2p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~2p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `2`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Zero address "0~10r x" — "0~10r x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~10r x
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:4           address
+0:0 - 0:4             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:4               step: number `10`
+0:4 - 0:7         file_command
+0:4 - 0:5           name: command_name `r`
+0:6 - 0:7           file: filename
+0:6 - 0:7             filename_text `x`
+
+==================
+Zero address "0~0p" — "0~0p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 invalid_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Zero address "0~p" — "0~p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:2           address
+0:0 - 0:2             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 invalid_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+Zero address "0~0r x" — "0~0r x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0r x
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:6         file_command
+0:3 - 0:4           name: command_name `r`
+0:5 - 0:6           file: filename
+0:5 - 0:6             filename_text `x`
+
+==================
+Zero address "0~r x" — "0~r x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~r x
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:2           address
+0:0 - 0:2             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:5         file_command
+0:2 - 0:3           name: command_name `r`
+0:4 - 0:5           file: filename
+0:4 - 0:5             filename_text `x`
+
+==================
+Zero address "00 ~ 00r x" — "00 ~ 00r x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+00 ~ 00r x
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:7          address: address_clause
+0:0  - 0:7            address
+0:0  - 0:7              line_address
+0:0  - 0:2                first: number `00`
+0:3  - 0:4                address_operator `~`
+0:5  - 0:7                step: number `00`
+0:7  - 0:10         file_command
+0:7  - 0:8            name: command_name `r`
+0:9  - 0:10           file: filename
+0:9  - 0:10             filename_text `x`
+
+==================
+Zero address "0~0!r x" — "0~0!r x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0!r x
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 invalid_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:4         negation: negation
+0:3 - 0:4           "!"
+0:4 - 0:7         file_command
+0:4 - 0:5           name: command_name `r`
+0:6 - 0:7           file: filename
+0:6 - 0:7             filename_text `x`
+
+==================
+Zero regex range [null,"a",false] — "0,/a/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0,/a/p
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:5           address
+0:2 - 0:5             regex_address
+0:2 - 0:3               opening: delimiter `/`
+0:3 - 0:4               regular_expression
+0:3 - 0:4                 alternation
+0:3 - 0:4                   regex_branch
+0:3 - 0:4                     regex_character
+0:3 - 0:4                       literal `a`
+0:4 - 0:5               closing: delimiter `/`
+0:5 - 0:6         simple_command
+0:5 - 0:6           name: command_name `p`
+
+==================
+Zero regex range ["100","b",false] — "0~100,/b/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~100,/b/p
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:9          address: address_clause
+0:0  - 0:5            address
+0:0  - 0:5              line_address
+0:0  - 0:1                first: number `0`
+0:1  - 0:2                address_operator `~`
+0:2  - 0:5                step: number `100`
+0:5  - 0:6            address_separator `,`
+0:6  - 0:9            address
+0:6  - 0:9              regex_address
+0:6  - 0:7                opening: delimiter `/`
+0:7  - 0:8                regular_expression
+0:7  - 0:8                  alternation
+0:7  - 0:8                    regex_branch
+0:7  - 0:8                      regex_character
+0:7  - 0:8                        literal `b`
+0:8  - 0:9                closing: delimiter `/`
+0:9  - 0:10         simple_command
+0:9  - 0:10           name: command_name `p`
+
+==================
+Zero regex range ["","a",false] — "0~,/a/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~,/a/p
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:6         address: address_clause
+0:0 - 0:2           address
+0:0 - 0:2             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3           address_separator `,`
+0:3 - 0:6           address
+0:3 - 0:6             regex_address
+0:3 - 0:4               opening: delimiter `/`
+0:4 - 0:5               regular_expression
+0:4 - 0:5                 alternation
+0:4 - 0:5                   regex_branch
+0:4 - 0:5                     regex_character
+0:4 - 0:5                       literal `a`
+0:5 - 0:6               closing: delimiter `/`
+0:6 - 0:7         simple_command
+0:6 - 0:7           name: command_name `p`
+
+==================
+Zero regex range ["0","a",false] — "0~0,/a/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0,/a/p
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:4           address_separator `,`
+0:4 - 0:7           address
+0:4 - 0:7             regex_address
+0:4 - 0:5               opening: delimiter `/`
+0:5 - 0:6               regular_expression
+0:5 - 0:6                 alternation
+0:5 - 0:6                   regex_branch
+0:5 - 0:6                     regex_character
+0:5 - 0:6                       literal `a`
+0:6 - 0:7               closing: delimiter `/`
+0:7 - 0:8         simple_command
+0:7 - 0:8           name: command_name `p`
+
+==================
+Zero regex range ["0","a",true] — "0~0,/a/!p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0,/a/!p
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:4           address_separator `,`
+0:4 - 0:7           address
+0:4 - 0:7             regex_address
+0:4 - 0:5               opening: delimiter `/`
+0:5 - 0:6               regular_expression
+0:5 - 0:6                 alternation
+0:5 - 0:6                   regex_branch
+0:5 - 0:6                     regex_character
+0:5 - 0:6                       literal `a`
+0:6 - 0:7               closing: delimiter `/`
+0:7 - 0:8         negation: negation
+0:7 - 0:8           "!"
+0:8 - 0:9         simple_command
+0:8 - 0:9           name: command_name `p`
+
+==================
+Invalid zero initial range undefined — "0,1p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0,1p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 invalid_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           address
+0:2 - 0:3             line_address
+0:2 - 0:3               first: number `1`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Invalid zero initial range "0" — "0~0,1p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0,1p
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 invalid_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:4           address_separator `,`
+0:4 - 0:5           address
+0:4 - 0:5             line_address
+0:4 - 0:5               first: number `1`
+0:5 - 0:6         simple_command
+0:5 - 0:6           name: command_name `p`
+
+==================
+Invalid zero final range undefined — "1,0p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,0p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           address
+0:2 - 0:3             line_address
+0:2 - 0:3               issue: syntax_issue
+0:2 - 0:3                 invalid_syntax
+0:2 - 0:3                   invalid_zero_address
+0:2 - 0:3                     number `0`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Invalid zero final range "0" — "1,0~0p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,0~0p
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:5           address
+0:2 - 0:5             line_address
+0:2 - 0:3               issue: syntax_issue
+0:2 - 0:3                 invalid_syntax
+0:2 - 0:3                   invalid_zero_address
+0:2 - 0:3                     number `0`
+0:3 - 0:4               address_operator `~`
+0:4 - 0:5               step: number `0`
+0:5 - 0:6         simple_command
+0:5 - 0:6           name: command_name `p`
+
+==================
+Quit accepts only one address "1,2" — "1,2q"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,2q
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:3           issue: syntax_issue
+0:1 - 0:3             invalid_syntax
+0:1 - 0:3               excess_address
+0:1 - 0:2                 address_separator `,`
+0:2 - 0:3                 address
+0:2 - 0:3                   line_address
+0:2 - 0:3                     first: number `2`
+0:3 - 0:4         numeric_command
+0:3 - 0:4           name: command_name `q`
+
+==================
+Quit accepts only one address ",2" — ",2q"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+,2q
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:0           issue: syntax_issue
+0:0 - 0:0             invalid_syntax
+0:0 - 0:0               missing_address
+0:0 - 0:2           issue: syntax_issue
+0:0 - 0:2             invalid_syntax
+0:0 - 0:2               excess_address
+0:0 - 0:1                 address_separator `,`
+0:1 - 0:2                 address
+0:1 - 0:2                   line_address
+0:1 - 0:2                     first: number `2`
+0:2 - 0:3         numeric_command
+0:2 - 0:3           name: command_name `q`
+
+==================
+Quit accepts only one address "," — ",q"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+,q
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:0           issue: syntax_issue
+0:0 - 0:0             invalid_syntax
+0:0 - 0:0               missing_address
+0:0 - 0:1           issue: syntax_issue
+0:0 - 0:1             invalid_syntax
+0:0 - 0:1               excess_address
+0:0 - 0:1                 address_separator `,`
+0:1 - 0:1                 issue: syntax_issue
+0:1 - 0:1                   invalid_syntax
+0:1 - 0:1                     missing_address
+0:1 - 0:2         numeric_command
+0:1 - 0:2           name: command_name `q`
+
+==================
+Third address is excess — "1,2,3p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,2,3p
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           address
+0:2 - 0:3             line_address
+0:2 - 0:3               first: number `2`
+0:3 - 0:5           issue: syntax_issue
+0:3 - 0:5             invalid_syntax
+0:3 - 0:5               excess_address
+0:3 - 0:4                 address_separator `,`
+0:4 - 0:5                 address
+0:4 - 0:5                   line_address
+0:4 - 0:5                     first: number `3`
+0:5 - 0:6         simple_command
+0:5 - 0:6           name: command_name `p`
+
+==================
+Label rejects addresses — "1:label"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1:label
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:1         issue: syntax_issue
+0:0 - 0:1           invalid_syntax
+0:0 - 0:1             excess_address
+0:0 - 0:1               address: address_clause
+0:0 - 0:1                 address
+0:0 - 0:1                   line_address
+0:0 - 0:1                     first: number `1`
+0:1 - 0:7         label_command
+0:1 - 0:2           name: command_name `:`
+0:2 - 0:7           label: label
+0:2 - 0:7             label_text `label`
+
+==================
+Missing address ",2" — ",2p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+,2p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:0           issue: syntax_issue
+0:0 - 0:0             invalid_syntax
+0:0 - 0:0               missing_address
+0:0 - 0:1           address_separator `,`
+0:1 - 0:2           address
+0:1 - 0:2             line_address
+0:1 - 0:2               first: number `2`
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+Missing address "1," — "1,p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:2           issue: syntax_issue
+0:2 - 0:2             invalid_syntax
+0:2 - 0:2               missing_address
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+First relative address "+" — "+p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
++p
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           relative_address
+0:0 - 0:1             address_operator `+`
+0:1 - 0:2         simple_command
+0:1 - 0:2           name: command_name `p`
+
+==================
+First relative address "~" — "~p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+~p
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           relative_address
+0:0 - 0:1             address_operator `~`
+0:1 - 0:2         simple_command
+0:1 - 0:2           name: command_name `p`
+
+==================
+First relative address "+ 00" — "+ 00p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
++ 00p
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:4           relative_address
+0:0 - 0:1             address_operator `+`
+0:2 - 0:4             count: number `00`
+0:4 - 0:5         simple_command
+0:4 - 0:5           name: command_name `p`
+
+==================
+First relative address "~0" — "~0p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+~0p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:2           relative_address
+0:0 - 0:1             address_operator `~`
+0:1 - 0:2             count: number `0`
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+First relative address "+3" — "+3p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
++3p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:2           relative_address
+0:0 - 0:1             address_operator `+`
+0:1 - 0:2             issue: syntax_issue
+0:1 - 0:2               invalid_syntax
+0:1 - 0:2                 invalid_relative_address
+0:1 - 0:2                   count: number `3`
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+First relative address "~12" — "~12p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+~12p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           relative_address
+0:0 - 0:1             address_operator `~`
+0:1 - 0:3             issue: syntax_issue
+0:1 - 0:3               invalid_syntax
+0:1 - 0:3                 invalid_relative_address
+0:1 - 0:3                   count: number `12`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+First relative address with branch — "+b"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
++b
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           relative_address
+0:0 - 0:1             address_operator `+`
+0:1 - 0:2         branch_command
+0:1 - 0:2           name: command_name `b`
+
+==================
+Relative range end "+" — "1,+p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,+p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           relative_address
+0:2 - 0:3             address_operator `+`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Relative range end "~" — "1,~p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,~p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           relative_address
+0:2 - 0:3             address_operator `~`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Relative range end "+0" — "1,+0p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,+0p
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:4           relative_address
+0:2 - 0:3             address_operator `+`
+0:3 - 0:4             count: number `0`
+0:4 - 0:5         simple_command
+0:4 - 0:5           name: command_name `p`
+
+==================
+Relative range end "~3" — "1,~3p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,~3p
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:4           relative_address
+0:2 - 0:3             address_operator `~`
+0:3 - 0:4             count: number `3`
+0:4 - 0:5         simple_command
+0:4 - 0:5           name: command_name `p`
+
+==================
+Relative range beginning — "+,2p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
++,2p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:1           relative_address
+0:0 - 0:1             address_operator `+`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           address
+0:2 - 0:3             line_address
+0:2 - 0:3               first: number `2`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Relative address before label — "+:label"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
++:label
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:1         issue: syntax_issue
+0:0 - 0:1           invalid_syntax
+0:0 - 0:1             excess_address
+0:0 - 0:1               address: address_clause
+0:0 - 0:1                 relative_address
+0:0 - 0:1                   address_operator `+`
+0:1 - 0:7         label_command
+0:1 - 0:2           name: command_name `:`
+0:2 - 0:7           label: label
+0:2 - 0:7             label_text `label`
+
+==================
+Relative address missing command — "+"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
++
+------------------
+0:0 - 0:1   script
+0:0 - 0:1     command_list
+0:0 - 0:1       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           relative_address
+0:0 - 0:1             address_operator `+`
+0:1 - 0:1         issue: syntax_issue
+0:1 - 0:1           incomplete_syntax
+0:1 - 0:1             missing_command
+
+==================
+Optional periodic step undefined — "1~p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1~p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:2           address
+0:0 - 0:2             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+Optional periodic step "0" — "1~0p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1~0p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Missing address excludes layout " p" — "1, p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1, p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:2           issue: syntax_issue
+0:2 - 0:2             invalid_syntax
+0:2 - 0:2               missing_address
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Missing address excludes layout " \t" — "1, \t"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1, 	
+------------------
+0:0 - 0:4   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:2         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:2           issue: syntax_issue
+0:2 - 0:2             incomplete_syntax
+0:2 - 0:2               missing_address
+0:2 - 0:2         issue: syntax_issue
+0:2 - 0:2           incomplete_syntax
+0:2 - 0:2             missing_command
+
+==================
+Excess omitted address excludes layout — "1,2,  p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,2,  p
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           address
+0:2 - 0:3             line_address
+0:2 - 0:3               first: number `2`
+0:3 - 0:4           issue: syntax_issue
+0:3 - 0:4             invalid_syntax
+0:3 - 0:4               excess_address
+0:3 - 0:4                 address_separator `,`
+0:4 - 0:4                 issue: syntax_issue
+0:4 - 0:4                   invalid_syntax
+0:4 - 0:4                     missing_address
+0:6 - 0:7         simple_command
+0:6 - 0:7           name: command_name `p`
+
+==================
+Missing command excludes layout — "1 \t;"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1 	;
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:1       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:1         issue: syntax_issue
+0:1 - 0:1           invalid_syntax
+0:1 - 0:1             missing_command
+0:3 - 0:4       command_separator `;`
+
+==================
+Missing first address starts at comma "   " — "   ,2p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+   ,2p
+------------------
+0:3 - 0:6   script
+0:3 - 0:6     command_list
+0:3 - 0:6       command
+0:3 - 0:5         address: address_clause
+0:3 - 0:3           issue: syntax_issue
+0:3 - 0:3             invalid_syntax
+0:3 - 0:3               missing_address
+0:3 - 0:4           address_separator `,`
+0:4 - 0:5           address
+0:4 - 0:5             line_address
+0:4 - 0:5               first: number `2`
+0:5 - 0:6         simple_command
+0:5 - 0:6           name: command_name `p`
+
+==================
+Missing first address starts at comma "p;   " — "p;   ,2p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+p;   ,2p
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:1       command
+0:0 - 0:1         simple_command
+0:0 - 0:1           name: command_name `p`
+0:1 - 0:2       command_separator `;`
+0:5 - 0:8       command
+0:5 - 0:7         address: address_clause
+0:5 - 0:5           issue: syntax_issue
+0:5 - 0:5             invalid_syntax
+0:5 - 0:5               missing_address
+0:5 - 0:6           address_separator `,`
+0:6 - 0:7           address
+0:6 - 0:7             line_address
+0:6 - 0:7               first: number `2`
+0:7 - 0:8         simple_command
+0:7 - 0:8           name: command_name `p`
+
+==================
+Missing first address starts at comma "{   " — "{   ,2p}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{   ,2p}
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         block
+0:0 - 0:1           "{"
+0:4 - 0:7           command_list
+0:4 - 0:7             command
+0:4 - 0:6               address: address_clause
+0:4 - 0:4                 issue: syntax_issue
+0:4 - 0:4                   invalid_syntax
+0:4 - 0:4                     missing_address
+0:4 - 0:5                 address_separator `,`
+0:5 - 0:6                 address
+0:5 - 0:6                   line_address
+0:5 - 0:6                     first: number `2`
+0:6 - 0:7               simple_command
+0:6 - 0:7                 name: command_name `p`
+0:7 - 0:8           "}"
+
+==================
+Zero step at EOF "" — "0~0"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 incomplete_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:3         issue: syntax_issue
+0:3 - 0:3           incomplete_syntax
+0:3 - 0:3             missing_command
+
+==================
+Zero step at EOF " " — "0~0 "
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0 
+------------------
+0:0 - 0:4   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:3           address
+0:0 - 0:3             line_address
+0:0 - 0:1               issue: syntax_issue
+0:0 - 0:1                 incomplete_syntax
+0:0 - 0:1                   invalid_zero_address
+0:0 - 0:1                     number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3               step: number `0`
+0:3 - 0:3         issue: syntax_issue
+0:3 - 0:3           incomplete_syntax
+0:3 - 0:3             missing_command
+
+==================
+Control delimiter escape in address — "\\c\\c\\.cp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+\c\c\.cp
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:7           address
+0:0 - 0:7             regex_address
+0:0 - 0:2               opening: delimiter `\\c`
+0:2 - 0:6               regular_expression
+0:2 - 0:6                 alternation
+0:2 - 0:6                   regex_branch
+0:2 - 0:4                     regex_character
+0:2 - 0:4                       escape `\\c`
+0:4 - 0:6                     regex_character
+0:4 - 0:6                       escape `\\.`
+0:6 - 0:7               closing: delimiter `c`
+0:7 - 0:8         simple_command
+0:7 - 0:8           name: command_name `p`
+
+==================
+Backslash address delimiter — "\\\\b\\p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+\\b\p
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:4           address
+0:0 - 0:4             regex_address
+0:0 - 0:2               opening: delimiter `\\\\`
+0:2 - 0:3               regular_expression
+0:2 - 0:3                 alternation
+0:2 - 0:3                   regex_branch
+0:2 - 0:3                     regex_character
+0:2 - 0:3                       literal `b`
+0:3 - 0:4               closing: delimiter `\\`
+0:4 - 0:5         simple_command
+0:4 - 0:5           name: command_name `p`
+
+==================
+Nested zero addresses retain local validity — "0,//{$!\n0~!;0;$y"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0,//{$!
+0~!;0;$y
+------------------
+0:0 - 1:8   script
+0:0 - 1:8     command_list
+0:0 - 1:8       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:4           address
+0:2 - 0:4             regex_address
+0:2 - 0:3               opening: delimiter `/`
+0:3 - 0:4               closing: delimiter `/`
+0:4 - 1:8         block
+0:4 - 0:5           "{"
+0:5 - 1:8           command_list
+0:5 - 0:7             command
+0:5 - 0:6               address: address_clause
+0:5 - 0:6                 address
+0:5 - 0:6                   last_line_address `$`
+0:6 - 0:7               negation: negation
+0:6 - 0:7                 "!"
+0:7 - 0:7               issue: syntax_issue
+0:7 - 0:7                 invalid_syntax
+0:7 - 0:7                   missing_command
+0:7 - 1:0             command_separator
+0:7 - 0:8               `\n`
+1:0 - 1:3             command
+1:0 - 1:2               address: address_clause
+1:0 - 1:2                 address
+1:0 - 1:2                   line_address
+1:0 - 1:1                     issue: syntax_issue
+1:0 - 1:1                       invalid_syntax
+1:0 - 1:1                         invalid_zero_address
+1:0 - 1:1                           number `0`
+1:1 - 1:2                     address_operator `~`
+1:2 - 1:3               negation: negation
+1:2 - 1:3                 "!"
+1:3 - 1:3               issue: syntax_issue
+1:3 - 1:3                 invalid_syntax
+1:3 - 1:3                   missing_command
+1:3 - 1:4             command_separator `;`
+1:4 - 1:5             command
+1:4 - 1:5               address: address_clause
+1:4 - 1:5                 address
+1:4 - 1:5                   line_address
+1:4 - 1:5                     issue: syntax_issue
+1:4 - 1:5                       invalid_syntax
+1:4 - 1:5                         invalid_zero_address
+1:4 - 1:5                           number `0`
+1:5 - 1:5               issue: syntax_issue
+1:5 - 1:5                 invalid_syntax
+1:5 - 1:5                   missing_command
+1:5 - 1:6             command_separator `;`
+1:6 - 1:8             command
+1:6 - 1:7               address: address_clause
+1:6 - 1:7                 address
+1:6 - 1:7                   last_line_address `$`
+1:7 - 1:8               translate_command
+1:7 - 1:8                 name: command_name `y`
+1:8 - 1:8                 issue: syntax_issue
+1:8 - 1:8                   incomplete_syntax
+1:8 - 1:8                     missing_opening_delimiter
+1:8 - 1:8           issue: syntax_issue
+1:8 - 1:8             incomplete_syntax
+1:8 - 1:8               missing_closing_delimiter
+
+==================
+Optional operand after zero step range "e ;" — "0~0,/a/e ;"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0,/a/e ;
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:7          address: address_clause
+0:0  - 0:3            address
+0:0  - 0:3              line_address
+0:0  - 0:1                first: number `0`
+0:1  - 0:2                address_operator `~`
+0:2  - 0:3                step: number `0`
+0:3  - 0:4            address_separator `,`
+0:4  - 0:7            address
+0:4  - 0:7              regex_address
+0:4  - 0:5                opening: delimiter `/`
+0:5  - 0:6                regular_expression
+0:5  - 0:6                  alternation
+0:5  - 0:6                    regex_branch
+0:5  - 0:6                      regex_character
+0:5  - 0:6                        literal `a`
+0:6  - 0:7                closing: delimiter `/`
+0:7  - 0:10         execute_command
+0:7  - 0:8            name: command_name `e`
+0:9  - 0:10           command: shell_command
+0:9  - 0:10             shell_text `;`
+
+==================
+Optional operand after zero step range "b x" — "0~0,/a/b x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0,/a/b x
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:7          address: address_clause
+0:0  - 0:3            address
+0:0  - 0:3              line_address
+0:0  - 0:1                first: number `0`
+0:1  - 0:2                address_operator `~`
+0:2  - 0:3                step: number `0`
+0:3  - 0:4            address_separator `,`
+0:4  - 0:7            address
+0:4  - 0:7              regex_address
+0:4  - 0:5                opening: delimiter `/`
+0:5  - 0:6                regular_expression
+0:5  - 0:6                  alternation
+0:5  - 0:6                    regex_branch
+0:5  - 0:6                      regex_character
+0:5  - 0:6                        literal `a`
+0:6  - 0:7                closing: delimiter `/`
+0:7  - 0:10         branch_command
+0:7  - 0:8            name: command_name `b`
+0:9  - 0:10           label: label
+0:9  - 0:10             label_text `x`
+
+==================
+Optional operand after zero step range "T x" — "0~0,/a/T x"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0,/a/T x
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:7          address: address_clause
+0:0  - 0:3            address
+0:0  - 0:3              line_address
+0:0  - 0:1                first: number `0`
+0:1  - 0:2                address_operator `~`
+0:2  - 0:3                step: number `0`
+0:3  - 0:4            address_separator `,`
+0:4  - 0:7            address
+0:4  - 0:7              regex_address
+0:4  - 0:5                opening: delimiter `/`
+0:5  - 0:6                regular_expression
+0:5  - 0:6                  alternation
+0:5  - 0:6                    regex_branch
+0:5  - 0:6                      regex_character
+0:5  - 0:6                        literal `a`
+0:6  - 0:7                closing: delimiter `/`
+0:7  - 0:10         branch_command
+0:7  - 0:8            name: command_name `T`
+0:9  - 0:10           label: label
+0:9  - 0:10             label_text `x`
+
+==================
+Optional operand after zero step range "v 4" — "0~0,/a/v 4"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~0,/a/v 4
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:7          address: address_clause
+0:0  - 0:3            address
+0:0  - 0:3              line_address
+0:0  - 0:1                first: number `0`
+0:1  - 0:2                address_operator `~`
+0:2  - 0:3                step: number `0`
+0:3  - 0:4            address_separator `,`
+0:4  - 0:7            address
+0:4  - 0:7              regex_address
+0:4  - 0:5                opening: delimiter `/`
+0:5  - 0:6                regular_expression
+0:5  - 0:6                  alternation
+0:5  - 0:6                    regex_branch
+0:5  - 0:6                      regex_character
+0:5  - 0:6                        literal `a`
+0:6  - 0:7                closing: delimiter `/`
+0:7  - 0:10         version_command
+0:7  - 0:8            name: command_name `v`
+0:9  - 0:10           version: version
+0:9  - 0:10             version_text `4`
+
+==================
+Optional operand after zero step range "l 5" — "0~,/a/l 5"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+0~,/a/l 5
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:6         address: address_clause
+0:0 - 0:2           address
+0:0 - 0:2             line_address
+0:0 - 0:1               first: number `0`
+0:1 - 0:2               address_operator `~`
+0:2 - 0:3           address_separator `,`
+0:3 - 0:6           address
+0:3 - 0:6             regex_address
+0:3 - 0:4               opening: delimiter `/`
+0:4 - 0:5               regular_expression
+0:4 - 0:5                 alternation
+0:4 - 0:5                   regex_branch
+0:4 - 0:5                     regex_character
+0:4 - 0:5                       literal `a`
+0:5 - 0:6               closing: delimiter `/`
+0:6 - 0:9         numeric_command
+0:6 - 0:7           name: command_name `l`
+0:8 - 0:9           argument: number `5`

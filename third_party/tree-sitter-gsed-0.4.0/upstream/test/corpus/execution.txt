@@ -1,0 +1,561 @@
+==================
+Shell text introducer and sed escapes — "e\\\nx\\t\\x41\n"
+:language(gsed)
+==================
+e\
+x\t\x41
+
+------------------
+(script
+  (command_list
+    (command
+      (execute_command
+        (command_name)
+        (text_introducer)
+        (shell_command
+          (shell_text)
+          (character_escape)
+          (character_escape))))
+    (command_separator)))
+
+==================
+Odd terminal backslash — "e x\\t\\"
+:language(gsed_ere)
+:language(gsed)
+:cst
+==================
+e x\t\
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:6           command: shell_command
+0:2 - 0:5             shell_text `x\\t`
+0:5 - 0:6             escape `\\`
+
+==================
+Optional shell operand — "e"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e
+------------------
+0:0 - 0:1   script
+0:0 - 0:1     command_list
+0:0 - 0:1       command
+0:0 - 0:1         execute_command
+0:0 - 0:1           name: command_name `e`
+
+==================
+Raw control escape — "e x\\c\\.\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\c\.\
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:8           command: shell_command
+0:2 - 0:7             shell_text `x\\c\\.`
+0:7 - 0:8             escape `\\`
+
+==================
+Three terminal backslashes — "e x\\t\\\\\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\t\\\
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:8           command: shell_command
+0:2 - 0:7             shell_text `x\\t\\\\`
+0:7 - 0:8             escape `\\`
+
+==================
+Even terminal backslashes — "e x\\t\\\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\t\\
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:7           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 0:5             character_escape `\\t`
+0:5 - 0:7             escape `\\\\`
+
+==================
+Continued raw body — "e x\\t\\\ny\\n\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\t\
+y\n\
+------------------
+0:0 - 1:4   script
+0:0 - 1:4     command_list
+0:0 - 1:4       command
+0:0 - 1:4         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 1:4           command: shell_command
+0:2 - 0:5             shell_text `x\\t`
+0:5 - 1:0             line_continuation
+0:5 - 0:7               `\\\n`
+1:0 - 1:3             shell_text `y\\n`
+1:3 - 1:4             escape `\\`
+
+==================
+Terminated body — "e x\\t\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\t
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:5       command
+0:0 - 0:5         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:5           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 0:5             character_escape `\\t`
+0:5 - 1:0       command_separator
+0:5 - 0:6         `\n`
+
+==================
+Introducer precedes numeric escape — "e\\x70"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e\x70
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 0:2           text_introducer `\\`
+0:2 - 0:5           command: shell_command
+0:2 - 0:5             shell_text `x70`
+
+==================
+Introducer owns initial newline — "e\\\nx\\t"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e\
+x\t
+------------------
+0:0 - 1:3   script
+0:0 - 1:3     command_list
+0:0 - 1:3       command
+0:0 - 1:3         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 1:0           text_introducer
+0:1 - 0:3             `\\\n`
+1:0 - 1:3           command: shell_command
+1:0 - 1:1             shell_text `x`
+1:1 - 1:3             character_escape `\\t`
+
+==================
+Terminal backslash disables escape processing after introducer — "e\\\\t\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e\\t\
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 0:2           text_introducer `\\`
+0:2 - 0:5           command: shell_command
+0:2 - 0:4             shell_text `\\t`
+0:4 - 0:5             escape `\\`
+
+==================
+Raw backslash after introducer — "e\\\\\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e\\\
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:4         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 0:2           text_introducer `\\`
+0:2 - 0:4           command: shell_command
+0:2 - 0:3             shell_text `\\`
+0:3 - 0:4             escape `\\`
+
+==================
+Four backslashes before terminating newline — "1e\\\\\\\\\nx"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1e\\\\
+x
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:6       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:6         execute_command
+0:1 - 0:2           name: command_name `e`
+0:2 - 0:3           text_introducer `\\`
+0:3 - 0:6           command: shell_command
+0:3 - 0:4             escape `\\`
+0:4 - 0:6             escape `\\\\`
+0:6 - 1:0       command_separator
+0:6 - 0:7         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `x`
+
+==================
+Four backslashes at EOF — "1e\\\\\\\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1e\\\\
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:6         execute_command
+0:1 - 0:2           name: command_name `e`
+0:2 - 0:3           text_introducer `\\`
+0:3 - 0:6           command: shell_command
+0:3 - 0:5             escape `\\\\`
+0:5 - 0:6             escape `\\`
+
+==================
+Two backslashes after introducer continue line — "1e\\\\\\\nx"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1e\\\
+x
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 1:1       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 1:1         execute_command
+0:1 - 0:2           name: command_name `e`
+0:2 - 0:3           text_introducer `\\`
+0:3 - 1:1           command: shell_command
+0:3 - 0:4             escape `\\`
+0:4 - 1:0             line_continuation
+0:4 - 0:6               `\\\n`
+1:0 - 1:1             shell_text `x`
+
+==================
+Control backslash before dot at EOF — "ex\\c\\."
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+ex\c\.
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 0:6           command: shell_command
+0:1 - 0:2             shell_text `x`
+0:2 - 0:5             issue: syntax_issue
+0:2 - 0:5               incomplete_syntax
+0:2 - 0:5                 invalid_control_escape
+0:2 - 0:5                   character_escape `\\c\\`
+0:5 - 0:6             shell_text `.`
+
+==================
+Control backslash before dot at EOF completed with raw termination — "ex\\c\\.\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+ex\c\.\
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 0:7           command: shell_command
+0:1 - 0:6             shell_text `x\\c\\.`
+0:6 - 0:7             escape `\\`
+
+==================
+Control backslash takes quoted newline — "e x\\c\\\np"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\c\
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 1:1       command
+0:0 - 1:1         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 1:1           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 1:0             issue: syntax_issue
+0:3 - 1:0               incomplete_syntax
+0:3 - 1:0                 invalid_control_escape
+0:3 - 1:0                   character_escape
+0:3 - 0:7                     `\\c\\\n`
+1:0 - 1:1             shell_text `p`
+
+==================
+Control backslash takes quoted newline completed with raw termination — "e x\\c\\\np\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\c\
+p\
+------------------
+0:0 - 1:2   script
+0:0 - 1:2     command_list
+0:0 - 1:2       command
+0:0 - 1:2         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 1:2           command: shell_command
+0:2 - 0:5             shell_text `x\\c`
+0:5 - 1:0             line_continuation
+0:5 - 0:7               `\\\n`
+1:0 - 1:1             shell_text `p`
+1:1 - 1:2             escape `\\`
+
+==================
+Control backslash after multiline introducer at EOF — "e\\\nx\\c\\."
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e\
+x\c\.
+------------------
+0:0 - 1:5   script
+0:0 - 1:5     command_list
+0:0 - 1:5       command
+0:0 - 1:5         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 1:0           text_introducer
+0:1 - 0:3             `\\\n`
+1:0 - 1:5           command: shell_command
+1:0 - 1:1             shell_text `x`
+1:1 - 1:4             issue: syntax_issue
+1:1 - 1:4               incomplete_syntax
+1:1 - 1:4                 invalid_control_escape
+1:1 - 1:4                   character_escape `\\c\\`
+1:4 - 1:5             shell_text `.`
+
+==================
+Control backslash after multiline introducer at EOF completed with raw termination — "e\\\nx\\c\\.\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e\
+x\c\.\
+------------------
+0:0 - 1:6   script
+0:0 - 1:6     command_list
+0:0 - 1:6       command
+0:0 - 1:6         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 1:0           text_introducer
+0:1 - 0:3             `\\\n`
+1:0 - 1:6           command: shell_command
+1:0 - 1:5             shell_text `x\\c\\.`
+1:5 - 1:6             escape `\\`
+
+==================
+Control backslash before terminated operand — "e x\\c\\y\np"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\c\y
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:7       command
+0:0 - 0:7         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:7           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 0:6             issue: syntax_issue
+0:3 - 0:6               invalid_syntax
+0:3 - 0:6                 invalid_control_escape
+0:3 - 0:6                   character_escape `\\c\\`
+0:6 - 0:7             shell_text `y`
+0:7 - 1:0       command_separator
+0:7 - 0:8         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+
+==================
+Control backslash after terminated multiline introducer — "e\\\nx\\c\\.\np"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e\
+x\c\.
+p
+------------------
+0:0 - 2:1   script
+0:0 - 2:1     command_list
+0:0 - 1:5       command
+0:0 - 1:5         execute_command
+0:0 - 0:1           name: command_name `e`
+0:1 - 1:0           text_introducer
+0:1 - 0:3             `\\\n`
+1:0 - 1:5           command: shell_command
+1:0 - 1:1             shell_text `x`
+1:1 - 1:4             issue: syntax_issue
+1:1 - 1:4               invalid_syntax
+1:1 - 1:4                 invalid_control_escape
+1:1 - 1:4                   character_escape `\\c\\`
+1:4 - 1:5             shell_text `.`
+1:5 - 2:0       command_separator
+1:5 - 1:6         `\n`
+2:0 - 2:1       command
+2:0 - 2:1         simple_command
+2:0 - 2:1           name: command_name `p`
+
+==================
+Non-ASCII control argument — "e x\\cΣ"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\cΣ
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:7           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 0:7             character_escape `\\cΣ`
+
+==================
+Backslash count before newline 1 — "e x\\\npp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\
+pp
+------------------
+0:0 - 1:2   script
+0:0 - 1:2     command_list
+0:0 - 1:2       command
+0:0 - 1:2         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 1:2           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 1:0             line_continuation
+0:3 - 0:5               `\\\n`
+1:0 - 1:2             shell_text `pp`
+
+==================
+Backslash count before newline 2 — "e x\\\\\npp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\\
+pp
+------------------
+0:0 - 1:2   script
+0:0 - 1:2     command_list
+0:0 - 0:5       command
+0:0 - 0:5         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 0:5           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 0:5             escape `\\\\`
+0:5 - 1:0       command_separator
+0:5 - 0:6         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+1:1 - 1:1         issue: syntax_issue
+1:1 - 1:1           invalid_syntax
+1:1 - 1:1             missing_command_separator
+1:1 - 1:2       command
+1:1 - 1:2         simple_command
+1:1 - 1:2           name: command_name `p`
+
+==================
+Backslash count before newline 3 — "e x\\\\\\\npp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+e x\\\
+pp
+------------------
+0:0 - 1:2   script
+0:0 - 1:2     command_list
+0:0 - 1:2       command
+0:0 - 1:2         execute_command
+0:0 - 0:1           name: command_name `e`
+0:2 - 1:2           command: shell_command
+0:2 - 0:3             shell_text `x`
+0:3 - 0:5             escape `\\\\`
+0:5 - 1:0             line_continuation
+0:5 - 0:7               `\\\n`
+1:0 - 1:2             shell_text `pp`

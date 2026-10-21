@@ -1,0 +1,39 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+
+  "grammars": [
+    {
+      "name": "lean",
+      "camelcase": "Lean",
+      "scope": "source.lean",
+      "path": ".",
+      "file-types": ["lean"],
+      "injection-regex": "^lean$",
+      "highlights": ["queries/highlights.scm"],
+      "injections": ["queries/injections.scm"],
+      "locals": ["queries/locals.scm"]
+    }
+  ],
+  "metadata": {
+    "version": "0.2.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for the Lean 4 theorem prover",
+    "authors": [
+      {
+        "name": "Julian Berman",
+        "email": "Julian+tree-sitter-lean@GrayVines.com"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/Julian/tree-sitter-lean"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": false,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": false
+  }
+}

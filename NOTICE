@@ -95,3 +95,24 @@ source at eed7ddf6a66b596906aa8ca3d40521b8278adc6f and the exact MIT notice,
 Copyright (c) 2023 Amaan Qureshi, bundled as licenses/tree-sitter-hare-1.0.0-LICENSE.
 The ordinary foreach grammar correction, generated tables and current local
 Rust binding are disclosed separately in the retained source provenance.
+
+The local tree-sitter-pug 0.0.1 package retains all 36 upstream Git blobs at
+13e9195370172c86a8b88184cc358b23b677cc46 and the exact MIT grant, Copyright (c)
+2021 Florian Proksch, under third_party/tree-sitter-pug-0.0.1/LICENSE.
+The original npm ISC metadata is retained without rewriting the MIT grant;
+scanner/status/Rc ownership changes are separately disclosed in LOCAL_CHANGES.md.
+
+The local tree-sitter-wolfram 0.0.1 derivative retains all 19 upstream Git
+blobs at 15b3244e0029ef1f14e1764d522da5821cf8cbae and the exact MIT grant,
+Copyright (c) 2021 Brenton Bostick, under
+third_party/tree-sitter-wolfram-0.0.1/LICENSE. The checked comment scanner,
+request status bridge and local Rust wrapper are disclosed in LOCAL_CHANGES.md.
+
+The local tree-sitter-gsed 0.4.0 derivative retains all 68 upstream Git blobs
+at 3f91eb75566ec290ea8103de73c5dcbf1d7ef106 and the exact MIT grant,
+Copyright (c) 2026 konomanoasa, under third_party/tree-sitter-gsed-0.4.0/LICENSE.
+The scoped scanner and owned Rust host are disclosed in LOCAL_CHANGES.md.
+
+Idris grammar sources retain the MIT notices of Max Brunsfeld, Maskhjarna,
+postsolar, Hideaki Kawai and kayhide. See third_party/tree-sitter-idris-0.0.1/NOTICE
+and LICENSE for the complete retained grant and local derivative disclosure.

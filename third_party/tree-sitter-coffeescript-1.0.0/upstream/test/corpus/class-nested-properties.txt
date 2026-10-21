@@ -1,0 +1,30 @@
+# Class property blocks can nest within sections
+==================
+class nested properties
+==================
+
+class Widget
+  events:
+    theme:
+      dark: true
+
+---
+
+(source_file
+  (statement_sequence
+    (statement
+      (class_definition
+        (identifier)
+        (class_body
+          (class_indented_body
+            (class_member
+              (class_property_block
+                (identifier)
+                (class_property_member
+                  (class_property_block
+                    (identifier)
+                    (class_property_member
+                      (class_property_assignment
+                        (identifier)
+                        (expression
+                          (boolean))))))))))))))

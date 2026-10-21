@@ -1,0 +1,15 @@
+This source-only derivative preserves the MIT-licensed tree-sitter-chapel
+source at commit 630bdd0b01200eb6ebff82037f9bc5355491f965.
+Copyright (c) 2023 Gabriel Brown. See LICENSE.
+
+The declaration, identifier, comment, literal and precedence extensions were
+written against Chapel 2.10.0 grammar/specification references at commit
+62678344fd7e64d9bdcb8b6b8928f7c8fd1c7ca4. Those references are Apache-2.0.
+Copyright 2020-2026 Hewlett Packard Enterprise Development LP.
+Copyright 2004-2019 Cray Inc. See LICENSE.chapel and COPYRIGHT.chapel.
+
+The complete pristine upstream input is retained under upstream/, and ten
+exact official references are retained under official-references/ in this
+package. No official compiler source closure or upstream parser completeness
+is claimed. The separately licensed original repository fixture is retained
+under crates/rootlight-adapter-treesitter/tests/fixtures/chapel/ in the project.

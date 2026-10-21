@@ -1,0 +1,316 @@
+================
+Integer
+================
+
+11
+
+---
+
+(source_file
+  (integer))
+
+================
+Real number
+================
+
+11.11
+
+---
+
+(source_file
+  (real))
+
+================
+Real number - no trailing digits
+================
+
+11.
+
+---
+
+(source_file
+  (real))
+
+================
+Real number - no leading digits
+================
+
+.11
+
+---
+
+(source_file
+  (real))
+
+================
+Simple string
+================
+
+"hello"
+
+---
+
+(source_file
+  (string))
+
+================
+String with escaped quote
+================
+
+"hello \"world\""
+
+---
+
+(source_file
+  (string))
+
+================
+String with backslash escape
+================
+
+"tab\tnewline\n"
+
+---
+
+(source_file
+  (string))
+
+================
+Empty string
+================
+
+""
+
+---
+
+(source_file
+  (string))
+
+================
+String with backtick
+================
+
+"this`is`a`context"
+
+---
+
+(source_file
+  (string))
+
+================
+String with escaped newline
+================
+
+"\
+"
+
+---
+
+(source_file
+  (string))
+
+================
+Slot
+================
+
+#
+
+---
+
+(source_file
+  (slot))
+
+================
+Slot - numbered
+================
+
+#2
+
+---
+
+(source_file
+  (slot))
+
+================
+Slot - named
+================
+
+#name
+
+---
+
+(source_file
+  (slot))
+
+================
+SlotSequence
+================
+
+##
+
+---
+
+(source_file
+  (slot_sequence))
+
+================
+SlotSequence - numbered
+================
+
+##3
+
+---
+
+(source_file
+  (slot_sequence))
+
+================
+Slot - zero (head of function)
+================
+
+#0
+
+---
+
+(source_file
+  (slot))
+
+================
+Slot - named with digits
+================
+
+#a2
+
+---
+
+(source_file
+  (slot))
+
+================
+Slot - quoted name
+================
+
+#"some name"
+
+---
+
+(source_file
+  (slot))
+
+================
+Slot - number followed by letter
+================
+
+#2a
+
+---
+
+(source_file
+  (implicit_times
+    (slot)
+    (symbol)))
+
+================
+SlotSequence - zero
+================
+
+##0
+
+---
+
+(source_file
+  (slot_sequence))
+
+; ================
+================
+Slot in pure function
+================
+
+#1 + #2 &
+
+---
+
+(source_file
+  (postfix
+    (infix
+      (slot)
+      (slot))))
+
+================
+Symbol - simple
+================
+
+foo
+
+---
+
+(source_file
+  (symbol))
+
+================
+Symbol - with dollar sign
+================
+
+foo$bar12
+
+---
+
+(source_file
+  (symbol))
+
+================
+Symbol - dollar prefix
+================
+
+$foo
+
+---
+
+(source_file
+  (symbol))
+
+================
+Symbol - context qualified
+================
+
+Global`x
+
+---
+
+(source_file
+  (symbol))
+
+================
+Symbol - nested context
+================
+
+my`contex`f
+
+---
+
+(source_file
+  (symbol))
+
+================
+Symbol - relative context (leading backtick)
+================
+
+`localSymbol
+
+---
+
+(source_file
+  (symbol))
+
+================
+Symbol - context qualified call
+================
+
+my`contex`f[my`var`x]
+
+---
+
+(source_file
+  (call
+    head: (symbol)
+    arguments: (symbol)))

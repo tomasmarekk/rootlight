@@ -1,0 +1,24 @@
+================================================================================
+postfix conditional
+================================================================================
+
+log("ready") if initialized
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (postfix_conditional
+            (expression
+              (function_call
+                (expression
+                  (identifier))
+                (expression
+                  (string
+                    (double_quoted_string
+                      (double_quoted_content))))))
+            (expression
+              (identifier))))))))

@@ -1,0 +1,33 @@
+================================================================================
+statement following an indented block
+================================================================================
+
+if a
+  b = 1
+c = 2
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (if_statement
+        (expression
+          (identifier))
+        (block
+          (indented_block
+            (statement_sequence
+              (statement
+                (assignment_statement
+                  (pattern
+                    (identifier))
+                  (expression
+                    (number
+                      (decimal_number))))))))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (number
+            (decimal_number)))))))

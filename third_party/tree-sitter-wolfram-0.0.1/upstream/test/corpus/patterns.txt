@@ -1,0 +1,408 @@
+================
+Blank
+================
+
+_
+
+---
+
+(source_file
+  (blank))
+
+================
+Blank with head
+================
+
+_Integer
+
+---
+
+(source_file
+  (blank))
+
+================
+BlankSequence
+================
+
+__
+
+---
+
+(source_file
+  (blank_sequence))
+
+================
+BlankNullSequence
+================
+
+___
+
+---
+
+(source_file
+  (blank_null_sequence))
+
+================
+Named pattern - Blank
+================
+
+x_
+
+---
+
+(source_file
+  (pattern
+    name: (symbol)
+    constraint: (blank)))
+
+================
+Named pattern - Blank with head
+================
+
+x_Integer
+
+---
+
+(source_file
+  (pattern
+    name: (symbol)
+    constraint: (blank)))
+
+================
+Named pattern - BlankSequence
+================
+
+x__
+
+---
+
+(source_file
+  (pattern
+    name: (symbol)
+    constraint: (blank_sequence)))
+
+================
+Named pattern - BlankNullSequence
+================
+
+x___
+
+---
+
+(source_file
+  (pattern
+    name: (symbol)
+    constraint: (blank_null_sequence)))
+
+================
+Pattern - long form
+================
+
+x : _
+
+---
+
+(source_file
+  (binary
+    (symbol)
+    (blank)))
+
+================
+Optional - long form
+================
+
+x : _ : 1
+
+---
+
+(source_file
+  (binary
+    (binary
+      (symbol)
+      (blank))
+    (integer)))
+
+================
+Optional - shorthand
+================
+
+f[x_ : 1]
+
+---
+
+(source_file
+  (call
+    head: (symbol)
+    arguments: (binary
+      (pattern
+        name: (symbol)
+        constraint: (blank))
+      (integer))))
+
+================
+PatternTest
+================
+
+x_?EvenQ
+
+---
+
+(source_file
+  (binary
+    (pattern
+      name: (symbol)
+      constraint: (blank))
+    (symbol)))
+
+================
+Condition
+================
+
+x_ /; x > 1
+
+---
+
+(source_file
+  (binary
+    (pattern
+      name: (symbol)
+      constraint: (blank))
+    (infix
+      (symbol)
+      (integer))))
+
+================
+Function definition with patterns
+================
+
+f[x_, y_] := x + y
+
+---
+
+(source_file
+  (binary
+    (call
+      head: (symbol)
+      arguments: (infix
+        (pattern
+          name: (symbol)
+          constraint: (blank))
+        (pattern
+          name: (symbol)
+          constraint: (blank))))
+    (infix
+      (symbol)
+      (symbol))))
+
+================
+Condition on definition
+================
+
+f[x_] /; x > 0 := x
+
+---
+
+(source_file
+  (binary
+    (binary
+      (call
+        head: (symbol)
+        arguments: (pattern
+          name: (symbol)
+          constraint: (blank)))
+      (infix
+        (symbol)
+        (integer)))
+    (symbol)))
+
+================
+Blank default - standalone
+================
+
+_.
+
+---
+
+(source_file
+  (blank_default))
+
+================
+Blank default - named
+================
+
+x_.
+
+---
+
+(source_file
+  (pattern
+    name: (symbol)
+    constraint: (blank_default)))
+
+================
+Default in addition
+================
+
+x_. + y_.
+
+---
+
+(source_file
+  (infix
+    (pattern
+      name: (symbol)
+      constraint: (blank_default))
+    (pattern
+      name: (symbol)
+      constraint: (blank_default))))
+
+================
+Default in power
+================
+
+x_^y_.
+
+---
+
+(source_file
+  (binary
+    (pattern
+      name: (symbol)
+      constraint: (blank))
+    (pattern
+      name: (symbol)
+      constraint: (blank_default))))
+
+================
+Repeated - pattern in list
+================
+
+{x_, y_}..
+
+---
+
+(source_file
+  (postfix
+    (group
+      (infix
+        (pattern
+          name: (symbol)
+          constraint: (blank))
+        (pattern
+          name: (symbol)
+          constraint: (blank))))))
+
+================
+RepeatedNull - pattern in list
+================
+
+{x_, y_}...
+
+---
+
+(source_file
+  (postfix
+    (group
+      (infix
+        (pattern
+          name: (symbol)
+          constraint: (blank))
+        (pattern
+          name: (symbol)
+          constraint: (blank))))))
+
+================
+Repeated in list pattern
+================
+
+{_,_}..
+
+---
+
+(source_file
+  (postfix
+    (group
+      (infix
+        (blank)
+        (blank)))))
+
+================
+Optional with explicit default
+================
+
+f[x_, k_:kdef] := x + k
+
+---
+
+(source_file
+  (binary
+    (call
+      head: (symbol)
+      arguments: (infix
+        (pattern
+          name: (symbol)
+          constraint: (blank))
+        (binary
+          (pattern
+            name: (symbol)
+            constraint: (blank))
+          (symbol))))
+    (infix
+      (symbol)
+      (symbol))))
+
+================
+Alternatives in pattern
+================
+
+_Integer | _Real
+
+---
+
+(source_file
+  (infix
+    (blank)
+    (blank)))
+
+================
+Named pattern with head - BlankSequence
+================
+
+x__Integer
+
+---
+
+(source_file
+  (pattern
+    name: (symbol)
+    constraint: (blank_sequence)))
+
+================
+Named pattern with head - BlankNullSequence
+================
+
+x___Integer
+
+---
+
+(source_file
+  (pattern
+    name: (symbol)
+    constraint: (blank_null_sequence)))
+
+================
+Default in sum
+================
+
+a_. + b_.
+
+---
+
+(source_file
+  (infix
+    (pattern
+      name: (symbol)
+      constraint: (blank_default))
+    (pattern
+      name: (symbol)
+      constraint: (blank_default))))

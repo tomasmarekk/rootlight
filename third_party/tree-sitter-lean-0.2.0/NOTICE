@@ -1,0 +1,4 @@
+Lean grammar: Julian/tree-sitter-lean, MIT, pinned revision 916c44f4d89c970f66dd34a49e7ce848f4d29e72.
+All 55 upstream blobs are retained unchanged under upstream/.
+The checked scanner, status unit and Rust owner are local reviewed derivatives.
+The package version retains upstream metadata; it is not a pristine published crate.

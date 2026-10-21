@@ -1,0 +1,34 @@
+================================================================================
+for by loop
+================================================================================
+
+for i in [0..4] by 2:
+  next = i
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (for_statement
+        (identifier)
+        (expression
+          (range
+            (expression
+              (number
+                (decimal_number)))
+            (expression
+              (number
+                (decimal_number)))))
+        (expression
+          (number
+            (decimal_number)))
+        (block
+          (indented_block
+            (statement_sequence
+              (statement
+                (assignment_statement
+                  (pattern
+                    (identifier))
+                  (expression
+                    (identifier)))))))))))

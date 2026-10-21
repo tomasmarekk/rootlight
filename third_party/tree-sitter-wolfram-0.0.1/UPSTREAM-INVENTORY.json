@@ -1,0 +1,178 @@
+{
+  "repository": "https://github.com/WolframResearch/tree-sitter-wolfram",
+  "revision": "15b3244e0029ef1f14e1764d522da5821cf8cbae",
+  "tree_sha1": "1a4c47693883766f66b2e96539553a34af2ad90d",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 536,
+      "sha256": "5ddd491b98543be23c15afa6fd1eacba8545a77e9ad490068239465065fb9521",
+      "git_blob_sha1": "baffb394f4577b30c87b97b46f63e7b26bbc65cb",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 137,
+      "sha256": "37bbb3a8c49f21fe146da061395dfe14882d2855ceb6c546d6e3d8b9ad516dab",
+      "git_blob_sha1": "3a8173747cd5af4c99544a312066b893231041ac",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1072,
+      "sha256": "d0a92fb17936d0613a10a58c9ba6ca27c464c4ac92e31d7633125b3f15e68656",
+      "git_blob_sha1": "76f2d13497798384c097872379b9c6ec559d06cb",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "README.md",
+      "bytes": 714,
+      "sha256": "48afc4f392e89ae1d7d22495cb34b675c8b324917b4e4f268e0c22b64388e667",
+      "git_blob_sha1": "b967b23a7be68b78022ed90cb5a8dfd206719273",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 38576,
+      "sha256": "494729104216fa8afb95f776ac51f69c778a4b3c2b533b8a8316b7f9e5dcb59e",
+      "git_blob_sha1": "ea5080c3206ee13fa2500720701946b79b99c9f3",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 87828,
+      "sha256": "fee3e8dfeb48dcbded2ff177c1da1c00abf6c2909e4507350eb22e6bf51312c0",
+      "git_blob_sha1": "5534ce8413b074eb9ea6f7305f56084f99a0089c",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 44664,
+      "sha256": "eafdeefb547ec792efa0f2e3662fb378c56d1882e76438b60f0b6422e40492d6",
+      "git_blob_sha1": "717c7b316a1876de0f635f04ed6aaac6eb544989",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 2638395,
+      "sha256": "da8f47dd9dc2863e60148aea5e80d6965dc773d190c19cae723a92826c097cb0",
+      "git_blob_sha1": "721a091f5e4ca4f97d8cbede637817fbc609bb93",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 2530,
+      "sha256": "ec04d57d275c36425cea010a3e94699bd3578b306cbaab1cc4b74fe2396f2cc8",
+      "git_blob_sha1": "bd848f94ef7e04b57231ddcf6d848a71a0d6ee9c",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "git_blob_sha1": "1abdd1201578605b8d05a3001f01ebc0d58826d9",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "git_blob_sha1": "56fc8cd470996ded64a5452be25e26dbd2aa682a",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "git_blob_sha1": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "test/corpus/comments.txt",
+      "bytes": 324,
+      "sha256": "3385e876148299af86713b4cd5efe3d84f1894448a408f3c5c8c4f08dd776036",
+      "git_blob_sha1": "5787954b805ba0084b7cde9dad158b44beed0643",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "test/corpus/expressions.txt",
+      "bytes": 12433,
+      "sha256": "5d4d99b52d1942a9e360eadf04a7b0a467732f85af8674c248da55bea09c5db4",
+      "git_blob_sha1": "974014ed39aaec0187abb8d9e2465ae71dbb837b",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "test/corpus/literals.txt",
+      "bytes": 2859,
+      "sha256": "e769df523175f038b280754b50e860a09612790ab1a3280eb8917d2262fbb211",
+      "git_blob_sha1": "e2ab945a4b5fdc0fe4caa94e0ff6c3f6b45f6bcd",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "test/corpus/misc.txt",
+      "bytes": 3296,
+      "sha256": "f81fb669192b92e0018fc1274c81d2d15eeb57c50e76047d72c3591e43991b4e",
+      "git_blob_sha1": "0511af8ae09680b0ee5df7d9f19da1bdb84a173c",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "test/corpus/numbers.txt",
+      "bytes": 1825,
+      "sha256": "cce315201e4e003d9b4c76420e0ff460a3d325821ec13741b8f1988b42522027",
+      "git_blob_sha1": "be71948a9e10a476121a604df45464ffcd4a8820",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "test/corpus/patterns.txt",
+      "bytes": 5030,
+      "sha256": "0bd0941efb9be18465f14081236f87be888bd52b42541f0aa1d9e57268f0e582",
+      "git_blob_sha1": "9c974f43a601d1e614ff50e805055e1ee829a7c0",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 546,
+      "sha256": "7e60d499f3eb33489101bad2f4b586d7a05aea88867c686bc39e704df38a351b",
+      "git_blob_sha1": "85dfa94bb46d2800f202fbd31b32ca1203e508a5",
+      "git_mode": "100644",
+      "archive_mode": "0o664",
+      "executable_intent": false
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+[package]
+name = "tree-sitter-gsed"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/konomanoasa/tree-sitter-gsed"
+description = "Complete retained GNU Sed tables with checked scoped scanner state"
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

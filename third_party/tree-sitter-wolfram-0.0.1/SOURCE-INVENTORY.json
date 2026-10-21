@@ -1,0 +1,42 @@
+{
+  "compiled_inputs": [
+    "upstream/src/parser.c",
+    "upstream/src/tree_sitter/parser.h",
+    "src/scanner.c",
+    "src/rootlight_wolfram_status.c",
+    "src/rootlight_wolfram_status.h"
+  ],
+  "files": {
+    "bindings/rust/build.rs": "8599f97b8da1d5e2613c9769ac8569ea54b79648748205df1758d27824eba96a",
+    "bindings/rust/lib.rs": "8eba02ae6f1c1b3383879a9b3e33d40506c530dccc6a296f0fdf6e7f6f3b5fb6",
+    "Cargo.toml": "5f107e631f06acfb4bc3f2ec8c3cd2367f3bfde7979711ce159e9282bb6b50c3",
+    "LICENSE": "d0a92fb17936d0613a10a58c9ba6ca27c464c4ac92e31d7633125b3f15e68656",
+    "LOCAL_CHANGES.md": "574f88201cb9bac4cbee9116565ccc3dc0c79cf75f1d44da836e7e737802913d",
+    "NOTICE": "c48a6c99d7ab190aa86f2399ee9e2adc24910fcc2bac72ddf4aa6048ff3af346",
+    "SCANNER.patch": "4ec6c8f3aeb55e9e76bb79ede78dee29a2d63cc266cfaed191b13c58e3c29e2c",
+    "SOURCE-PROVENANCE.json": "b5395e907e9530269104437f931d336e4f4f0b307b2d86fc276fb0978fbd17e9",
+    "src/rootlight_wolfram_status.c": "6f216e1d0c8a7d136f304ee645b9751a4459873370ed0907438ede97b3950647",
+    "src/rootlight_wolfram_status.h": "d51c5f2cabd58a0db3ca72883df55ae44e2f9df599f745e9e004e0669f3cf81c",
+    "src/scanner.c": "478c2dbc815305e331d3b39ac29dcf787ffcff90cc68869742ac8cdfff30b75e",
+    "upstream/.gitattributes": "5ddd491b98543be23c15afa6fd1eacba8545a77e9ad490068239465065fb9521",
+    "upstream/.gitignore": "37bbb3a8c49f21fe146da061395dfe14882d2855ceb6c546d6e3d8b9ad516dab",
+    "upstream/grammar.js": "494729104216fa8afb95f776ac51f69c778a4b3c2b533b8a8316b7f9e5dcb59e",
+    "upstream/LICENSE": "d0a92fb17936d0613a10a58c9ba6ca27c464c4ac92e31d7633125b3f15e68656",
+    "upstream/README.md": "48afc4f392e89ae1d7d22495cb34b675c8b324917b4e4f268e0c22b64388e667",
+    "upstream/src/grammar.json": "fee3e8dfeb48dcbded2ff177c1da1c00abf6c2909e4507350eb22e6bf51312c0",
+    "upstream/src/node-types.json": "eafdeefb547ec792efa0f2e3662fb378c56d1882e76438b60f0b6422e40492d6",
+    "upstream/src/parser.c": "da8f47dd9dc2863e60148aea5e80d6965dc773d190c19cae723a92826c097cb0",
+    "upstream/src/scanner.c": "ec04d57d275c36425cea010a3e94699bd3578b306cbaab1cc4b74fe2396f2cc8",
+    "upstream/src/tree_sitter/alloc.h": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+    "upstream/src/tree_sitter/array.h": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+    "upstream/src/tree_sitter/parser.h": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+    "upstream/test/corpus/comments.txt": "3385e876148299af86713b4cd5efe3d84f1894448a408f3c5c8c4f08dd776036",
+    "upstream/test/corpus/expressions.txt": "5d4d99b52d1942a9e360eadf04a7b0a467732f85af8674c248da55bea09c5db4",
+    "upstream/test/corpus/literals.txt": "e769df523175f038b280754b50e860a09612790ab1a3280eb8917d2262fbb211",
+    "upstream/test/corpus/misc.txt": "f81fb669192b92e0018fc1274c81d2d15eeb57c50e76047d72c3591e43991b4e",
+    "upstream/test/corpus/numbers.txt": "cce315201e4e003d9b4c76420e0ff460a3d325821ec13741b8f1988b42522027",
+    "upstream/test/corpus/patterns.txt": "0bd0941efb9be18465f14081236f87be888bd52b42541f0aa1d9e57268f0e582",
+    "upstream/tree-sitter.json": "7e60d499f3eb33489101bad2f4b586d7a05aea88867c686bc39e704df38a351b",
+    "UPSTREAM-INVENTORY.json": "02b890851a024f4b340b6b026934cd9687d6a108948d8ba9b0b926eac2ed9f8d"
+  }
+}

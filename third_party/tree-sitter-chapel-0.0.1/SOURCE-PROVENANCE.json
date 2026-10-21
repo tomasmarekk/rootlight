@@ -1,0 +1,243 @@
+{
+  "source_inventory": {
+    "upstream/.gitignore.upstream": {
+      "bytes": 18,
+      "sha256": "1b7e7c05b850f9f536c4350796b4cfea362cd43716d3dc696b21ad360dc33389"
+    },
+    "upstream/add_node_modules_to_PATH.sh": {
+      "bytes": 52,
+      "sha256": "78732ab77700c9d6f2bf141bb2c5ae670b11e38b2b723431eeb9ca8e1596b49a"
+    },
+    "upstream/binding.gyp": {
+      "bytes": 389,
+      "sha256": "f763c5e30250d7472cc255ea6c352416576043769f0494e73da90621d0f946d6"
+    },
+    "upstream/bindings/node/binding.cc": {
+      "bytes": 917,
+      "sha256": "de8b7f23cea5cc3f146785b46dfd7b41db3429f084e35d85b579e44cb1a0f052"
+    },
+    "upstream/bindings/node/index.js": {
+      "bytes": 487,
+      "sha256": "9e7116f1a70bfab5d890f5e53c82af4e733bbe3afd4aab97b0824f435665a327"
+    },
+    "upstream/bindings/rust/build.rs": {
+      "bytes": 1319,
+      "sha256": "44d8d49d7e8b45571e7d221c7b4d8d3100d18a0d8889aba360931fd7caf402fd"
+    },
+    "upstream/bindings/rust/lib.rs": {
+      "bytes": 2021,
+      "sha256": "c2057cbae6993675ab7ebdc7364eecbd93288ae498f06d695d7897c34d807c5a"
+    },
+    "upstream/Cargo.toml": {
+      "bytes": 579,
+      "sha256": "fad9b1c3d684972d9d7d6ed9ca462025bbac5dd43fad38f6a8b7c269de31164f"
+    },
+    "upstream/contributing.md": {
+      "bytes": 1989,
+      "sha256": "da2542c3cfb9e160f0c7bcfa62c4f973b501da1951bb65e97a9e5889034b6311"
+    },
+    "upstream/examples/assignment.chpl": {
+      "bytes": 28,
+      "sha256": "74dd9559cfd1608620de0fcffb557ae2664f3b606e6e22ba38cbfe9da660f3d9"
+    },
+    "upstream/examples/binary.chpl": {
+      "bytes": 28,
+      "sha256": "74dd9559cfd1608620de0fcffb557ae2664f3b606e6e22ba38cbfe9da660f3d9"
+    },
+    "upstream/examples/comments.chpl": {
+      "bytes": 62,
+      "sha256": "cfd1311f6e828d380d5b617fbf91d540e33cb1a0ca4b34668c9178a4ceebb12a"
+    },
+    "upstream/examples/declaration.chpl": {
+      "bytes": 132,
+      "sha256": "cf5952e06d5a22a05bbe2dbd55f4d11ff6635682a1918ff640c3fd0e02f823a2"
+    },
+    "upstream/grammar.js": {
+      "bytes": 8706,
+      "sha256": "de55b7e61afa292e07d31f49fcfe8e45a1759eb47d7c8ba605161b3909a30d46"
+    },
+    "upstream/LICENSE": {
+      "bytes": 1070,
+      "sha256": "d8fe0c544dea7c7169167c719f96867ba31bad18609bc7036b196a5b8f5dea0b"
+    },
+    "upstream/package-lock.json": {
+      "bytes": 1111,
+      "sha256": "bbb17fd3f8ab2cdd73526262826b64ad6453582c42d4a3f3dee854d69aa875cb"
+    },
+    "upstream/package.json": {
+      "bytes": 561,
+      "sha256": "37adb3c6ca360e835fc0d30b91b086869ab085d8a3c85abed73b3c06637aefd7"
+    },
+    "upstream/readme.md": {
+      "bytes": 307,
+      "sha256": "cc066224b1d45bf2b6ce4b101eb57f9b819c69db10213b494b1392d79ae73883"
+    },
+    "upstream/src/grammar.json": {
+      "bytes": 22720,
+      "sha256": "20cd9e483d70e25f7ed9d74fced98a9732ae12e1bbe55fd3a37e4a97ece91212"
+    },
+    "upstream/src/node-types.json": {
+      "bytes": 11060,
+      "sha256": "cf6c91eedb8bc3da42c7063641cf9741be3564a8f1a856ff7f7b4c61e27c3f48"
+    },
+    "upstream/src/parser.c": {
+      "bytes": 97883,
+      "sha256": "fb045eccdbf212e046bc8b31a62836551a1d7188a1550b2ac13050fe12692a10"
+    },
+    "upstream/src/tree_sitter/parser.h": {
+      "bytes": 5378,
+      "sha256": "ab104936984904469572a4e868149f7a22fb2929347f837ae6a1f9b790f1b173"
+    },
+    "upstream/test/corpus/comments.txt": {
+      "bytes": 279,
+      "sha256": "943ecac79046feaf5d5c163150cc74d04787f1e32dbf72f3bd0892409045fb14"
+    },
+    "upstream/test/corpus/literals.txt": {
+      "bytes": 650,
+      "sha256": "1e5f418cb4becfbdc6e84e97865c4c442d12287fe554c58ead928de808c1cb44"
+    },
+    "upstream/test/corpus/statements.txt": {
+      "bytes": 581,
+      "sha256": "8c876575d41be15662133122250f8fd0919dbbbd725b3f520cd565a9cd85a692"
+    },
+    "upstream/test/template.txt": {
+      "bytes": 119,
+      "sha256": "b1796305dcc6f8a2cc5c22f32cfb9c243c6ce56bf09e6d5b9b314fccbec8dd66"
+    },
+    "upstream/todo.md": {
+      "bytes": 501,
+      "sha256": "e32e9b9fd5efdac0188d3f37e67314013ccdf50df74be23eba2eba671c7ea335"
+    },
+    "official-references/COPYRIGHT": {
+      "bytes": 128,
+      "sha256": "ff2012dd2d224680e95c8f083396a5c23985f7681fe214260b2a1b7b13280db9"
+    },
+    "official-references/doc/rst/language/spec/lexical-structure.rst": {
+      "bytes": 15069,
+      "sha256": "1a4fd51ecf2a900726a6957de9dfb3b1c7f7a9e03e8e96cf61899492174ce2cf"
+    },
+    "official-references/doc/rst/language/spec/modules.rst": {
+      "bytes": 40978,
+      "sha256": "68173af0effd28bf86b8fef8b1b784deef74c55bf09dfb33de5e9eef93adaa5a"
+    },
+    "official-references/doc/rst/language/spec/procedures.rst": {
+      "bytes": 62599,
+      "sha256": "cec1eae136f4e593429ae8c29d7d932a159d7f1ba33e47118d1a500031f5485c"
+    },
+    "official-references/frontend/CMakeLists.txt": {
+      "bytes": 5778,
+      "sha256": "74750377802ba17fd8e7a136675d115d406b3e0f466a0c03ee04a5fca6e9431a"
+    },
+    "official-references/frontend/lib/parsing/chpl.lex": {
+      "bytes": 14775,
+      "sha256": "edadf0e67c55cf1eeed02f2e419f5f28ea7ee21b8ff6b7feaf5d2a9c7a106366"
+    },
+    "official-references/frontend/lib/parsing/chpl.ypp": {
+      "bytes": 120853,
+      "sha256": "42b7a4bc46a1506c9bb6eaa5a22dd6008992f7890767d90061c26bc266cd7c1b"
+    },
+    "official-references/frontend/lib/parsing/CMakeLists.txt": {
+      "bytes": 2234,
+      "sha256": "dc64b35bb775c6dbccf11c6955c286701725de840b788dfda546654b1d96de84"
+    },
+    "official-references/LICENSE": {
+      "bytes": 7141,
+      "sha256": "57b90724c2e93220ef9590a05bdd00f193dd52df42e4d42b9a89c38d5b3c9c4f"
+    },
+    "official-references/LICENSE.chapel": {
+      "bytes": 11357,
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+    },
+    "grammar.js": {
+      "bytes": 11536,
+      "sha256": "eabad572005c74d390ad5c917bcbb233061c01ab7ac3ba41c6c8bcaabeb67fbc"
+    },
+    "tree-sitter.json": {
+      "bytes": 480,
+      "sha256": "38839bd54cde268a0afc3db20a7dfdbf96106caf691956134cf6bee091adb7aa"
+    },
+    "LICENSE": {
+      "bytes": 1070,
+      "sha256": "d8fe0c544dea7c7169167c719f96867ba31bad18609bc7036b196a5b8f5dea0b"
+    },
+    "LICENSE.chapel": {
+      "bytes": 11357,
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+    },
+    "COPYRIGHT.chapel": {
+      "bytes": 128,
+      "sha256": "ff2012dd2d224680e95c8f083396a5c23985f7681fe214260b2a1b7b13280db9"
+    },
+    "NOTICE": {
+      "bytes": 923,
+      "sha256": "0638b44ebe49aea64b556089e00c7ffe05d70d427463e6236046da3987b5f136"
+    },
+    "bindings/rust/lib.rs": {
+      "bytes": 645,
+      "sha256": "d4ca4178dbb958a74c1a20487e8585a23e6aa5cccf2cac60ccc34c831d0e2954"
+    },
+    "bindings/rust/build.rs": {
+      "bytes": 605,
+      "sha256": "a069128232354575a76c2baee5965a1ea2235fefd1fb0c7e86009b9203b61660"
+    },
+    "src/grammar.json": {
+      "bytes": 60146,
+      "sha256": "c47e789579935ae069306ff235526e3092ef0c3a45f0c606ad81156d2e94724f"
+    },
+    "src/node-types.json": {
+      "bytes": 28657,
+      "sha256": "32bc3978a995302ebf4a24561e07867cf8c65f729f6e7b27158dbf2c1c10b1ca"
+    },
+    "src/parser.c": {
+      "bytes": 328760,
+      "sha256": "49efe1ae40f8f004d7b5084a2b482004507305913f23c32bb2cc17a5df6cbbd6"
+    },
+    "src/scanner.c": {
+      "bytes": 1995,
+      "sha256": "b5c9fd72e07326fa4ed99759156823fd6bdd0fdb34a2f4c0c38fa77186ebb72e"
+    },
+    "src/tree_sitter/alloc.h": {
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    "src/tree_sitter/array.h": {
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    "src/tree_sitter/parser.h": {
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    "Cargo.toml": {
+      "bytes": 406,
+      "sha256": "8e639c827c08598f7599fd8c0ce6d971e453ed2bc6841b31787ed8fb3b37f357"
+    },
+    "provenance/tree-sitter-chapel-git-tree.json": {
+      "bytes": 8258,
+      "sha256": "064b2eaa70e9b6e6a4bb2cf17dbe12ba0df7657841bcd7b37c739a95158b0525"
+    },
+    "provenance/candidate-acquisition.json": {
+      "bytes": 24473,
+      "sha256": "25eb71f66d6425f71ea7ac7dc33d676dfa8ec4509117f34edc7d0c76ff64502a"
+    },
+    "provenance/official-reference-metadata.json": {
+      "bytes": 8302,
+      "sha256": "4fb89f383c17e0e1cb04e6cae583b45d462f714f9806f7ed4626fea26679fd0e"
+    },
+    "UPSTREAM-INVENTORY.json": {
+      "bytes": 10307,
+      "sha256": "056d8f10e42dee683175d448b173f2d35c466064168f9c2c9189ab1b2607da25"
+    },
+    "LOCAL_CHANGES.md": {
+      "bytes": 712,
+      "sha256": "76e4ab81460680dcfc90085bbd29c330bcefa453bc652fda90c5a041ac015cea"
+    },
+    "SOURCES.md": {
+      "bytes": 946,
+      "sha256": "f72636e69d70dc9163bac9bd55f14fd60f4b7982258fc26d23e10880462eebe1"
+    }
+  },
+  "native_observation_authority": "separately retained clean original Chapel CST observation; syntax is not binding",
+  "first_rust_suite": "six actual tests compiled,5 passed,1 atomic-comment expectation failed; correction is separately retained and requires execution",
+  "upstream_source_downloaded_during_build": false
+}

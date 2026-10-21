@@ -1,0 +1,31 @@
+{
+  "upstream": "https://github.com/konomanoasa/tree-sitter-gsed",
+  "commit": "3f91eb75566ec290ea8103de73c5dcbf1d7ef106",
+  "tree": "d592c11bfce90bfc5654fa7bfb02dac2a6167337",
+  "upstream_version": "0.4.0",
+  "package_identity": "local operational derivative; not a pristine published Rust crate",
+  "retained_upstream_blobs": 68,
+  "complete_upstream_bytes": 8116774,
+  "license": "MIT",
+  "qualified_host": {
+    "bytes": 8472,
+    "sha256": "a8c51e85fd360518ccc1ae96aa16d08f89caf8782ddffb5636bf1e65acbaa852"
+  },
+  "C_scanner": {
+    "bytes": 198366,
+    "sha256": "2e75555b87abff57d56ab94e5268b4e63d650f68b7bcd266134f26b642315930"
+  },
+  "wrapper_original": {
+    "bytes": 11474,
+    "sha256": "b786bca10c6597406b34f2215a34c5b7ea21e038b99bc2a23ed2882a4ea2e480"
+  },
+  "wrapper_body_sha256": "ac6c689f42752579e0cf2cf23f87e7e8948fff8b8332cdc8ead55bf57bdc8838",
+  "wrapper_derivation": "Only two node-inventory include paths and normalized contract identity change; owned lifecycle bodies are identical.",
+  "scanner_contract": "sed-scanner-checked-state/1;wire=16/1;bre=f580c8ee7ae31e7ef805fa16ac6f9fc574ccac5ed8b9db56e8249491b3713377;ere=73064175619d6312c7f10af49269605ff0ff73fb3232eb01c087f43a17b271c4;scanner=fe32615ad4d49c6491e3232d2fa7a338c299eba8787fc3c8d9190cf2a116bd35;status=7a2936f01865b28855adb36dc58111968c394dd99a524188db7cb31f7dd80d9f;header=548ee8369da06c9bbe0dea3c4fdc8e5bba987717a3abdc0e95fc41a9c88d9c86;host-placeholder-body=ac6c689f42752579e0cf2cf23f87e7e8948fff8b8332cdc8ead55bf57bdc8838",
+  "generated_abi": 15,
+  "default_dialect": "GNU BRE static file-text",
+  "optional_ERE": "retained explicit wrapper entrypoint; no request API/dialect inference added",
+  "build_downloads": false,
+  "generator_executed": false,
+  "compiled_here": false
+}

@@ -1,0 +1,2957 @@
+[
+  {
+    "type": "address",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "last_line_address",
+          "named": true
+        },
+        {
+          "type": "line_address",
+          "named": true
+        },
+        {
+          "type": "regex_address",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "address_clause",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "address",
+          "named": true
+        },
+        {
+          "type": "address_separator",
+          "named": true
+        },
+        {
+          "type": "relative_address",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "address_modifier",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "alternation",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "regex_branch",
+          "named": true
+        },
+        {
+          "type": "regex_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "anchor",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "regex_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "backreference",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "regex_reference",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "block",
+    "named": true,
+    "fields": {
+      "closing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "}",
+            "named": false
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "negation": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "negation",
+            "named": true
+          }
+        ]
+      },
+      "opening": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "{",
+            "named": false
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "command_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "bracket_character",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "bracket_expression",
+    "named": true,
+    "fields": {
+      "closing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "bracket_close",
+            "named": true
+          },
+          {
+            "type": "character_escape",
+            "named": true
+          },
+          {
+            "type": "escape",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "opening": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "bracket_open",
+            "named": true
+          },
+          {
+            "type": "character_escape",
+            "named": true
+          },
+          {
+            "type": "escape",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "bracket_character",
+          "named": true
+        },
+        {
+          "type": "character_class",
+          "named": true
+        },
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "collating_symbol",
+          "named": true
+        },
+        {
+          "type": "equivalence_class",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "range",
+          "named": true
+        },
+        {
+          "type": "regex_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "branch_command",
+    "named": true,
+    "fields": {
+      "label": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "label",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "character_class",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "class_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "class_close",
+          "named": true
+        },
+        {
+          "type": "class_open",
+          "named": true
+        },
+        {
+          "type": "compound_marker",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "class_name",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "class_name_text",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "collating_element",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "collating_text",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "collating_symbol",
+    "named": true,
+    "fields": {
+      "element": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "collating_element",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "collating_close",
+          "named": true
+        },
+        {
+          "type": "collating_open",
+          "named": true
+        },
+        {
+          "type": "compound_marker",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "command",
+    "named": true,
+    "fields": {
+      "address": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "address_clause",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "negation": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "negation",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "branch_command",
+          "named": true
+        },
+        {
+          "type": "comment",
+          "named": true
+        },
+        {
+          "type": "execute_command",
+          "named": true
+        },
+        {
+          "type": "file_command",
+          "named": true
+        },
+        {
+          "type": "label_command",
+          "named": true
+        },
+        {
+          "type": "numeric_command",
+          "named": true
+        },
+        {
+          "type": "simple_command",
+          "named": true
+        },
+        {
+          "type": "substitute_command",
+          "named": true
+        },
+        {
+          "type": "text_command",
+          "named": true
+        },
+        {
+          "type": "translate_command",
+          "named": true
+        },
+        {
+          "type": "version_command",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "command_list",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "command",
+          "named": true
+        },
+        {
+          "type": "command_separator",
+          "named": true
+        },
+        {
+          "type": "comment",
+          "named": true
+        },
+        {
+          "type": "directive",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "command_separator",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "comment",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "comment_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "directive",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "comment_text",
+          "named": true
+        },
+        {
+          "type": "directive_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "duplicate_negation",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "duplicate_substitution_flag",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "flag",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "empty_filename",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "filename_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "empty_label",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "label_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "equivalence_class",
+    "named": true,
+    "fields": {
+      "element": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "collating_element",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "compound_marker",
+          "named": true
+        },
+        {
+          "type": "equivalence_close",
+          "named": true
+        },
+        {
+          "type": "equivalence_open",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "excess_address",
+    "named": true,
+    "fields": {
+      "address": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "address_clause",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "address",
+          "named": true
+        },
+        {
+          "type": "address_separator",
+          "named": true
+        },
+        {
+          "type": "relative_address",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "execute_command",
+    "named": true,
+    "fields": {
+      "command": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "shell_command",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "text_introducer",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "file_command",
+    "named": true,
+    "fields": {
+      "file": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "filename",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "filename",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "filename_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "group",
+    "named": true,
+    "fields": {
+      "closing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "character_escape",
+            "named": true
+          },
+          {
+            "type": "escape",
+            "named": true
+          },
+          {
+            "type": "group_close",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "opening": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "character_escape",
+            "named": true
+          },
+          {
+            "type": "escape",
+            "named": true
+          },
+          {
+            "type": "group_open",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "regular_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "incomplete_syntax",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "invalid_control_escape",
+          "named": true
+        },
+        {
+          "type": "invalid_interval_character",
+          "named": true
+        },
+        {
+          "type": "invalid_interval_syntax",
+          "named": true
+        },
+        {
+          "type": "invalid_range_endpoint",
+          "named": true
+        },
+        {
+          "type": "invalid_range_operator",
+          "named": true
+        },
+        {
+          "type": "invalid_regex_operator",
+          "named": true
+        },
+        {
+          "type": "invalid_zero_address",
+          "named": true
+        },
+        {
+          "type": "missing_address",
+          "named": true
+        },
+        {
+          "type": "missing_bracket_element",
+          "named": true
+        },
+        {
+          "type": "missing_closing_delimiter",
+          "named": true
+        },
+        {
+          "type": "missing_command",
+          "named": true
+        },
+        {
+          "type": "missing_escape_character",
+          "named": true
+        },
+        {
+          "type": "missing_interval_count",
+          "named": true
+        },
+        {
+          "type": "missing_opening_delimiter",
+          "named": true
+        },
+        {
+          "type": "missing_operand",
+          "named": true
+        },
+        {
+          "type": "unknown_character_class",
+          "named": true
+        },
+        {
+          "type": "unknown_substitution_flag",
+          "named": true
+        },
+        {
+          "type": "unmatched_group_close",
+          "named": true
+        },
+        {
+          "type": "unterminated_operand",
+          "named": true
+        },
+        {
+          "type": "unterminated_regex",
+          "named": true
+        },
+        {
+          "type": "zero_occurrence",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "interval",
+    "named": true,
+    "fields": {
+      "closing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "character_escape",
+            "named": true
+          },
+          {
+            "type": "escape",
+            "named": true
+          },
+          {
+            "type": "interval_close",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "maximum": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "interval_count",
+            "named": true
+          }
+        ]
+      },
+      "minimum": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "interval_count",
+            "named": true
+          }
+        ]
+      },
+      "opening": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "character_escape",
+            "named": true
+          },
+          {
+            "type": "escape",
+            "named": true
+          },
+          {
+            "type": "interval_open",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "interval_separator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "interval_count",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_control_escape",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_delimiter",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "invalid_encoding",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "invalid_interval_character",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_interval_syntax",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_range_endpoint",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_class",
+          "named": true
+        },
+        {
+          "type": "equivalence_class",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_range_operator",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "range_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_regex_operator",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "interval_open",
+          "named": true
+        },
+        {
+          "type": "regex_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_relative_address",
+    "named": true,
+    "fields": {
+      "count": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "number",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "invalid_syntax",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "duplicate_negation",
+          "named": true
+        },
+        {
+          "type": "duplicate_substitution_flag",
+          "named": true
+        },
+        {
+          "type": "empty_filename",
+          "named": true
+        },
+        {
+          "type": "empty_label",
+          "named": true
+        },
+        {
+          "type": "excess_address",
+          "named": true
+        },
+        {
+          "type": "invalid_control_escape",
+          "named": true
+        },
+        {
+          "type": "invalid_delimiter",
+          "named": true
+        },
+        {
+          "type": "invalid_encoding",
+          "named": true
+        },
+        {
+          "type": "invalid_interval_character",
+          "named": true
+        },
+        {
+          "type": "invalid_interval_syntax",
+          "named": true
+        },
+        {
+          "type": "invalid_range_endpoint",
+          "named": true
+        },
+        {
+          "type": "invalid_range_operator",
+          "named": true
+        },
+        {
+          "type": "invalid_regex_operator",
+          "named": true
+        },
+        {
+          "type": "invalid_relative_address",
+          "named": true
+        },
+        {
+          "type": "invalid_zero_address",
+          "named": true
+        },
+        {
+          "type": "misplaced_character_class",
+          "named": true
+        },
+        {
+          "type": "missing_address",
+          "named": true
+        },
+        {
+          "type": "missing_bracket_element",
+          "named": true
+        },
+        {
+          "type": "missing_closing_delimiter",
+          "named": true
+        },
+        {
+          "type": "missing_command",
+          "named": true
+        },
+        {
+          "type": "missing_command_separator",
+          "named": true
+        },
+        {
+          "type": "missing_escape_character",
+          "named": true
+        },
+        {
+          "type": "missing_interval_count",
+          "named": true
+        },
+        {
+          "type": "missing_opening_delimiter",
+          "named": true
+        },
+        {
+          "type": "missing_operand",
+          "named": true
+        },
+        {
+          "type": "modifier_on_empty_regexp",
+          "named": true
+        },
+        {
+          "type": "unknown_character_class",
+          "named": true
+        },
+        {
+          "type": "unknown_command",
+          "named": true
+        },
+        {
+          "type": "unknown_substitution_flag",
+          "named": true
+        },
+        {
+          "type": "unmatched_closing_brace",
+          "named": true
+        },
+        {
+          "type": "unmatched_group_close",
+          "named": true
+        },
+        {
+          "type": "unterminated_operand",
+          "named": true
+        },
+        {
+          "type": "unterminated_regex",
+          "named": true
+        },
+        {
+          "type": "zero_occurrence",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "invalid_zero_address",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "number",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "label",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "label_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "label_command",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "label": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "label",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "line_address",
+    "named": true,
+    "fields": {
+      "first": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "number",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "step": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "number",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "address_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "misplaced_character_class",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "class_name",
+          "named": true
+        },
+        {
+          "type": "compound_marker",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "missing_address",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_bracket_element",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_closing_delimiter",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_command",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_command_separator",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_escape_character",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_interval_count",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_opening_delimiter",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "missing_operand",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "modifier_on_empty_regexp",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "address_modifier",
+          "named": true
+        },
+        {
+          "type": "flag",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "negation",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "number",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "numeric_command",
+    "named": true,
+    "fields": {
+      "argument": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "number",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "range",
+    "named": true,
+    "fields": {
+      "end": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "bracket_character",
+            "named": true
+          },
+          {
+            "type": "collating_symbol",
+            "named": true
+          },
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "start": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "bracket_character",
+            "named": true
+          },
+          {
+            "type": "collating_symbol",
+            "named": true
+          },
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "range_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "regex_address",
+    "named": true,
+    "fields": {
+      "closing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "opening": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "address_modifier",
+          "named": true
+        },
+        {
+          "type": "regular_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "regex_branch",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "anchor",
+          "named": true
+        },
+        {
+          "type": "backreference",
+          "named": true
+        },
+        {
+          "type": "bracket_expression",
+          "named": true
+        },
+        {
+          "type": "group",
+          "named": true
+        },
+        {
+          "type": "interval",
+          "named": true
+        },
+        {
+          "type": "regex_character",
+          "named": true
+        },
+        {
+          "type": "regex_character_class",
+          "named": true
+        },
+        {
+          "type": "repetition",
+          "named": true
+        },
+        {
+          "type": "wildcard",
+          "named": true
+        },
+        {
+          "type": "word_boundary",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "regex_character",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "regex_character_class",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "regex_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "regular_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "alternation",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "relative_address",
+    "named": true,
+    "fields": {
+      "count": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "number",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "address_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "repetition",
+    "named": true,
+    "fields": {
+      "expression": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "anchor",
+            "named": true
+          },
+          {
+            "type": "backreference",
+            "named": true
+          },
+          {
+            "type": "bracket_expression",
+            "named": true
+          },
+          {
+            "type": "group",
+            "named": true
+          },
+          {
+            "type": "interval",
+            "named": true
+          },
+          {
+            "type": "regex_character",
+            "named": true
+          },
+          {
+            "type": "regex_character_class",
+            "named": true
+          },
+          {
+            "type": "syntax_issue",
+            "named": true
+          },
+          {
+            "type": "wildcard",
+            "named": true
+          },
+          {
+            "type": "word_boundary",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "operator": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "character_escape",
+            "named": true
+          },
+          {
+            "type": "escape",
+            "named": true
+          },
+          {
+            "type": "interval",
+            "named": true
+          },
+          {
+            "type": "regex_operator",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "replacement",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "case_conversion",
+          "named": true
+        },
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "line_continuation",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "matched_text_reference",
+          "named": true
+        },
+        {
+          "type": "replacement_reference",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "script",
+    "named": true,
+    "root": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "command_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "shell_command",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "line_continuation",
+          "named": true
+        },
+        {
+          "type": "shell_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "simple_command",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "substitute_command",
+    "named": true,
+    "fields": {
+      "closing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      },
+      "opening": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      },
+      "separator": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "regular_expression",
+          "named": true
+        },
+        {
+          "type": "replacement",
+          "named": true
+        },
+        {
+          "type": "substitution_flags",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "substitution_flags",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "flag",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "write_flag",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "syntax_issue",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "incomplete_syntax",
+          "named": true
+        },
+        {
+          "type": "invalid_syntax",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "text",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "line_continuation",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "text_command",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "text",
+          "named": true
+        },
+        {
+          "type": "text_introducer",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "translate_command",
+    "named": true,
+    "fields": {
+      "closing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      },
+      "destination": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "translation_string",
+            "named": true
+          }
+        ]
+      },
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      },
+      "opening": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      },
+      "separator": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "delimiter",
+            "named": true
+          }
+        ]
+      },
+      "source": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "translation_string",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "translation_string",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "line_continuation",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "unknown_character_class",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "class_name",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "unknown_command",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "unknown_substitution_flag",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "unmatched_closing_brace",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "unmatched_group_close",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "group_close",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "unterminated_operand",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "unterminated_regex",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "version",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "version_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "version_command",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "command_name",
+            "named": true
+          }
+        ]
+      },
+      "version": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "version",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "wildcard",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "escape",
+          "named": true
+        },
+        {
+          "type": "regex_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "word_boundary",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "character_escape",
+          "named": true
+        },
+        {
+          "type": "regex_operator",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "write_flag",
+    "named": true,
+    "fields": {
+      "issue": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "syntax_issue",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "filename",
+          "named": true
+        },
+        {
+          "type": "flag",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "zero_occurrence",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "number",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "!",
+    "named": false
+  },
+  {
+    "type": "address_operator",
+    "named": true
+  },
+  {
+    "type": "address_separator",
+    "named": true
+  },
+  {
+    "type": "bracket_close",
+    "named": true
+  },
+  {
+    "type": "bracket_open",
+    "named": true
+  },
+  {
+    "type": "case_conversion",
+    "named": true
+  },
+  {
+    "type": "character_escape",
+    "named": true
+  },
+  {
+    "type": "class_close",
+    "named": true
+  },
+  {
+    "type": "class_name_text",
+    "named": true
+  },
+  {
+    "type": "class_open",
+    "named": true
+  },
+  {
+    "type": "collating_close",
+    "named": true
+  },
+  {
+    "type": "collating_open",
+    "named": true
+  },
+  {
+    "type": "collating_text",
+    "named": true
+  },
+  {
+    "type": "command_name",
+    "named": true
+  },
+  {
+    "type": "comment_text",
+    "named": true
+  },
+  {
+    "type": "compound_marker",
+    "named": true
+  },
+  {
+    "type": "delimiter",
+    "named": true
+  },
+  {
+    "type": "directive_text",
+    "named": true
+  },
+  {
+    "type": "equivalence_close",
+    "named": true
+  },
+  {
+    "type": "equivalence_open",
+    "named": true
+  },
+  {
+    "type": "escape",
+    "named": true
+  },
+  {
+    "type": "filename_text",
+    "named": true
+  },
+  {
+    "type": "flag",
+    "named": true
+  },
+  {
+    "type": "group_close",
+    "named": true
+  },
+  {
+    "type": "group_open",
+    "named": true
+  },
+  {
+    "type": "interval_close",
+    "named": true
+  },
+  {
+    "type": "interval_open",
+    "named": true
+  },
+  {
+    "type": "interval_separator",
+    "named": true
+  },
+  {
+    "type": "label_text",
+    "named": true
+  },
+  {
+    "type": "last_line_address",
+    "named": true
+  },
+  {
+    "type": "line_continuation",
+    "named": true
+  },
+  {
+    "type": "literal",
+    "named": true
+  },
+  {
+    "type": "matched_text_reference",
+    "named": true
+  },
+  {
+    "type": "range_operator",
+    "named": true
+  },
+  {
+    "type": "regex_operator",
+    "named": true
+  },
+  {
+    "type": "regex_reference",
+    "named": true
+  },
+  {
+    "type": "replacement_reference",
+    "named": true
+  },
+  {
+    "type": "shell_text",
+    "named": true
+  },
+  {
+    "type": "text_introducer",
+    "named": true
+  },
+  {
+    "type": "version_text",
+    "named": true
+  },
+  {
+    "type": "{",
+    "named": false
+  },
+  {
+    "type": "}",
+    "named": false
+  }
+]

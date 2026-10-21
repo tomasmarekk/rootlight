@@ -1,0 +1,40 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "gsed",
+      "title": "GNU sed",
+      "scope": "source.gsed",
+      "path": ".",
+      "file-types": ["gsed"],
+      "injection-regex": "^gsed$",
+      "highlights": "queries/highlights.scm",
+      "external-files": ["common/scanner.h", "common/tokens.h"]
+    },
+    {
+      "name": "gsed_ere",
+      "title": "GNU sed (ERE)",
+      "scope": "source.gsed.ere",
+      "path": "gsed_ere",
+      "injection-regex": "^gsed_ere$",
+      "highlights": "queries/highlights.scm",
+      "external-files": ["common/scanner.h", "common/tokens.h"]
+    }
+  ],
+  "metadata": {
+    "version": "0.4.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammars for GNU sed 4.10.",
+    "links": {
+      "repository": "https://github.com/konomanoasa/tree-sitter-gsed"
+    }
+  },
+  "bindings": {
+    "c": false,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": true,
+    "swift": false
+  }
+}

@@ -1,0 +1,21 @@
+name: Test
+
+on:
+  push:
+    paths:
+      - 'grammar.js'
+      - 'corpus/**'
+      - 'src/scanner.c'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - run: npm ci --include=peer
+      - run: npm run versions
+      - run: npm run test

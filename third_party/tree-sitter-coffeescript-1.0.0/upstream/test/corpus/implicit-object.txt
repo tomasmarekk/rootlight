@@ -1,0 +1,28 @@
+================================================================================
+indented brace-less object
+================================================================================
+
+person =
+  name: "Bob"
+  age: 30
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (implicit_object
+          (pair
+            (identifier)
+            (expression
+              (string
+                (double_quoted_string
+                  (double_quoted_content)))))
+          (pair
+            (identifier)
+            (expression
+              (number
+                (decimal_number)))))))))

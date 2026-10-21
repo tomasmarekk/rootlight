@@ -1,0 +1,37 @@
+================================================================================
+catch with bare binding
+================================================================================
+
+try
+  risky()
+catch e
+  log e
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (try_statement
+        (block
+          (indented_block
+            (statement_sequence
+              (statement
+                (expression_statement
+                  (expression
+                    (function_call
+                      (expression
+                        (identifier)))))))))
+        (catch_clause
+          (identifier)
+          (block
+            (indented_block
+              (statement_sequence
+                (statement
+                  (expression_statement
+                    (expression
+                      (implicit_call
+                        (expression
+                          (identifier))
+                        (expression
+                          (identifier))))))))))))))

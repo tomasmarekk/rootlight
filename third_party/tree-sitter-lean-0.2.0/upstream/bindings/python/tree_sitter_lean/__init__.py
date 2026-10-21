@@ -1,0 +1,38 @@
+"""
+Python bindings to a tree sitter grammar for the Lean theorem prover.
+"""
+
+from importlib.resources import files
+
+from tree_sitter_lean._binding import language
+
+
+def _get_query(name, file):
+    query = files(f"{__package__}.queries") / file
+    globals()[name] = query.read_text()
+    return globals()[name]
+
+
+def __getattr__(name):
+    if name == "HIGHLIGHTS_QUERY":
+        return _get_query("HIGHLIGHTS_QUERY", "highlights.scm")
+    if name == "INJECTIONS_QUERY":
+        return _get_query("INJECTIONS_QUERY", "injections.scm")
+    if name == "LOCALS_QUERY":
+        return _get_query("LOCALS_QUERY", "locals.scm")
+    if name == "FOLDS_QUERY":
+        return _get_query("FOLDS_QUERY", "folds.scm")
+    if name == "INDENTS_QUERY":
+        return _get_query("INDENTS_QUERY", "indents.scm")
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "FOLDS_QUERY",
+    "HIGHLIGHTS_QUERY",
+    "INDENTS_QUERY",
+    "INJECTIONS_QUERY",
+    "LOCALS_QUERY",
+    "language",
+]

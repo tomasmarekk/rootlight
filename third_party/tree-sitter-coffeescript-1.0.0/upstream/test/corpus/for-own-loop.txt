@@ -1,0 +1,25 @@
+================================================================================
+for own loop
+================================================================================
+
+for own key of inventory:
+  value = key
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (for_statement
+        (identifier)
+        (expression
+          (identifier))
+        (block
+          (indented_block
+            (statement_sequence
+              (statement
+                (assignment_statement
+                  (pattern
+                    (identifier))
+                  (expression
+                    (identifier)))))))))))

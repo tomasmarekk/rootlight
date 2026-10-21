@@ -1,0 +1,20 @@
+================================================================================
+embedded html block
+================================================================================
+
+template = ```html
+<div class="card">
+  <span>Hello</span>
+</div>
+```
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (embedded_html))))))

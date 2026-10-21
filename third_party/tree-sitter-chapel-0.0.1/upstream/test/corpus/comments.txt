@@ -1,0 +1,24 @@
+=====================
+inline comment
+=====================
+
+// this is an inline comment
+
+-------------
+
+(source_file
+  (inline_comment))
+
+
+=====================
+block comment
+=====================
+
+/*
+  this is a block comment
+*/
+
+-------------
+
+(source_file
+  (block_comment))

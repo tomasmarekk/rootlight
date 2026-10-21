@@ -1,0 +1,496 @@
+--- a/upstream/common/scanner.h
++++ b/active-src/common/scanner.h
+@@ -3,6 +3,7 @@
+ 
+ #include "../src/tree_sitter/parser.h"
+ #include "tokens.h"
++#include "rootlight_sed_status.h"
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stdlib.h>
+@@ -37,7 +38,7 @@
+   TERM_STAGE_PAYLOAD,
+   TERM_STAGE_CLOSE,
+ };
+-enum { SERIALIZED_SIZE = 14 };
++enum { SERIALIZED_SIZE = 16, PAYLOAD_SIZE = 14 };
+ 
+ // host_* tracks raw input; other regex state tracks decoded input.
+ typedef struct {
+@@ -65,6 +66,35 @@
+   bool text_eof;
+ } Scanner;
+ 
++static inline bool rootlight_sed_input_valid(const TSLexer *lexer) {
++  int32_t c = lexer->lookahead;
++  if (c < 0 || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_INVALID_SCALAR);
++    return false;
++  }
++  return true;
++}
++
++static inline void rootlight_sed_checked_advance(TSLexer *lexer, bool skip) {
++  if (!rootlight_sed_scope_step() || !rootlight_sed_input_valid(lexer)) return;
++  lexer->advance(lexer, skip);
++  rootlight_sed_input_valid(lexer);
++}
++
++static inline bool rootlight_sed_state_valid(const Scanner *s) {
++  bool valid = s && s->mode <= COMMENT_TEXT && s->bracket <= BRACKET_AFTER_OPEN
++    && s->host_bracket <= BRACKET_AFTER_OPEN && s->term_stage <= TERM_STAGE_CLOSE
++    && s->utf8_remaining <= 3 && s->hyphens <= 2
++    && (s->term == 0 || s->term == ':' || s->term == '.' || s->term == '=')
++    && (s->host_term == 0 || s->host_term == ':' || s->host_term == '.' || s->host_term == '=')
++    && s->delimiter <= 127 && s->delimiter != '\n'
++    && ((s->term == 0) == (s->term_stage == TERM_STAGE_NONE))
++    && (!s->host_term_closing || s->host_term != 0)
++    && (!s->interval_content || s->interval);
++  if (!valid) rootlight_sed_scope_refuse(ROOTLIGHT_SED_MALFORMED_STATE);
++  return valid;
++}
++
+ typedef struct {
+   TSLexer lexer;
+   TSLexer *input;
+@@ -75,25 +105,29 @@
+ static inline void lookahead_advance(TSLexer *lexer, bool skip) {
+   LookaheadLexer *ahead = (LookaheadLexer *)lexer;
+   if (ahead->pending) ahead->pending = false;
+-  else ahead->input->advance(ahead->input, skip);
++  else rootlight_sed_checked_advance(ahead->input, skip);
+   lexer->lookahead = ahead->input->lookahead;
+ }
+ static inline void lookahead_mark(TSLexer *lexer) {
++  if (!rootlight_sed_scope_poll()) return;
+   LookaheadLexer *ahead = (LookaheadLexer *)lexer;
+   if (!ahead->pending && !ahead->finished) ahead->input->mark_end(ahead->input);
+ }
+ static inline bool lookahead_eof(const TSLexer *lexer) {
++  if (!rootlight_sed_scope_poll()) return true;
+   const LookaheadLexer *ahead = (const LookaheadLexer *)lexer;
+   return !ahead->pending && ahead->input->eof(ahead->input);
+ }
+ static inline int32_t peek_next(TSLexer *lexer) {
++  if (!rootlight_sed_scope_poll()) return 0;
+   LookaheadLexer *ahead = (LookaheadLexer *)lexer;
+   lexer->mark_end(lexer);
+-  ahead->input->advance(ahead->input, false);
++  rootlight_sed_checked_advance(ahead->input, false);
+   ahead->pending = true;
+   return ahead->input->lookahead;
+ }
+ static inline bool next_eof(TSLexer *lexer) {
++  if (!rootlight_sed_scope_poll()) return true;
+   LookaheadLexer *ahead = (LookaheadLexer *)lexer;
+   return ahead->input->eof(ahead->input);
+ }
+@@ -121,7 +155,7 @@
+ } Unit;
+ 
+ static inline void advance(TSLexer *lexer) {
+-  lexer->advance(lexer, false);
++  rootlight_sed_checked_advance(lexer, false);
+ }
+ static inline bool one_of(int32_t c, const char *set) {
+   return c > 0 && c < 128 && strchr(set, c) != NULL;
+@@ -223,17 +257,19 @@
+ static inline bool skip_blanks(TSLexer *lexer) {
+   bool skipped = false;
+   while (blank(lexer->lookahead)) {
+-    lexer->advance(lexer, true);
++    if (!rootlight_sed_scope_step()) break;
++    rootlight_sed_checked_advance(lexer, true);
+     skipped = true;
+   }
+   return skipped;
+ }
+ static inline void advance_blanks(TSLexer *lexer) {
+-  while (blank(lexer->lookahead)) advance(lexer);
++  while (blank(lexer->lookahead)) {
++    if (!rootlight_sed_scope_step()) break; advance(lexer); }
+ }
+ static inline bool
+ marked(TSLexer *lexer, const bool *valid, enum TokenType token) {
+-  if (!valid[token]) return false;
++  if (!rootlight_sed_scope_poll() || !valid[token]) return false;
+   lexer->result_symbol = token;
+   return true;
+ }
+@@ -326,6 +362,7 @@
+   unsigned value = 0, count = 0;
+   bool continued = false;
+   while (count < limit && !host_boundary(lexer, s)) {
++    if (!rootlight_sed_scope_step()) break;
+     bool escaped_delimiter = !text_mode(s) &&
+       host_plain(s) &&
+       lexer->lookahead == '\\' &&
+@@ -472,6 +509,7 @@
+ static inline bool
+ invalid_encoding(TSLexer *lexer, Scanner *s, const bool *valid) {
+   do {
++    if (!rootlight_sed_scope_step()) break;
+     advance_host(lexer, s);
+   } while (!decoded(lexer->lookahead));
+   return element(lexer, s, valid, INVALID_ENCODING);
+@@ -529,7 +567,7 @@
+ }
+ static inline bool missing(TSLexer *lexer, Scanner *s, const bool *valid) {
+   enum TokenType token = lexer->eof(lexer) ? END_OF_INPUT : BOUNDARY;
+-  if (!valid[token]) return false;
++  if (!rootlight_sed_scope_poll() || !valid[token]) return false;
+   if (
+     !command_end(lexer) && !(regex_mode(s) && lexer->lookahead == s->delimiter)
+   )
+@@ -545,6 +583,7 @@
+   bool name = false;
+   int32_t last = 0;
+   while (!host_boundary(lexer, &state)) {
++    if (!rootlight_sed_scope_step()) break;
+     Unit u = unit(lexer, true, &state);
+     if (
+       !decoded(u.value) ||
+@@ -565,6 +604,7 @@
+     return true;
+   unsigned low = c.prefix, width = 1;
+   for (unsigned i = 0; i < c.remaining; i++) {
++    if (!rootlight_sed_scope_step()) break;
+     low *= c.radix;
+     width *= c.radix;
+     if (((character - low) & 255) < width) return true;
+@@ -582,8 +622,10 @@
+     return true;
+   if (quoted) return false;
+   if (comma && completes_character(u, ',')) return true;
+-  for (unsigned c = '0'; c <= '9'; c++)
++  for (unsigned c = '0'; c <= '9'; c++) {
++    if (!rootlight_sed_scope_step()) break;
+     if (completes_character(u, c)) return true;
++  }
+   return false;
+ }
+ static inline enum TokenType classify_class(TSLexer *lexer, Scanner state) {
+@@ -608,12 +650,14 @@
+   bool extendable = false;
+   Unit current = unit(lexer, true, &state);
+   for (;;) {
++    if (!rootlight_sed_scope_step()) break;
+     if (
+       ascii &&
+       lexer->eof(lexer) &&
+       (current.completion.character || current.completion.radix)
+     ) {
+       for (size_t i = 0; i < NAME_COUNT; i++) {
++    if (!rootlight_sed_scope_step()) break;
+         char target[sizeof("xdigit:]")] = {0};
+         size_t size = strlen(names[i]);
+         memcpy(target, names[i], size);
+@@ -655,6 +699,7 @@
+   if (invalid) return CLASS_VALID;
+   bool prefix = false;
+   for (size_t i = 0; i < NAME_COUNT; i++) {
++    if (!rootlight_sed_scope_step()) break;
+     if (ascii && strcmp(name, names[i]) == 0) return CLASS_VALID;
+     if (ascii && strncmp(name, names[i], length) == 0) prefix = true;
+   }
+@@ -720,13 +765,16 @@
+     decoded(lexer->lookahead) &&
+     lexer->lookahead != '\\' &&
+     lexer->lookahead != s->term
+-  )
++  ) {
++    if (!rootlight_sed_scope_step()) break;
+     advance_host(lexer, s);
++  }
+   return emit(lexer, valid, TERM_TEXT);
+ }
+ static inline enum TokenType literal_interval(TSLexer *lexer, Scanner state) {
+   bool count = false, comma = false;
+   while (!host_boundary(lexer, &state)) {
++    if (!rootlight_sed_scope_step()) break;
+     Unit u = regex_unit(lexer, &state);
+     if (!decoded(u.value) || u.invalid_control) return REGEX_ESCAPE;
+     if (digit(u.value) && !u.quoted) {
+@@ -785,6 +833,7 @@
+   bool complete = true;
+   Scanner ahead = *s;
+   for (uint8_t i = 0; i < count; i++) {
++    if (!rootlight_sed_scope_step()) break;
+     if (host_boundary(lexer, &ahead)) {
+       complete = false;
+       break;
+@@ -829,8 +878,10 @@
+   }
+   if (digit(c) && !u.quoted) {
+     if (!u.encoded && !u.host_escape)
+-      while (digit(lexer->lookahead) && lexer->lookahead != s->delimiter)
++      while (digit(lexer->lookahead) && lexer->lookahead != s->delimiter) {
++    if (!rootlight_sed_scope_step()) break;
+         advance_host(lexer, s);
++      }
+     return emit(lexer, valid, VARIANT(u, COUNT));
+   }
+   if (c == ',' && !u.quoted && valid[INTERVAL_COMMA])
+@@ -853,8 +904,10 @@
+     lexer->lookahead != ',' &&
+     lexer->lookahead != '}' &&
+     lexer->lookahead != '\\'
+-  )
++  ) {
++    if (!rootlight_sed_scope_step()) break;
+     advance_host(lexer, s);
++  }
+   return emit(lexer, valid, INVALID_INTERVAL_CHARACTER);
+ }
+ static inline enum TokenType term_opening(Unit u, int32_t marker) {
+@@ -963,6 +1016,10 @@
+     return emit(lexer, valid, VARIANT(u, BRACKET_OPEN));
+   }
+   if (c == '(' && dialect_operator(u)) {
++    if (s->groups == UINT32_MAX) {
++      rootlight_sed_scope_refuse(ROOTLIGHT_SED_CAPACITY);
++      return false;
++    }
+     s->groups++;
+     s->atom = false;
+     s->branch_start = true;
+@@ -1106,6 +1163,7 @@
+   s->text_eof = false;
+   if (leadin) advance(lexer);
+   while (!lexer->eof(lexer)) {
++    if (!rootlight_sed_scope_step()) break;
+     int32_t c = lexer->lookahead;
+     if (prefix && c != '\\') {
+       s->verbatim = c == '\n';
+@@ -1128,6 +1186,7 @@
+     consumed = true;
+   }
+   while (!line_end(lexer) && decoded(lexer->lookahead)) {
++    if (!rootlight_sed_scope_step()) break;
+     if (lexer->lookahead == '\\') {
+       int32_t next = peek_next(lexer);
+       if (next == '\n' || next_eof(lexer)) {
+@@ -1189,8 +1248,10 @@
+     decoded(lexer->lookahead) &&
+     (text_mode(s) || lexer->lookahead != s->delimiter) &&
+     (s->mode != REPLACEMENT || lexer->lookahead != '&')
+-  )
++  ) {
++    if (!rootlight_sed_scope_step()) break;
+     advance(lexer);
++  }
+   return emit(lexer, valid, LITERAL);
+ }
+ static inline bool opaque_end(TSLexer *lexer, bool word) {
+@@ -1208,13 +1269,15 @@
+     : s->mode == VERSION_TEXT                  ? VERSION
+     : comment                                  ? COMMENT_TAIL
+                                                : FILENAME;
+-  do advance(lexer);
++  do {
++    if (!rootlight_sed_scope_step()) break; advance(lexer); }
+   while (!opaque_end(lexer, word) && decoded(lexer->lookahead));
+   return emit(lexer, valid, token);
+ }
+ static inline bool scan_digits(TSLexer *lexer) {
+   bool zero = true;
+   do {
++    if (!rootlight_sed_scope_step()) break;
+     zero = zero && lexer->lookahead == '0';
+     advance(lexer);
+   } while (digit(lexer->lookahead));
+@@ -1225,7 +1288,8 @@
+   if (lexer->lookahead == '~') {
+     advance(lexer);
+     advance_blanks(lexer);
+-    while (lexer->lookahead == '0') advance(lexer);
++    while (lexer->lookahead == '0') {
++    if (!rootlight_sed_scope_step()) break; advance(lexer); }
+     if (digit(lexer->lookahead)) return NUMBER;
+     advance_blanks(lexer);
+   }
+@@ -1235,6 +1299,7 @@
+     if (regex_opening(lexer->lookahead)) return ZERO_NUMBER;
+   } else {
+     while (!decoded(lexer->lookahead)) {
++    if (!rootlight_sed_scope_step()) break;
+       advance(lexer);
+       advance_blanks(lexer);
+     }
+@@ -1313,7 +1378,8 @@
+   enum TokenType token = first && lexer->lookahead == 'n' ? DIRECTIVE : COMMENT;
+   if (token == DIRECTIVE) advance(lexer);
+   else
+-    while (!line_end(lexer) && decoded(lexer->lookahead)) advance(lexer);
++    while (!line_end(lexer) && decoded(lexer->lookahead)) {
++    if (!rootlight_sed_scope_step()) break; advance(lexer); }
+   s->mode = COMMENT_TEXT;
+   return emit(lexer, valid, token);
+ }
+@@ -1450,6 +1516,16 @@
+   return missing(lexer, s, valid);
+ }
+ static inline bool scan(void *payload, TSLexer *lexer, const bool *valid) {
++  if (!rootlight_sed_scope_step()) return false;
++  if (!payload) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_ALLOCATION);
++    return false;
++  }
++  if (!lexer || !valid) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_MALFORMED_STATE);
++    return false;
++  }
++  if (!rootlight_sed_state_valid(payload) || !rootlight_sed_input_valid(lexer)) return false;
+   if (valid[ERROR_SENTINEL]) return false;
+   LookaheadLexer ahead = {
+     .lexer =
+@@ -1470,69 +1546,91 @@
+   else result = scan_normal(&ahead.lexer, &next, valid);
+   // Tree-sitter tracks only the first lookahead byte; advance past multibyte input.
+   if (lexer->lookahead >= 0x80 && decoded(lexer->lookahead))
+-    lexer->advance(lexer, false);
+-  if (result) {
++    rootlight_sed_checked_advance(lexer, false);
++  if (result && rootlight_sed_scope_poll() && rootlight_sed_state_valid(&next)) {
+     *(Scanner *)payload = next;
+     lexer->result_symbol = ahead.lexer.result_symbol;
+   }
+-  return result;
+-}
++  return result && rootlight_sed_scope_poll();
++}
++/* Persist one complete versioned scanner state; rollback cannot clear refusal.
++ * The fixed upstream payload stays byte-compatible behind its explicit header. */
+ static inline unsigned serialize(void *payload, char *buffer) {
++  if (!rootlight_sed_scope_step()) return 0;
++  if (!payload) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_ALLOCATION);
++    return 0;
++  }
+   const Scanner *s = payload;
+-  buffer[0] = (char)s->mode;
+-  buffer[1] = (char)s->bracket;
+-  buffer[2] = (char)s->term;
+-  buffer[3] = (char)s->term_stage;
+-  buffer[4] = (char)s->utf8_remaining;
+-  buffer[5] = (char)s->host_bracket;
+-  buffer[6] = (char)s->host_term;
+-  buffer[7] = (char)s->delimiter;
+-  buffer[8] = (char)(s->interval |
+-    s->branch_start << 1 |
+-    s->atom << 2 |
+-    s->interval_content << 3 |
+-    s->verbatim << 4 |
+-    s->misplaced_class << 5 |
+-    s->boundary_atom << 6 |
+-    s->raw_text << 7);
+-  buffer[9] = (char)(s->host_escaped |
+-    s->host_term_closing << 1 |
+-    s->host_control << 2 |
+-    s->text_eof << 3 |
+-    s->hyphens << 4);
+-  for (unsigned i = 0; i < 4; i++)
+-    buffer[10 + i] = (char)(s->groups >> (i * 8));
++  if (!buffer || !rootlight_sed_state_valid(s)) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_MALFORMED_STATE);
++    return 0;
++  }
++  char state[SERIALIZED_SIZE] = {'S', 1};
++  char *bytes = state + 2;
++  bytes[0] = (char)s->mode;
++  bytes[1] = (char)s->bracket;
++  bytes[2] = (char)s->term;
++  bytes[3] = (char)s->term_stage;
++  bytes[4] = (char)s->utf8_remaining;
++  bytes[5] = (char)s->host_bracket;
++  bytes[6] = (char)s->host_term;
++  bytes[7] = (char)s->delimiter;
++  bytes[8] = (char)(s->interval | s->branch_start << 1 | s->atom << 2 |
++    s->interval_content << 3 | s->verbatim << 4 | s->misplaced_class << 5 |
++    s->boundary_atom << 6 | s->raw_text << 7);
++  bytes[9] = (char)(s->host_escaped | s->host_term_closing << 1 |
++    s->host_control << 2 | s->text_eof << 3 | s->hyphens << 4);
++  for (unsigned i = 0; i < 4; i++) bytes[10 + i] = (char)(s->groups >> (i * 8));
++  if (!rootlight_sed_scope_poll()) return 0;
++  memcpy(buffer, state, sizeof(state));
+   return SERIALIZED_SIZE;
+ }
+-static inline void
+-deserialize(void *payload, const char *buffer, unsigned length) {
+-  Scanner *s = payload;
+-  memset(s, 0, sizeof(*s));
+-  if (length != SERIALIZED_SIZE) return;
+-  uint8_t flags = (uint8_t)buffer[8];
+-  uint8_t host_flags = (uint8_t)buffer[9];
+-  s->mode = (uint8_t)buffer[0];
+-  s->bracket = (uint8_t)buffer[1];
+-  s->term = (uint8_t)buffer[2];
+-  s->term_stage = (uint8_t)buffer[3];
+-  s->utf8_remaining = (uint8_t)buffer[4];
+-  s->host_bracket = (uint8_t)buffer[5];
+-  s->host_term = (uint8_t)buffer[6];
+-  s->delimiter = (uint8_t)buffer[7];
+-  s->interval = flags & 1;
+-  s->branch_start = flags & 2;
+-  s->atom = flags & 4;
+-  s->interval_content = flags & 8;
+-  s->verbatim = flags & 16;
+-  s->misplaced_class = flags & 32;
+-  s->boundary_atom = flags & 64;
+-  s->raw_text = flags & 128;
+-  s->host_escaped = host_flags & 1;
+-  s->host_term_closing = host_flags & 2;
+-  s->host_control = host_flags & 4;
+-  s->text_eof = host_flags & 8;
+-  s->hyphens = (host_flags >> 4) & 3;
+-  for (unsigned i = 0; i < 4; i++)
+-    s->groups |= (uint32_t)(uint8_t)buffer[10 + i] << (i * 8);
+-}
++
++static inline void deserialize(void *payload, const char *buffer, unsigned length) {
++  if (!rootlight_sed_scope_step()) return;
++  if (!payload) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_ALLOCATION);
++    return;
++  }
++  Scanner next = {0};
++  if (length == 0) {
++    *(Scanner *)payload = next;
++    return;
++  }
++  if (!buffer || length != SERIALIZED_SIZE || buffer[0] != 'S' || buffer[1] != 1) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_MALFORMED_STATE);
++    return;
++  }
++  const uint8_t *bytes = (const uint8_t *)buffer + 2;
++  uint8_t flags = bytes[8], host = bytes[9];
++  if (host & 0xc0) {
++    rootlight_sed_scope_refuse(ROOTLIGHT_SED_MALFORMED_STATE);
++    return;
++  }
++  next.mode = bytes[0];
++  next.bracket = bytes[1];
++  next.term = bytes[2];
++  next.term_stage = bytes[3];
++  next.utf8_remaining = bytes[4];
++  next.host_bracket = bytes[5];
++  next.host_term = bytes[6];
++  next.delimiter = bytes[7];
++  next.interval = flags & 1;
++  next.branch_start = flags & 2;
++  next.atom = flags & 4;
++  next.interval_content = flags & 8;
++  next.verbatim = flags & 16;
++  next.misplaced_class = flags & 32;
++  next.boundary_atom = flags & 64;
++  next.raw_text = flags & 128;
++  next.host_escaped = host & 1;
++  next.host_term_closing = host & 2;
++  next.host_control = host & 4;
++  next.text_eof = host & 8;
++  next.hyphens = (host >> 4) & 3;
++  for (unsigned i = 0; i < 4; i++) next.groups |= (uint32_t)bytes[10 + i] << (i * 8);
++  if (rootlight_sed_state_valid(&next) && rootlight_sed_scope_poll()) *(Scanner *)payload = next;
++}
++
+ #endif

@@ -1,0 +1,51 @@
+{
+  "name": "@konomanoasa/tree-sitter-gsed",
+  "version": "0.4.0",
+  "type": "module",
+  "description": "Tree-sitter grammars for GNU sed 4.10.",
+  "license": "MIT",
+  "repository": "git+https://github.com/konomanoasa/tree-sitter-gsed.git",
+  "files": [
+    "Cargo.toml",
+    "bindings/rust/*.rs",
+    "common/**/*.h",
+    "common/**/*.js",
+    "grammar.js",
+    "gsed_ere/grammar.js",
+    "gsed_ere/src/*.c",
+    "gsed_ere/src/*.json",
+    "gsed_ere/src/tree_sitter/*.h",
+    "queries/*.scm",
+    "src/*.c",
+    "src/*.json",
+    "src/tree_sitter/*.h",
+    "test/bindings.test.rs",
+    "tree-sitter.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "npm run tree-sitter -- build-all",
+    "check": "biome check . && tsc --noEmit",
+    "check:queries": "npm run tree-sitter -- check-queries",
+    "format": "biome format --write .",
+    "generate": "npm run tree-sitter -- generate-all",
+    "test": "npm run tree-sitter -- test-corpus --rebuild && node --test --test-concurrency=1 \"test/*.test.js\"",
+    "test:fuzz:corpus": "npm run tree-sitter -- fuzz-all --iterations 100 --edits 5",
+    "test:highlights": "node --test test/highlight.test.js",
+    "test:incremental": "node --test --test-concurrency=1 test/cst.test.js test/parser.test.js test/incremental.test.js",
+    "test:sanitize": "node scripts/check-c.js --sanitize",
+    "test:scanner": "node scripts/check-c.js",
+    "tree-sitter": "node scripts/tree-sitter.js"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "26.6.5",
+    "tree-sitter-cli": "0.27.1",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "tree-sitter-cli": true
+  }
+}

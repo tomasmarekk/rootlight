@@ -1,0 +1,72 @@
+================================================================================
+import export syntax
+================================================================================
+
+import View from 'views'
+import { EncounterSettingsView, AbCIIExportView as ExportView } from './encounter'
+import * as Helpers from './helpers'
+import { something } from 'module'
+import 'polyfill'
+
+export { View, EncounterSettingsView as Settings }
+export * from './helpers'
+export default View
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (import_statement
+        (identifier)
+        (string
+          (single_quoted_string
+            (single_quoted_content)))))
+    (statement
+      (import_statement
+        (named_imports
+          (import_specifier
+            (identifier))
+          (import_specifier
+            (identifier)
+            (identifier)))
+        (string
+          (single_quoted_string
+            (single_quoted_content)))))
+    (statement
+      (import_statement
+        (namespace_import
+          (identifier))
+        (string
+          (single_quoted_string
+            (single_quoted_content)))))
+    (statement
+      (import_statement
+        (named_imports
+          (import_specifier
+            (identifier)))
+        (string
+          (single_quoted_string
+            (single_quoted_content)))))
+    (statement
+      (import_statement
+        (string
+          (single_quoted_string
+            (single_quoted_content)))))
+    (statement
+      (export_statement
+        (named_exports
+          (export_specifier
+            (identifier))
+          (export_specifier
+            (identifier)
+            (identifier)))))
+    (statement
+      (export_statement
+        (string
+          (single_quoted_string
+            (single_quoted_content)))))
+    (statement
+      (export_statement
+        (expression
+          (identifier))))))

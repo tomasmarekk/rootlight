@@ -286,3 +286,86 @@ crates/rootlight-adapter-treesitter/tests/fixtures/webassembly/** -text
 /tests/fixtures/objective-c/event-emitter.m -text
 /tests/fixtures/objective-c/preprocessor-property.LICENSE -text
 /tests/fixtures/objective-c/preprocessor-property.h -text
+
+# Preserve physical C# formal observation fixture bytes.
+/crates/rootlight-adapter-treesitter/tests/fixtures/csharp_formal_observation/** -text
+
+crates/rootlight-adapter-treesitter/tests/fixtures/chapel/genhashkey32.chpl -text
+crates/rootlight-adapter-treesitter/tests/fixtures/chapel/LICENSE -text
+crates/rootlight-adapter-treesitter/tests/fixtures/chapel/SOURCES.md -text
+
+# Preserve original C++ callback observation fixture bytes.
+/crates/rootlight-adapter-treesitter/tests/fixtures/cpp_waforth_formal/** -text
+
+# Preserve every authenticated Chapel input, including generated CRLF metadata.
+third_party/tree-sitter-chapel-0.0.1/** -text
+
+# Preserve original Java local receiver observation fixture bytes.
+/crates/rootlight-adapter-treesitter/tests/fixtures/java_local_receiver/** -text whitespace=-blank-at-eol,cr-at-eol
+
+crates/rootlight-adapter-treesitter/tests/fixtures/dockerfile/** -text
+crates/rootlight-adapter-treesitter/tests/fixtures/gdscript/GroupCel.gd -text
+crates/rootlight-adapter-treesitter/tests/fixtures/gdscript/LICENSE.txt -text
+
+/third_party/tree-sitter-meson-1.0.0/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/meson/** -text
+/third_party/tree-sitter-dockerfile-0.2.0/** -text
+
+/third_party/tree-sitter-coffeescript-1.0.0/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/coffeescript/** -text
+
+/crates/rootlight-adapter-treesitter/tests/fixtures/csharp_fields/Original.cs -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/csharp_fields/LICENSE.txt -text
+
+/crates/rootlight-discovery/tests/fixtures/wolfram/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/go_written_calls/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/pug/** -text
+
+/third_party/tree-sitter-pug-0.0.1/** -text
+third_party/tree-sitter-lean-0.2.0/** -text
+
+# Preserve complete original residual fixtures and their physical line endings.
+crates/rootlight-adapter-treesitter/tests/fixtures/written_residuals/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Preserve complete reviewed Wolfram upstream and physical original fixtures.
+/third_party/tree-sitter-wolfram-0.0.1/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/wolfram/** -text
+
+# Preserve authenticated raw Wolfram source and scanner-diff context bytes.
+/crates/rootlight-adapter-treesitter/tests/fixtures/wolfram/SocketUtilities.wl -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/third_party/tree-sitter-wolfram-0.0.1/SCANNER.patch -text whitespace=-blank-at-eol,cr-at-eol
+
+/crates/rootlight-adapter-treesitter/tests/fixtures/powershell_formal/** -text
+
+# Preserve complete licensed C variable-scope originals byte for byte.
+/crates/rootlight-adapter-treesitter/tests/fixtures/c_written_bindings/** -text
+
+# Preserve the complete licensed Coq written-callable original.
+/crates/rootlight-adapter-treesitter/tests/fixtures/coq-written-callables/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Preserve complete licensed Agda equation source bytes.
+/crates/rootlight-adapters/tests/fixtures/agda_equations/** -text
+
+# Preserve complete retained Sed sources, derivative diff and raw original.
+/third_party/tree-sitter-gsed-0.4.0/** -text
+/third_party/tree-sitter-gsed-0.4.0/SCANNER.patch -text whitespace=-blank-at-eol,cr-at-eol
+/crates/rootlight-adapter-treesitter/tests/fixtures/sed/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+crates/rootlight-adapter-treesitter/tests/fixtures/lean/** -text
+crates/rootlight-adapter-treesitter/tests/fixtures/idris/** -text
+
+# Retained Idris sources preserve original bytes and attribution.
+third_party/tree-sitter-idris-0.0.1/** -text
+/crates/rootlight-adapters/tests/fixtures/thinkscript/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/bash_module_references/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/dockerfile_env/** -text
+
+# Preserve the complete licensed Make source and its physical CRLF bytes.
+/crates/rootlight-service/tests/fixtures/make_prerequisites/** -text
+/crates/rootlight-service/tests/fixtures/make_prerequisites/Makefile whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Preserve the complete licensed TypeScript source and physical CRLF bytes.
+/crates/rootlight-service/tests/fixtures/typescript_value_uses/** -text
+
+# Preserve complete licensed Nix source and its physical CRLF bytes.
+/crates/rootlight-adapter-treesitter/tests/fixtures/nix_captured_formal/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/nix_captured_formal/flake.nix whitespace=-blank-at-eof,cr-at-eol

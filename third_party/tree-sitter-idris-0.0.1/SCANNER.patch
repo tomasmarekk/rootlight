@@ -1,0 +1,395 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -10,7 +10,9 @@
+ // #define DEBUG_NEXT_TOKEN 1
+ 
+ #include "tree_sitter/parser.h"
+-#include "tree_sitter/array.h"
++#include "rootlight_idris_status.h"
++#include <stdint.h>
++#include <stdlib.h>
+ #include <assert.h>
+ #ifdef DEBUG
+ #include <stdio.h>
+@@ -22,11 +24,11 @@
+ 
+ // short circuit
+ #define SHORT_SCANNER if (res.finished) return res;
+-#define PEEK state->lexer->lookahead
++#define PEEK idris_peek(state)
+ // Move the parser position one character to the right.
+-#define S_ADVANCE state->lexer->advance(state->lexer, false)
++#define S_ADVANCE idris_advance(state, false)
+ // Move the parser position one character to the right, treating the consumed character as whitespace.
+-#define S_SKIP state->lexer->advance(state->lexer, true)
++#define S_SKIP idris_advance(state, true)
+ #define SYM(s) (state->symbols[s])
+ 
+ #ifdef DEBUG
+@@ -188,12 +190,89 @@
+ }
+ #endif
+ 
+-typedef Array(char) String;
++/* Fixed scanner storage avoids input-sized allocation and leaked token arrays.
++ * Capacity refusal stays outside snapshots and prevents admitting any tree. */
++#define IDRIS_TOKEN_CAPACITY 1024u
++#define IDRIS_STACK_CAPACITY 255u
+ 
+ typedef struct {
+-  Array(uint32_t) indents;
+-  Array(uint32_t) raw_string_sharp_counts;
++  char contents[IDRIS_TOKEN_CAPACITY];
++  uint32_t size;
++} String;
++
++typedef struct {
++  uint32_t contents[IDRIS_STACK_CAPACITY];
++  uint32_t size;
++} U32Stack;
++
++typedef struct {
++  U32Stack indents;
++  U32Stack raw_string_sharp_counts;
+ } Payload;
++
++static bool idris_string_push(String *text, uint32_t value) {
++  if (!rootlight_idris_scope_step()) return false;
++  if (value > 0x10ffffu || (value >= 0xd800u && value <= 0xdfffu)) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_INVALID_SCALAR);
++    return false;
++  }
++  unsigned width = value < 0x80u ? 1u : value < 0x800u ? 2u : value < 0x10000u ? 3u : 4u;
++  if (text->size >= IDRIS_TOKEN_CAPACITY
++      || (value && width >= IDRIS_TOKEN_CAPACITY - text->size)) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_CAPACITY);
++    return false;
++  }
++  if (!value) {
++    text->contents[text->size++] = 0;
++    return true;
++  }
++  unsigned at = text->size;
++  if (width == 1u) text->contents[at++] = (char)value;
++  else {
++    text->contents[at++] = (char)((width == 2u ? 0xc0u : width == 3u ? 0xe0u : 0xf0u)
++      | (value >> (6u * (width - 1u))));
++    for (unsigned remaining = width - 1u; remaining; --remaining)
++      text->contents[at++] = (char)(0x80u | ((value >> (6u * (remaining - 1u))) & 0x3fu));
++  }
++  text->size = at;
++  text->contents[at] = 0;
++  return true;
++}
++
++static bool idris_stack_push(U32Stack *stack, uint32_t value) {
++  if (!rootlight_idris_scope_step()) return false;
++  if (stack->size >= IDRIS_STACK_CAPACITY) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_CAPACITY);
++    return false;
++  }
++  stack->contents[stack->size++] = value;
++  return true;
++}
++
++static uint32_t *idris_stack_get(U32Stack *stack, uint32_t index) {
++  static uint32_t zero;
++  if (!rootlight_idris_scope_step()) return &zero;
++  if (stack->size > IDRIS_STACK_CAPACITY || index >= stack->size) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_MALFORMED_STATE);
++    return &zero;
++  }
++  return &stack->contents[index];
++}
++
++static void idris_stack_pop(U32Stack *stack) {
++  if (!rootlight_idris_scope_step()) return;
++  if (!stack->size || stack->size > IDRIS_STACK_CAPACITY) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_MALFORMED_STATE);
++    return;
++  }
++  --stack->size;
++}
++
++#define array_new() {{0}, 0}
++#define array_push(self, value) _Generic((self), String*: idris_string_push, U32Stack*: idris_stack_push)((self), (uint32_t)(value))
++#define array_get(self, index) idris_stack_get((self), (uint32_t)(index))
++#define array_back(self) idris_stack_get((self), (self)->size ? (self)->size - 1u : UINT32_MAX)
++#define array_pop(self) idris_stack_pop(self)
+ 
+ // --------------------------------------------------------------------------------------------------------
+ // State
+@@ -219,6 +298,25 @@
+ #endif
+ } State;
+ 
++static int32_t idris_peek(State *state) {
++  if (!rootlight_idris_scope_step()) return 0;
++  int32_t value = state->lexer->lookahead;
++  if (value < 0 || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_INVALID_SCALAR);
++    return 0;
++  }
++  if (value == 0 && !state->lexer->eof(state->lexer)) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_UNSUPPORTED_NUL);
++    return 0;
++  }
++  return value;
++}
++
++static void idris_advance(State *state, bool skip) {
++  if (!rootlight_idris_scope_step() || state->lexer->eof(state->lexer)) return;
++  state->lexer->advance(state->lexer, skip);
++}
++
+ static State state_new(TSLexer *l, const bool * restrict vs, Payload *is) {
+   return (State) {
+     .lexer = l,
+@@ -279,6 +377,7 @@
+  * The parser's position in the current line.
+  */
+ static uint32_t column(State *state) {
++  if (!rootlight_idris_scope_step()) return 0;
+   return is_eof(state) ? 0 : state->lexer->get_column(state->lexer);
+ }
+ 
+@@ -743,10 +842,18 @@
+         break;
+       case ' ':
+         S_SKIP;
++        if (indent == UINT32_MAX) {
++          rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_CAPACITY);
++          return 0;
++        }
+         indent++;
+         break;
+       case '\t':
+         S_SKIP;
++        if (indent > UINT32_MAX - 8u) {
++          rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_CAPACITY);
++          return 0;
++        }
+         indent += 8;
+         break;
+       default:
+@@ -1084,6 +1191,10 @@
+         S_ADVANCE;
+         if (PEEK == '-') {
+           S_ADVANCE;
++          if (level == UINT32_MAX) {
++            rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_CAPACITY);
++            return res_fail;
++          }
+           level++;
+         }
+         break;
+@@ -1502,7 +1613,9 @@
+ #ifdef DEBUG_NEXT_TOKEN
+   debug_lookahead(state);
+ #endif
+-  if (result.finished && result.sym != FAIL) {
++  if (result.finished && result.sym >= SEMICOLON && result.sym < ERROR_SENTINEL
++      && result.sym != FAIL && state->symbols[result.sym]
++      && rootlight_idris_scope_poll()) {
+ #ifdef DEBUG
+     // TODO(414owen) can names[] fail?
+     DEBUG_PRINTF("result: %s, ", sym_names[result.sym]);
+@@ -1524,25 +1637,55 @@
+ /**
+  * This function allocates the persistent state of the parser that is passed into the other API functions.
+  */
++#ifdef ROOTLIGHT_IDRIS_TEST
++static bool idris_test_fail_allocation;
++#endif
++
+ void *tree_sitter_idris_external_scanner_create() {
+-  void *res = calloc(sizeof(Payload), 1);
+-  return res;
++  if (!rootlight_idris_scope_step()) return NULL;
++#ifdef ROOTLIGHT_IDRIS_TEST
++  if (idris_test_fail_allocation) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_ALLOCATION);
++    return NULL;
++  }
++#endif
++  Payload *payload = calloc(1, sizeof(Payload));
++  if (!payload) rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_ALLOCATION);
++  return payload;
+ }
+ 
+ /**
+  * Main logic entry point.
+  */
+ bool tree_sitter_idris_external_scanner_scan(Payload *payload, TSLexer *lexer, const bool *syms) {
++  if (!rootlight_idris_scope_step()) return false;
++  if (!payload || !lexer || !syms) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_ALLOCATION);
++    return false;
++  }
++  if (payload->indents.size > IDRIS_STACK_CAPACITY
++      || payload->raw_string_sharp_counts.size > IDRIS_STACK_CAPACITY) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_MALFORMED_STATE);
++    return false;
++  }
++  // Tree-sitter may decline this trial. Only a permitted token commits state.
++  Payload next = *payload;
++  TSSymbol previous_symbol = lexer->result_symbol;
+   State state = {
+     .lexer = lexer,
+     .symbols = syms,
+-    .payload = payload
++    .payload = &next
+   };
+ #ifdef DEBUG
+   debug_state(&state);
+   if (state.needs_free) free(state.marked_by);
+ #endif
+-  return eval(scan_all, &state);
++  if (eval(scan_all, &state) && rootlight_idris_scope_poll()) {
++    *payload = next;
++    return true;
++  }
++  lexer->result_symbol = previous_symbol;
++  return false;
+ }
+ 
+ /**
+@@ -1550,64 +1693,86 @@
+  * This is normally more complex, but since this parser's state constists solely of a vector of integers, it can just be
+  * copied.
+  */
++/* Versioned little-endian snapshots retain all uint32 values exactly.
++ * No partial restore survives a refusal or Tree-sitter's empty reset. */
++static void idris_reset(Payload *payload) {
++  payload->indents.size = 0;
++  payload->raw_string_sharp_counts.size = 0;
++}
++
++static uint32_t idris_read_u32(const unsigned char *raw) {
++  return (uint32_t)raw[0] | ((uint32_t)raw[1] << 8u)
++    | ((uint32_t)raw[2] << 16u) | ((uint32_t)raw[3] << 24u);
++}
++
++static void idris_write_u32(unsigned char *raw, uint32_t value) {
++  for (unsigned at = 0; at < 4u; ++at) raw[at] = (unsigned char)(value >> (8u * at));
++}
++
+ unsigned tree_sitter_idris_external_scanner_serialize(Payload *payload, char *buffer) {
+-  unsigned size = 0;
+-  {
+-    unsigned len = payload->indents.size;
+-    if (size + 1 + len > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) return 0;
+-    buffer[size++] = len;
+-    memcpy(&buffer[size], payload->indents.contents, len);
+-    size += len;
+-  }
+-  {
+-    unsigned len = payload->raw_string_sharp_counts.size;
+-    if (size + 1 + len > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) return 0;
+-    buffer[size++] = len;
+-    memcpy(&buffer[size], payload->raw_string_sharp_counts.contents, len);
+-    size += len;
+-  }
+-  return size;
+-}
+-
+-/**
+- * Load another parser state into the currently active state.
+- * `payload` is the state of the previous parser execution, while `buffer` is the saved state of a different position
+- * (e.g. when doing incremental parsing).
+- */
+-void tree_sitter_idris_external_scanner_deserialize(Payload *payload, char *buffer, unsigned length) {
+-  if(length == 0) return;
+-
+-  unsigned size = 0;
+-  {
+-    unsigned len = buffer[size++];
+-    if (len > 0) {
+-      array_reserve(&payload->indents, len);
+-      memcpy(payload->indents.contents, &buffer[size], len);
+-      payload->indents.size = len;
+-    }
+-    size += len;
+-  }
+-  {
+-    unsigned len = buffer[size++];
+-    if (len > 0) {
+-      array_reserve(&payload->raw_string_sharp_counts, len);
+-      memcpy(payload->raw_string_sharp_counts.contents, &buffer[size], len);
+-     payload->raw_string_sharp_counts.size = len;
+-    }
+-    size += len;
+-  }
+-  assert(size == length);
++  if (!rootlight_idris_scope_step()) return 0;
++  if (!payload || !buffer) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_ALLOCATION);
++    return 0;
++  }
++  uint32_t ni = payload->indents.size, nr = payload->raw_string_sharp_counts.size;
++  if (ni > IDRIS_STACK_CAPACITY || nr > IDRIS_STACK_CAPACITY
++      || ni + nr > (TREE_SITTER_SERIALIZATION_BUFFER_SIZE - 4u) / 4u) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_CAPACITY);
++    return 0;
++  }
++  unsigned char *raw = (unsigned char *)buffer;
++  raw[0] = 1u;
++  raw[1] = 0u;
++  raw[2] = (unsigned char)ni;
++  raw[3] = (unsigned char)nr;
++  unsigned at = 4u;
++  for (unsigned member = 0; member < 2u; ++member) {
++    U32Stack *stack = member ? &payload->raw_string_sharp_counts : &payload->indents;
++    for (uint32_t index = 0; index < stack->size; ++index) {
++      if (!rootlight_idris_scope_step()) return 0;
++      idris_write_u32(raw + at, stack->contents[index]);
++      at += 4u;
++    }
++  }
++  return at;
++}
++
++void tree_sitter_idris_external_scanner_deserialize(Payload *payload, const char *buffer, unsigned length) {
++  if (payload) idris_reset(payload);
++  if (!rootlight_idris_scope_step()) return;
++  if (!payload) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_ALLOCATION);
++    return;
++  }
++  if (!length) return;
++  if (!buffer || length < 4u || length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_MALFORMED_STATE);
++    return;
++  }
++  const unsigned char *raw = (const unsigned char *)buffer;
++  uint32_t ni = raw[2], nr = raw[3];
++  if (raw[0] != 1u || raw[1] != 0u || 4u + 4u * (ni + nr) != length) {
++    rootlight_idris_scope_refuse(ROOTLIGHT_IDRIS_MALFORMED_STATE);
++    return;
++  }
++  unsigned at = 4u;
++  for (unsigned member = 0; member < 2u; ++member) {
++    U32Stack *stack = member ? &payload->raw_string_sharp_counts : &payload->indents;
++    uint32_t count = member ? nr : ni;
++    for (uint32_t index = 0; index < count; ++index) {
++      if (!rootlight_idris_scope_step()) { idris_reset(payload); return; }
++      stack->contents[index] = idris_read_u32(raw + at);
++      at += 4u;
++    }
++  }
++  payload->indents.size = ni;
++  payload->raw_string_sharp_counts.size = nr;
+ }
+ 
+ /**
+  * Destroy the state.
+  */
+ void tree_sitter_idris_external_scanner_destroy(Payload *payload) {
+-  if (payload != NULL) {
+-    // Free the backing buffers of the arrays before freeing the payload itself,
+-    // otherwise their heap allocations (grown by push_indent / array_push) leak.
+-    array_delete(&payload->indents);
+-    array_delete(&payload->raw_string_sharp_counts);
+-  }
+   free(payload);
+ }

@@ -1,0 +1,49 @@
+================================================================================
+class property block
+================================================================================
+
+class Widget
+  events:
+    click: ->
+      @ready = true
+  initialize: ->
+    @ready = false
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (class_definition
+        (identifier)
+        (class_body
+          (class_indented_body
+            (class_member
+              (class_property_block
+                (identifier)
+                (class_property_member
+                  (class_property_method
+                    (identifier)
+                    (block
+                      (indented_block
+                        (statement_sequence
+                          (statement
+                            (assignment_statement
+                              (pattern
+                                (instance_variable
+                                  (identifier)))
+                              (expression
+                                (boolean)))))))))))
+            (class_member
+              (method_definition
+                (identifier)
+                (block
+                  (indented_block
+                    (statement_sequence
+                      (statement
+                        (assignment_statement
+                          (pattern
+                            (instance_variable
+                              (identifier)))
+                          (expression
+                            (boolean)))))))))))))))

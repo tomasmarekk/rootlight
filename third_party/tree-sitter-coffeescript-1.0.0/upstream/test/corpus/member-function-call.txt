@@ -1,0 +1,19 @@
+================================================================================
+member function call
+================================================================================
+
+object.method()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (function_call
+            (expression
+              (member_expression
+                (expression
+                  (identifier))
+                (identifier)))))))))

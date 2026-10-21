@@ -1,0 +1,28 @@
+================================================================================
+is / isnt operators
+================================================================================
+
+value is 0
+value isnt null
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (binary_expression
+            (expression
+              (identifier))
+            (expression
+              (number
+                (decimal_number)))))))
+    (statement
+      (expression_statement
+        (expression
+          (binary_expression
+            (expression
+              (identifier))
+            (expression
+              (null_literal))))))))

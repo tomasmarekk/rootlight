@@ -1,0 +1,20 @@
+{
+  "upstream": "https://github.com/talha-akram/tree-sitter-coffeescript",
+  "commit": "aaba90672d42932d6c8cccbbb0aa130688155289",
+  "tree": "37420fb7de20425e9e110d5a0c7694658d593841",
+  "upstream_blobs": 63,
+  "upstream_bytes": 43032398,
+  "grammar_abi": 14,
+  "active_parser": "upstream/src/parser.c",
+  "active_scanner": "src/scanner.c",
+  "active_status_unit": "src/rootlight_coffeescript_status.c",
+  "renamed_inert_metadata": {
+    ".gitattributes": ".gitattributes.upstream"
+  },
+  "local_changes": "LOCAL_CHANGES.md",
+  "memory_enforcement": "Unavailable",
+  "operational_wrapper": "LanguageFn 0.1.7 and cc 1.2.67; no build-time downloads",
+  "generic_owned_wrapper_product_qualification": false,
+  "callback_owner_successor": "Rc C-held owner plus temporary callback lease, native reentry conflict and callback/destructor panic containment; source review and product execution remain separate gates",
+  "scanner_historical_qualification": "Separate retained 13 C controls, exact full original conservation and 9 SDK lifecycle controls; not product qualification."
+}

@@ -1,0 +1,7 @@
+.agents
+.DS_Store
+AGENTS.md
+
+agent/*
+
+node_modules/

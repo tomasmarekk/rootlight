@@ -1,0 +1,23 @@
+================================================================================
+chained assignment
+================================================================================
+
+a = b = c = 0
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (assignment_statement
+          (pattern
+            (identifier))
+          (assignment_statement
+            (pattern
+              (identifier))
+            (expression
+              (number
+                (decimal_number)))))))))

@@ -1,0 +1,197 @@
+================
+Simple integer
+================
+
+123
+
+---
+
+(source_file
+  (integer))
+
+================
+Simple real
+================
+
+123.4
+
+---
+
+(source_file
+  (real))
+
+================
+Real - no trailing digits
+================
+
+11.
+
+---
+
+(source_file
+  (real))
+
+================
+Real - no leading digits
+================
+
+.11
+
+---
+
+(source_file
+  (real))
+
+================
+Arbitrary precision real
+================
+
+123.45678901234567890
+
+---
+
+(source_file
+  (real))
+
+================
+Machine precision with backtick
+================
+
+123.45678901234567890`
+
+---
+
+(source_file
+  (real))
+
+================
+Precision specification
+================
+
+123.456`200
+
+---
+
+(source_file
+  (real))
+
+================
+Accuracy specification
+================
+
+123.456``200
+
+---
+
+(source_file
+  (real))
+
+================
+Scientific notation
+================
+
+1.234*^6
+
+---
+
+(source_file
+  (real))
+
+================
+Scientific notation negative exponent
+================
+
+1.234*^-6
+
+---
+
+(source_file
+  (real))
+
+================
+Scientific notation with precision
+================
+
+1.234`200*^6
+
+---
+
+(source_file
+  (real))
+
+================
+Base notation integer
+================
+
+2^^101
+
+---
+
+(source_file
+  (integer))
+
+================
+Base notation real
+================
+
+2^^101.111
+
+---
+
+(source_file
+  (real))
+
+================
+Base notation with precision
+================
+
+2^^101.111`200
+
+---
+
+(source_file
+  (real))
+
+================
+Base notation with scientific notation
+================
+
+2^^101.111`200*^6
+
+---
+
+(source_file
+  (real))
+
+================
+Hex base notation
+================
+
+16^^ff
+
+---
+
+(source_file
+  (integer))
+
+================
+Integer with precision
+================
+
+123`
+
+---
+
+(source_file
+  (integer))
+
+================
+Integer scientific notation
+================
+
+5*^6
+
+---
+
+(source_file
+  (integer))

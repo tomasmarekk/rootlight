@@ -1,0 +1,25 @@
+{
+  "grammars": [
+    {
+      "name": "wolfram",
+      "camelcase": "Wolfram",
+      "scope": "source.wolfram",
+      "path": ".",
+      "file-types": ["wl", "m", "wls", "wlt", "mt", "nb"]
+    }
+  ],
+  "metadata": {
+    "version": "0.0.1",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for Wolfram Language",
+    "authors": [
+      {
+        "name": "Giulio Alessandrini",
+        "email": "giulio.a@gmail.com"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/WolframResearch/tree-sitter-wolfram"
+    }
+  }
+}

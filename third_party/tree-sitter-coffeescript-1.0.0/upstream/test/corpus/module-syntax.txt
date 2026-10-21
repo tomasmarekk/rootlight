@@ -1,0 +1,25 @@
+================================================================================
+module syntax
+================================================================================
+
+import helper from "./utils"
+export helper
+module.exports = helper
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (import_statement
+        (identifier)
+        (string
+          (double_quoted_string
+            (double_quoted_content)))))
+    (statement
+      (export_statement
+        (identifier)))
+    (statement
+      (module_exports_statement
+        (expression
+          (identifier))))))

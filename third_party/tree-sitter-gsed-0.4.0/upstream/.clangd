@@ -1,0 +1,32 @@
+CompileFlags:
+  Add:
+    - -std=c17
+    - -xc
+    - -Wall
+    - -Wextra
+    - -Werror
+    - -pedantic
+
+---
+If:
+  PathMatch: .*\.h
+CompileFlags:
+  Add:
+    - -xc-header
+    - -Wno-unused-function
+
+---
+If:
+  PathMatch: test/[^/]*\.c
+CompileFlags:
+  Add:
+    - -Wno-unused-function
+
+---
+If:
+  PathMatch:
+    - common/scanner\.h
+    - test/scanner\.test\.c
+CompileFlags:
+  Add:
+    - -DGSED_EXTENDED=0

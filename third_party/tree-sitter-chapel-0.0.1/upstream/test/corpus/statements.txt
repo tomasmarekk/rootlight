@@ -1,0 +1,33 @@
+======================
+variable declaration 1
+======================
+
+var a;
+
+-------------
+
+(source_file
+    (variable_declaration_statement
+      (variable_kind)
+      (variable_declaration_list
+        (variable_declaration
+          (identifier_list
+            (identifier))))))
+
+
+======================
+variable declaration 2
+======================
+
+var _a_BC__d50$;
+
+-------------
+
+(source_file
+    (variable_declaration_statement
+      (variable_kind)
+      (variable_declaration_list
+        (variable_declaration
+          (identifier_list
+            (identifier))))))
+

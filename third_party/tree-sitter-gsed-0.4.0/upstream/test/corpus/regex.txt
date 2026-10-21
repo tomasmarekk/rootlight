@@ -1,0 +1,811 @@
+==================
+Orphan regex operators retain roles — "s/{2}/x/;s/\\x2a/x/;s/\\x29/x/\n"
+:language(gsed_ere)
+==================
+s/{2}/x/;s/\x2a/x/;s/\x29/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (interval
+                (syntax_issue
+                  (invalid_syntax
+                    (invalid_regex_operator
+                      (interval_open))))
+                (interval_count
+                  (number))
+                (interval_close)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (syntax_issue
+                (invalid_syntax
+                  (invalid_regex_operator
+                    (character_escape)))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (syntax_issue
+                (invalid_syntax
+                  (unmatched_group_close
+                    (character_escape)))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Unmatched group closers leave no operand — "s/a)+/x/\n"
+:language(gsed_ere)
+==================
+s/a)+/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (literal))
+              (syntax_issue
+                (invalid_syntax
+                  (unmatched_group_close
+                    (group_close))))
+              (syntax_issue
+                (invalid_syntax
+                  (invalid_regex_operator
+                    (regex_operator)))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Unmatched group closers leave no operand — "s/a\\)*/x/\n"
+:language(gsed)
+==================
+s/a\)*/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (literal))
+              (syntax_issue
+                (invalid_syntax
+                  (unmatched_group_close
+                    (group_close))))
+              (regex_character
+                (literal)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Groups alternatives and repeated operators — "s/\\(a\\|\\)\\+a\\{,2\\}**/b/\n"
+:language(gsed)
+==================
+s/\(a\|\)\+a\{,2\}**/b/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        name: (command_name)
+        opening: (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                expression: (group
+                  opening: (group_open)
+                  (regular_expression
+                    (alternation
+                      (regex_branch
+                        (regex_character
+                          (literal)))
+                      (regex_operator)))
+                  closing: (group_close))
+                operator: (regex_operator))
+              (repetition
+                expression: (regex_character
+                  (literal))
+                operator: (interval
+                  opening: (interval_open)
+                  (interval_separator)
+                  maximum: (interval_count
+                    (number))
+                  closing: (interval_close))
+                operator: (regex_operator)
+                operator: (regex_operator)))))
+        separator: (delimiter)
+        (replacement
+          (literal))
+        closing: (delimiter)))
+    (command_separator)))
+
+==================
+Groups alternatives and repeated operators — "s/(a|)+a{,2}**/b/\n"
+:language(gsed_ere)
+==================
+s/(a|)+a{,2}**/b/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        name: (command_name)
+        opening: (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                expression: (group
+                  opening: (group_open)
+                  (regular_expression
+                    (alternation
+                      (regex_branch
+                        (regex_character
+                          (literal)))
+                      (regex_operator)))
+                  closing: (group_close))
+                operator: (regex_operator))
+              (repetition
+                expression: (regex_character
+                  (literal))
+                operator: (interval
+                  opening: (interval_open)
+                  (interval_separator)
+                  maximum: (interval_count
+                    (number))
+                  closing: (interval_close))
+                operator: (regex_operator)
+                operator: (regex_operator)))))
+        separator: (delimiter)
+        (replacement
+          (literal))
+        closing: (delimiter)))
+    (command_separator)))
+
+==================
+Empty group — "s/\\(\\)/x/\n"
+:language(gsed)
+:cst
+==================
+s/\(\)/x/
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:6               regex_branch
+0:2 - 0:6                 group
+0:2 - 0:4                   opening: group_open `\\(`
+0:4 - 0:6                   closing: group_close `\\)`
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+0:9 - 1:0       command_separator
+0:9 - 0:10         `\n`
+
+==================
+Empty alternatives — "s/\\|a\\|\\|/x/\n"
+:language(gsed)
+:cst
+==================
+s/\|a\|\|/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:4                regex_operator `\\|`
+0:4  - 0:5                regex_branch
+0:4  - 0:5                  regex_character
+0:4  - 0:5                    literal `a`
+0:5  - 0:7                regex_operator `\\|`
+0:7  - 0:9                regex_operator `\\|`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+0:12 - 1:0        command_separator
+0:12 - 0:13         `\n`
+
+==================
+Repeated group with adjacent operators — "s/\\(ab\\)**/x/\n"
+:language(gsed)
+:cst
+==================
+s/\(ab\)**/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 repetition
+0:2  - 0:8                    expression: group
+0:2  - 0:4                      opening: group_open `\\(`
+0:4  - 0:6                      regular_expression
+0:4  - 0:6                        alternation
+0:4  - 0:6                          regex_branch
+0:4  - 0:5                            regex_character
+0:4  - 0:5                              literal `a`
+0:5  - 0:6                            regex_character
+0:5  - 0:6                              literal `b`
+0:6  - 0:8                      closing: group_close `\\)`
+0:8  - 0:9                    operator: regex_operator `*`
+0:9  - 0:10                   operator: regex_operator `*`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+0:13 - 1:0        command_separator
+0:13 - 0:14         `\n`
+
+==================
+Backreference after group — "s/\\(a\\)\\1/x/\n"
+:language(gsed)
+:cst
+==================
+s/\(a\)\1/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:7                  group
+0:2  - 0:4                    opening: group_open `\\(`
+0:4  - 0:5                    regular_expression
+0:4  - 0:5                      alternation
+0:4  - 0:5                        regex_branch
+0:4  - 0:5                          regex_character
+0:4  - 0:5                            literal `a`
+0:5  - 0:7                    closing: group_close `\\)`
+0:7  - 0:9                  backreference
+0:7  - 0:9                    regex_reference `\\1`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+0:12 - 1:0        command_separator
+0:12 - 0:13         `\n`
+
+==================
+Empty group — "s/()/x/\n"
+:language(gsed_ere)
+:cst
+==================
+s/()/x/
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:4           regular_expression
+0:2 - 0:4             alternation
+0:2 - 0:4               regex_branch
+0:2 - 0:4                 group
+0:2 - 0:3                   opening: group_open `(`
+0:3 - 0:4                   closing: group_close `)`
+0:4 - 0:5           separator: delimiter `/`
+0:5 - 0:6           replacement
+0:5 - 0:6             literal `x`
+0:6 - 0:7           closing: delimiter `/`
+0:7 - 1:0       command_separator
+0:7 - 0:8         `\n`
+
+==================
+Empty alternatives — "s/|a||/x/\n"
+:language(gsed_ere)
+:cst
+==================
+s/|a||/x/
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:3               regex_operator `|`
+0:3 - 0:4               regex_branch
+0:3 - 0:4                 regex_character
+0:3 - 0:4                   literal `a`
+0:4 - 0:5               regex_operator `|`
+0:5 - 0:6               regex_operator `|`
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+0:9 - 1:0       command_separator
+0:9 - 0:10         `\n`
+
+==================
+Repeated group with adjacent operators — "s/(ab)**/x/\n"
+:language(gsed_ere)
+:cst
+==================
+s/(ab)**/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:6                    expression: group
+0:2  - 0:3                      opening: group_open `(`
+0:3  - 0:5                      regular_expression
+0:3  - 0:5                        alternation
+0:3  - 0:5                          regex_branch
+0:3  - 0:4                            regex_character
+0:3  - 0:4                              literal `a`
+0:4  - 0:5                            regex_character
+0:4  - 0:5                              literal `b`
+0:5  - 0:6                      closing: group_close `)`
+0:6  - 0:7                    operator: regex_operator `*`
+0:7  - 0:8                    operator: regex_operator `*`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+0:11 - 1:0        command_separator
+0:11 - 0:12         `\n`
+
+==================
+Backreference after group — "s/(a)\\1/x/\n"
+:language(gsed_ere)
+:cst
+==================
+s/(a)\1/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:5                  group
+0:2  - 0:3                    opening: group_open `(`
+0:3  - 0:4                    regular_expression
+0:3  - 0:4                      alternation
+0:3  - 0:4                        regex_branch
+0:3  - 0:4                          regex_character
+0:3  - 0:4                            literal `a`
+0:4  - 0:5                    closing: group_close `)`
+0:5  - 0:7                  backreference
+0:5  - 0:7                    regex_reference `\\1`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+0:10 - 1:0        command_separator
+0:10 - 0:11         `\n`
+
+==================
+Unmatched group closer — "s/\\)/x/"
+:language(gsed)
+:cst
+==================
+s/\)/x/
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:4           regular_expression
+0:2 - 0:4             alternation
+0:2 - 0:4               regex_branch
+0:2 - 0:4                 issue: syntax_issue
+0:2 - 0:4                   invalid_syntax
+0:2 - 0:4                     unmatched_group_close
+0:2 - 0:4                       group_close `\\)`
+0:4 - 0:5           separator: delimiter `/`
+0:5 - 0:6           replacement
+0:5 - 0:6             literal `x`
+0:6 - 0:7           closing: delimiter `/`
+
+==================
+Encoded unmatched group closer — "s/\\x5c)/x/"
+:language(gsed)
+:cst
+==================
+s/\x5c)/x/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  issue: syntax_issue
+0:2  - 0:7                    invalid_syntax
+0:2  - 0:7                      unmatched_group_close
+0:2  - 0:7                        character_escape `\\x5c)`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Unmatched group closer — "s/)/x/"
+:language(gsed_ere)
+:cst
+==================
+s/)/x/
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 issue: syntax_issue
+0:2 - 0:3                   invalid_syntax
+0:2 - 0:3                     unmatched_group_close
+0:2 - 0:3                       group_close `)`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `x`
+0:5 - 0:6           closing: delimiter `/`
+
+==================
+Encoded unmatched group closer — "s/\\x29/x/"
+:language(gsed_ere)
+:cst
+==================
+s/\x29/x/
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:6               regex_branch
+0:2 - 0:6                 issue: syntax_issue
+0:2 - 0:6                   invalid_syntax
+0:2 - 0:6                     unmatched_group_close
+0:2 - 0:6                       character_escape `\\x29`
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Leading repetition has no operand "*" — "s/*/x/"
+:language(gsed_ere)
+:cst
+==================
+s/*/x/
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 issue: syntax_issue
+0:2 - 0:3                   invalid_syntax
+0:2 - 0:3                     invalid_regex_operator
+0:2 - 0:3                       regex_operator `*`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `x`
+0:5 - 0:6           closing: delimiter `/`
+
+==================
+Leading repetition has no operand "\\x2a" — "s/\\x2a/x/"
+:language(gsed_ere)
+:cst
+==================
+s/\x2a/x/
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:6               regex_branch
+0:2 - 0:6                 issue: syntax_issue
+0:2 - 0:6                   invalid_syntax
+0:2 - 0:6                     invalid_regex_operator
+0:2 - 0:6                       character_escape `\\x2a`
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Unterminated pattern and replacement — "s/a"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:3         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:3           issue: syntax_issue
+0:3 - 0:3             incomplete_syntax
+0:3 - 0:3               unterminated_regex
+0:3 - 0:3           issue: syntax_issue
+0:3 - 0:3             incomplete_syntax
+0:3 - 0:3               unterminated_operand
+
+==================
+Missing group closer at address delimiter — "/\\(a/p"
+:language(gsed)
+:cst
+==================
+/\(a/p
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:5           address
+0:0 - 0:5             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:4               regular_expression
+0:1 - 0:4                 alternation
+0:1 - 0:4                   regex_branch
+0:1 - 0:4                     group
+0:1 - 0:3                       opening: group_open `\\(`
+0:3 - 0:4                       regular_expression
+0:3 - 0:4                         alternation
+0:3 - 0:4                           regex_branch
+0:3 - 0:4                             regex_character
+0:3 - 0:4                               literal `a`
+0:4 - 0:4                       issue: syntax_issue
+0:4 - 0:4                         invalid_syntax
+0:4 - 0:4                           missing_closing_delimiter
+0:4 - 0:5               closing: delimiter `/`
+0:5 - 0:6         simple_command
+0:5 - 0:6           name: command_name `p`
+
+==================
+Encoded group closer at EOF \o51 — "/\\o51"
+:language(gsed)
+:cst
+==================
+/\o51
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:5           address
+0:0 - 0:5             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:5               regular_expression
+0:1 - 0:5                 alternation
+0:1 - 0:5                   regex_branch
+0:1 - 0:5                     regex_character
+0:1 - 0:5                       character_escape `\\o51`
+0:5 - 0:5               issue: syntax_issue
+0:5 - 0:5                 incomplete_syntax
+0:5 - 0:5                   unterminated_regex
+0:5 - 0:5         issue: syntax_issue
+0:5 - 0:5           incomplete_syntax
+0:5 - 0:5             missing_command
+
+==================
+Encoded group closer at EOF \x29 — "/\\x29"
+:language(gsed)
+:cst
+==================
+/\x29
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:5           address
+0:0 - 0:5             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:5               regular_expression
+0:1 - 0:5                 alternation
+0:1 - 0:5                   regex_branch
+0:1 - 0:5                     regex_character
+0:1 - 0:5                       character_escape `\\x29`
+0:5 - 0:5               issue: syntax_issue
+0:5 - 0:5                 incomplete_syntax
+0:5 - 0:5                   unterminated_regex
+0:5 - 0:5         issue: syntax_issue
+0:5 - 0:5           incomplete_syntax
+0:5 - 0:5             missing_command
+
+==================
+Missing group closer at address delimiter — "/(a/p"
+:language(gsed_ere)
+:cst
+==================
+/(a/p
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:4           address
+0:0 - 0:4             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:3               regular_expression
+0:1 - 0:3                 alternation
+0:1 - 0:3                   regex_branch
+0:1 - 0:3                     group
+0:1 - 0:2                       opening: group_open `(`
+0:2 - 0:3                       regular_expression
+0:2 - 0:3                         alternation
+0:2 - 0:3                           regex_branch
+0:2 - 0:3                             regex_character
+0:2 - 0:3                               literal `a`
+0:3 - 0:3                       issue: syntax_issue
+0:3 - 0:3                         invalid_syntax
+0:3 - 0:3                           missing_closing_delimiter
+0:3 - 0:4               closing: delimiter `/`
+0:4 - 0:5         simple_command
+0:4 - 0:5           name: command_name `p`
+
+==================
+Encoded group closer at EOF \o51 — "/\\o51"
+:language(gsed_ere)
+:cst
+==================
+/\o51
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:5           address
+0:0 - 0:5             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:5               regular_expression
+0:1 - 0:5                 alternation
+0:1 - 0:5                   regex_branch
+0:1 - 0:5                     issue: syntax_issue
+0:1 - 0:5                       incomplete_syntax
+0:1 - 0:5                         unmatched_group_close
+0:1 - 0:5                           character_escape `\\o51`
+0:5 - 0:5               issue: syntax_issue
+0:5 - 0:5                 incomplete_syntax
+0:5 - 0:5                   unterminated_regex
+0:5 - 0:5         issue: syntax_issue
+0:5 - 0:5           incomplete_syntax
+0:5 - 0:5             missing_command
+
+==================
+Encoded group closer at EOF \x29 — "/\\x29"
+:language(gsed_ere)
+:cst
+==================
+/\x29
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:5           address
+0:0 - 0:5             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:5               regular_expression
+0:1 - 0:5                 alternation
+0:1 - 0:5                   regex_branch
+0:1 - 0:5                     issue: syntax_issue
+0:1 - 0:5                       invalid_syntax
+0:1 - 0:5                         unmatched_group_close
+0:1 - 0:5                           character_escape `\\x29`
+0:5 - 0:5               issue: syntax_issue
+0:5 - 0:5                 incomplete_syntax
+0:5 - 0:5                   unterminated_regex
+0:5 - 0:5         issue: syntax_issue
+0:5 - 0:5           incomplete_syntax
+0:5 - 0:5             missing_command

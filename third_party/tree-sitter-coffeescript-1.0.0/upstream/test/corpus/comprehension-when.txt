@@ -1,0 +1,50 @@
+================================================================================
+comprehensions with when
+================================================================================
+
+evens = (n for n in numbers when n is 2)
+keys = (key for key of items when key isnt "skip")
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (comprehension
+            (expression
+              (identifier))
+            (pattern
+              (identifier))
+            (expression
+              (identifier))
+            (expression
+              (binary_expression
+                (expression
+                  (identifier))
+                (expression
+                  (number
+                    (decimal_number)))))))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (comprehension
+            (expression
+              (identifier))
+            (pattern
+              (identifier))
+            (expression
+              (identifier))
+            (expression
+              (binary_expression
+                (expression
+                  (identifier))
+                (expression
+                  (string
+                    (double_quoted_string
+                      (double_quoted_content))))))))))))

@@ -1,0 +1,25 @@
+================================================================================
+object shorthand
+================================================================================
+
+obj = {a, b, c: 1}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (object
+            (pair
+              (identifier))
+            (pair
+              (identifier))
+            (pair
+              (identifier)
+              (expression
+                (number
+                  (decimal_number))))))))))

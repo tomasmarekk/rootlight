@@ -1,0 +1,3 @@
+# Local changes
+
+The active finite grammar extends the retained MIT upstream with explicit ordinary module/procedure/formal fields, reserved keywords, finite expressions and a stateless atomic nested-comment scanner. Exact official Chapel2.10.0 grammar/specification references are retained under official-references with their Apache-2.0 license and copyright. Active src/parser.c, grammar.json and node-types.json are generated outputs from the separately recorded generation; they are never regenerated during compilation. Complete upstream bytes remain under upstream, including its historical generated parser and wrapper. No compiler semantics, overload selection or native parser completeness is claimed.

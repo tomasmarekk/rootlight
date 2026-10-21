@@ -1,0 +1,18 @@
+{
+  "upstream": "https://github.com/staysail/tree-sitter-meson",
+  "commit": "1a497eecfb1b840ab12caf28f0ef45d4a5e26d28",
+  "tree": "f2d8b3134663794469e0a9be26ca4c68ec4f2063",
+  "upstream_blobs": 33,
+  "upstream_bytes": 341458,
+  "grammar_abi": 14,
+  "active_parser": "upstream/src/parser.c",
+  "active_scanner": null,
+  "upstream_changes": [],
+  "renamed_inert_metadata": {
+    ".gitattributes": ".gitattributes.upstream"
+  },
+  "operational_wrapper": "LanguageFn 0.1.7 and cc 1.2.67; no legacy Tree-sitter runtime dependency",
+  "memory_enforcement": "Unavailable under the existing Tree-sitter provider contract",
+  "native_syntax_only": true,
+  "product_qualification": false
+}

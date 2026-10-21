@@ -1,0 +1,424 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -16,7 +16,8 @@
+ 
+ #include "tree_sitter/parser.h"
+ #include "tree_sitter/alloc.h"
+-#include "tree_sitter/array.h"
++#include "rootlight_lean_status.h"
++#include <limits.h>
+ 
+ #include <stdbool.h>
+ #include <stdint.h>
+@@ -84,12 +85,42 @@
+  * open tactic/do block. Always contains at least one entry — the base
+  * (0). Tokens push and pop based on observed line indentation.
+  */
++#define LEAN_STATE_CAPACITY 510u
++#define LEAN_COMMENT_DEPTH_CAPACITY 1024u
++#define LEAN_RAW_HASH_CAPACITY 1024u
++
+ struct Scanner {
+-  Array(uint16_t) indents;
++  uint16_t indents[LEAN_STATE_CAPACITY];
++  uint16_t count;
+ };
+ 
+-static inline void advance(TSLexer *lexer) { lexer->advance(lexer, false); }
+-static inline void skip(TSLexer *lexer)    { lexer->advance(lexer, true); }
++_Static_assert(sizeof(struct Scanner) <= 1024, "fixed scanner state exceeds envelope");
++
++static bool valid_current(TSLexer *lexer) {
++  if (!rootlight_lean_scope_poll()) return false;
++  int32_t value = lexer->lookahead;
++  if (value < 0 || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) {
++    rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_INVALID_SCALAR);
++    return false;
++  }
++  if (value == 0 && !lexer->eof(lexer)) {
++    rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_UNSUPPORTED_NUL);
++    return false;
++  }
++  return true;
++}
++
++static bool advance(TSLexer *lexer) {
++  if (!valid_current(lexer) || !rootlight_lean_scope_step()) return false;
++  lexer->advance(lexer, false);
++  return true;
++}
++
++static bool skip(TSLexer *lexer) {
++  if (!valid_current(lexer) || !rootlight_lean_scope_step()) return false;
++  lexer->advance(lexer, true);
++  return true;
++}
+ 
+ /* ---------- identifier --------------------------------------------------- */
+ 
+@@ -108,21 +139,21 @@
+   int32_t c = lexer->lookahead;
+   if (c == ID_BEGIN_ESCAPE) {
+     *out_is_ascii = false;
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+     while (lexer->lookahead != 0
+         && lexer->lookahead != ID_END_ESCAPE
+         && lexer->lookahead != '\n') {
+-      advance(lexer);
++      if (!advance(lexer)) return false;
+     }
+     if (lexer->lookahead != ID_END_ESCAPE) return false;
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+     return true;
+   }
+   if (!is_id_first(c)) return false;
+ 
+   do {
+     if (lexer->lookahead >= 0x80) *out_is_ascii = false;
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+   } while (is_id_rest(lexer->lookahead));
+ 
+   return true;
+@@ -145,12 +176,12 @@
+ static bool scan_identifier_continue(TSLexer *lexer, bool seen_unusual) {
+   while (is_id_rest(lexer->lookahead)) {
+     if (lexer->lookahead >= 0x80) seen_unusual = true;
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+   }
+   lexer->mark_end(lexer);
+ 
+   while (lexer->lookahead == '.') {
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+     int32_t next = lexer->lookahead;
+     if (next != ID_BEGIN_ESCAPE && !is_id_first(next)) break;
+     seen_unusual = true;
+@@ -177,7 +208,7 @@
+                          &dummy_len, &dummy_ascii)) return false;
+     lexer->mark_end(lexer);
+     while (lexer->lookahead == '.') {
+-      advance(lexer);
++      if (!advance(lexer)) return false;
+       int32_t next = lexer->lookahead;
+       if (next != ID_BEGIN_ESCAPE && !is_id_first(next)) break;
+       if (!scan_ident_part(lexer, dummy_buf, sizeof(dummy_buf),
+@@ -189,7 +220,7 @@
+   }
+   if (!is_id_first(c)) return false;
+   bool seen_unusual = (c >= 0x80);
+-  advance(lexer);
++  if (!advance(lexer)) return false;
+   return scan_identifier_continue(lexer, seen_unusual);
+ }
+ 
+@@ -204,19 +235,23 @@
+   while (depth > 0) {
+     if (lexer->eof(lexer)) return false;
+     if (lexer->lookahead == '/') {
+-      advance(lexer);
++      if (!advance(lexer)) return false;
+       if (lexer->lookahead == '-') {
+-        advance(lexer);
++        if (!advance(lexer)) return false;
++        if (depth == LEAN_COMMENT_DEPTH_CAPACITY) {
++          rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_CAPACITY);
++          return false;
++        }
+         depth++;
+       }
+     } else if (lexer->lookahead == '-') {
+-      advance(lexer);
++      if (!advance(lexer)) return false;
+       if (lexer->lookahead == '/') {
+-        advance(lexer);
++        if (!advance(lexer)) return false;
+         depth--;
+       }
+     } else {
+-      advance(lexer);
++      if (!advance(lexer)) return false;
+     }
+   }
+   return true;
+@@ -229,18 +264,18 @@
+ static bool scan_block_or_doc_comment(TSLexer *lexer,
+                                       const bool *valid_symbols) {
+   if (lexer->lookahead != '/') return false;
+-  advance(lexer);
++  if (!advance(lexer)) return false;
+   if (lexer->lookahead != '-') return false;
+-  advance(lexer);
++  if (!advance(lexer)) return false;
+ 
+   int kind;
+   if (lexer->lookahead == '-' && valid_symbols[DOC_COMMENT]) {
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+     /* Avoid eating `/---` style ASCII rulers as doc comments? Lean does
+        treat them as doc comments, so accept. */
+     kind = DOC_COMMENT;
+   } else if (lexer->lookahead == '!' && valid_symbols[MODULE_DOC_COMMENT]) {
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+     kind = MODULE_DOC_COMMENT;
+   } else if (valid_symbols[BLOCK_COMMENT]) {
+     kind = BLOCK_COMMENT;
+@@ -262,19 +297,20 @@
+ static bool scan_raw_string_after_r(TSLexer *lexer) {
+   unsigned hashes = 0;
+   while (lexer->lookahead == '#') {
+-    advance(lexer);
++    if (hashes == LEAN_RAW_HASH_CAPACITY) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_CAPACITY); return false; }
++    if (!advance(lexer)) return false;
+     hashes++;
+   }
+   if (lexer->lookahead != '"') return false;
+-  advance(lexer);
++  if (!advance(lexer)) return false;
+ 
+   for (;;) {
+     if (lexer->eof(lexer)) return false;
+     if (lexer->lookahead == '"') {
+-      advance(lexer);
++      if (!advance(lexer)) return false;
+       unsigned seen = 0;
+       while (seen < hashes && lexer->lookahead == '#') {
+-        advance(lexer);
++        if (!advance(lexer)) return false;
+         seen++;
+       }
+       if (seen == hashes) {
+@@ -282,7 +318,7 @@
+         return true;
+       }
+     } else {
+-      advance(lexer);
++      if (!advance(lexer)) return false;
+     }
+   }
+ }
+@@ -315,7 +351,7 @@
+      layout once we reach a newline. */
+   while (lexer->lookahead == ' ' || lexer->lookahead == '\t'
+       || lexer->lookahead == '\r') {
+-    skip(lexer);
++    if (!skip(lexer)) return false;
+   }
+ 
+   /* If we're not at a newline (or EOF), no layout token applies. */
+@@ -327,19 +363,21 @@
+     if (lexer->lookahead == '\n') {
+       indent = 0;
+       saw_newline = true;
+-      skip(lexer);
++      if (!skip(lexer)) return false;
+     } else if (lexer->lookahead == ' ') {
++      if (indent == UINT16_MAX) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_UNSUPPORTED_INDENTATION); return false; }
+       indent++;
+-      skip(lexer);
++      if (!skip(lexer)) return false;
+     } else if (lexer->lookahead == '\t') {
++      if (indent > UINT16_MAX - 8u) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_UNSUPPORTED_INDENTATION); return false; }
+       indent += 8;
+-      skip(lexer);
++      if (!skip(lexer)) return false;
+     } else if (lexer->lookahead == '\r') {
+-      skip(lexer);
++      if (!skip(lexer)) return false;
+     } else if (lexer->eof(lexer)) {
+       /* EOF closes every open block. */
+-      if (valid_symbols[DEDENT] && scanner->indents.size > 1) {
+-        array_pop(&scanner->indents);
++      if (valid_symbols[DEDENT] && scanner->count > 1) {
++        --scanner->count;
+         lexer->result_symbol = DEDENT;
+         return true;
+       }
+@@ -350,8 +388,8 @@
+   }
+   if (!saw_newline) return false;
+ 
+-  uint16_t top = scanner->indents.size > 0
+-    ? *array_back(&scanner->indents)
++  uint16_t top = scanner->count > 0
++    ? scanner->indents[scanner->count - 1]
+     : 0;
+ 
+   /* `|` always continues the surrounding rule (match alt, ctor alt,
+@@ -362,7 +400,11 @@
+ 
+   if (indent > top) {
+     if (valid_symbols[INDENT]) {
+-      array_push(&scanner->indents, (uint16_t)indent);
++      if (scanner->count == LEAN_STATE_CAPACITY) {
++        rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_CAPACITY);
++        return false;
++      }
++      scanner->indents[scanner->count++] = (uint16_t)indent;
+       lexer->result_symbol = INDENT;
+       return true;
+     }
+@@ -373,7 +415,16 @@
+     return false;
+   }
+   if (indent < top && valid_symbols[DEDENT]) {
+-    array_pop(&scanner->indents);
++    bool known = false;
++    for (uint16_t index = 0; index < scanner->count; ++index) {
++      if (!rootlight_lean_scope_step()) return false;
++      if (scanner->indents[index] == indent) known = true;
++    }
++    if (!known) {
++      rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_UNSUPPORTED_INDENTATION);
++      return false;
++    }
++    --scanner->count;
+     lexer->result_symbol = DEDENT;
+     return true;
+   }
+@@ -402,7 +453,7 @@
+       || lexer->lookahead == '\t'
+       || lexer->lookahead == '\r'
+       || lexer->lookahead == '\n') {
+-    skip(lexer);
++    if (!skip(lexer)) return false;
+   }
+ 
+   /* Norm bars `‖ … ‖`. The same glyph opens and closes, disambiguated
+@@ -411,9 +462,9 @@
+      A trailing `₊` (non-negative norm `‖x‖₊`) folds into the close. */
+   if (lexer->lookahead == NORM_BAR
+       && (valid_symbols[NORM_OPEN] || valid_symbols[NORM_CLOSE])) {
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+     if (valid_symbols[NORM_CLOSE]) {
+-      if (lexer->lookahead == SUBSCRIPT_PLUS) advance(lexer);
++      if (lexer->lookahead == SUBSCRIPT_PLUS) if (!advance(lexer)) return false;
+       lexer->mark_end(lexer);
+       lexer->result_symbol = NORM_CLOSE;
+       return true;
+@@ -438,7 +489,7 @@
+      identifier. */
+   if (lexer->lookahead == 'r'
+       && (valid_symbols[RAW_STRING_LITERAL] || valid_symbols[SCANNED_IDENT])) {
+-    advance(lexer);
++    if (!advance(lexer)) return false;
+     int32_t next = lexer->lookahead;
+     if (valid_symbols[RAW_STRING_LITERAL]
+         && (next == '"' || next == '#')) {
+@@ -466,47 +517,73 @@
+ /* ---------- tree-sitter ABI --------------------------------------------- */
+ 
+ void *tree_sitter_lean_external_scanner_create(void) {
+-  struct Scanner *s = ts_calloc(1, sizeof(struct Scanner));
+-  array_init(&s->indents);
+-  array_push(&s->indents, 0);
+-  return s;
++  if (!rootlight_lean_scope_poll()) return NULL;
++  struct Scanner *scanner = ts_calloc(1, sizeof(struct Scanner));
++  if (!scanner) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_ALLOCATION); return NULL; }
++  scanner->count = 1;
++  return scanner;
+ }
+ 
+ void tree_sitter_lean_external_scanner_destroy(void *payload) {
+-  struct Scanner *s = payload;
+-  array_delete(&s->indents);
+-  ts_free(s);
++  ts_free(payload);
+ }
+ 
+ unsigned tree_sitter_lean_external_scanner_serialize(void *payload, char *buffer) {
+-  struct Scanner *s = payload;
+-  unsigned offset = 0;
+-  for (uint32_t i = 0;
+-       i < s->indents.size && offset + sizeof(uint16_t) <= TREE_SITTER_SERIALIZATION_BUFFER_SIZE;
+-       i++) {
+-    uint16_t v = *array_get(&s->indents, i);
+-    memcpy(buffer + offset, &v, sizeof v);
+-    offset += sizeof v;
+-  }
+-  return offset;
+-}
+-
+-void tree_sitter_lean_external_scanner_deserialize(void *payload,
+-                                                   const char *buffer,
+-                                                   unsigned length) {
+-  struct Scanner *s = payload;
+-  array_clear(&s->indents);
+-  unsigned offset = 0;
+-  while (offset + sizeof(uint16_t) <= length) {
+-    uint16_t v;
+-    memcpy(&v, buffer + offset, sizeof v);
+-    array_push(&s->indents, v);
+-    offset += sizeof v;
+-  }
+-  if (s->indents.size == 0) array_push(&s->indents, 0);
+-}
+-
+-bool tree_sitter_lean_external_scanner_scan(void *payload, TSLexer *lexer,
+-                                            const bool *valid_symbols) {
+-  return scan((struct Scanner *)payload, lexer, valid_symbols);
+-}
++  if (!rootlight_lean_scope_step()) return 0;
++  if (!payload) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_ALLOCATION); return 0; }
++  struct Scanner *scanner = payload;
++  if (!buffer || scanner->count == 0 || scanner->count > LEAN_STATE_CAPACITY || scanner->indents[0] != 0) {
++    rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_MALFORMED_STATE); return 0;
++  }
++  unsigned length = 4u + 2u * scanner->count;
++  if (length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_CAPACITY); return 0; }
++  buffer[0] = 'L'; buffer[1] = 1;
++  buffer[2] = (char)(scanner->count & 0xffu); buffer[3] = (char)(scanner->count >> 8);
++  for (uint16_t index = 0; index < scanner->count; ++index) {
++    if (!rootlight_lean_scope_step()) return 0;
++    uint16_t value = scanner->indents[index];
++    if (index && value <= scanner->indents[index - 1]) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_MALFORMED_STATE); return 0; }
++    buffer[4 + 2 * index] = (char)(value & 0xffu);
++    buffer[5 + 2 * index] = (char)(value >> 8);
++  }
++  return length;
++}
++
++void tree_sitter_lean_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
++  if (!rootlight_lean_scope_step()) return;
++  if (!payload) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_ALLOCATION); return; }
++  struct Scanner temporary = {0};
++  temporary.count = 1;
++  if (length == 0) { *(struct Scanner *)payload = temporary; return; }
++  if (!buffer || length < 6 || length > TREE_SITTER_SERIALIZATION_BUFFER_SIZE || buffer[0] != 'L' || buffer[1] != 1) {
++    rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_MALFORMED_STATE); return;
++  }
++  uint16_t count = (uint16_t)((uint8_t)buffer[2] | ((uint16_t)(uint8_t)buffer[3] << 8));
++  if (count == 0 || count > LEAN_STATE_CAPACITY || length != 4u + 2u * count) {
++    rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_MALFORMED_STATE); return;
++  }
++  temporary.count = count;
++  for (uint16_t index = 0; index < count; ++index) {
++    if (!rootlight_lean_scope_step()) return;
++    uint16_t value = (uint16_t)((uint8_t)buffer[4 + 2 * index] | ((uint16_t)(uint8_t)buffer[5 + 2 * index] << 8));
++    if ((!index && value != 0) || (index && value <= temporary.indents[index - 1])) {
++      rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_MALFORMED_STATE); return;
++    }
++    temporary.indents[index] = value;
++  }
++  if (!rootlight_lean_scope_poll()) return;
++  *(struct Scanner *)payload = temporary;
++}
++
++bool tree_sitter_lean_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
++  if (!payload) { rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_ALLOCATION); return false; }
++  if (!valid_current(lexer) || !rootlight_lean_scope_step()) return false;
++  struct Scanner *scanner = payload;
++  if (scanner->count == 0 || scanner->count > LEAN_STATE_CAPACITY || scanner->indents[0] != 0) {
++    rootlight_lean_scope_refuse(ROOTLIGHT_LEAN_MALFORMED_STATE); return false;
++  }
++  struct Scanner before = *scanner;
++  bool accepted = scan(scanner, lexer, valid_symbols);
++  if (!accepted || !rootlight_lean_scope_poll()) { *scanner = before; return false; }
++  return true;
++}

@@ -1,0 +1,1226 @@
+==================
+Invalid substitution flags — "s//x/Ig0k\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+s//x/Ig0k
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        name: (command_name)
+        opening: (delimiter)
+        separator: (delimiter)
+        (replacement
+          (literal))
+        closing: (delimiter)
+        (substitution_flags
+          issue: (syntax_issue
+            (invalid_syntax
+              (modifier_on_empty_regexp
+                (flag))))
+          (flag)
+          issue: (syntax_issue
+            (invalid_syntax
+              (zero_occurrence
+                (number))))
+          issue: (syntax_issue
+            (invalid_syntax
+              (unknown_substitution_flag))))))
+    (command_separator)))
+
+==================
+Incomplete regex and replacement — "s/[a"
+:language(gsed)
+:language(gsed_ere)
+==================
+s/[a
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        name: (command_name)
+        opening: (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (bracket_expression
+                opening: (bracket_open)
+                (bracket_character
+                  (literal))
+                issue: (syntax_issue
+                  (incomplete_syntax
+                    (missing_closing_delimiter)))))))
+        issue: (syntax_issue
+          (incomplete_syntax
+            (unterminated_regex)))
+        issue: (syntax_issue
+          (incomplete_syntax
+            (unterminated_operand)))))))
+
+==================
+Backslash substitution delimiter — "s\\a\\X\\p\n"
+:language(gsed)
+==================
+s\a\X\p
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (literal)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)
+        (substitution_flags
+          (flag))))
+    (command_separator)))
+
+==================
+Substitution occurrence and global flag — "s/a/b/2g\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/2g
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:8           substitution_flags
+0:6 - 0:7             number `2`
+0:7 - 0:8             flag `g`
+0:8 - 1:0       command_separator
+0:8 - 0:9         `\n`
+
+==================
+Replacement case conversion references and character escape — "s/a/\\U&\\E\\1\\t/ep\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/\U&\E\1\t/ep
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:16       command
+0:0  - 0:16         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:3            regular_expression
+0:2  - 0:3              alternation
+0:2  - 0:3                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:4            separator: delimiter `/`
+0:4  - 0:13           replacement
+0:4  - 0:6              case_conversion `\\U`
+0:6  - 0:7              matched_text_reference `&`
+0:7  - 0:9              case_conversion `\\E`
+0:9  - 0:11             replacement_reference `\\1`
+0:11 - 0:13             character_escape `\\t`
+0:13 - 0:14           closing: delimiter `/`
+0:14 - 0:16           substitution_flags
+0:14 - 0:15             flag `e`
+0:15 - 0:16             flag `p`
+0:16 - 1:0        command_separator
+0:16 - 0:17         `\n`
+
+==================
+Flags "gg" — "s/a/b/gg"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/gg
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:8           substitution_flags
+0:6 - 0:7             flag `g`
+0:7 - 0:8             issue: syntax_issue
+0:7 - 0:8               invalid_syntax
+0:7 - 0:8                 duplicate_substitution_flag
+0:7 - 0:8                   flag `g`
+
+==================
+Flags "pp" — "s/a/b/pp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/pp
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:8           substitution_flags
+0:6 - 0:7             flag `p`
+0:7 - 0:8             issue: syntax_issue
+0:7 - 0:8               invalid_syntax
+0:7 - 0:8                 duplicate_substitution_flag
+0:7 - 0:8                   flag `p`
+
+==================
+Flags "2p3" — "s/a/b/2p3"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/2p3
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:9           substitution_flags
+0:6 - 0:7             number `2`
+0:7 - 0:8             flag `p`
+0:8 - 0:9             issue: syntax_issue
+0:8 - 0:9               invalid_syntax
+0:8 - 0:9                 duplicate_substitution_flag
+0:8 - 0:9                   number `3`
+
+==================
+Flags "0" — "s/a/b/0"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/0
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:7           substitution_flags
+0:6 - 0:7             issue: syntax_issue
+0:6 - 0:7               incomplete_syntax
+0:6 - 0:7                 zero_occurrence
+0:6 - 0:7                   number `0`
+
+==================
+Flags "0 " — "s/a/b/0 "
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/0 
+------------------
+0:0 - 0:8   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:7           substitution_flags
+0:6 - 0:7             issue: syntax_issue
+0:6 - 0:7               invalid_syntax
+0:6 - 0:7                 zero_occurrence
+0:6 - 0:7                   number `0`
+
+==================
+Flags "k" — "s/a/b/k"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/k
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:7           substitution_flags
+0:6 - 0:7             issue: syntax_issue
+0:6 - 0:7               invalid_syntax
+0:6 - 0:7                 unknown_substitution_flag `k`
+
+==================
+Flags "pep" — "s/a/b/pep"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/pep
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:9           substitution_flags
+0:6 - 0:7             flag `p`
+0:7 - 0:8             flag `e`
+0:8 - 0:9             flag `p`
+
+==================
+Flags "eeII" — "s/a/b/eeII"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/eeII
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:3            regular_expression
+0:2  - 0:3              alternation
+0:2  - 0:3                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:4            separator: delimiter `/`
+0:4  - 0:5            replacement
+0:4  - 0:5              literal `b`
+0:5  - 0:6            closing: delimiter `/`
+0:6  - 0:10           substitution_flags
+0:6  - 0:7              flag `e`
+0:7  - 0:8              flag `e`
+0:8  - 0:9              flag `I`
+0:9  - 0:10             flag `I`
+
+==================
+Incomplete CRLF after substitution — "s/a/b/\r"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:7           substitution_flags
+0:6 - 0:7             issue: syntax_issue
+0:6 - 0:7               incomplete_syntax
+0:6 - 0:7                 unknown_substitution_flag `\r`
+
+==================
+Duplicate zero occurrence — "s/a/b/2 0;p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/2 0;p
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:9        command
+0:0  - 0:9          substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:3            regular_expression
+0:2  - 0:3              alternation
+0:2  - 0:3                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:4            separator: delimiter `/`
+0:4  - 0:5            replacement
+0:4  - 0:5              literal `b`
+0:5  - 0:6            closing: delimiter `/`
+0:6  - 0:9            substitution_flags
+0:6  - 0:7              number `2`
+0:8  - 0:9              issue: syntax_issue
+0:8  - 0:9                invalid_syntax
+0:8  - 0:9                  duplicate_substitution_flag
+0:8  - 0:9                    issue: syntax_issue
+0:8  - 0:9                      invalid_syntax
+0:8  - 0:9                        zero_occurrence
+0:8  - 0:9                          number `0`
+0:9  - 0:10       command_separator `;`
+0:10 - 0:11       command
+0:10 - 0:11         simple_command
+0:10 - 0:11           name: command_name `p`
+
+==================
+Modifier on empty expression — "s//b/i"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s//b/i
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           separator: delimiter `/`
+0:3 - 0:4           replacement
+0:3 - 0:4             literal `b`
+0:4 - 0:5           closing: delimiter `/`
+0:5 - 0:6           substitution_flags
+0:5 - 0:6             issue: syntax_issue
+0:5 - 0:6               invalid_syntax
+0:5 - 0:6                 modifier_on_empty_regexp
+0:5 - 0:6                   flag `i`
+
+==================
+Write flag filename consumes semicolon — "s/a/b/wfile;p\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/wfile;p
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:3            regular_expression
+0:2  - 0:3              alternation
+0:2  - 0:3                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:4            separator: delimiter `/`
+0:4  - 0:5            replacement
+0:4  - 0:5              literal `b`
+0:5  - 0:6            closing: delimiter `/`
+0:6  - 0:13           substitution_flags
+0:6  - 0:13             write_flag
+0:6  - 0:7                flag `w`
+0:7  - 0:13               filename
+0:7  - 0:13                 filename_text `file;p`
+0:13 - 1:0        command_separator
+0:13 - 0:14         `\n`
+
+==================
+Leading NUL in write filename — "s/a/b/w \u0000tail"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/w  tail
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:3            regular_expression
+0:2  - 0:3              alternation
+0:2  - 0:3                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:4            separator: delimiter `/`
+0:4  - 0:5            replacement
+0:4  - 0:5              literal `b`
+0:5  - 0:6            closing: delimiter `/`
+0:6  - 0:13           substitution_flags
+0:6  - 0:13             write_flag
+0:6  - 0:7                flag `w`
+0:8  - 0:13               filename
+0:8  - 0:9                  issue: syntax_issue
+0:8  - 0:9                    invalid_syntax
+0:8  - 0:9                      empty_filename
+0:8  - 0:9                        filename_text `\0`
+0:9  - 0:13                 filename_text `tail`
+
+==================
+NUL delimiter — "s\u0000"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s 
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:2         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           issue: syntax_issue
+0:1 - 0:2             invalid_syntax
+0:1 - 0:2               invalid_delimiter `\0`
+
+==================
+Replacement digitless escape before delimiter — "s2a2\\x2"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s2a2\x2
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `2`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `2`
+0:4 - 0:6           replacement
+0:4 - 0:6             escape `\\x`
+0:6 - 0:7           closing: delimiter `2`
+
+==================
+Replacement terminal control escape — "s/a/\\c/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/\c/
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:6           replacement
+0:4 - 0:6             character_escape `\\c`
+0:6 - 0:7           closing: delimiter `/`
+
+==================
+Replacement paired control backslash — "s/a/\\c\\\\/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/\c\\/
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:8           replacement
+0:4 - 0:8             character_escape `\\c\\\\`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Digit delimiter prevents replacement reference — "s1a1b\\11"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s1a1b\11
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `1`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `1`
+0:4 - 0:7           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:7             escape `\\1`
+0:7 - 0:8           closing: delimiter `1`
+
+==================
+Case-conversion letter delimiter remains an escape — "sUaU\\UU"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+sUaU\UU
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `U`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `U`
+0:4 - 0:6           replacement
+0:4 - 0:6             escape `\\U`
+0:6 - 0:7           closing: delimiter `U`
+
+==================
+Control escape in replacement — "s/a/\\c\\\ny/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/\c\
+y/
+------------------
+0:0 - 1:2   script
+0:0 - 1:2     command_list
+0:0 - 1:2       command
+0:0 - 1:2         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 1:1           replacement
+0:4 - 1:0             character_escape
+0:4 - 0:8               `\\c\\\n`
+1:0 - 1:1             literal `y`
+1:1 - 1:2           closing: delimiter `/`
+
+==================
+Unpaired control backslash in replacement — "s/a/\\c\\./"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/\c\./
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:8           replacement
+0:4 - 0:7             issue: syntax_issue
+0:4 - 0:7               invalid_syntax
+0:4 - 0:7                 invalid_control_escape
+0:4 - 0:7                   character_escape `\\c\\`
+0:7 - 0:8             literal `.`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Escaped ampersand is an unpaired control argument — "s&a&\\c\\&&"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s&a&\c\&&
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `&`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `&`
+0:4 - 0:8           replacement
+0:4 - 0:8             issue: syntax_issue
+0:4 - 0:8               invalid_syntax
+0:4 - 0:8                 invalid_control_escape
+0:4 - 0:8                   character_escape `\\c\\&`
+0:8 - 0:9           closing: delimiter `&`
+
+==================
+Non-ASCII control argument in replacement — "s/x/\\cΣ/"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/x/\cΣ/
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `x`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:8           replacement
+0:4 - 0:8             character_escape `\\cΣ`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Escaped delimiter digit in replacement — "s5a5\\x\\55p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s5a5\x\55p
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `5`
+0:2  - 0:3            regular_expression
+0:2  - 0:3              alternation
+0:2  - 0:3                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:4            separator: delimiter `5`
+0:4  - 0:8            replacement
+0:4  - 0:8              character_escape `\\x\\5`
+0:8  - 0:9            closing: delimiter `5`
+0:9  - 0:10           substitution_flags
+0:9  - 0:10             flag `p`
+
+==================
+Backslash delimiter — "s\\b\\X\\p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s\b\X\p
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `\\`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `b`
+0:3 - 0:4           separator: delimiter `\\`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `X`
+0:5 - 0:6           closing: delimiter `\\`
+0:6 - 0:7           substitution_flags
+0:6 - 0:7             flag `p`
+
+==================
+Space delimiter — "s a b "
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s a b 
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter ` `
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter ` `
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter ` `
+
+==================
+Control delimiter escape consumes the apparent separator — "sca\\ccYcg"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+sca\ccYcg
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `c`
+0:2 - 0:7           regular_expression
+0:2 - 0:7             alternation
+0:2 - 0:7               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:5                 regex_character
+0:3 - 0:5                   escape `\\c`
+0:5 - 0:6                 regex_character
+0:5 - 0:6                   literal `c`
+0:6 - 0:7                 regex_character
+0:6 - 0:7                   literal `Y`
+0:7 - 0:8           separator: delimiter `c`
+0:8 - 0:9           replacement
+0:8 - 0:9             literal `g`
+0:9 - 0:9           issue: syntax_issue
+0:9 - 0:9             incomplete_syntax
+0:9 - 0:9               unterminated_operand
+
+==================
+Grouped alternation and replacement case conversion — "s/\\(a\\|b\\)\\+/\\U&/g"
+:language(gsed)
+:cst
+==================
+s/\(a\|b\)\+/\U&/g
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:18         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 repetition
+0:2  - 0:10                   expression: group
+0:2  - 0:4                      opening: group_open `\\(`
+0:4  - 0:8                      regular_expression
+0:4  - 0:8                        alternation
+0:4  - 0:5                          regex_branch
+0:4  - 0:5                            regex_character
+0:4  - 0:5                              literal `a`
+0:5  - 0:7                          regex_operator `\\|`
+0:7  - 0:8                          regex_branch
+0:7  - 0:8                            regex_character
+0:7  - 0:8                              literal `b`
+0:8  - 0:10                     closing: group_close `\\)`
+0:10 - 0:12                   operator: regex_operator `\\+`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:16           replacement
+0:13 - 0:15             case_conversion `\\U`
+0:15 - 0:16             matched_text_reference `&`
+0:16 - 0:17           closing: delimiter `/`
+0:17 - 0:18           substitution_flags
+0:17 - 0:18             flag `g`
+
+==================
+Grouped alternation and replacement case conversion — "s/(a|b)+/\\U&/g"
+:language(gsed_ere)
+:cst
+==================
+s/(a|b)+/\U&/g
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:7                    expression: group
+0:2  - 0:3                      opening: group_open `(`
+0:3  - 0:6                      regular_expression
+0:3  - 0:6                        alternation
+0:3  - 0:4                          regex_branch
+0:3  - 0:4                            regex_character
+0:3  - 0:4                              literal `a`
+0:4  - 0:5                          regex_operator `|`
+0:5  - 0:6                          regex_branch
+0:5  - 0:6                            regex_character
+0:5  - 0:6                              literal `b`
+0:6  - 0:7                      closing: group_close `)`
+0:7  - 0:8                    operator: regex_operator `+`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:12           replacement
+0:9  - 0:11             case_conversion `\\U`
+0:11 - 0:12             matched_text_reference `&`
+0:12 - 0:13           closing: delimiter `/`
+0:13 - 0:14           substitution_flags
+0:13 - 0:14             flag `g`
+
+==================
+Missing replacement closing delimiter — "s/a/b"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:5           issue: syntax_issue
+0:5 - 0:5             incomplete_syntax
+0:5 - 0:5               unterminated_operand
+
+==================
+CRLF after a substitution flag
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/g
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:7           substitution_flags
+0:6 - 0:7             flag `g`
+0:8 - 1:0       command_separator
+0:8 - 0:9         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+
+==================
+CRLF after substitution without flags
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:6       command
+0:0 - 0:6         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:7 - 1:0       command_separator
+0:7 - 0:8         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+
+==================
+Space between CR and LF is not a substitution terminator
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/g 
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:8           substitution_flags
+0:6 - 0:7             flag `g`
+0:7 - 0:8             issue: syntax_issue
+0:7 - 0:8               invalid_syntax
+0:7 - 0:8                 unknown_substitution_flag `\r`
+0:9 - 1:0       command_separator
+0:9 - 0:10         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+
+==================
+CR between substitution flags remains invalid
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/gp
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:9           substitution_flags
+0:6 - 0:7             flag `g`
+0:7 - 0:8             issue: syntax_issue
+0:7 - 0:8               invalid_syntax
+0:7 - 0:8                 unknown_substitution_flag `\r`
+0:8 - 0:9             flag `p`
+
+==================
+Only the final CR before LF ends substitution flags
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/g
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:8           substitution_flags
+0:6 - 0:7             flag `g`
+0:7 - 0:8             issue: syntax_issue
+0:7 - 0:8               invalid_syntax
+0:7 - 0:8                 unknown_substitution_flag `\r`
+0:9 - 1:0       command_separator
+0:9 - 0:10         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+
+==================
+Vertical tab before LF is an invalid substitution flag
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/g
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:8           substitution_flags
+0:6 - 0:7             flag `g`
+0:7 - 0:8             issue: syntax_issue
+0:7 - 0:8               invalid_syntax
+0:7 - 0:8                 unknown_substitution_flag `\v`
+0:8 - 1:0       command_separator
+0:8 - 0:9         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`
+
+==================
+Form feed before LF is an invalid substitution flag
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+s/a/b/g
+p
+------------------
+0:0 - 1:1   script
+0:0 - 1:1     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:3           regular_expression
+0:2 - 0:3             alternation
+0:2 - 0:3               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:4           separator: delimiter `/`
+0:4 - 0:5           replacement
+0:4 - 0:5             literal `b`
+0:5 - 0:6           closing: delimiter `/`
+0:6 - 0:8           substitution_flags
+0:6 - 0:7             flag `g`
+0:7 - 0:8             issue: syntax_issue
+0:7 - 0:8               invalid_syntax
+0:7 - 0:8                 unknown_substitution_flag `\f`
+0:8 - 1:0       command_separator
+0:8 - 0:9         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`

@@ -1,0 +1,4 @@
+WolframResearch/tree-sitter-wolfram
+Pinned upstream commit: 15b3244e0029ef1f14e1764d522da5821cf8cbae
+MIT copyright 2021 Brenton Bostick; retained complete upstream source and license.
+The local Rust wrapper and checked scanner/status are reviewed derivatives, not an upstream published Rust crate.

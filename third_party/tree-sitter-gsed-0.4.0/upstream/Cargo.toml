@@ -1,0 +1,40 @@
+[package]
+name = "konomanoasa-tree-sitter-gsed"
+version = "0.4.0"
+edition = "2024"
+description = "Tree-sitter grammars for GNU sed 4.10."
+readme = "README.md"
+repository = "https://github.com/konomanoasa/tree-sitter-gsed"
+license = "MIT"
+build = "bindings/rust/build.rs"
+links = "tree-sitter-gsed"
+include = [
+  "/LICENSE",
+  "/README.md",
+  "/bindings/rust/*.rs",
+  "/common/**/*.h",
+  "/gsed_ere/src/*.c",
+  "/gsed_ere/src/node-types.json",
+  "/gsed_ere/src/tree_sitter/*.h",
+  "/queries/*.scm",
+  "/src/*.c",
+  "/src/node-types.json",
+  "/src/tree_sitter/*.h",
+  "/test/bindings.test.rs",
+]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[[test]]
+name = "bindings"
+path = "test/bindings.test.rs"
+
+[dependencies]
+tree-sitter-language = "0.1.8"
+
+[dev-dependencies]
+tree-sitter = "0.27.1"
+
+[build-dependencies]
+cc = "1.4"

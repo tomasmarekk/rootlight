@@ -1,0 +1,20 @@
+================================================================================
+instanceof operator
+================================================================================
+
+valid = obj instanceof Klass
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (binary_expression
+            (expression
+              (identifier))
+            (expression
+              (identifier))))))))

@@ -1,0 +1,21 @@
+{
+  "upstream": "https://github.com/zealot128/tree-sitter-pug",
+  "commit": "13e9195370172c86a8b88184cc358b23b677cc46",
+  "tree": "ab70c4bb178710be939814654e776dafc553343a",
+  "upstream_blobs": 36,
+  "upstream_bytes": 1193164,
+  "upstream_archive_sha256": "2d8543a22e48bfecdd713cd13c531321d7921273af0d5ec3773422002e29e682",
+  "upstream_modes": "UPSTREAM-INVENTORY.json",
+  "active_parser": "upstream/src/parser.c",
+  "active_scanner": "src/scanner.c",
+  "active_status_unit": "src/rootlight_pug_status.c",
+  "grammar_abi": 14,
+  "memory_enforcement": "Unavailable",
+  "local_changes": "LOCAL_CHANGES.md",
+  "license": "MIT",
+  "upstream_npm_license": "ISC",
+  "metadata_discrepancy_preserved": true,
+  "operational_wrapper": "LanguageFn 0.1.7 and cc 1.2.67; no build-time downloads",
+  "wrapper_body_sha256_without_contract_constant": "803f61350f75e6114dbe361307982cc01ed7936f37bafe89a920fe7446060328",
+  "scanner_contract": "pug-scanner-checked-state/1;parser=ab3b9becbe2de196a439a3bf41b0b930cde145c32b12046b980669c30564b976;scanner=3e0c6962da141bac0b0c3a564c73941a7a4e8c1501d74405e647e2d32f35166b;status=d8445b5f1a9ccba182cb712c7dfe18bd298d01cdfdb5022f31218d89b3fb4dec;header=59cc4afcdf42dd102a612ca7134c6ee40b8668578a2dc41ee1c3d977a8581381;wrapper-body=803f61350f75e6114dbe361307982cc01ed7936f37bafe89a920fe7446060328"
+}

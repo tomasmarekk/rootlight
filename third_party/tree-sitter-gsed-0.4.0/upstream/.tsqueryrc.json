@@ -1,0 +1,187 @@
+{
+  "parser_install_directories": ["build", "."],
+  "valid_captures": {
+    "highlights": {
+      "attribute": "Annotations",
+      "attribute.builtin": "Built-in annotations",
+      "boolean": "Boolean values",
+      "character": "Characters",
+      "character.special": "Special characters",
+      "comment": "Comments",
+      "comment.documentation": "Documentation comments",
+      "comment.error": "Error comments",
+      "comment.note": "Informational comments",
+      "comment.todo": "Task comments",
+      "comment.warning": "Warning comments",
+      "constant": "Constants",
+      "constant.builtin": "Built-in constants",
+      "constant.macro": "Macro constants",
+      "constructor": "Constructors",
+      "diff.delta": "Changed lines",
+      "diff.minus": "Removed lines",
+      "diff.plus": "Added lines",
+      "function": "Function definitions",
+      "function.builtin": "Built-in functions",
+      "function.call": "Function calls",
+      "function.macro": "Function macros",
+      "function.method": "Method definitions",
+      "function.method.call": "Method calls",
+      "keyword": "Keywords",
+      "keyword.conditional": "Conditionals",
+      "keyword.conditional.ternary": "Conditional operators",
+      "keyword.coroutine": "Coroutine keywords",
+      "keyword.debug": "Debugging keywords",
+      "keyword.directive": "Directives",
+      "keyword.directive.define": "Definition directives",
+      "keyword.exception": "Exception keywords",
+      "keyword.function": "Function keywords",
+      "keyword.import": "Import keywords",
+      "keyword.modifier": "Modifiers",
+      "keyword.operator": "Word operators",
+      "keyword.repeat": "Loop keywords",
+      "keyword.return": "Return keywords",
+      "keyword.type": "Type keywords",
+      "label": "Labels",
+      "markup.heading": "Headings",
+      "markup.heading.1": "Heading level 1",
+      "markup.heading.2": "Heading level 2",
+      "markup.heading.3": "Heading level 3",
+      "markup.heading.4": "Heading level 4",
+      "markup.heading.5": "Heading level 5",
+      "markup.heading.6": "Heading level 6",
+      "markup.italic": "Italic text",
+      "markup.link": "Links",
+      "markup.link.label": "Link labels",
+      "markup.link.url": "Link URLs",
+      "markup.list": "Lists",
+      "markup.list.checked": "Completed tasks",
+      "markup.list.unchecked": "Pending tasks",
+      "markup.math": "Math notation",
+      "markup.quote": "Quoted blocks",
+      "markup.raw": "Literal text",
+      "markup.raw.block": "Literal blocks",
+      "markup.strikethrough": "Deleted text",
+      "markup.strong": "Bold text",
+      "markup.underline": "Underlined text",
+      "module": "Modules",
+      "module.builtin": "Built-in modules",
+      "number": "Numbers",
+      "number.float": "Floating-point numbers",
+      "operator": "Operators",
+      "property": "Properties",
+      "punctuation.bracket": "Brackets",
+      "punctuation.delimiter": "Separators",
+      "punctuation.special": "Special punctuation",
+      "string": "Strings",
+      "string.documentation": "Documentation strings",
+      "string.escape": "Escapes",
+      "string.regexp": "Regular expressions",
+      "string.special": "Special strings",
+      "string.special.path": "File paths",
+      "string.special.symbol": "Symbols",
+      "string.special.url": "URLs",
+      "tag": "Tags",
+      "tag.attribute": "Tag attributes",
+      "tag.builtin": "Built-in tags",
+      "tag.delimiter": "Tag delimiters",
+      "type": "Types",
+      "type.builtin": "Built-in types",
+      "type.definition": "Type definitions",
+      "variable": "Variables",
+      "variable.builtin": "Built-in variables",
+      "variable.member": "Member variables",
+      "variable.parameter": "Parameters",
+      "variable.parameter.builtin": "Built-in parameters"
+    }
+  },
+  "valid_predicates": {
+    "eq": {
+      "description": "Compare captured text.",
+      "parameters": [
+        {
+          "type": "capture"
+        },
+        {
+          "type": "any"
+        }
+      ],
+      "not": true
+    },
+    "any-eq": {
+      "description": "Compare any captured text.",
+      "parameters": [
+        {
+          "type": "capture"
+        },
+        {
+          "type": "any"
+        }
+      ],
+      "not": false
+    },
+    "any-not-eq": {
+      "description": "Reject equal text in any capture.",
+      "parameters": [
+        {
+          "type": "capture"
+        },
+        {
+          "type": "any"
+        }
+      ],
+      "not": false
+    },
+    "match": {
+      "description": "Match captured text against a regular expression.",
+      "parameters": [
+        {
+          "type": "capture"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "not": true
+    },
+    "any-match": {
+      "description": "Match any captured text against a regular expression.",
+      "parameters": [
+        {
+          "type": "capture"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "not": false
+    },
+    "any-not-match": {
+      "description": "Reject a regular expression match in any capture.",
+      "parameters": [
+        {
+          "type": "capture"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "not": false
+    },
+    "any-of": {
+      "description": "Compare captured text against a list of strings.",
+      "parameters": [
+        {
+          "type": "capture"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string",
+          "arity": "variadic"
+        }
+      ],
+      "not": true
+    }
+  }
+}

@@ -1,0 +1,75 @@
+================================================================================
+function expressions
+================================================================================
+
+square = (x) -> x * x
+identity = x -> x
+build = (factory) ->
+  factory ->
+    result = factory()
+    result
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (function_expression
+            (parameters
+              (parameter
+                (pattern
+                  (identifier))))
+            (expression
+              (binary_expression
+                (expression
+                  (identifier))
+                (expression
+                  (identifier))))))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (function_expression
+            (pattern
+              (identifier))
+            (expression
+              (identifier))))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (function_expression
+            (parameters
+              (parameter
+                (pattern
+                  (identifier))))
+            (block
+              (indented_block
+                (statement_sequence
+                  (statement
+                    (expression_statement
+                      (expression
+                        (function_expression
+                          (pattern
+                            (identifier))
+                          (block
+                            (indented_block
+                              (statement_sequence
+                                (statement
+                                  (assignment_statement
+                                    (pattern
+                                      (identifier))
+                                    (expression
+                                      (function_call
+                                        (expression
+                                          (identifier))))))
+                                (statement
+                                  (expression_statement
+                                    (expression
+                                      (identifier))))))))))))))))))))

@@ -1,0 +1,34 @@
+================
+Simple comment
+================
+
+(* comment *)
+
+---
+
+(source_file
+  (comment))
+
+================
+Nested comment
+================
+
+(* outer (* inner *) *)
+
+---
+
+(source_file
+  (comment))
+
+================
+Multiline comment
+================
+
+(* multiline
+   comment
+   here *)
+
+---
+
+(source_file
+  (comment))

@@ -1,0 +1,26 @@
+================================================================================
+do block
+================================================================================
+
+do ->:
+  value = "ready"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (do_block
+            (block
+              (indented_block
+                (statement_sequence
+                  (statement
+                    (assignment_statement
+                      (pattern
+                        (identifier))
+                      (expression
+                        (string
+                          (double_quoted_string
+                            (double_quoted_content)))))))))))))))

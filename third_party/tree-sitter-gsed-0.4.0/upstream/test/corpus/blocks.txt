@@ -1,0 +1,275 @@
+==================
+Missing command and block closer — "{1"
+:language(gsed)
+:language(gsed_ere)
+==================
+{1
+------------------
+(script
+  (command_list
+    (command
+      (block
+        (command_list
+          (command
+            address: (address_clause
+              (address
+                (line_address
+                  first: (number))))
+            issue: (syntax_issue
+              (incomplete_syntax
+                (missing_command)))))
+        issue: (syntax_issue
+          (incomplete_syntax
+            (missing_closing_delimiter)))))))
+
+==================
+Addressed block and negation — "1,3!{p;d}\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1,3!{p;d}
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:9       command
+0:0 - 0:3         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2           address_separator `,`
+0:2 - 0:3           address
+0:2 - 0:3             line_address
+0:2 - 0:3               first: number `3`
+0:3 - 0:4         negation: negation
+0:3 - 0:4           "!"
+0:4 - 0:9         block
+0:4 - 0:5           "{"
+0:5 - 0:8           command_list
+0:5 - 0:6             command
+0:5 - 0:6               simple_command
+0:5 - 0:6                 name: command_name `p`
+0:6 - 0:7             command_separator `;`
+0:7 - 0:8             command
+0:7 - 0:8               simple_command
+0:7 - 0:8                 name: command_name `d`
+0:8 - 0:9           "}"
+0:9 - 1:0       command_separator
+0:9 - 0:10         `\n`
+
+==================
+Control layout inside a block — "{\rp}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p}
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:4         block
+0:0 - 0:1           "{"
+0:1 - 0:3           command_list
+0:2 - 0:3             command
+0:2 - 0:3               simple_command
+0:2 - 0:3                 name: command_name `p`
+0:3 - 0:4           "}"
+
+==================
+Unmatched closing brace — "}p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+}p
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:1       issue: syntax_issue
+0:0 - 0:1         invalid_syntax
+0:0 - 0:1           unmatched_closing_brace
+0:0 - 0:1             "}"
+0:1 - 0:2       command
+0:1 - 0:2         simple_command
+0:1 - 0:2           name: command_name `p`
+
+==================
+Address before closing brace — "{+}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{+}
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:3         block
+0:0 - 0:1           "{"
+0:1 - 0:2           issue: syntax_issue
+0:1 - 0:2             invalid_syntax
+0:1 - 0:2               excess_address
+0:1 - 0:2                 address: address_clause
+0:1 - 0:2                   relative_address
+0:1 - 0:2                     address_operator `+`
+0:2 - 0:3           "}"
+
+==================
+Missing closer excludes layout — "{p \t"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p 	
+------------------
+0:0 - 0:4   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:2         block
+0:0 - 0:1           "{"
+0:1 - 0:2           command_list
+0:1 - 0:2             command
+0:1 - 0:2               simple_command
+0:1 - 0:2                 name: command_name `p`
+0:2 - 0:2           issue: syntax_issue
+0:2 - 0:2             incomplete_syntax
+0:2 - 0:2               missing_closing_delimiter
+
+==================
+Closing brace owns address and negation [null,1] — "{p;!}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p;!}
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         block
+0:0 - 0:1           "{"
+0:1 - 0:3           command_list
+0:1 - 0:2             command
+0:1 - 0:2               simple_command
+0:1 - 0:2                 name: command_name `p`
+0:2 - 0:3             command_separator `;`
+0:3 - 0:4           negation: negation
+0:3 - 0:4             "!"
+0:4 - 0:5           "}"
+
+==================
+Closing brace owns address and negation ["1",0] — "{p;1}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p;1}
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         block
+0:0 - 0:1           "{"
+0:1 - 0:3           command_list
+0:1 - 0:2             command
+0:1 - 0:2               simple_command
+0:1 - 0:2                 name: command_name `p`
+0:2 - 0:3             command_separator `;`
+0:3 - 0:4           issue: syntax_issue
+0:3 - 0:4             invalid_syntax
+0:3 - 0:4               excess_address
+0:3 - 0:4                 address: address_clause
+0:3 - 0:4                   address
+0:3 - 0:4                     line_address
+0:3 - 0:4                       first: number `1`
+0:4 - 0:5           "}"
+
+==================
+Closing brace owns address and negation ["1",1] — "{p;1!}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p;1!}
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         block
+0:0 - 0:1           "{"
+0:1 - 0:3           command_list
+0:1 - 0:2             command
+0:1 - 0:2               simple_command
+0:1 - 0:2                 name: command_name `p`
+0:2 - 0:3             command_separator `;`
+0:3 - 0:4           issue: syntax_issue
+0:3 - 0:4             invalid_syntax
+0:3 - 0:4               excess_address
+0:3 - 0:4                 address: address_clause
+0:3 - 0:4                   address
+0:3 - 0:4                     line_address
+0:3 - 0:4                       first: number `1`
+0:4 - 0:5           negation: negation
+0:4 - 0:5             "!"
+0:5 - 0:6           "}"
+
+==================
+Closing brace owns address and negation ["1,2",1] — "{p;1,2!}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p;1,2!}
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         block
+0:0 - 0:1           "{"
+0:1 - 0:3           command_list
+0:1 - 0:2             command
+0:1 - 0:2               simple_command
+0:1 - 0:2                 name: command_name `p`
+0:2 - 0:3             command_separator `;`
+0:3 - 0:6           issue: syntax_issue
+0:3 - 0:6             invalid_syntax
+0:3 - 0:6               excess_address
+0:3 - 0:6                 address: address_clause
+0:3 - 0:4                   address
+0:3 - 0:4                     line_address
+0:3 - 0:4                       first: number `1`
+0:4 - 0:5                   address_separator `,`
+0:5 - 0:6                   address
+0:5 - 0:6                     line_address
+0:5 - 0:6                       first: number `2`
+0:6 - 0:7           negation: negation
+0:6 - 0:7             "!"
+0:7 - 0:8           "}"
+
+==================
+Closing brace owns address and negation [null,2] — "{p;!!}"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p;!!}
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         block
+0:0 - 0:1           "{"
+0:1 - 0:3           command_list
+0:1 - 0:2             command
+0:1 - 0:2               simple_command
+0:1 - 0:2                 name: command_name `p`
+0:2 - 0:3             command_separator `;`
+0:3 - 0:5           negation: negation
+0:3 - 0:4             "!"
+0:4 - 0:5             issue: syntax_issue
+0:4 - 0:5               invalid_syntax
+0:4 - 0:5                 duplicate_negation
+0:4 - 0:5                   "!"
+0:5 - 0:6           "}"

@@ -1,0 +1,6 @@
+Pug grammar and scanner from zealot128/tree-sitter-pug.
+Pinned commit 13e9195370172c86a8b88184cc358b23b677cc46.
+Copyright (c) 2021 Florian Proksch; the exact MIT grant remains in LICENSE.
+Upstream package.json says ISC while LICENSE and Cargo.toml say MIT.
+All original metadata is retained unchanged under upstream/.
+Local scanner and binding changes do not replace upstream authorship or prove Pug evaluation semantics.

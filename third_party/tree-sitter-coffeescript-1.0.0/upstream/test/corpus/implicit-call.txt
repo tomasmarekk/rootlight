@@ -1,0 +1,107 @@
+================================================================================
+implicit call with single argument
+================================================================================
+
+console.log msg
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (implicit_call
+            (expression
+              (member_expression
+                (expression
+                  (identifier))
+                (identifier)))
+            (expression
+              (identifier))))))))
+
+================================================================================
+implicit call with multiple arguments
+================================================================================
+
+foo a, b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (implicit_call
+            (expression
+              (identifier))
+            (expression
+              (identifier))
+            (expression
+              (identifier))))))))
+
+================================================================================
+nested implicit calls are right-associative
+================================================================================
+
+foo bar baz
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (implicit_call
+            (expression
+              (identifier))
+            (expression
+              (implicit_call
+                (expression
+                  (identifier))
+                (expression
+                  (identifier))))))))))
+
+================================================================================
+implicit call argument absorbs binary operators
+================================================================================
+
+foo a + b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (implicit_call
+            (expression
+              (identifier))
+            (expression
+              (binary_expression
+                (expression
+                  (identifier))
+                (expression
+                  (identifier))))))))))
+
+================================================================================
+spaced minus is subtraction, not an implicit call
+================================================================================
+
+a - b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (binary_expression
+            (expression
+              (identifier))
+            (expression
+              (identifier))))))))

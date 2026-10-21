@@ -1,0 +1,125 @@
+==================
+GNU numeric commands — "q42;Q0;l80;v4.10;F;z\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+q42;Q0;l80;v4.10;F;z
+
+------------------
+(script
+  (command_list
+    (command
+      (numeric_command
+        name: (command_name)
+        argument: (number)))
+    (command_separator)
+    (command
+      (numeric_command
+        name: (command_name)
+        argument: (number)))
+    (command_separator)
+    (command
+      (numeric_command
+        name: (command_name)
+        argument: (number)))
+    (command_separator)
+    (command
+      (version_command
+        name: (command_name)
+        version: (version
+          (version_text))))
+    (command_separator)
+    (command
+      (simple_command
+        name: (command_name)))
+    (command_separator)
+    (command
+      (simple_command
+        name: (command_name)))
+    (command_separator)))
+
+==================
+Version word "4.10p" — "v4.10p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+v4.10p
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         version_command
+0:0 - 0:1           name: command_name `v`
+0:1 - 0:6           version: version
+0:1 - 0:6             version_text `4.10p`
+
+==================
+Version word "foo" — "vfoo"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+vfoo
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:4         version_command
+0:0 - 0:1           name: command_name `v`
+0:1 - 0:4           version: version
+0:1 - 0:4             version_text `foo`
+
+==================
+Version word "4.10-rc1\tp" — "v4.10-rc1\tp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+v4.10-rc1	p
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:9        command
+0:0  - 0:9          version_command
+0:0  - 0:1            name: command_name `v`
+0:1  - 0:9            version: version
+0:1  - 0:9              version_text `4.10-rc1`
+0:10 - 0:11       command
+0:10 - 0:11         simple_command
+0:10 - 0:11           name: command_name `p`
+
+==================
+Version word "0alpha p" — "v0alpha p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+v0alpha p
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:7       command
+0:0 - 0:7         version_command
+0:0 - 0:1           name: command_name `v`
+0:1 - 0:7           version: version
+0:1 - 0:7             version_text `0alpha`
+0:8 - 0:9       command
+0:8 - 0:9         simple_command
+0:8 - 0:9           name: command_name `p`
+
+==================
+Version before comment — "v#comment"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+v#comment
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:1       command
+0:0 - 0:1         version_command
+0:0 - 0:1           name: command_name `v`
+0:1 - 0:9       comment
+0:1 - 0:9         comment_text `#comment`

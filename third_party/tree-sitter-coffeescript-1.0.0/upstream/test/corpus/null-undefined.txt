@@ -1,0 +1,23 @@
+================================================================================
+null and undefined
+================================================================================
+
+value = null
+missing = undefined
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (null_literal))))
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (undefined_literal))))))

@@ -1,0 +1,3 @@
+This local derivative retains all68 upstream Git blobs, modes and the exact
+MIT grant, Copyright (c) 2026 konomanoasa. Original source is under upstream/.
+Rootlight's checked scanner and owned Rust host are disclosed separately.

@@ -1,0 +1,34 @@
+================================================================================
+switch statement
+================================================================================
+
+switch day
+  when "Mon", "Tue" then break
+  else then continue
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (switch_statement
+        (expression
+          (identifier))
+        (when_clause
+          (expression
+            (string
+              (double_quoted_string
+                (double_quoted_content))))
+          (expression
+            (string
+              (double_quoted_string
+                (double_quoted_content))))
+          (block
+            (inline_block
+              (statement
+                (break_statement)))))
+        (else_clause
+          (block
+            (inline_block
+              (statement
+                (continue_statement)))))))))

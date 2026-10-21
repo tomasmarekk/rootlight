@@ -1,0 +1,17 @@
+================================================================================
+member access
+================================================================================
+
+console.log
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (expression_statement
+        (expression
+          (member_expression
+            (expression
+              (identifier))
+            (identifier)))))))

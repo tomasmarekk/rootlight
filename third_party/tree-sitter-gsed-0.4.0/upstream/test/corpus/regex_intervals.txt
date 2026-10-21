@@ -1,0 +1,2347 @@
+==================
+Invalid interval contents — "s/a\\{b2\\}/x/\n"
+:language(gsed)
+==================
+s/a\{b2\}/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        name: (command_name)
+        opening: (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                expression: (regex_character
+                  (literal))
+                operator: (interval
+                  opening: (interval_open)
+                  issue: (syntax_issue
+                    (invalid_syntax
+                      (invalid_interval_character
+                        (literal))))
+                  minimum: (interval_count
+                    (number))
+                  closing: (interval_close))))))
+        separator: (delimiter)
+        (replacement
+          (literal))
+        closing: (delimiter)))
+    (command_separator)))
+
+==================
+Invalid interval contents — "s/a{b2}/x/\n"
+:language(gsed_ere)
+==================
+s/a{b2}/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        name: (command_name)
+        opening: (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                expression: (regex_character
+                  (literal))
+                operator: (interval
+                  opening: (interval_open)
+                  issue: (syntax_issue
+                    (invalid_syntax
+                      (invalid_interval_character
+                        (literal))))
+                  minimum: (interval_count
+                    (number))
+                  closing: (interval_close))))))
+        separator: (delimiter)
+        (replacement
+          (literal))
+        closing: (delimiter)))
+    (command_separator)))
+
+==================
+Literal interval validation after word boundaries — "s/a\\b\\{/x/\ns/\\b\\{/x/\ns/a\\b\\{1\\}/x/\n"
+:language(gsed)
+==================
+s/a\b\{/x/
+s/\b\{/x/
+s/a\b\{1\}/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (literal))
+              (word_boundary
+                (regex_operator))
+              (regex_character
+                (syntax_issue
+                  (invalid_syntax
+                    (invalid_interval_syntax
+                      (escape))))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (word_boundary
+                (regex_operator))
+              (regex_character
+                (escape)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (literal))
+              (word_boundary
+                (regex_operator))
+              (regex_character
+                (escape))
+              (regex_character
+                (literal))
+              (regex_character
+                (escape)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Interval with omitted minimum — "s/a\\{,2\\}/x/\n"
+:language(gsed)
+:cst
+==================
+s/a\{,2\}/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      interval_separator `,`
+0:6  - 0:7                      maximum: interval_count
+0:6  - 0:7                        number `2`
+0:7  - 0:9                      closing: interval_close `\\}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+0:12 - 1:0        command_separator
+0:12 - 0:13         `\n`
+
+==================
+Interval with omitted minimum — "s/a\\{,2\\}/b/"
+:language(gsed)
+:cst
+==================
+s/a\{,2\}/b/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      interval_separator `,`
+0:6  - 0:7                      maximum: interval_count
+0:6  - 0:7                        number `2`
+0:7  - 0:9                      closing: interval_close `\\}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `b`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Interval with no counts — "s/a\\{,\\}/x/\n"
+:language(gsed)
+:cst
+==================
+s/a\{,\}/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      interval_separator `,`
+0:6  - 0:8                      closing: interval_close `\\}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+0:11 - 1:0        command_separator
+0:11 - 0:12         `\n`
+
+==================
+Interval with omitted minimum — "s/a{,2}/x/\n"
+:language(gsed_ere)
+:cst
+==================
+s/a{,2}/x/
+
+------------------
+0:0  - 1:0    script
+0:0  - 1:0      command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:7                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      interval_separator `,`
+0:5  - 0:6                      maximum: interval_count
+0:5  - 0:6                        number `2`
+0:6  - 0:7                      closing: interval_close `}`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+0:10 - 1:0        command_separator
+0:10 - 0:11         `\n`
+
+==================
+Interval with omitted minimum — "s/a{,2}/b/"
+:language(gsed_ere)
+:cst
+==================
+s/a{,2}/b/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:7                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      interval_separator `,`
+0:5  - 0:6                      maximum: interval_count
+0:5  - 0:6                        number `2`
+0:6  - 0:7                      closing: interval_close `}`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `b`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Interval with no counts — "s/a{,}/x/\n"
+:language(gsed_ere)
+:cst
+==================
+s/a{,}/x/
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:6               regex_branch
+0:2 - 0:6                 repetition
+0:2 - 0:3                   expression: regex_character
+0:2 - 0:3                     literal `a`
+0:3 - 0:6                   operator: interval
+0:3 - 0:4                     opening: interval_open `{`
+0:4 - 0:5                     interval_separator `,`
+0:5 - 0:6                     closing: interval_close `}`
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+0:9 - 1:0       command_separator
+0:9 - 0:10         `\n`
+
+==================
+Interval count and issue ownership "1\\n" — "s/a\\{1\\n\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{1\n\}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:10                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:8                      issue: syntax_issue
+0:6  - 0:8                        invalid_syntax
+0:6  - 0:8                          invalid_interval_character
+0:6  - 0:8                            character_escape `\\n`
+0:8  - 0:10                     closing: interval_close `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\q" — "s/a\\{1\\q\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{1\q\}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:10                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:8                      issue: syntax_issue
+0:6  - 0:8                        invalid_syntax
+0:6  - 0:8                          invalid_interval_character
+0:6  - 0:8                            escape `\\q`
+0:8  - 0:10                     closing: interval_close `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\x61" — "s/a\\{1\\x61\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{1\x61\}/x/
+------------------
+0:0  - 0:15   script
+0:0  - 0:15     command_list
+0:0  - 0:15       command
+0:0  - 0:15         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:12           regular_expression
+0:2  - 0:12             alternation
+0:2  - 0:12               regex_branch
+0:2  - 0:12                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:12                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:10                     issue: syntax_issue
+0:6  - 0:10                       invalid_syntax
+0:6  - 0:10                         invalid_interval_character
+0:6  - 0:10                           character_escape `\\x61`
+0:10 - 0:12                     closing: interval_close `\\}`
+0:12 - 0:13           separator: delimiter `/`
+0:13 - 0:14           replacement
+0:13 - 0:14             literal `x`
+0:14 - 0:15           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1x\\n" — "s/a\\{1x\\n\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{1x\n\}/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:11                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:9                      issue: syntax_issue
+0:6  - 0:9                        invalid_syntax
+0:6  - 0:9                          invalid_interval_character
+0:6  - 0:7                            literal `x`
+0:7  - 0:9                            character_escape `\\n`
+0:9  - 0:11                     closing: interval_close `\\}`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "b2" — "s/a\\{b2\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{b2\}/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      issue: syntax_issue
+0:5  - 0:6                        invalid_syntax
+0:5  - 0:6                          invalid_interval_character
+0:5  - 0:6                            literal `b`
+0:6  - 0:7                      minimum: interval_count
+0:6  - 0:7                        number `2`
+0:7  - 0:9                      closing: interval_close `\\}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "b2" — "s/a\\{b2\\}/b/"
+:language(gsed)
+:cst
+==================
+s/a\{b2\}/b/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      issue: syntax_issue
+0:5  - 0:6                        invalid_syntax
+0:5  - 0:6                          invalid_interval_character
+0:5  - 0:6                            literal `b`
+0:6  - 0:7                      minimum: interval_count
+0:6  - 0:7                        number `2`
+0:7  - 0:9                      closing: interval_close `\\}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `b`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "\\q2" — "s/a\\{\\q2\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{\q2\}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:10                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:7                      issue: syntax_issue
+0:5  - 0:7                        invalid_syntax
+0:5  - 0:7                          invalid_interval_character
+0:5  - 0:7                            escape `\\q`
+0:7  - 0:8                      minimum: interval_count
+0:7  - 0:8                        number `2`
+0:8  - 0:10                     closing: interval_close `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1b2" — "s/a\\{1b2\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{1b2\}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:10                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:7                      issue: syntax_issue
+0:6  - 0:7                        invalid_syntax
+0:6  - 0:7                          invalid_interval_character
+0:6  - 0:7                            literal `b`
+0:7  - 0:8                      minimum: interval_count
+0:7  - 0:8                        number `2`
+0:8  - 0:10                     closing: interval_close `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\q2" — "s/a\\{1\\q2\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{1\q2\}/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:11                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:8                      issue: syntax_issue
+0:6  - 0:8                        invalid_syntax
+0:6  - 0:8                          invalid_interval_character
+0:6  - 0:8                            escape `\\q`
+0:8  - 0:9                      minimum: interval_count
+0:8  - 0:9                        number `2`
+0:9  - 0:11                     closing: interval_close `\\}`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "b2,c34d5" — "s/a\\{b2,c34d5\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{b2,c34d5\}/x/
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:18         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:15           regular_expression
+0:2  - 0:15             alternation
+0:2  - 0:15               regex_branch
+0:2  - 0:15                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:15                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      issue: syntax_issue
+0:5  - 0:6                        invalid_syntax
+0:5  - 0:6                          invalid_interval_character
+0:5  - 0:6                            literal `b`
+0:6  - 0:7                      minimum: interval_count
+0:6  - 0:7                        number `2`
+0:7  - 0:8                      interval_separator `,`
+0:8  - 0:9                      issue: syntax_issue
+0:8  - 0:9                        invalid_syntax
+0:8  - 0:9                          invalid_interval_character
+0:8  - 0:9                            literal `c`
+0:9  - 0:11                     maximum: interval_count
+0:9  - 0:11                       number `34`
+0:11 - 0:12                     issue: syntax_issue
+0:11 - 0:12                       invalid_syntax
+0:11 - 0:12                         invalid_interval_character
+0:11 - 0:12                           literal `d`
+0:12 - 0:13                     maximum: interval_count
+0:12 - 0:13                       number `5`
+0:13 - 0:15                     closing: interval_close `\\}`
+0:15 - 0:16           separator: delimiter `/`
+0:16 - 0:17           replacement
+0:16 - 0:17             literal `x`
+0:17 - 0:18           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1,\\q23" — "s/a\\{1,\\q23\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{1,\q23\}/x/
+------------------
+0:0  - 0:16   script
+0:0  - 0:16     command_list
+0:0  - 0:16       command
+0:0  - 0:16         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:13           regular_expression
+0:2  - 0:13             alternation
+0:2  - 0:13               regex_branch
+0:2  - 0:13                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:13                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:7                      interval_separator `,`
+0:7  - 0:9                      issue: syntax_issue
+0:7  - 0:9                        invalid_syntax
+0:7  - 0:9                          invalid_interval_character
+0:7  - 0:9                            escape `\\q`
+0:9  - 0:11                     maximum: interval_count
+0:9  - 0:11                       number `23`
+0:11 - 0:13                     closing: interval_close `\\}`
+0:13 - 0:14           separator: delimiter `/`
+0:14 - 0:15           replacement
+0:14 - 0:15             literal `x`
+0:15 - 0:16           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "ab12cd34" — "s/a\\{ab12cd34\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\{ab12cd34\}/x/
+------------------
+0:0  - 0:18   script
+0:0  - 0:18     command_list
+0:0  - 0:18       command
+0:0  - 0:18         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:15           regular_expression
+0:2  - 0:15             alternation
+0:2  - 0:15               regex_branch
+0:2  - 0:15                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:15                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:7                      issue: syntax_issue
+0:5  - 0:7                        invalid_syntax
+0:5  - 0:7                          invalid_interval_character
+0:5  - 0:7                            literal `ab`
+0:7  - 0:9                      minimum: interval_count
+0:7  - 0:9                        number `12`
+0:9  - 0:11                     issue: syntax_issue
+0:9  - 0:11                       invalid_syntax
+0:9  - 0:11                         invalid_interval_character
+0:9  - 0:11                           literal `cd`
+0:11 - 0:13                     minimum: interval_count
+0:11 - 0:13                       number `34`
+0:13 - 0:15                     closing: interval_close `\\}`
+0:15 - 0:16           separator: delimiter `/`
+0:16 - 0:17           replacement
+0:16 - 0:17             literal `x`
+0:17 - 0:18           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "" — "s/a\\{\\}/b/"
+:language(gsed)
+:cst
+==================
+s/a\{\}/b/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:7                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:5                      issue: syntax_issue
+0:5  - 0:5                        invalid_syntax
+0:5  - 0:5                          missing_interval_count
+0:5  - 0:7                      closing: interval_close `\\}`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `b`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "2,x" — "s/a\\{2,x\\}/b/"
+:language(gsed)
+:cst
+==================
+s/a\{2,x\}/b/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:10                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `2`
+0:6  - 0:7                      interval_separator `,`
+0:7  - 0:8                      issue: syntax_issue
+0:7  - 0:8                        invalid_syntax
+0:7  - 0:8                          invalid_interval_character
+0:7  - 0:8                            literal `x`
+0:8  - 0:10                     closing: interval_close `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `b`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "\\2" — "s/a\\{\\2\\}/b/"
+:language(gsed)
+:cst
+==================
+s/a\{\2\}/b/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:7                      issue: syntax_issue
+0:5  - 0:7                        invalid_syntax
+0:5  - 0:7                          invalid_interval_character
+0:5  - 0:7                            escape `\\2`
+0:7  - 0:9                      closing: interval_close `\\}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `b`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\,2" — "s/a\\{1\\,2\\}/b/"
+:language(gsed)
+:cst
+==================
+s/a\{1\,2\}/b/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:11                   operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `1`
+0:6  - 0:8                      issue: syntax_issue
+0:6  - 0:8                        invalid_syntax
+0:6  - 0:8                          invalid_interval_character
+0:6  - 0:8                            escape `\\,`
+0:8  - 0:9                      minimum: interval_count
+0:8  - 0:9                        number `2`
+0:9  - 0:11                     closing: interval_close `\\}`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `b`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\n" — "s/a{1\\n}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1\n}/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:7                      issue: syntax_issue
+0:5  - 0:7                        invalid_syntax
+0:5  - 0:7                          invalid_interval_character
+0:5  - 0:7                            character_escape `\\n`
+0:7  - 0:8                      closing: interval_close `}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\q" — "s/a{1\\q}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1\q}/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:7                      issue: syntax_issue
+0:5  - 0:7                        invalid_syntax
+0:5  - 0:7                          invalid_interval_character
+0:5  - 0:7                            escape `\\q`
+0:7  - 0:8                      closing: interval_close `}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\x61" — "s/a{1\\x61}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1\x61}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:10                   operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:9                      issue: syntax_issue
+0:5  - 0:9                        invalid_syntax
+0:5  - 0:9                          invalid_interval_character
+0:5  - 0:9                            character_escape `\\x61`
+0:9  - 0:10                     closing: interval_close `}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1x\\n" — "s/a{1x\\n}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1x\n}/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:8                      issue: syntax_issue
+0:5  - 0:8                        invalid_syntax
+0:5  - 0:8                          invalid_interval_character
+0:5  - 0:6                            literal `x`
+0:6  - 0:8                            character_escape `\\n`
+0:8  - 0:9                      closing: interval_close `}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "b2" — "s/a{b2}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{b2}/x/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:7                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      issue: syntax_issue
+0:4  - 0:5                        invalid_syntax
+0:4  - 0:5                          invalid_interval_character
+0:4  - 0:5                            literal `b`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `2`
+0:6  - 0:7                      closing: interval_close `}`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "b2" — "s/a{b2}/b/"
+:language(gsed_ere)
+:cst
+==================
+s/a{b2}/b/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:7                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      issue: syntax_issue
+0:4  - 0:5                        invalid_syntax
+0:4  - 0:5                          invalid_interval_character
+0:4  - 0:5                            literal `b`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `2`
+0:6  - 0:7                      closing: interval_close `}`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `b`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "\\q2" — "s/a{\\q2}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{\q2}/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:6                      issue: syntax_issue
+0:4  - 0:6                        invalid_syntax
+0:4  - 0:6                          invalid_interval_character
+0:4  - 0:6                            escape `\\q`
+0:6  - 0:7                      minimum: interval_count
+0:6  - 0:7                        number `2`
+0:7  - 0:8                      closing: interval_close `}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1b2" — "s/a{1b2}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1b2}/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:6                      issue: syntax_issue
+0:5  - 0:6                        invalid_syntax
+0:5  - 0:6                          invalid_interval_character
+0:5  - 0:6                            literal `b`
+0:6  - 0:7                      minimum: interval_count
+0:6  - 0:7                        number `2`
+0:7  - 0:8                      closing: interval_close `}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\q2" — "s/a{1\\q2}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1\q2}/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:7                      issue: syntax_issue
+0:5  - 0:7                        invalid_syntax
+0:5  - 0:7                          invalid_interval_character
+0:5  - 0:7                            escape `\\q`
+0:7  - 0:8                      minimum: interval_count
+0:7  - 0:8                        number `2`
+0:8  - 0:9                      closing: interval_close `}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "b2,c34d5" — "s/a{b2,c34d5}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{b2,c34d5}/x/
+------------------
+0:0  - 0:16   script
+0:0  - 0:16     command_list
+0:0  - 0:16       command
+0:0  - 0:16         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:13           regular_expression
+0:2  - 0:13             alternation
+0:2  - 0:13               regex_branch
+0:2  - 0:13                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:13                   operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      issue: syntax_issue
+0:4  - 0:5                        invalid_syntax
+0:4  - 0:5                          invalid_interval_character
+0:4  - 0:5                            literal `b`
+0:5  - 0:6                      minimum: interval_count
+0:5  - 0:6                        number `2`
+0:6  - 0:7                      interval_separator `,`
+0:7  - 0:8                      issue: syntax_issue
+0:7  - 0:8                        invalid_syntax
+0:7  - 0:8                          invalid_interval_character
+0:7  - 0:8                            literal `c`
+0:8  - 0:10                     maximum: interval_count
+0:8  - 0:10                       number `34`
+0:10 - 0:11                     issue: syntax_issue
+0:10 - 0:11                       invalid_syntax
+0:10 - 0:11                         invalid_interval_character
+0:10 - 0:11                           literal `d`
+0:11 - 0:12                     maximum: interval_count
+0:11 - 0:12                       number `5`
+0:12 - 0:13                     closing: interval_close `}`
+0:13 - 0:14           separator: delimiter `/`
+0:14 - 0:15           replacement
+0:14 - 0:15             literal `x`
+0:15 - 0:16           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1,\\q23" — "s/a{1,\\q23}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1,\q23}/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:11                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:11                   operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:6                      interval_separator `,`
+0:6  - 0:8                      issue: syntax_issue
+0:6  - 0:8                        invalid_syntax
+0:6  - 0:8                          invalid_interval_character
+0:6  - 0:8                            escape `\\q`
+0:8  - 0:10                     maximum: interval_count
+0:8  - 0:10                       number `23`
+0:10 - 0:11                     closing: interval_close `}`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "ab12cd34" — "s/a{ab12cd34}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{ab12cd34}/x/
+------------------
+0:0  - 0:16   script
+0:0  - 0:16     command_list
+0:0  - 0:16       command
+0:0  - 0:16         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:13           regular_expression
+0:2  - 0:13             alternation
+0:2  - 0:13               regex_branch
+0:2  - 0:13                 repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:13                   operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:6                      issue: syntax_issue
+0:4  - 0:6                        invalid_syntax
+0:4  - 0:6                          invalid_interval_character
+0:4  - 0:6                            literal `ab`
+0:6  - 0:8                      minimum: interval_count
+0:6  - 0:8                        number `12`
+0:8  - 0:10                     issue: syntax_issue
+0:8  - 0:10                       invalid_syntax
+0:8  - 0:10                         invalid_interval_character
+0:8  - 0:10                           literal `cd`
+0:10 - 0:12                     minimum: interval_count
+0:10 - 0:12                       number `34`
+0:12 - 0:13                     closing: interval_close `}`
+0:13 - 0:14           separator: delimiter `/`
+0:14 - 0:15           replacement
+0:14 - 0:15             literal `x`
+0:15 - 0:16           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "" — "s/a{}/b/"
+:language(gsed_ere)
+:cst
+==================
+s/a{}/b/
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:5           regular_expression
+0:2 - 0:5             alternation
+0:2 - 0:5               regex_branch
+0:2 - 0:5                 repetition
+0:2 - 0:3                   expression: regex_character
+0:2 - 0:3                     literal `a`
+0:3 - 0:5                   operator: interval
+0:3 - 0:4                     opening: interval_open `{`
+0:4 - 0:4                     issue: syntax_issue
+0:4 - 0:4                       invalid_syntax
+0:4 - 0:4                         missing_interval_count
+0:4 - 0:5                     closing: interval_close `}`
+0:5 - 0:6           separator: delimiter `/`
+0:6 - 0:7           replacement
+0:6 - 0:7             literal `b`
+0:7 - 0:8           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "2,x" — "s/a{2,x}/b/"
+:language(gsed_ere)
+:cst
+==================
+s/a{2,x}/b/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `2`
+0:5  - 0:6                      interval_separator `,`
+0:6  - 0:7                      issue: syntax_issue
+0:6  - 0:7                        invalid_syntax
+0:6  - 0:7                          invalid_interval_character
+0:6  - 0:7                            literal `x`
+0:7  - 0:8                      closing: interval_close `}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `b`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "\\2" — "s/a{\\2}/b/"
+:language(gsed_ere)
+:cst
+==================
+s/a{\2}/b/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:7                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:7                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:6                      issue: syntax_issue
+0:4  - 0:6                        invalid_syntax
+0:4  - 0:6                          invalid_interval_character
+0:4  - 0:6                            escape `\\2`
+0:6  - 0:7                      closing: interval_close `}`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `b`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Interval count and issue ownership "1\\,2" — "s/a{1\\,2}/b/"
+:language(gsed_ere)
+:cst
+==================
+s/a{1\,2}/b/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:5                      minimum: interval_count
+0:4  - 0:5                        number `1`
+0:5  - 0:7                      issue: syntax_issue
+0:5  - 0:7                        invalid_syntax
+0:5  - 0:7                          invalid_interval_character
+0:5  - 0:7                            escape `\\,`
+0:7  - 0:8                      minimum: interval_count
+0:7  - 0:8                        number `2`
+0:8  - 0:9                      closing: interval_close `}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `b`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\b\\{" — "s/a\\b\\{/x/"
+:language(gsed)
+:cst
+==================
+s/a\b\{/x/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\b`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    issue: syntax_issue
+0:5  - 0:7                      invalid_syntax
+0:5  - 0:7                        invalid_interval_syntax
+0:5  - 0:7                          escape `\\{`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\B\\{x\\}" — "s/a\\B\\{x\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\B\{x\}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\B`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    issue: syntax_issue
+0:5  - 0:7                      invalid_syntax
+0:5  - 0:7                        invalid_interval_syntax
+0:5  - 0:7                          escape `\\{`
+0:7  - 0:8                  regex_character
+0:7  - 0:8                    literal `x`
+0:8  - 0:10                 regex_character
+0:8  - 0:10                   escape `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\<\\{\\}" — "s/a\\<\\{\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\<\{\}/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\<`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    issue: syntax_issue
+0:5  - 0:7                      invalid_syntax
+0:5  - 0:7                        invalid_interval_syntax
+0:5  - 0:7                          escape `\\{`
+0:7  - 0:9                  regex_character
+0:7  - 0:9                    escape `\\}`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\>\\{1,2,3\\}" — "s/a\\>\\{1,2,3\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\>\{1,2,3\}/x/
+------------------
+0:0  - 0:17   script
+0:0  - 0:17     command_list
+0:0  - 0:17       command
+0:0  - 0:17         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:14           regular_expression
+0:2  - 0:14             alternation
+0:2  - 0:14               regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\>`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    issue: syntax_issue
+0:5  - 0:7                      invalid_syntax
+0:5  - 0:7                        invalid_interval_syntax
+0:5  - 0:7                          escape `\\{`
+0:7  - 0:8                  regex_character
+0:7  - 0:8                    literal `1`
+0:8  - 0:9                  regex_character
+0:8  - 0:9                    literal `,`
+0:9  - 0:10                 regex_character
+0:9  - 0:10                   literal `2`
+0:10 - 0:11                 regex_character
+0:10 - 0:11                   literal `,`
+0:11 - 0:12                 regex_character
+0:11 - 0:12                   literal `3`
+0:12 - 0:14                 regex_character
+0:12 - 0:14                   escape `\\}`
+0:14 - 0:15           separator: delimiter `/`
+0:15 - 0:16           replacement
+0:15 - 0:16             literal `x`
+0:16 - 0:17           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\`\\{" — "s/a\\`\\{/x/"
+:language(gsed)
+:cst
+==================
+s/a\`\{/x/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\\``
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    issue: syntax_issue
+0:5  - 0:7                      invalid_syntax
+0:5  - 0:7                        invalid_interval_syntax
+0:5  - 0:7                          escape `\\{`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\'\\{" — "s/a\\'\\{/x/"
+:language(gsed)
+:cst
+==================
+s/a\'\{/x/
+------------------
+0:0  - 0:10   script
+0:0  - 0:10     command_list
+0:0  - 0:10       command
+0:0  - 0:10         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:7            regular_expression
+0:2  - 0:7              alternation
+0:2  - 0:7                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\'`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    issue: syntax_issue
+0:5  - 0:7                      invalid_syntax
+0:5  - 0:7                        invalid_interval_syntax
+0:5  - 0:7                          escape `\\{`
+0:7  - 0:8            separator: delimiter `/`
+0:8  - 0:9            replacement
+0:8  - 0:9              literal `x`
+0:9  - 0:10           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\b\\B\\{" — "s/a\\b\\B\\{/x/"
+:language(gsed)
+:cst
+==================
+s/a\b\B\{/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\b`
+0:5  - 0:7                  word_boundary
+0:5  - 0:7                    regex_operator `\\B`
+0:7  - 0:9                  regex_character
+0:7  - 0:9                    issue: syntax_issue
+0:7  - 0:9                      invalid_syntax
+0:7  - 0:9                        invalid_interval_syntax
+0:7  - 0:9                          escape `\\{`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "\\(a\\)\\b\\{" — "s/\\(a\\)\\b\\{/x/"
+:language(gsed)
+:cst
+==================
+s/\(a\)\b\{/x/
+------------------
+0:0  - 0:14   script
+0:0  - 0:14     command_list
+0:0  - 0:14       command
+0:0  - 0:14         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:11           regular_expression
+0:2  - 0:11             alternation
+0:2  - 0:11               regex_branch
+0:2  - 0:7                  group
+0:2  - 0:4                    opening: group_open `\\(`
+0:4  - 0:5                    regular_expression
+0:4  - 0:5                      alternation
+0:4  - 0:5                        regex_branch
+0:4  - 0:5                          regex_character
+0:4  - 0:5                            literal `a`
+0:5  - 0:7                    closing: group_close `\\)`
+0:7  - 0:9                  word_boundary
+0:7  - 0:9                    regex_operator `\\b`
+0:9  - 0:11                 regex_character
+0:9  - 0:11                   issue: syntax_issue
+0:9  - 0:11                     invalid_syntax
+0:9  - 0:11                       invalid_interval_syntax
+0:9  - 0:11                         escape `\\{`
+0:11 - 0:12           separator: delimiter `/`
+0:12 - 0:13           replacement
+0:12 - 0:13             literal `x`
+0:13 - 0:14           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "\\b\\{" — "s/\\b\\{/x/"
+:language(gsed)
+:cst
+==================
+s/\b\{/x/
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:9         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:6           regular_expression
+0:2 - 0:6             alternation
+0:2 - 0:6               regex_branch
+0:2 - 0:4                 word_boundary
+0:2 - 0:4                   regex_operator `\\b`
+0:4 - 0:6                 regex_character
+0:4 - 0:6                   escape `\\{`
+0:6 - 0:7           separator: delimiter `/`
+0:7 - 0:8           replacement
+0:7 - 0:8             literal `x`
+0:8 - 0:9           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\|\\b\\{" — "s/a\\|\\b\\{/x/"
+:language(gsed)
+:cst
+==================
+s/a\|\b\{/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:3                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                regex_operator `\\|`
+0:5  - 0:9                regex_branch
+0:5  - 0:7                  word_boundary
+0:5  - 0:7                    regex_operator `\\b`
+0:7  - 0:9                  regex_character
+0:7  - 0:9                    escape `\\{`
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\b\\{1\\}" — "s/a\\b\\{1\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\b\{1\}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\b`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    escape `\\{`
+0:7  - 0:8                  regex_character
+0:7  - 0:8                    literal `1`
+0:8  - 0:10                 regex_character
+0:8  - 0:10                   escape `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\b\\{,\\}" — "s/a\\b\\{,\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\b\{,\}/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\b`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    escape `\\{`
+0:7  - 0:8                  regex_character
+0:7  - 0:8                    literal `,`
+0:8  - 0:10                 regex_character
+0:8  - 0:10                   escape `\\}`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Literal interval after word boundary "a\\b\\{\\x31\\}" — "s/a\\b\\{\\x31\\}/x/"
+:language(gsed)
+:cst
+==================
+s/a\b\{\x31\}/x/
+------------------
+0:0  - 0:16   script
+0:0  - 0:16     command_list
+0:0  - 0:16       command
+0:0  - 0:16         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:13           regular_expression
+0:2  - 0:13             alternation
+0:2  - 0:13               regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:5                  word_boundary
+0:3  - 0:5                    regex_operator `\\b`
+0:5  - 0:7                  regex_character
+0:5  - 0:7                    escape `\\{`
+0:7  - 0:11                 regex_character
+0:7  - 0:11                   character_escape `\\x31`
+0:11 - 0:13                 regex_character
+0:11 - 0:13                   escape `\\}`
+0:13 - 0:14           separator: delimiter `/`
+0:14 - 0:15           replacement
+0:14 - 0:15             literal `x`
+0:15 - 0:16           closing: delimiter `/`
+
+==================
+Branch-initial boundary leaves interval opening literal — "s/\\(\\b\\{\\)/x/"
+:language(gsed)
+:cst
+==================
+s/\(\b\{\)/x/
+------------------
+0:0  - 0:13   script
+0:0  - 0:13     command_list
+0:0  - 0:13       command
+0:0  - 0:13         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:10           regular_expression
+0:2  - 0:10             alternation
+0:2  - 0:10               regex_branch
+0:2  - 0:10                 group
+0:2  - 0:4                    opening: group_open `\\(`
+0:4  - 0:8                    regular_expression
+0:4  - 0:8                      alternation
+0:4  - 0:8                        regex_branch
+0:4  - 0:6                          word_boundary
+0:4  - 0:6                            regex_operator `\\b`
+0:6  - 0:8                          regex_character
+0:6  - 0:8                            escape `\\{`
+0:8  - 0:10                   closing: group_close `\\)`
+0:10 - 0:11           separator: delimiter `/`
+0:11 - 0:12           replacement
+0:11 - 0:12             literal `x`
+0:12 - 0:13           closing: delimiter `/`
+
+==================
+Leading interval retains counts "{" — "s/{2}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/{2}/x/
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:5           regular_expression
+0:2 - 0:5             alternation
+0:2 - 0:5               regex_branch
+0:2 - 0:5                 interval
+0:2 - 0:3                   issue: syntax_issue
+0:2 - 0:3                     invalid_syntax
+0:2 - 0:3                       invalid_regex_operator
+0:2 - 0:3                         interval_open `{`
+0:3 - 0:4                   minimum: interval_count
+0:3 - 0:4                     number `2`
+0:4 - 0:5                   closing: interval_close `}`
+0:5 - 0:6           separator: delimiter `/`
+0:6 - 0:7           replacement
+0:6 - 0:7             literal `x`
+0:7 - 0:8           closing: delimiter `/`
+
+==================
+Leading interval retains counts "\\x7b" — "s/\\x7b2}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/\x7b2}/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  interval
+0:2  - 0:6                    issue: syntax_issue
+0:2  - 0:6                      invalid_syntax
+0:2  - 0:6                        invalid_regex_operator
+0:2  - 0:6                          character_escape `\\x7b`
+0:6  - 0:7                    minimum: interval_count
+0:6  - 0:7                      number `2`
+0:7  - 0:8                    closing: interval_close `}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Encoded close preserves the empty interval issue — "sDa{\\x7\\DDXD"
+:language(gsed_ere)
+:cst
+==================
+sDa{\x7\DDXD
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `D`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:4                      issue: syntax_issue
+0:4  - 0:4                        invalid_syntax
+0:4  - 0:4                          missing_interval_count
+0:4  - 0:9                      closing: character_escape `\\x7\\D`
+0:9  - 0:10           separator: delimiter `D`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `X`
+0:11 - 0:12           closing: delimiter `D`
+
+==================
+Generated backslash is repeated by an incomplete interval — "s/a\\x5c\\{/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a\x5c\{/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:3                  regex_character
+0:2  - 0:3                    literal `a`
+0:3  - 0:9                  repetition
+0:3  - 0:8                    expression: regex_character
+0:3  - 0:8                      character_escape `\\x5c\\`
+0:8  - 0:9                    operator: interval
+0:8  - 0:9                      opening: interval_open `{`
+0:9  - 0:9                      issue: syntax_issue
+0:9  - 0:9                        invalid_syntax
+0:9  - 0:9                          missing_interval_count
+0:9  - 0:9                      issue: syntax_issue
+0:9  - 0:9                        invalid_syntax
+0:9  - 0:9                          missing_closing_delimiter
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Unpaired control backslash inside interval — "s/a{\\c\\}/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{\c\}/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:7                      issue: syntax_issue
+0:4  - 0:7                        invalid_syntax
+0:4  - 0:7                          invalid_control_escape
+0:4  - 0:7                            character_escape `\\c\\`
+0:7  - 0:8                      closing: interval_close `}`
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Interval escape at EOF — "/a\\{\\"
+:language(gsed)
+:cst
+==================
+/a\{\
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:5       command
+0:0 - 0:5         address: address_clause
+0:0 - 0:5           address
+0:0 - 0:5             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:5               regular_expression
+0:1 - 0:5                 alternation
+0:1 - 0:5                   regex_branch
+0:1 - 0:5                     repetition
+0:1 - 0:2                       expression: regex_character
+0:1 - 0:2                         literal `a`
+0:2 - 0:5                       operator: interval
+0:2 - 0:4                         opening: interval_open `\\{`
+0:4 - 0:5                         issue: syntax_issue
+0:4 - 0:5                           incomplete_syntax
+0:4 - 0:5                             missing_escape_character `\\`
+0:5 - 0:5                         issue: syntax_issue
+0:5 - 0:5                           incomplete_syntax
+0:5 - 0:5                             missing_closing_delimiter
+0:5 - 0:5               issue: syntax_issue
+0:5 - 0:5                 incomplete_syntax
+0:5 - 0:5                   unterminated_regex
+0:5 - 0:5         issue: syntax_issue
+0:5 - 0:5           incomplete_syntax
+0:5 - 0:5             missing_command
+
+==================
+Encoded escape at interval delimiter — "s/a\\{\\x5c/x/"
+:language(gsed)
+:cst
+==================
+s/a\{\x5c/x/
+------------------
+0:0  - 0:12   script
+0:0  - 0:12     command_list
+0:0  - 0:12       command
+0:0  - 0:12         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:9            regular_expression
+0:2  - 0:9              alternation
+0:2  - 0:9                regex_branch
+0:2  - 0:9                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:9                    operator: interval
+0:3  - 0:5                      opening: interval_open `\\{`
+0:5  - 0:9                      issue: syntax_issue
+0:5  - 0:9                        invalid_syntax
+0:5  - 0:9                          missing_escape_character `\\x5c`
+0:9  - 0:9                      issue: syntax_issue
+0:9  - 0:9                        invalid_syntax
+0:9  - 0:9                          missing_closing_delimiter
+0:9  - 0:10           separator: delimiter `/`
+0:10 - 0:11           replacement
+0:10 - 0:11             literal `x`
+0:11 - 0:12           closing: delimiter `/`
+
+==================
+Incomplete numeric escape in interval "\\x" — "/a\\{1\\x"
+:language(gsed)
+:cst
+==================
+/a\{1\x
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:7           address
+0:0 - 0:7             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:7               regular_expression
+0:1 - 0:7                 alternation
+0:1 - 0:7                   regex_branch
+0:1 - 0:7                     repetition
+0:1 - 0:2                       expression: regex_character
+0:1 - 0:2                         literal `a`
+0:2 - 0:7                       operator: interval
+0:2 - 0:4                         opening: interval_open `\\{`
+0:4 - 0:5                         minimum: interval_count
+0:4 - 0:5                           number `1`
+0:5 - 0:7                         issue: syntax_issue
+0:5 - 0:7                           incomplete_syntax
+0:5 - 0:7                             invalid_interval_character
+0:5 - 0:7                               escape `\\x`
+0:7 - 0:7                         issue: syntax_issue
+0:7 - 0:7                           incomplete_syntax
+0:7 - 0:7                             missing_closing_delimiter
+0:7 - 0:7               issue: syntax_issue
+0:7 - 0:7                 incomplete_syntax
+0:7 - 0:7                   unterminated_regex
+0:7 - 0:7         issue: syntax_issue
+0:7 - 0:7           incomplete_syntax
+0:7 - 0:7             missing_command
+
+==================
+Incomplete numeric escape in interval "\\x4" — "/a\\{1\\x4"
+:language(gsed)
+:cst
+==================
+/a\{1\x4
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:0 - 0:8       command
+0:0 - 0:8         address: address_clause
+0:0 - 0:8           address
+0:0 - 0:8             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:8               regular_expression
+0:1 - 0:8                 alternation
+0:1 - 0:8                   regex_branch
+0:1 - 0:8                     repetition
+0:1 - 0:2                       expression: regex_character
+0:1 - 0:2                         literal `a`
+0:2 - 0:8                       operator: interval
+0:2 - 0:4                         opening: interval_open `\\{`
+0:4 - 0:5                         minimum: interval_count
+0:4 - 0:5                           number `1`
+0:5 - 0:8                         issue: syntax_issue
+0:5 - 0:8                           invalid_syntax
+0:5 - 0:8                             invalid_interval_character
+0:5 - 0:8                               character_escape `\\x4`
+0:8 - 0:8                         issue: syntax_issue
+0:8 - 0:8                           incomplete_syntax
+0:8 - 0:8                             missing_closing_delimiter
+0:8 - 0:8               issue: syntax_issue
+0:8 - 0:8                 incomplete_syntax
+0:8 - 0:8                   unterminated_regex
+0:8 - 0:8         issue: syntax_issue
+0:8 - 0:8           incomplete_syntax
+0:8 - 0:8             missing_command
+
+==================
+Interval escape at EOF — "/a{\\"
+:language(gsed_ere)
+:cst
+==================
+/a{\
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:4       command
+0:0 - 0:4         address: address_clause
+0:0 - 0:4           address
+0:0 - 0:4             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:4               regular_expression
+0:1 - 0:4                 alternation
+0:1 - 0:4                   regex_branch
+0:1 - 0:4                     repetition
+0:1 - 0:2                       expression: regex_character
+0:1 - 0:2                         literal `a`
+0:2 - 0:4                       operator: interval
+0:2 - 0:3                         opening: interval_open `{`
+0:3 - 0:4                         issue: syntax_issue
+0:3 - 0:4                           incomplete_syntax
+0:3 - 0:4                             missing_escape_character `\\`
+0:4 - 0:4                         issue: syntax_issue
+0:4 - 0:4                           incomplete_syntax
+0:4 - 0:4                             missing_closing_delimiter
+0:4 - 0:4               issue: syntax_issue
+0:4 - 0:4                 incomplete_syntax
+0:4 - 0:4                   unterminated_regex
+0:4 - 0:4         issue: syntax_issue
+0:4 - 0:4           incomplete_syntax
+0:4 - 0:4             missing_command
+
+==================
+Encoded escape at interval delimiter — "s/a{\\x5c/x/"
+:language(gsed_ere)
+:cst
+==================
+s/a{\x5c/x/
+------------------
+0:0  - 0:11   script
+0:0  - 0:11     command_list
+0:0  - 0:11       command
+0:0  - 0:11         substitute_command
+0:0  - 0:1            name: command_name `s`
+0:1  - 0:2            opening: delimiter `/`
+0:2  - 0:8            regular_expression
+0:2  - 0:8              alternation
+0:2  - 0:8                regex_branch
+0:2  - 0:8                  repetition
+0:2  - 0:3                    expression: regex_character
+0:2  - 0:3                      literal `a`
+0:3  - 0:8                    operator: interval
+0:3  - 0:4                      opening: interval_open `{`
+0:4  - 0:8                      issue: syntax_issue
+0:4  - 0:8                        invalid_syntax
+0:4  - 0:8                          missing_escape_character `\\x5c`
+0:8  - 0:8                      issue: syntax_issue
+0:8  - 0:8                        invalid_syntax
+0:8  - 0:8                          missing_closing_delimiter
+0:8  - 0:9            separator: delimiter `/`
+0:9  - 0:10           replacement
+0:9  - 0:10             literal `x`
+0:10 - 0:11           closing: delimiter `/`
+
+==================
+Incomplete numeric escape in interval "\\x" — "/a{1\\x"
+:language(gsed_ere)
+:cst
+==================
+/a{1\x
+------------------
+0:0 - 0:6   script
+0:0 - 0:6     command_list
+0:0 - 0:6       command
+0:0 - 0:6         address: address_clause
+0:0 - 0:6           address
+0:0 - 0:6             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:6               regular_expression
+0:1 - 0:6                 alternation
+0:1 - 0:6                   regex_branch
+0:1 - 0:6                     repetition
+0:1 - 0:2                       expression: regex_character
+0:1 - 0:2                         literal `a`
+0:2 - 0:6                       operator: interval
+0:2 - 0:3                         opening: interval_open `{`
+0:3 - 0:4                         minimum: interval_count
+0:3 - 0:4                           number `1`
+0:4 - 0:6                         issue: syntax_issue
+0:4 - 0:6                           incomplete_syntax
+0:4 - 0:6                             invalid_interval_character
+0:4 - 0:6                               escape `\\x`
+0:6 - 0:6                         issue: syntax_issue
+0:6 - 0:6                           incomplete_syntax
+0:6 - 0:6                             missing_closing_delimiter
+0:6 - 0:6               issue: syntax_issue
+0:6 - 0:6                 incomplete_syntax
+0:6 - 0:6                   unterminated_regex
+0:6 - 0:6         issue: syntax_issue
+0:6 - 0:6           incomplete_syntax
+0:6 - 0:6             missing_command
+
+==================
+Incomplete numeric escape in interval "\\x4" — "/a{1\\x4"
+:language(gsed_ere)
+:cst
+==================
+/a{1\x4
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         address: address_clause
+0:0 - 0:7           address
+0:0 - 0:7             regex_address
+0:0 - 0:1               opening: delimiter `/`
+0:1 - 0:7               regular_expression
+0:1 - 0:7                 alternation
+0:1 - 0:7                   regex_branch
+0:1 - 0:7                     repetition
+0:1 - 0:2                       expression: regex_character
+0:1 - 0:2                         literal `a`
+0:2 - 0:7                       operator: interval
+0:2 - 0:3                         opening: interval_open `{`
+0:3 - 0:4                         minimum: interval_count
+0:3 - 0:4                           number `1`
+0:4 - 0:7                         issue: syntax_issue
+0:4 - 0:7                           invalid_syntax
+0:4 - 0:7                             invalid_interval_character
+0:4 - 0:7                               character_escape `\\x4`
+0:7 - 0:7                         issue: syntax_issue
+0:7 - 0:7                           incomplete_syntax
+0:7 - 0:7                             missing_closing_delimiter
+0:7 - 0:7               issue: syntax_issue
+0:7 - 0:7                 incomplete_syntax
+0:7 - 0:7                   unterminated_regex
+0:7 - 0:7         issue: syntax_issue
+0:7 - 0:7           incomplete_syntax
+0:7 - 0:7             missing_command
+
+==================
+Literal interval opening at EOF — "s/a\\b\\{"
+:language(gsed)
+:cst
+==================
+s/a\b\{
+------------------
+0:0 - 0:7   script
+0:0 - 0:7     command_list
+0:0 - 0:7       command
+0:0 - 0:7         substitute_command
+0:0 - 0:1           name: command_name `s`
+0:1 - 0:2           opening: delimiter `/`
+0:2 - 0:7           regular_expression
+0:2 - 0:7             alternation
+0:2 - 0:7               regex_branch
+0:2 - 0:3                 regex_character
+0:2 - 0:3                   literal `a`
+0:3 - 0:5                 word_boundary
+0:3 - 0:5                   regex_operator `\\b`
+0:5 - 0:7                 regex_character
+0:5 - 0:7                   issue: syntax_issue
+0:5 - 0:7                     incomplete_syntax
+0:5 - 0:7                       invalid_interval_syntax
+0:5 - 0:7                         escape `\\{`
+0:7 - 0:7           issue: syntax_issue
+0:7 - 0:7             incomplete_syntax
+0:7 - 0:7               unterminated_regex
+0:7 - 0:7           issue: syntax_issue
+0:7 - 0:7             incomplete_syntax
+0:7 - 0:7               unterminated_operand

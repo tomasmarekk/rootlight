@@ -1,0 +1,871 @@
+==================
+Optional operands and word boundaries — "b\nt\nT\ne\n:x p\nb x#hi\nv0alpha p\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+b
+t
+T
+e
+:x p
+b x#hi
+v0alpha p
+
+------------------
+(script
+  (command_list
+    (command
+      (branch_command
+        (command_name)))
+    (command_separator)
+    (command
+      (branch_command
+        (command_name)))
+    (command_separator)
+    (command
+      (branch_command
+        (command_name)))
+    (command_separator)
+    (command
+      (execute_command
+        (command_name)))
+    (command_separator)
+    (command
+      (label_command
+        (command_name)
+        (label
+          (label_text))))
+    (command
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (branch_command
+        (command_name)
+        (label
+          (label_text))))
+    (comment
+      (comment_text))
+    (command_separator)
+    (command
+      (version_command
+        (command_name)
+        (version
+          (version_text))))
+    (command
+      (simple_command
+        (command_name)))
+    (command_separator)))
+
+==================
+Zero address read and opaque operands — "0r file;name\nb loop\n:loop\ne echo hi; pwd\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+0r file;name
+b loop
+:loop
+e echo hi; pwd
+
+------------------
+(script
+  (command_list
+    (command
+      address: (address_clause
+        (address
+          (line_address
+            first: (number))))
+      (file_command
+        name: (command_name)
+        file: (filename
+          (filename_text))))
+    (command_separator)
+    (command
+      (branch_command
+        name: (command_name)
+        label: (label
+          (label_text))))
+    (command_separator)
+    (command
+      (label_command
+        name: (command_name)
+        label: (label
+          (label_text))))
+    (command_separator)
+    (command
+      (execute_command
+        name: (command_name)
+        command: (shell_command
+          (shell_text))))
+    (command_separator)))
+
+==================
+Control escape issues retain their operand — "s/\\c\\./x/;s/a/\\c\\./;y/a/\\c\\./\na \\c\\.\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+s/\c\./x/;s/a/\c\./;y/a/\c\./
+a \c\.
+
+------------------
+(script
+  (command_list
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (syntax_issue
+                (invalid_syntax
+                  (invalid_control_escape
+                    (character_escape))))
+              (wildcard
+                (regex_operator)))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (regex_character
+                (literal)))))
+        (delimiter)
+        (replacement
+          (syntax_issue
+            (invalid_syntax
+              (invalid_control_escape
+                (character_escape))))
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (translate_command
+        (command_name)
+        (delimiter)
+        (translation_string
+          (literal))
+        (delimiter)
+        (translation_string
+          (syntax_issue
+            (invalid_syntax
+              (invalid_control_escape
+                (character_escape))))
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (text_command
+        (command_name)
+        (text_introducer)
+        (text
+          (literal)
+          (escape))))
+    (command_separator)))
+
+==================
+Incomplete command ":" — ":"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+:
+------------------
+0:0 - 0:1   script
+0:0 - 0:1     command_list
+0:0 - 0:1       command
+0:0 - 0:1         label_command
+0:0 - 0:1           name: command_name `:`
+0:1 - 0:1           issue: syntax_issue
+0:1 - 0:1             incomplete_syntax
+0:1 - 0:1               missing_operand
+
+==================
+Control escapes zero steps and issue payloads — "ax\\c\\.\n0~0r x\n0~,/a/p\n!!p\ns/a\\{1\\n\\}/x/\ns/a\\{1\\q\\}/x/\n"
+:language(gsed)
+==================
+ax\c\.
+0~0r x
+0~,/a/p
+!!p
+s/a\{1\n\}/x/
+s/a\{1\q\}/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (text_command
+        (command_name)
+        (text
+          (literal)
+          (syntax_issue
+            (invalid_syntax
+              (invalid_control_escape
+                (character_escape))))
+          (literal))))
+    (command_separator)
+    (command
+      (address_clause
+        (address
+          (line_address
+            (number)
+            (address_operator)
+            (number))))
+      (file_command
+        (command_name)
+        (filename
+          (filename_text))))
+    (command_separator)
+    (command
+      (address_clause
+        (address
+          (line_address
+            (number)
+            (address_operator)))
+        (address_separator)
+        (address
+          (regex_address
+            (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (regex_character
+                    (literal)))))
+            (delimiter))))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (negation
+        (syntax_issue
+          (invalid_syntax
+            (duplicate_negation))))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                (regex_character
+                  (literal))
+                (interval
+                  (interval_open)
+                  (interval_count
+                    (number))
+                  (syntax_issue
+                    (invalid_syntax
+                      (invalid_interval_character
+                        (character_escape))))
+                  (interval_close))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                (regex_character
+                  (literal))
+                (interval
+                  (interval_open)
+                  (interval_count
+                    (number))
+                  (syntax_issue
+                    (invalid_syntax
+                      (invalid_interval_character
+                        (escape))))
+                  (interval_close))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Control escapes zero steps and issue payloads — "ax\\c\\.\n0~0r x\n0~,/a/p\n!!p\ns/a{1\\n}/x/\ns/a{1\\q}/x/\n"
+:language(gsed_ere)
+==================
+ax\c\.
+0~0r x
+0~,/a/p
+!!p
+s/a{1\n}/x/
+s/a{1\q}/x/
+
+------------------
+(script
+  (command_list
+    (command
+      (text_command
+        (command_name)
+        (text
+          (literal)
+          (syntax_issue
+            (invalid_syntax
+              (invalid_control_escape
+                (character_escape))))
+          (literal))))
+    (command_separator)
+    (command
+      (address_clause
+        (address
+          (line_address
+            (number)
+            (address_operator)
+            (number))))
+      (file_command
+        (command_name)
+        (filename
+          (filename_text))))
+    (command_separator)
+    (command
+      (address_clause
+        (address
+          (line_address
+            (number)
+            (address_operator)))
+        (address_separator)
+        (address
+          (regex_address
+            (delimiter)
+            (regular_expression
+              (alternation
+                (regex_branch
+                  (regex_character
+                    (literal)))))
+            (delimiter))))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (negation
+        (syntax_issue
+          (invalid_syntax
+            (duplicate_negation))))
+      (simple_command
+        (command_name)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                (regex_character
+                  (literal))
+                (interval
+                  (interval_open)
+                  (interval_count
+                    (number))
+                  (syntax_issue
+                    (invalid_syntax
+                      (invalid_interval_character
+                        (character_escape))))
+                  (interval_close))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)
+    (command
+      (substitute_command
+        (command_name)
+        (delimiter)
+        (regular_expression
+          (alternation
+            (regex_branch
+              (repetition
+                (regex_character
+                  (literal))
+                (interval
+                  (interval_open)
+                  (interval_count
+                    (number))
+                  (syntax_issue
+                    (invalid_syntax
+                      (invalid_interval_character
+                        (escape))))
+                  (interval_close))))))
+        (delimiter)
+        (replacement
+          (literal))
+        (delimiter)))
+    (command_separator)))
+
+==================
+Empty script — ""
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+
+------------------
+0:0 - 0:0   script
+
+==================
+Numeric version and shell commands — "q42;Q0;l80;v4.10\ne printf ok; printf done\nF;z\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+q42;Q0;l80;v4.10
+e printf ok; printf done
+F;z
+
+------------------
+0:0  - 3:0    script
+0:0  - 3:0      command_list
+0:0  - 0:3        command
+0:0  - 0:3          numeric_command
+0:0  - 0:1            name: command_name `q`
+0:1  - 0:3            argument: number `42`
+0:3  - 0:4        command_separator `;`
+0:4  - 0:6        command
+0:4  - 0:6          numeric_command
+0:4  - 0:5            name: command_name `Q`
+0:5  - 0:6            argument: number `0`
+0:6  - 0:7        command_separator `;`
+0:7  - 0:10       command
+0:7  - 0:10         numeric_command
+0:7  - 0:8            name: command_name `l`
+0:8  - 0:10           argument: number `80`
+0:10 - 0:11       command_separator `;`
+0:11 - 0:16       command
+0:11 - 0:16         version_command
+0:11 - 0:12           name: command_name `v`
+0:12 - 0:16           version: version
+0:12 - 0:16             version_text `4.10`
+0:16 - 1:0        command_separator
+0:16 - 0:17         `\n`
+1:0  - 1:24       command
+1:0  - 1:24         execute_command
+1:0  - 1:1            name: command_name `e`
+1:2  - 1:24           command: shell_command
+1:2  - 1:24             shell_text `printf ok; printf done`
+1:24 - 2:0        command_separator
+1:24 - 1:25         `\n`
+2:0  - 2:1        command
+2:0  - 2:1          simple_command
+2:0  - 2:1            name: command_name `F`
+2:1  - 2:2        command_separator `;`
+2:2  - 2:3        command
+2:2  - 2:3          simple_command
+2:2  - 2:3            name: command_name `z`
+2:3  - 3:0        command_separator
+2:3  - 2:4          `\n`
+
+==================
+Control layout before commands — "\rp;\u000bp;\fp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+p;p;p
+------------------
+0:0 - 0:8   script
+0:0 - 0:8     command_list
+0:1 - 0:2       command
+0:1 - 0:2         simple_command
+0:1 - 0:2           name: command_name `p`
+0:2 - 0:3       command_separator `;`
+0:4 - 0:5       command
+0:4 - 0:5         simple_command
+0:4 - 0:5           name: command_name `p`
+0:5 - 0:6       command_separator `;`
+0:7 - 0:8       command
+0:7 - 0:8         simple_command
+0:7 - 0:8           name: command_name `p`
+
+==================
+Carriage return after address — "1\rp"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2         issue: syntax_issue
+0:1 - 0:2           invalid_syntax
+0:1 - 0:2             unknown_command `\r`
+0:2 - 0:2         issue: syntax_issue
+0:2 - 0:2           invalid_syntax
+0:2 - 0:2             missing_command_separator
+0:2 - 0:3       command
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+Regex address cannot follow address without comma — "1/a/p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1/a/p
+------------------
+0:0 - 0:5   script
+0:0 - 0:5     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2         issue: syntax_issue
+0:1 - 0:2           invalid_syntax
+0:1 - 0:2             unknown_command `/`
+0:2 - 0:2         issue: syntax_issue
+0:2 - 0:2           invalid_syntax
+0:2 - 0:2             missing_command_separator
+0:2 - 0:5       command
+0:2 - 0:5         text_command
+0:2 - 0:3           name: command_name `a`
+0:3 - 0:5           text
+0:3 - 0:5             literal `/p`
+
+==================
+Space cannot replace an address separator — "1 2p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1 2p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:3       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:2 - 0:3         issue: syntax_issue
+0:2 - 0:3           invalid_syntax
+0:2 - 0:3             unknown_command `2`
+0:3 - 0:3         issue: syntax_issue
+0:3 - 0:3           invalid_syntax
+0:3 - 0:3             missing_command_separator
+0:3 - 0:4       command
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Address after negation is an unknown command — "$!$p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+$!$p
+------------------
+0:0 - 0:4   script
+0:0 - 0:4     command_list
+0:0 - 0:3       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             last_line_address `$`
+0:1 - 0:2         negation: negation
+0:1 - 0:2           "!"
+0:2 - 0:3         issue: syntax_issue
+0:2 - 0:3           invalid_syntax
+0:2 - 0:3             unknown_command `$`
+0:3 - 0:3         issue: syntax_issue
+0:3 - 0:3           invalid_syntax
+0:3 - 0:3             missing_command_separator
+0:3 - 0:4       command
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Comma after negation — "!,"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+!,
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         negation: negation
+0:0 - 0:1           "!"
+0:1 - 0:2         issue: syntax_issue
+0:1 - 0:2           invalid_syntax
+0:1 - 0:2             unknown_command `,`
+
+==================
+Backslash after address — "1\\"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1\
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2         issue: syntax_issue
+0:1 - 0:2           invalid_syntax
+0:1 - 0:2             unknown_command `\\`
+
+==================
+NUL command — "\u0000"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+ 
+------------------
+0:0 - 0:1   script
+0:0 - 0:1     command_list
+0:0 - 0:1       command
+0:0 - 0:1         issue: syntax_issue
+0:0 - 0:1           invalid_syntax
+0:0 - 0:1             unknown_command `\0`
+
+==================
+Unknown uppercase command — "1S"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1S
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:2         issue: syntax_issue
+0:1 - 0:2           invalid_syntax
+0:1 - 0:2             unknown_command `S`
+
+==================
+NUL after command — "p\u0000"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+p 
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:1       command
+0:0 - 0:1         simple_command
+0:0 - 0:1           name: command_name `p`
+0:1 - 0:1         issue: syntax_issue
+0:1 - 0:1           invalid_syntax
+0:1 - 0:1             missing_command_separator
+0:1 - 0:2       command
+0:1 - 0:2         issue: syntax_issue
+0:1 - 0:2           invalid_syntax
+0:1 - 0:2             unknown_command `\0`
+
+==================
+Duplicate negation — "!!p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+!!p
+------------------
+0:0 - 0:3   script
+0:0 - 0:3     command_list
+0:0 - 0:3       command
+0:0 - 0:2         negation: negation
+0:0 - 0:1           "!"
+0:1 - 0:2           issue: syntax_issue
+0:1 - 0:2             invalid_syntax
+0:1 - 0:2               duplicate_negation
+0:1 - 0:2                 "!"
+0:2 - 0:3         simple_command
+0:2 - 0:3           name: command_name `p`
+
+==================
+Incomplete command "1" — "1"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1
+------------------
+0:0 - 0:1   script
+0:0 - 0:1     command_list
+0:0 - 0:1       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:1         issue: syntax_issue
+0:1 - 0:1           incomplete_syntax
+0:1 - 0:1             missing_command
+
+==================
+Incomplete command "1\n" — "1\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:1       command
+0:0 - 0:1         address: address_clause
+0:0 - 0:1           address
+0:0 - 0:1             line_address
+0:0 - 0:1               first: number `1`
+0:1 - 0:1         issue: syntax_issue
+0:1 - 0:1           invalid_syntax
+0:1 - 0:1             missing_command
+0:1 - 1:0       command_separator
+0:1 - 0:2         `\n`
+
+==================
+Incomplete command "r\n" — "r\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+r
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:1       command
+0:0 - 0:1         file_command
+0:0 - 0:1           name: command_name `r`
+0:1 - 0:1           issue: syntax_issue
+0:1 - 0:1             invalid_syntax
+0:1 - 0:1               missing_operand
+0:1 - 1:0       command_separator
+0:1 - 0:2         `\n`
+
+==================
+Incomplete command "{p" — "{p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+{p
+------------------
+0:0 - 0:2   script
+0:0 - 0:2     command_list
+0:0 - 0:2       command
+0:0 - 0:2         block
+0:0 - 0:1           "{"
+0:1 - 0:2           command_list
+0:1 - 0:2             command
+0:1 - 0:2               simple_command
+0:1 - 0:2                 name: command_name `p`
+0:2 - 0:2           issue: syntax_issue
+0:2 - 0:2             incomplete_syntax
+0:2 - 0:2               missing_closing_delimiter
+
+==================
+Blank script " " — " "
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+ 
+------------------
+0:1 - 0:1   script
+
+==================
+Blank script "\t " — "\t "
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+	 
+------------------
+0:2 - 0:2   script
+
+==================
+Leading layout " p" — " p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+ p
+------------------
+0:1 - 0:2   script
+0:1 - 0:2     command_list
+0:1 - 0:2       command
+0:1 - 0:2         simple_command
+0:1 - 0:2           name: command_name `p`
+
+==================
+Leading layout "  !p" — "  !p"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+  !p
+------------------
+0:2 - 0:4   script
+0:2 - 0:4     command_list
+0:2 - 0:4       command
+0:2 - 0:3         negation: negation
+0:2 - 0:3           "!"
+0:3 - 0:4         simple_command
+0:3 - 0:4           name: command_name `p`
+
+==================
+Leading layout "  #n" — "  #n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+  #n
+------------------
+0:2 - 0:4   script
+0:2 - 0:4     command_list
+0:2 - 0:4       comment
+0:2 - 0:4         comment_text `#n`
+
+==================
+Leading layout "\n   " — "\n   "
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+
+   
+------------------
+0:0 - 1:3   script
+0:0 - 1:0     command_list
+0:0 - 1:0       command_separator
+0:0 - 0:1         `\n`

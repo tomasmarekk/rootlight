@@ -1,0 +1,22 @@
+================================================================================
+spread in destructuring
+================================================================================
+
+[first, second, ...rest] = items
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (array_pattern
+            (pattern
+              (identifier))
+            (pattern
+              (identifier))
+            (splat_pattern
+              (identifier))))
+        (expression
+          (identifier))))))

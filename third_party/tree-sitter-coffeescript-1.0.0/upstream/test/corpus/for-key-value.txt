@@ -1,0 +1,28 @@
+================================================================================
+for loop with key and value
+================================================================================
+
+for k, v of obj
+  log k
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (for_statement
+        (identifier)
+        (identifier)
+        (expression
+          (identifier))
+        (block
+          (indented_block
+            (statement_sequence
+              (statement
+                (expression_statement
+                  (expression
+                    (implicit_call
+                      (expression
+                        (identifier))
+                      (expression
+                        (identifier)))))))))))))

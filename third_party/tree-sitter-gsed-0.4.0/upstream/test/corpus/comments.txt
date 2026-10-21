@@ -1,0 +1,195 @@
+==================
+Directive and comments — "#n quiet\n# plain\n!# negated\n"
+:language(gsed)
+:language(gsed_ere)
+==================
+#n quiet
+# plain
+!# negated
+
+------------------
+(script
+  (command_list
+    (directive
+      (directive_text)
+      (comment_text))
+    (command_separator)
+    (comment
+      (comment_text))
+    (command_separator)
+    (command
+      negation: (negation)
+      (comment
+        (comment_text)))
+    (command_separator)))
+
+==================
+Comment after command — "p#x\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+p#x
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:1       command
+0:0 - 0:1         simple_command
+0:0 - 0:1           name: command_name `p`
+0:1 - 0:3       comment
+0:1 - 0:3         comment_text `#x`
+0:3 - 1:0       command_separator
+0:3 - 0:4         `\n`
+
+==================
+Comment rejects addresses — "1#comment"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+1#comment
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:1         issue: syntax_issue
+0:0 - 0:1           invalid_syntax
+0:0 - 0:1             excess_address
+0:0 - 0:1               address: address_clause
+0:0 - 0:1                 address
+0:0 - 0:1                   line_address
+0:0 - 0:1                     first: number `1`
+0:1 - 0:9         comment
+0:1 - 0:9           comment_text `#comment`
+
+==================
+Negated comment — "!#comment"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+!#comment
+------------------
+0:0 - 0:9   script
+0:0 - 0:9     command_list
+0:0 - 0:9       command
+0:0 - 0:1         negation: negation
+0:0 - 0:1           "!"
+0:1 - 0:9         comment
+0:1 - 0:9           comment_text `#comment`
+
+==================
+Negated comment after print true — "p\n1!#comment\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+p
+1!#comment
+
+------------------
+0:0  - 2:0    script
+0:0  - 2:0      command_list
+0:0  - 0:1        command
+0:0  - 0:1          simple_command
+0:0  - 0:1            name: command_name `p`
+0:1  - 1:0        command_separator
+0:1  - 0:2          `\n`
+1:0  - 1:10       command
+1:0  - 1:1          issue: syntax_issue
+1:0  - 1:1            invalid_syntax
+1:0  - 1:1              excess_address
+1:0  - 1:1                address: address_clause
+1:0  - 1:1                  address
+1:0  - 1:1                    line_address
+1:0  - 1:1                      first: number `1`
+1:1  - 1:2          negation: negation
+1:1  - 1:2            "!"
+1:2  - 1:10         comment
+1:2  - 1:10           comment_text `#comment`
+1:10 - 2:0        command_separator
+1:10 - 1:11         `\n`
+
+==================
+Negated comment after print false — "p\n!#comment\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+p
+!#comment
+
+------------------
+0:0 - 2:0   script
+0:0 - 2:0     command_list
+0:0 - 0:1       command
+0:0 - 0:1         simple_command
+0:0 - 0:1           name: command_name `p`
+0:1 - 1:0       command_separator
+0:1 - 0:2         `\n`
+1:0 - 1:9       command
+1:0 - 1:1         negation: negation
+1:0 - 1:1           "!"
+1:1 - 1:9         comment
+1:1 - 1:9           comment_text `#comment`
+1:9 - 2:0       command_separator
+1:9 - 1:10         `\n`
+
+==================
+Directive preserves body whitespace — "#n hi\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+#n hi
+
+------------------
+0:0 - 1:0   script
+0:0 - 1:0     command_list
+0:0 - 0:5       directive
+0:0 - 0:2         directive_text `#n`
+0:2 - 0:5         comment_text ` hi`
+0:5 - 1:0       command_separator
+0:5 - 0:6         `\n`
+
+==================
+Only the first comment is a directive — "#n hi\n#n\n"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+#n hi
+#n
+
+------------------
+0:0 - 2:0   script
+0:0 - 2:0     command_list
+0:0 - 0:5       directive
+0:0 - 0:2         directive_text `#n`
+0:2 - 0:5         comment_text ` hi`
+0:5 - 1:0       command_separator
+0:5 - 0:6         `\n`
+1:0 - 1:2       comment
+1:0 - 1:2         comment_text `#n`
+1:2 - 2:0       command_separator
+1:2 - 1:3         `\n`
+
+==================
+Initial BOM precedes a directive — "﻿#n\np"
+:language(gsed)
+:language(gsed_ere)
+:cst
+==================
+﻿#n
+p
+------------------
+0:3 - 1:1   script
+0:3 - 1:1     command_list
+0:3 - 0:5       directive
+0:3 - 0:5         directive_text `#n`
+0:5 - 1:0       command_separator
+0:5 - 0:6         `\n`
+1:0 - 1:1       command
+1:0 - 1:1         simple_command
+1:0 - 1:1           name: command_name `p`

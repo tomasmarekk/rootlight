@@ -1,0 +1,468 @@
+--- a/bindings/rust/lib.rs
++++ b/bindings/rust/lib.rs
+@@ -1,120 +1,242 @@
+-//! Bind the reviewed CoffeeScript parser to complete scanner state and an owned host callback.
+-use std::{ffi::c_void, marker::PhantomData, rc::Rc};
++//! Bind retained CoffeeScript tables to the checked, request-scoped scanner.
++//! Cancellation storage remains owned until the native callback is detached.
++
++use std::{cell::Cell, ffi::c_void, marker::PhantomData, rc::Rc};
++use tree_sitter_language::LanguageFn;
+ 
+ unsafe extern "C" {
++    fn tree_sitter_coffeescript() -> *const ();
+     fn rootlight_coffeescript_scope_begin(limit: u64) -> u64;
++    fn rootlight_coffeescript_scope_status(token: u64) -> std::ffi::c_int;
++    fn rootlight_coffeescript_scope_work(token: u64) -> u64;
+     fn rootlight_coffeescript_scope_set_cancel(
+         token: u64,
+-        callback: unsafe extern "C" fn(*mut c_void) -> bool,
++        callback: Option<extern "C" fn(*mut c_void) -> bool>,
+         context: *mut c_void,
+     ) -> bool;
+-    fn rootlight_coffeescript_scope_status(token: u64) -> i32;
+-    fn rootlight_coffeescript_scope_finish(token: u64) -> i32;
+-    fn rootlight_coffeescript_scope_context_active(context: *const c_void) -> bool;
+-    fn rootlight_coffeescript_scope_work(token: u64) -> u64;
+-}
+-
+-/// Typed refusals cannot be converted to a successful partial tree.
++    fn rootlight_coffeescript_scope_finish(token: u64) -> std::ffi::c_int;
++    fn rootlight_coffeescript_scope_refuse(status: std::ffi::c_int);
++}
++
++/// The retained generated ABI-14 CoffeeScript entry point.
++// SAFETY: the retained generated parser defines this exact language entry point.
++pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_coffeescript) };
++
++/// Native node inventory from the same actual generator invocation as the tables.
++pub const NODE_TYPES: &str = include_str!("../../upstream/src/node-types.json");
++
++/// Complete active scanner, status bridge and generated parser identity.
++pub const SCANNER_CONTRACT_IDENTITY: &str = "coffeescript-owned-scanner-scope/3;parser=599ac2851c774ff389b0bd808ccef69f86ba1c0485f15c80088ff1484791a666;scanner=ce059ce315c3644f832d672ae3903702eec89f8070eac36b603398eb3c8beb9e;status=0d3589ca2f7dbb1a597d2562bc80460c2d597909a089a820604c12f0d047a5a9;header=1a428077355af4b9ee5d6b3dc78821dbeab784b20964b7e8fe8c86171ca2dfe0";
++
++/// First native refusal, or a strict wrapper lifecycle failure.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[non_exhaustive]
+ pub enum ScannerRefusal {
+-    /// The fallible allocation for the cancellation owner failed.
++    /// A scanner or stable callback allocation was refused.
+     OwnerAllocation,
+-    /// C could not allocate its fixed scanner; no memory accounting is claimed.
++    /// The fixed C scanner allocation was unavailable.
+     NativeAllocationUnavailable,
+-    /// A complete state or indentation width cannot fit its declared capacity.
++    /// The complete scanner state exceeds its 1024-byte serialized format.
+     Capacity,
+-    /// Serialized scanner state was not canonical.
++    /// Restored native scanner state was malformed or incomplete.
+     MalformedState,
+-    /// No owning same-thread parse scope exists.
++    /// A native callback ran outside its owning synchronous scope.
+     ScopeMissing,
+-    /// A nested or mismatched scope violated exclusive ownership.
++    /// Nested, exhausted or mismatched scope ownership was refused.
+     ScopeConflict,
+-    /// Native lookahead was not a Unicode scalar.
++    /// Native input exposed a value outside the Unicode scalar contract.
+     InvalidScalar,
+-    /// The host must recover its monotonic cancellation reason from its token.
++    /// The installed cancellation callback requested a stop.
+     Cancelled,
+-    /// The finite scanner transition credit was exhausted.
++    /// The next external-scanner step exceeded its finite credit.
+     WorkLimit,
+-    /// An embedded NUL cannot be interpreted as end of input.
++    /// Embedded NUL is not end of input.
+     UnsupportedNul,
+-    /// Dedentation did not name an existing indentation column.
++    /// Dedentation did not name an existing column.
+     UnsupportedIndentation,
+-    /// The C status ABI or callback-release proof was inconsistent.
++    /// A callback panicked; no unwind crossed the native ABI.
++    CallbackPanicked,
++    /// The linked status bridge returned an unrecognized ABI value.
+     StatusAbi(i32),
+ }
+ 
+-/// Exclusive thread-affine lifetime for a native scanner request.
++struct CallbackContext<T> {
++    value: T,
++    cancelled: fn(&T) -> bool,
++    panicked: Cell<bool>,
++}
++
++fn report_callback_panic() {
++    // SAFETY: this source-bound status operation only records a TLS refusal;
++    // it neither polls a callback nor dereferences its possibly destroyed data.
++    unsafe { rootlight_coffeescript_scope_refuse(11) };
++}
++
++fn release_callback_owner<T>(owner: Rc<Vec<CallbackContext<T>>>, cancelled: bool) -> bool {
++    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owner))) {
++        Ok(()) => cancelled,
++        Err(payload) => {
++            report_callback_panic();
++            // A panic payload may itself panic in Drop; do not run it across C.
++            std::mem::forget(payload);
++            true
++        }
++    }
++}
++
++extern "C" fn poll<T>(raw: *mut c_void) -> bool {
++    if raw.is_null() {
++        report_callback_panic();
++        return true;
++    }
++    let pointer = raw.cast::<Vec<CallbackContext<T>>>();
++    // SAFETY: begin installed this exact Rc::into_raw-owned C count on the same
++    // thread. A non-reentrant detach precedes releasing that count. Retain an
++    // independent temporary before arbitrary user code can finish/drop its guard.
++    let owner = unsafe {
++        Rc::increment_strong_count(pointer);
++        Rc::from_raw(pointer)
++    };
++    let Some(context) = owner.first() else {
++        report_callback_panic();
++        return release_callback_owner(owner, true);
++    };
++    let cancelled = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        (context.cancelled)(&context.value)
++    })) {
++        Ok(cancelled) => cancelled,
++        Err(payload) => {
++            context.panicked.set(true);
++            report_callback_panic();
++            std::mem::forget(payload);
++            true
++        }
++    };
++    // No context access follows the final owner release: T::drop may run here.
++    release_callback_owner(owner, cancelled)
++}
++
++/// Own one synchronous scanner operation and its stable cancellation context.
+ ///
+-/// Construct before parser creation or lease acquisition. Keep it alive during
+-/// parsing and any early parser cleanup, then call `finish` before accepting
+-/// a returned tree or permitting parser reuse. Any refusal requires discarding
+-/// that tree. Neither a numeric token nor this scope grants cross-thread access.
++/// This guard cannot cross threads. Each callback temporarily retains shared
++/// ownership before lending `&T`, including when T safely finishes its own guard.
++/// Forgetting leaks the owned counts and leaves the native scope occupied.
++/// Reentrant finish detaches its callback but leaves the operation conflicted;
++/// a self-dropped guard requires that worker thread to exit before another scope.
++/// The one-element Vec reserves fallibly; its constant-size Rc owner uses stable
++/// infallible allocation. This API provides no hard/accounted memory guarantee.
++#[must_use = "finish the scanner scope before admitting native syntax"]
+ pub struct ScannerScope<T: CancellationProbe> {
+     token: u64,
+-    owner: Vec<T>,
+-    armed: bool,
+-    _thread_affine: PhantomData<Rc<()>>,
++    context: Rc<Vec<CallbackContext<T>>>,
++    callback_owner: *const Vec<CallbackContext<T>>,
++    _thread: PhantomData<Rc<()>>,
++}
++
++impl<T: CancellationProbe> std::fmt::Debug for ScannerScope<T> {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("ScannerScope")
++            .finish_non_exhaustive()
++    }
+ }
+ 
+ impl<T: CancellationProbe> ScannerScope<T> {
+-    /// Start a finite scanner request with an owned stable callback address.
++    fn release_native_owner(&mut self) {
++        let pointer = std::mem::replace(&mut self.callback_owner, std::ptr::null());
++        if !pointer.is_null() {
++            // SAFETY: this pairs only the C-held into_raw count, exactly once,
++            // after matching finish detached the callback. The guard's separate
++            // Rc still owns the context, so this release cannot destroy T.
++            unsafe { drop(Rc::from_raw(pointer)) };
++        }
++    }
++
++    /// Install an owned callback context on the current OS thread.
+     ///
+     /// # Errors
+-    /// Returns a typed allocation, ownership, cancellation, or work refusal.
+-    pub fn begin(cancellation: T, limit: u64) -> Result<Self, ScannerRefusal> {
+-        let mut owner = Vec::new();
+-        owner
++    /// Returns allocation, ownership, cancellation or callback failure without
++    /// leaving a callback pointing at released storage.
++    pub fn begin(value: T, limit: u64) -> Result<Self, ScannerRefusal> {
++        let mut context = Vec::new();
++        context
+             .try_reserve_exact(1)
+             .map_err(|_| ScannerRefusal::OwnerAllocation)?;
+-        owner.push(cancellation);
+-        // SAFETY: C owns only TLS values here, before any callback is installed.
++        context.push(CallbackContext {
++            value,
++            cancelled: |value: &T| value.is_cancelled(),
++            panicked: Cell::new(false),
++        });
++        // Stable Rc::new has no fallible allocation API; its owner allocation
++        // is constant-size, while the generic T storage was reserved fallibly.
++        let context = Rc::new(context);
++        // SAFETY: the paired bridge owns a thread-local monotonically fresh token.
+         let token = unsafe { rootlight_coffeescript_scope_begin(limit) };
+         if token == 0 {
+             return Err(ScannerRefusal::ScopeConflict);
+         }
+-        let mut scope = Self {
++        let callback_owner = Rc::into_raw(Rc::clone(&context));
++        let scope = Self {
+             token,
+-            owner,
+-            armed: true,
+-            _thread_affine: PhantomData,
++            context,
++            callback_owner,
++            _thread: PhantomData,
+         };
+-        let context = scope.owner.as_mut_ptr().cast();
+-        // SAFETY: the private Vec keeps this allocation stable; it never grows
+-        // after installation and finish clears C's pointer before its release.
+-        let installed =
+-            unsafe { rootlight_coffeescript_scope_set_cancel(token, cancelled::<T>, context) };
++        // SAFETY: this actual into_raw count remains owned by scope until native
++        // finish detaches the callback, including installed-but-refused begin.
++        let installed = unsafe {
++            rootlight_coffeescript_scope_set_cancel(
++                token,
++                Some(poll::<T>),
++                scope.callback_owner.cast_mut().cast(),
++            )
++        };
+         if !installed {
+-            scope.finish()?;
+-            return Err(ScannerRefusal::StatusAbi(-1));
++            return match scope.finish() {
++                Err(refusal) => Err(refusal),
++                Ok(()) => Err(ScannerRefusal::ScopeConflict),
++            };
+         }
+         Ok(scope)
+     }
+ 
+-    /// Check the sticky native status, including current SDK cancellation.
++    /// Detach the callback and return the operation's sticky native refusal.
+     ///
+     /// # Errors
+-    /// Returns the first typed native refusal; it is never cleared by reset.
+-    pub fn status(&self) -> Result<(), ScannerRefusal> {
+-        // SAFETY: the !Send/!Sync owner retains this same-thread active token.
+-        self.decode(unsafe { rootlight_coffeescript_scope_status(self.token) })
+-    }
+-
+-    /// Return actual consumed scanner credits before scope closure.
++    /// Any native or wrapper refusal prevents publication of its tree or facts.
++    pub fn finish(mut self) -> Result<(), ScannerRefusal> {
++        let token = std::mem::replace(&mut self.token, 0);
++        // SAFETY: this thread-affine guard alone owns the nonzero token; native
++        // finish clears the callback before context can be dropped.
++        let status = unsafe { rootlight_coffeescript_scope_finish(token) };
++        self.release_native_owner();
++        if self
++            .context
++            .first()
++            .is_some_and(|context| context.panicked.get())
++        {
++            return Err(ScannerRefusal::CallbackPanicked);
++        }
++        Self::decode(status)
++    }
++
++    /// Return actual accepted external-scanner logical steps before closure.
+     #[must_use]
+     pub fn work(&self) -> u64 {
+-        // SAFETY: a live guard owns the matching same-thread token.
++        // SAFETY: the thread-affine guard owns this active operation token.
+         unsafe { rootlight_coffeescript_scope_work(self.token) }
+     }
+ 
+-    /// Clear the C callback before releasing its owned probe.
++    /// Poll sticky native status while retaining the owned callback.
+     ///
+     /// # Errors
+-    /// Returns the first typed refusal, including cancellation observed at finish.
+-    pub fn finish(mut self) -> Result<(), ScannerRefusal> {
+-        self.close()
+-    }
+-
+-    fn decode(&self, status: i32) -> Result<(), ScannerRefusal> {
++    /// Any native or callback refusal prevents admission of partial syntax.
++    pub fn status(&self) -> Result<(), ScannerRefusal> {
++        // SAFETY: C retains its own Rc count until matching finish detaches it.
++        Self::decode(unsafe { rootlight_coffeescript_scope_status(self.token) })
++    }
++
++    fn decode(status: i32) -> Result<(), ScannerRefusal> {
+         Err(match status {
+             0 => return Ok(()),
+             1 => ScannerRefusal::NativeAllocationUnavailable,
+@@ -127,60 +249,25 @@
+             8 => ScannerRefusal::WorkLimit,
+             9 => ScannerRefusal::UnsupportedNul,
+             10 => ScannerRefusal::UnsupportedIndentation,
++            11 => ScannerRefusal::CallbackPanicked,
+             other => ScannerRefusal::StatusAbi(other),
+         })
+     }
+-
+-    fn close(&mut self) -> Result<(), ScannerRefusal> {
+-        if !self.armed {
+-            return Ok(());
+-        }
+-        // SAFETY: the matching same-thread finish polls while owner is alive,
+-        // then clears the callback and context even when refusal is sticky.
+-        let status = unsafe { rootlight_coffeescript_scope_finish(self.token) };
+-        let result = self.decode(status);
+-        let context = self.owner.as_ptr().cast();
+-        // SAFETY: the query compares pointer values only, without dereferencing.
+-        let retained = unsafe { rootlight_coffeescript_scope_context_active(context) };
+-        self.armed = false;
+-        if retained {
+-            // An impossible cleanup mismatch must leak a valid owner rather
+-            // than leave C with a dangling pointer. Future begin fails closed.
+-            std::mem::forget(std::mem::take(&mut self.owner));
+-            return Err(ScannerRefusal::StatusAbi(-2));
+-        }
+-        result
+-    }
+ }
+ 
+ impl<T: CancellationProbe> Drop for ScannerScope<T> {
+     fn drop(&mut self) {
+-        let _ = self.close();
+-    }
+-}
+-
+-unsafe extern "C" fn cancelled<T: CancellationProbe>(context: *mut c_void) -> bool {
+-    // SAFETY: ScannerScope installed exactly one initialized cancellation probe at this
+-    // stable private address, and C clears the pointer before owner release.
+-    let cancellation = unsafe { &*context.cast::<T>() };
+-    cancellation.is_cancelled()
+-}
+-
+-/// A stable owned probe; borrowed request state cannot satisfy this bound.
++        if self.token != 0 {
++            // SAFETY: the same owning thread closes this token before Vec drops.
++            unsafe { rootlight_coffeescript_scope_finish(self.token) };
++            self.token = 0;
++            self.release_native_owner();
++        }
++    }
++}
++
++/// Owned request cancellation probe; borrowed state cannot satisfy this bound.
+ pub trait CancellationProbe: 'static {
+-    /// Return whether this request must stop. The callback must not panic.
++    /// Return whether parsing must stop; panics are contained at the native ABI.
+     fn is_cancelled(&self) -> bool;
+ }
+-
+-use tree_sitter_language::LanguageFn;
+-unsafe extern "C" {
+-    fn tree_sitter_coffeescript() -> *const ();
+-}
+-/// Exact pinned native language entry point; scanner scope is still mandatory.
+-// SAFETY: the retained parser translation unit defines this language function.
+-pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_coffeescript) };
+-/// Native node metadata matching the compiled parser.
+-pub const NODE_TYPES: &str = include_str!("../../upstream/src/node-types.json");
+-
+-/// Native scanner source and owned-probe ABI contract.
+-pub const SCANNER_CONTRACT_IDENTITY: &str = "coffeescript-owned-scanner-scope/2;parser=599ac2851c774ff389b0bd808ccef69f86ba1c0485f15c80088ff1484791a666;scanner=ce059ce315c3644f832d672ae3903702eec89f8070eac36b603398eb3c8beb9e;status=25170fd15a21afbae7516ee2d6bbc7d09cba56c7875022b2ff8f0f31f43da624;header=2d685cfab3745bfc80ac6fc96e00d0158a6fda6ca320f1b383622bfcb513d019";
+--- a/src/rootlight_coffeescript_status.c
++++ b/src/rootlight_coffeescript_status.c
+@@ -19,13 +19,14 @@
+ static ROOTLIGHT_COFFEESCRIPT_TLS RootlightCoffeescriptStatus refusal;
+ static ROOTLIGHT_COFFEESCRIPT_TLS RootlightCoffeescriptCancelled cancelled;
+ static ROOTLIGHT_COFFEESCRIPT_TLS void *cancel_context;
++static ROOTLIGHT_COFFEESCRIPT_TLS bool callback_active;
+ 
+ void rootlight_coffeescript_scope_refuse(RootlightCoffeescriptStatus status) {
+     if (refusal == ROOTLIGHT_COFFEESCRIPT_OK) refusal = status;
+ }
+ 
+ uint64_t rootlight_coffeescript_scope_begin(uint64_t limit) {
+-    if (active_token != 0 || next_token == UINT64_MAX) {
++    if (callback_active || active_token != 0 || next_token == UINT64_MAX) {
+         rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_SCOPE_CONFLICT);
+         return 0;
+     }
+@@ -40,7 +41,7 @@
+ 
+ bool rootlight_coffeescript_scope_set_cancel(uint64_t token,
+     RootlightCoffeescriptCancelled callback, void *context) {
+-    if (token == 0 || active_token != token) {
++    if (callback_active || token == 0 || active_token != token) {
+         rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_SCOPE_CONFLICT);
+         return false;
+     }
+@@ -50,12 +51,19 @@
+ }
+ 
+ bool rootlight_coffeescript_scope_poll(void) {
++    if (callback_active) {
++        rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_SCOPE_CONFLICT);
++        return false;
++    }
+     if (active_token == 0) {
+         rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_SCOPE_MISSING);
+         return false;
+     }
+-    if (refusal == ROOTLIGHT_COFFEESCRIPT_OK && cancelled && cancelled(cancel_context)) {
+-        rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_CANCELLED);
++    if (refusal == ROOTLIGHT_COFFEESCRIPT_OK && cancelled) {
++        callback_active = true;
++        bool stop = cancelled(cancel_context);
++        callback_active = false;
++        if (stop) rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_CANCELLED);
+     }
+     return refusal == ROOTLIGHT_COFFEESCRIPT_OK;
+ }
+@@ -92,6 +100,14 @@
+ }
+ 
+ RootlightCoffeescriptStatus rootlight_coffeescript_scope_finish(uint64_t token) {
++    if (callback_active) {
++        /* Detach before releasing the C-held Rc, while leaving the operation
++         * occupied so reentry cannot begin a fresh successful transaction. */
++        rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_SCOPE_CONFLICT);
++        cancelled = NULL;
++        cancel_context = NULL;
++        return ROOTLIGHT_COFFEESCRIPT_SCOPE_CONFLICT;
++    }
+     if (token == 0 || active_token != token) {
+         rootlight_coffeescript_scope_refuse(ROOTLIGHT_COFFEESCRIPT_SCOPE_CONFLICT);
+         return ROOTLIGHT_COFFEESCRIPT_SCOPE_CONFLICT;
+--- a/src/rootlight_coffeescript_status.h
++++ b/src/rootlight_coffeescript_status.h
+@@ -18,7 +18,8 @@
+     ROOTLIGHT_COFFEESCRIPT_CANCELLED = 7,
+     ROOTLIGHT_COFFEESCRIPT_WORK_LIMIT = 8,
+     ROOTLIGHT_COFFEESCRIPT_UNSUPPORTED_NUL = 9,
+-    ROOTLIGHT_COFFEESCRIPT_UNSUPPORTED_INDENTATION = 10
++    ROOTLIGHT_COFFEESCRIPT_UNSUPPORTED_INDENTATION = 10,
++    ROOTLIGHT_COFFEESCRIPT_CALLBACK_PANICKED = 11
+ } RootlightCoffeescriptStatus;
+ 
+ typedef bool (*RootlightCoffeescriptCancelled)(void *context);
+@@ -33,7 +34,8 @@
+     RootlightCoffeescriptCancelled cancelled, void *context);
+ 
+ /* Poll before final admission. Matching finish clears callback ownership even
+- * on refusal; mismatched finish preserves the outer callback and sticky error. */
++ * on refusal; mismatched finish preserves the outer callback and sticky error.
++ * Reentrant finish detaches the callback and keeps the operation occupied. */
+ RootlightCoffeescriptStatus rootlight_coffeescript_scope_status(uint64_t token);
+ RootlightCoffeescriptStatus rootlight_coffeescript_scope_finish(uint64_t token);
+ 

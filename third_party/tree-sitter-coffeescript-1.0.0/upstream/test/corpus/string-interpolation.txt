@@ -1,0 +1,25 @@
+================================================================================
+string interpolation
+================================================================================
+
+message = "Hi, I'm #{@name} #team"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (assignment_statement
+        (pattern
+          (identifier))
+        (expression
+          (string
+            (double_quoted_string
+              (double_quoted_content)
+              (interpolation
+                (expression
+                  (instance_variable
+                    (identifier))))
+              (double_quoted_content)
+              (double_quoted_content)
+              (double_quoted_content))))))))

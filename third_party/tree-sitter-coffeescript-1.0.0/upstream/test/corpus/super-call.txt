@@ -1,0 +1,32 @@
+================================================================================
+super call
+================================================================================
+
+class Pup extends Animal:
+  constructor: (name) ->: super(name)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement_sequence
+    (statement
+      (class_definition
+        (identifier)
+        (identifier)
+        (class_body
+          (class_indented_body
+            (class_member
+              (method_definition
+                (identifier)
+                (parameters
+                  (parameter
+                    (pattern
+                      (identifier))))
+                (block
+                  (inline_block
+                    (statement
+                      (expression_statement
+                        (expression
+                          (super_expression
+                            (expression
+                              (identifier))))))))))))))))

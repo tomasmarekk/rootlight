@@ -1,0 +1,3 @@
+autoInstallPeers: false
+allowBuilds:
+  tree-sitter-cli: true

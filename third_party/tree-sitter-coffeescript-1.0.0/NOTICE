@@ -1,0 +1,4 @@
+CoffeeScript grammar and scanner from talha-akram/tree-sitter-coffeescript.
+Pinned commit aaba90672d42932d6c8cccbbb0aa130688155289.
+MIT license and upstream authorship are retained in LICENSE and upstream/.
+Rootlight local changes do not replace upstream ownership or qualify full CoffeeScript semantics.

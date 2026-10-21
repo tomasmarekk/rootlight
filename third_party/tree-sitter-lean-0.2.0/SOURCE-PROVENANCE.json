@@ -1,0 +1,122 @@
+{
+  "upstream": {
+    "repository": "https://github.com/Julian/tree-sitter-lean",
+    "commit": "916c44f4d89c970f66dd34a49e7ce848f4d29e72",
+    "version_metadata": "0.2.0",
+    "license": "MIT",
+    "complete_blobs": 55,
+    "archive_sha256": "933465ccfca298ca888b71ab35b84b94a6f127806022b3490709de4d22790260"
+  },
+  "upstream_file_modes": {
+    ".editorconfig": "100644",
+    ".gitattributes": "100644",
+    ".github/FUNDING.yml": "100644",
+    ".github/SECURITY.md": "100644",
+    ".github/dependabot.yml": "100644",
+    ".github/release.yml": "100644",
+    ".github/workflows/ci.yml": "100644",
+    ".github/workflows/zizmor.yml": "100644",
+    ".gitignore": "100644",
+    ".pre-commit-config.yaml": "100644",
+    "CMakeLists.txt": "100644",
+    "Cargo.toml": "100644",
+    "LICENSE": "100644",
+    "Makefile": "100644",
+    "README.md": "100644",
+    "binding.gyp": "100644",
+    "bindings/c/tree-sitter-lean.h": "100644",
+    "bindings/c/tree-sitter-lean.pc.in": "100644",
+    "bindings/node/binding.cc": "100644",
+    "bindings/node/binding_test.js": "100644",
+    "bindings/node/index.d.ts": "100644",
+    "bindings/node/index.js": "100644",
+    "bindings/python/tree_sitter_lean/__init__.py": "100644",
+    "bindings/python/tree_sitter_lean/__init__.pyi": "100644",
+    "bindings/python/tree_sitter_lean/binding.c": "100644",
+    "bindings/python/tree_sitter_lean/py.typed": "100644",
+    "bindings/python/tree_sitter_lean/tests/__init__.py": "100644",
+    "bindings/python/tree_sitter_lean/tests/test_binding.py": "100644",
+    "bindings/rust/build.rs": "100644",
+    "bindings/rust/lib.rs": "100644",
+    "grammar.js": "100644",
+    "package.json": "100644",
+    "pnpm-lock.yaml": "100644",
+    "pnpm-workspace.yaml": "100644",
+    "pyproject.toml": "100644",
+    "queries/folds.scm": "100644",
+    "queries/highlights.scm": "100644",
+    "queries/indents.scm": "100644",
+    "queries/injections.scm": "100644",
+    "queries/locals.scm": "100644",
+    "src/grammar.json": "100644",
+    "src/node-types.json": "100644",
+    "src/parser.c": "100644",
+    "src/scanner.c": "100644",
+    "src/tree_sitter/alloc.h": "100644",
+    "src/tree_sitter/array.h": "100644",
+    "src/tree_sitter/parser.h": "100644",
+    "test/corpus/comments.txt": "100644",
+    "test/corpus/declarations.txt": "100644",
+    "test/corpus/literals.txt": "100644",
+    "test/corpus/module.txt": "100644",
+    "test/corpus/syntax-extras.txt": "100644",
+    "test/corpus/tactics.txt": "100644",
+    "test/corpus/terms.txt": "100644",
+    "tree-sitter.json": "100644"
+  },
+  "active_parser": {
+    "path": "upstream/src/parser.c",
+    "bytes": 49111890,
+    "sha256": "b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268"
+  },
+  "active_scanner": {
+    "path": "src/scanner.c",
+    "bytes": 20506,
+    "sha256": "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70"
+  },
+  "active_status": {
+    "path": "src/rootlight_lean_status.c",
+    "bytes": 4754,
+    "sha256": "16a1d58289466b285b23695bc8b903e810671e608c6dc197ddce51527c364943"
+  },
+  "active_status_header": {
+    "path": "src/rootlight_lean_status.h",
+    "bytes": 2356,
+    "sha256": "65a98d74c4033290c24656142dab26dd3578f0a27a18a3ee55b658d928c9a8b0"
+  },
+  "language_abi": 15,
+  "scanner_contract": "lean-scanner-checked-state/1;parser=b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268;scanner=0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70;status=16a1d58289466b285b23695bc8b903e810671e608c6dc197ddce51527c364943;header=65a98d74c4033290c24656142dab26dd3578f0a27a18a3ee55b658d928c9a8b0;wrapper-body=41336c3998e5cd606ab9952be4b0852210f1097746eb22ed7e1c93f1af50c5f0",
+  "wrapper_derivation": {
+    "source": "third_party/tree-sitter-pug-0.0.1/bindings/rust/lib.rs",
+    "bytes": 11147,
+    "sha256": "ed6459ca3c3f9fe1990e1d5303e0b157dd593238743cc76c6f5925a93b42b985",
+    "replacements": [
+      [
+        "Pug",
+        "Lean"
+      ],
+      [
+        "tree_sitter_pug",
+        "tree_sitter_lean"
+      ],
+      [
+        "rootlight_pug",
+        "rootlight_lean"
+      ],
+      [
+        "generated ABI-14",
+        "generated ABI-15"
+      ]
+    ],
+    "additional_change": "source identity constant only",
+    "normalized_wrapper_body_sha256": "41336c3998e5cd606ab9952be4b0852210f1097746eb22ed7e1c93f1af50c5f0"
+  },
+  "memory_enforcement": "Unavailable",
+  "build_fetches_sources": false,
+  "c_operational_evidence": {
+    "actual_handoff_sha256": "cc99673df7b354d902cb52236e332032efb5e15de20d09ab9e2a06f9ccbd813c",
+    "commands": 10,
+    "boundary_groups": 9,
+    "rust_product_qualification": false
+  }
+}
