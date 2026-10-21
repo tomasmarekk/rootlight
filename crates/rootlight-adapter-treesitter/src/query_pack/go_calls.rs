@@ -1,4 +1,4 @@
-//! Certify written bare calls to unique ordinary functions in the same Go file.
+//! Certify written bare calls and direct-argument function values in one Go file.
 //! Import namespaces cannot supply callable bare operands; dot imports and every
 //! visible binder/write of the selected name fence this bounded static dependency.
 
@@ -281,7 +281,12 @@ impl<'source> CaptureCache<'source> {
         }
     }
 
-    fn certified(&mut self, callee: Node<'_>, cancel: &Cancellation) -> Result<bool, AdapterError> {
+    fn certified(
+        &mut self,
+        callee: Node<'_>,
+        require_file_target: bool,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
         if !self.initialized {
             self.initialize(callee, cancel)?;
         }
@@ -312,14 +317,18 @@ impl<'source> CaptureCache<'source> {
             && callee.start_byte() >= body.start_byte()
             && callee.end_byte() <= body.end_byte()
             && self.functions.get(owner_name) == Some(&Some(owner.id()))
-            && self.functions.get(name).is_some_and(Option::is_some)
+            && if require_file_target {
+                self.functions.get(name).is_some_and(Option::is_some)
+            } else {
+                self.functions.get(name).is_none_or(Option::is_some)
+            }
             && !self.globals.contains(name)
             && !self.globals.contains(owner_name)
             && !self.locals.contains(&(owner.id(), name))
             && !self.refused_owners.contains(&owner.id()))
     }
 
-    /// Refine only bare callee carriers; all other Go captures keep their owner.
+    /// Refine native bare callees and paired direct-argument value carriers.
     /// Typed cancellation/allocation errors propagate and the caller handles exhaustion.
     pub(super) fn refine(
         &mut self,
@@ -338,6 +347,24 @@ impl<'source> CaptureCache<'source> {
             candidate.syntax = "go.unproven_direct_function";
             return Ok(Some(true));
         }
+        if node.kind() == "identifier"
+            && matches!(role, StructuralRole::Reference | StructuralRole::Signature)
+            && node.parent().is_some_and(|parent| {
+                parent.kind() == "argument_list"
+                    && parent
+                        .parent()
+                        .is_some_and(|call| call.kind() == "call_expression")
+            })
+            && self.certified(node, true, cancel)?
+        {
+            candidate.syntax = if role == StructuralRole::Signature {
+                "go.function_value_context"
+            } else {
+                "go.function_value"
+            };
+            candidate.required = true;
+            return Ok(Some(true));
+        }
         if node.kind() != "identifier"
             || !node.parent().is_some_and(|parent| {
                 parent.kind() == "call_expression"
@@ -353,9 +380,15 @@ impl<'source> CaptureCache<'source> {
         if !matches!(role, StructuralRole::Reference | StructuralRole::Signature) {
             return Ok(None);
         }
-        if self.certified(node, cancel)? {
-            candidate.role = StructuralRole::Reference;
-            candidate.syntax = "go.direct_file_function";
+        let file_target = self.certified(node, true, cancel)?;
+        if file_target || self.certified(node, false, cancel)? {
+            candidate.syntax = if role == StructuralRole::Signature {
+                "go.package_function_context"
+            } else if file_target {
+                "go.direct_file_function"
+            } else {
+                "go.package_function_candidate"
+            };
             candidate.required = true;
             return Ok(Some(true));
         }
@@ -497,5 +530,175 @@ mod tests {
             proof(source, 16384, true, &cancel),
             Err(AdapterError::Cancelled { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod function_value_tests {
+    use super::*;
+
+    fn values(source: &str, maximum: usize, complete: bool) -> Vec<(usize, usize)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let cancellation = Cancellation::new();
+        let mut cache = CaptureCache::new(source.as_bytes(), maximum, complete);
+        let mut found = Vec::new();
+        let mut cursor = tree.root_node().walk();
+        loop {
+            let node = cursor.node();
+            let mut candidate = QueryCandidate {
+                start: node.start_byte(),
+                end: node.end_byte(),
+                role: StructuralRole::Reference,
+                syntax: "go.identifier",
+                required: false,
+                native_depth: 0,
+            };
+            cache
+                .refine(
+                    node,
+                    StructuralRole::Reference,
+                    &mut candidate,
+                    &cancellation,
+                )
+                .unwrap();
+            if candidate.syntax == "go.function_value" {
+                assert!(candidate.required);
+                assert_eq!(candidate.role, StructuralRole::Reference);
+                found.push((node.start_byte(), node.end_byte()));
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return found;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_argument_function_values_keep_written_identity_without_calls() {
+        for (target, owner) in [("endpoint", "register"), ("renamed", "consume")] {
+            let source = format!(
+                "package sample\nfunc {target}(){{}};func {owner}(){{ receiver.Accept({target}) }}\n"
+            );
+            let start = source.rfind(target).unwrap();
+            assert_eq!(
+                values(&source, 16384, true),
+                [(start, start + target.len())]
+            );
+            assert!(values(&source, 16384, false).is_empty());
+            assert!(values(&source, 0, true).is_empty());
+        }
+    }
+
+    #[test]
+    fn function_value_certificates_refuse_shadow_namespace_recovery_and_closures() {
+        for source in [
+            "package sample;func target(){};func use(target func()){external(target)}",
+            "package sample;func target(){};func use(){target:=external;external(target)}",
+            "package sample;func target(){};func use(){for target:=range values{external(target)}}",
+            "package sample;import . \"external\";func target(){};func use(){external(target)}",
+            "package sample;func target(){};func target(){};func use(){external(target)}",
+            "package sample;func target(){};func use(){func(){external(target)}()}",
+            "package sample;func target(){};func use(){external(target)",
+        ] {
+            assert!(values(source, 16384, true).is_empty(), "{source}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod package_site_tests {
+    use super::*;
+
+    fn sites(source: &str, maximum: usize) -> Vec<(&'static str, StructuralRole)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let cancel = Cancellation::new();
+        let mut cache = CaptureCache::new(source.as_bytes(), maximum, true);
+        let mut cursor = tree.root_node().walk();
+        let mut found = Vec::new();
+        loop {
+            let node = cursor.node();
+            if node.kind() == "identifier" {
+                for role in [StructuralRole::Reference, StructuralRole::Signature] {
+                    let mut candidate = QueryCandidate {
+                        start: node.start_byte(),
+                        end: node.end_byte(),
+                        role,
+                        syntax: "go.identifier",
+                        required: false,
+                        native_depth: 0,
+                    };
+                    cache.refine(node, role, &mut candidate, &cancel).unwrap();
+                    if candidate.syntax == "go.package_function_candidate"
+                        || candidate.syntax == "go.package_function_context"
+                    {
+                        assert!(candidate.required);
+                        found.push((candidate.syntax, candidate.role));
+                    }
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return found;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unshadowed_package_calls_keep_required_site_authority_without_a_target() {
+        for (target, owner) in [("external", "consume"), ("renamed", "caller")] {
+            let source = format!("package sample;func {owner}(){{{target}()}}");
+            assert_eq!(
+                sites(&source, 16384),
+                [
+                    ("go.package_function_candidate", StructuralRole::Reference),
+                    ("go.package_function_context", StructuralRole::Signature)
+                ]
+            );
+            assert!(sites(&source, 0).is_empty());
+        }
+        assert_eq!(
+            sites("package sample;func target(){};func use(){target()}", 16384),
+            [("go.package_function_context", StructuralRole::Signature)]
+        );
+    }
+
+    #[test]
+    fn package_callsite_authority_refuses_native_binding_and_namespace_barriers() {
+        for source in [
+            "package sample;func use(target func()){target()}",
+            "package sample;func use(){target:=external;target()}",
+            "package sample;func use(){target=external;target()}",
+            "package sample;func use(){for target:=range values{target()}}",
+            "package sample;import . \"external\";func use(){target()}",
+            "package sample;import target \"external\";func use(){target()}",
+            "package sample;func use(){func(){target()}()}",
+            "package sample;func use[T any](){target()}",
+            "package sample;func target(){};func target(){};func use(){target()}",
+            "package sample;func use(){target(",
+        ] {
+            assert!(sites(source, 16384).is_empty(), "{source}");
+        }
     }
 }

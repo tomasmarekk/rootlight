@@ -1031,7 +1031,10 @@ impl QueryPack {
                         && candidate.role == StructuralRole::Reference
                         && matches!(
                             candidate.syntax,
-                            "go.call_formal" | "go.direct_file_function"
+                            "go.call_formal"
+                                | "go.direct_file_function"
+                                | "go.function_value"
+                                | "go.package_function_candidate"
                         ))
                     || (family == GrammarFamily::Chapel
                         && candidate.required

@@ -916,6 +916,7 @@ fn required_syntax_fact_count_from_output(
             || mojo_members::required(fact)
             || glsl_bindings::required(fact)
             || go_calls::required(fact)
+            || go_calls::package_candidate(fact)
             || php_this_calls::required(fact)
             || go_call_formals::certified_reference(fact)
             || ocaml_bindings::required(fact)
@@ -1607,10 +1608,11 @@ fn preflight_lowering_limits(
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
                 && php_this_calls::required(fact);
-            let go_call = request.language().as_str() == "go"
+            let go_proof = request.language().as_str() == "go"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
                 && go_calls::required(fact);
+            let go_call = go_proof && go_calls::call(fact);
             let sml_call = request.language().as_str() == "standard-ml"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -1690,7 +1692,8 @@ fn preflight_lowering_limits(
                     || (request.language().as_str() == "go"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
-                        && go_call_formals::certified_reference(fact))
+                        && (go_call_formals::certified_reference(fact)
+                            || go_calls::package_candidate(fact)))
                     || (request.language().as_str() == "astro"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -1749,7 +1752,7 @@ fn preflight_lowering_limits(
                     || sml_call
                     || ocaml_certificate
                     || glsl_proof
-                    || go_call
+                    || go_proof
                     || php_call
                     || scss_call
                     || prolog_call
@@ -12285,6 +12288,8 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
             | "java.local_receiver_context.signature"
             | "go.composite_formal_context.signature"
             | "go.call_formal_context.signature"
+            | "go.package_function_context.signature"
+            | "go.function_value_context.signature"
             | "c.formal_binding_context.signature"
             | "c.variable_file_context.signature"
             | "c.variable_target.signature"
@@ -12864,6 +12869,12 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     {
         return Some("php-method-runtime-implementation-and-external-semantics-unavailable");
     }
+    if go_calls::value_reference(fact) {
+        return Some("go-function-value-runtime-dispatch-unverified");
+    }
+    if go_calls::package_candidate(fact) {
+        return Some("go-package-function-target-unavailable");
+    }
     if fact
         .syntax_kind()
         .as_str()
@@ -13364,7 +13375,11 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         return Some(OccurrenceRole::CallSite);
     }
     if go_calls::required(fact) {
-        return Some(OccurrenceRole::CallSite);
+        return Some(if go_calls::value_reference(fact) {
+            OccurrenceRole::Reference
+        } else {
+            OccurrenceRole::CallSite
+        });
     }
     if glsl_bindings::required(fact) && !glsl_bindings::metadata(fact) {
         return Some(if glsl_bindings::call(fact) {

@@ -1558,12 +1558,16 @@ pub fn structural_captured_name_for_fact<'a>(
     }
     if label.starts_with("go.direct_file_function")
         || label.starts_with("go.unproven_direct_function")
+        || label.starts_with("go.function_value")
+        || label.starts_with("go.package_function_candidate")
     {
         return (language == "go"
             && fact.kind() == SyntaxFactKind::Occurrence
             && matches!(
                 label,
                 "go.direct_file_function.reference"
+                    | "go.function_value.reference"
+                    | "go.package_function_candidate.reference"
                     | "go.unproven_direct_function.reference"
                     | "go.unproven_direct_function.call_name"
             )
@@ -3770,6 +3774,8 @@ mod go_written_call_label_tests {
     fn only_exact_written_go_callee_labels_admit_complete_literal_names() {
         let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 6).unwrap();
         for label in [
+            "go.function_value.reference",
+            "go.package_function_candidate.reference",
             "go.direct_file_function.reference",
             "go.unproven_direct_function.reference",
             "go.unproven_direct_function.call_name",
@@ -3802,6 +3808,11 @@ mod go_written_call_label_tests {
             assert!(structural_captured_name_for_fact("go", &wrong_kind, "target", 6).is_none());
         }
         for label in [
+            "go.function_value.extra",
+            "go.function_value.call",
+            "go.function_value_extra.reference",
+            "go.package_function_candidate.call",
+            "go.package_function_candidate_extra.reference",
             "go.direct_file_function.extra",
             "go.unproven_direct_function.extra",
             "go.direct_file_function.call",

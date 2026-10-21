@@ -17,9 +17,27 @@ use super::{
     source_for_span, span_contains,
 };
 
-pub(super) fn required(fact: &SyntaxFact) -> bool {
+/// Recognize the call certificate independently of written function-value uses.
+pub(super) fn call(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str() == "go.direct_file_function.reference"
+}
+
+/// Recognize a native function argument identity without implying an invocation.
+pub(super) fn value_reference(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Occurrence
+        && fact.syntax_kind().as_str() == "go.function_value.reference"
+}
+
+/// Recognize a native bare-callee site without claiming a project target.
+pub(super) fn package_candidate(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Occurrence
+        && fact.syntax_kind().as_str() == "go.package_function_candidate.reference"
+}
+
+/// Retain both certificate forms in exact syntax artifact accounting.
+pub(super) fn required(fact: &SyntaxFact) -> bool {
+    call(fact) || value_reference(fact)
 }
 
 fn unique<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, Option<V>>, key: K, value: V) {
@@ -56,6 +74,8 @@ impl Targets {
         let mut definition_spans = HashMap::new();
         let mut contexts = HashMap::new();
         let mut occurrences = HashMap::new();
+        let mut value_contexts = HashMap::new();
+        let mut value_sites = HashMap::new();
         let mut names = HashMap::new();
         let mut bindings = HashMap::new();
         all.try_reserve(facts.len())
@@ -73,6 +93,12 @@ impl Targets {
             .try_reserve(facts.len())
             .map_err(|_| SinkError::AllocationFailed)?;
         occurrences
+            .try_reserve(facts.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        value_contexts
+            .try_reserve(facts.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
+        value_sites
             .try_reserve(facts.len())
             .map_err(|_| SinkError::AllocationFailed)?;
         names
@@ -115,6 +141,12 @@ impl Targets {
                 )
             {
                 unique(&mut contexts, span, fact);
+            }
+            if fact.kind() == SyntaxFactKind::Signature {
+                unique(&mut value_contexts, span, fact);
+            }
+            if fact.kind() == SyntaxFactKind::Occurrence {
+                unique(&mut value_sites, span, fact.local_id());
             }
             if required(fact) {
                 unique(&mut occurrences, span, fact.local_id());
@@ -185,6 +217,22 @@ impl Targets {
             let span = physical(fact.span())?;
             if occurrences.get(&span) != Some(&Some(fact.local_id())) {
                 continue;
+            }
+            if value_reference(fact) {
+                let Some(context) = value_contexts.get(&span).copied().flatten() else {
+                    continue;
+                };
+                // The native paired carrier supplies independent site authority;
+                // an ordinary argument relabel alone cannot borrow a file function.
+                if context.syntax_kind().as_str() != "go.function_value_context.signature"
+                    || context.parent() != fact.parent()
+                    || context.depth() != fact.depth()
+                    || context.span() != fact.span()
+                    || value_sites.get(&span) != Some(&Some(fact.local_id()))
+                    || text(context.span())? != text(fact.span())?
+                {
+                    continue;
+                }
             }
             let Some(target_local) = names.get(text(fact.span())?).copied().flatten() else {
                 continue;
@@ -268,9 +316,14 @@ impl Targets {
             return Ok(None);
         };
         let Some(owner) = owner else { return Ok(None) };
+        let expected_role = if value_reference(fact) {
+            OccurrenceRole::Reference
+        } else {
+            OccurrenceRole::CallSite
+        };
         if !required(fact)
             || occurrence.syntax_kind != fact.syntax_kind().as_str()
-            || occurrence.role != OccurrenceRole::CallSite
+            || occurrence.role != expected_role
             || occurrence.enclosing != Some(binding.owner)
             || owner.record.id != binding.owner
             || occurrence.provenance != binding.provenance
@@ -296,6 +349,9 @@ pub(super) fn relation(
     cancel: &Cancellation,
 ) -> Result<RelationRecord, AdapterError> {
     cancel.check()?;
+    if occurrence.role == OccurrenceRole::Reference {
+        return lexical_reference_relation(occurrence, target);
+    }
     let mut relation = lexical_reference_relation(occurrence, target)?;
     relation.subject = RelationEndpoint::Entity(owner.record.id);
     relation.predicate = RelationPredicate::Calls;

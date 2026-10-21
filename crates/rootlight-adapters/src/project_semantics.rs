@@ -10,6 +10,7 @@ use std::{
 
 mod dart;
 mod ecmascript;
+mod go;
 mod module_resolution;
 mod rust_modules;
 mod rust_source;
@@ -1466,6 +1467,7 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
             || is_symbol_signature_fact(fact)
             || formal_binding_context_metadata(fact).is_some()
             || is_ocaml_written_binding_metadata(fact)
+            || go::mandatory(fact)
             || (fact.kind() == SyntaxFactKind::Signature
                 && matches!(
                     fact.syntax_kind().as_str(),
@@ -1901,6 +1903,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     rust_direct_calls: BTreeMap<SourceSpan, RustDirectCallDraft>,
     rust_module_calls: BTreeMap<SourceSpan, rust_modules::CallProof>,
     rust_trait_calls: BTreeMap<SourceSpan, rust_modules::TraitCallProof>,
+    go_bindings: BTreeMap<SourceSpan, go::Proof>,
     rust_local_symbols: BTreeSet<SymbolId>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
@@ -1936,6 +1939,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             rust_direct_calls: BTreeMap::new(),
             rust_module_calls: BTreeMap::new(),
             rust_trait_calls: BTreeMap::new(),
+            go_bindings: BTreeMap::new(),
             rust_local_symbols: BTreeSet::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
@@ -1965,6 +1969,21 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     FactDomain::Relations,
                     "rust-generic-call-target-unavailable",
                 )?;
+            }
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Go {
+            self.go_bindings = go::resolve(&self)?;
+            for occurrence in &mut self.occurrences {
+                self.cancellation.check()?;
+                if occurrence.role == OccurrenceRole::Reference
+                    && go::occurrence(&occurrence.syntax_kind)
+                    && let Some(proof) = self.go_bindings.get(&occurrence.source.span())
+                {
+                    occurrence.enclosing_declaration = Some(proof.owner_local);
+                    if proof.call {
+                        occurrence.role = OccurrenceRole::CallSite;
+                    }
+                }
             }
         }
         self.materialize_default_exports()?;
@@ -2975,7 +2994,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         // executable owner; call graphs must retain the callable scope.
                         // Parser recovery can leave the parent-first cache incomplete,
                         // so the bounded ancestry walk provides the same exact fallback.
-                        let enclosing_declaration = if role == OccurrenceRole::CallSite {
+                        let enclosing_declaration = if role == OccurrenceRole::CallSite
+                            || (self.analyzer.language == SemanticProjectLanguage::Go
+                                && fact.syntax_kind().as_str() == "go.function_value.reference")
+                        {
                             fact.parent()
                                 .and_then(|parent| {
                                     nearest_callable_declaration.get(&parent).copied().flatten()
@@ -3412,7 +3434,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 confidence: confidence(confidence_value)?,
                 evidence: direct_evidence(draft.source.clone()),
             };
-            if let Some(proof) = self.rust_module_calls.get(&record.source.span()) {
+            if go::occurrence(&record.syntax_kind)
+                && let Some(proof) = self.go_bindings.get(&record.source.span())
+            {
+                record.evidence.derivation = proof.derivation.clone();
+            } else if let Some(proof) = self.rust_module_calls.get(&record.source.span()) {
                 record.evidence.derivation = proof.derivation.clone();
             } else if let Some(proof) = self.rust_trait_calls.get(&record.source.span()) {
                 record.evidence.derivation = proof.derivation.clone();
@@ -4433,9 +4459,21 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             };
         }
         if self.analyzer.language == SemanticProjectLanguage::Go
+            && go::occurrence(&occurrence.syntax_kind)
+            && let Some(proof) = self.go_bindings.get(&occurrence.source.span())
+        {
+            return ResolutionCandidates {
+                symbols: vec![proof.target],
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Go
             && (matches!(
                 occurrence.syntax_kind.as_str(),
-                "go.call_formal.reference" | "go.unproven_call_formal.reference"
+                "go.call_formal.reference"
+                    | "go.unproven_call_formal.reference"
+                    | "go.package_function_candidate.reference"
+                    | "go.function_value.reference"
             ) || occurrence
                 .syntax_kind
                 .starts_with("go.direct_file_function.")
@@ -5030,9 +5068,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             provenance: self.provenance_for_file(file)?,
             evidence: FactEvidence {
                 derivation: self
-                    .rust_module_calls
+                    .go_bindings
                     .get(&source.span())
                     .map(|proof| proof.derivation.clone())
+                    .or_else(|| {
+                        self.rust_module_calls
+                            .get(&source.span())
+                            .map(|proof| proof.derivation.clone())
+                    })
                     .or_else(|| {
                         self.rust_trait_calls
                             .get(&source.span())
@@ -6161,6 +6204,7 @@ fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
         && !structural_signature_is_preprocessor_context(fact)
         && formal_binding_context_metadata(fact).is_none()
         && !is_ocaml_written_binding_metadata(fact)
+        && !go::metadata(fact)
         && !matches!(
             fact.syntax_kind().as_str(),
             "glsl.formal_target.signature"

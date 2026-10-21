@@ -4624,3 +4624,68 @@ fn python_project_reassigned_module_name_is_an_explicit_gap_instead_of_per_write
             && gap.detail == "python-written-module-assignment-name-uniqueness-syntax-or-complete-native-proof-unavailable"));
     }
 }
+
+#[test]
+fn go_function_value_arguments_keep_the_enclosing_consumer_and_reference() {
+    for (target, owner) in [
+        ("GenerateHandler", "RegisterRoutes"),
+        ("endpoint", "register"),
+    ] {
+        let source = format!(
+            "package sample\nfunc {target}(){{}};func {owner}(){{ receiver.Accept({target}) }}\n"
+        );
+        let fixture = ProjectFixture::new(
+            ["server/handlers.go"],
+            [source.as_str()],
+            SemanticProjectLanguage::Go,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let target = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.display_name == target)
+            .unwrap();
+        let owner = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.display_name == owner)
+            .unwrap();
+        let sites: Vec<_> = output
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind == "go.function_value.reference")
+            .collect();
+        assert_eq!(sites.len(), 1);
+        let site = sites[0];
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert_eq!(site.enclosing, Some(owner.id));
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert!(
+            output
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+                    && edge.object == rootlight_ir::RelationEndpoint::Entity(target.id))
+        );
+        assert!(
+            !output
+                .document()
+                .occurrences
+                .iter()
+                .any(|other| other.enclosing == Some(owner.id)
+                    && other.role == OccurrenceRole::CallSite
+                    && other.target == OccurrenceTarget::Resolved { symbol: target.id })
+        );
+    }
+}
+
+#[path = "project_semantic_adapters/go_package_bindings.rs"]
+mod go_package_bindings;

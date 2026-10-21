@@ -1595,3 +1595,413 @@ fn duplicate_missing_foreign_and_wrong_owner_native_witnesses_cannot_donate_call
     )
     .unwrap();
 }
+
+#[test]
+fn written_function_value_arguments_are_references_without_invented_calls() {
+    for (target, owner) in [
+        ("GenerateHandler", "RegisterRoutes"),
+        ("endpoint", "register"),
+    ] {
+        let source = format!(
+            "package sample\nfunc {target}(){{}};func {owner}(){{ receiver.Accept({target}) }}\n"
+        );
+        let output = analyze(&source);
+        let target_id = entity_at(
+            &output,
+            target,
+            EntityKind::Function,
+            source.find(target).unwrap(),
+            target.len(),
+        );
+        let owner_id = entity_at(
+            &output,
+            owner,
+            EntityKind::Function,
+            source.find(owner).unwrap(),
+            owner.len(),
+        );
+        let start = u64::try_from(source.rfind(target).unwrap()).unwrap();
+        let sites: Vec<_> = output
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.source.span().start_byte() == start
+                    && site.syntax_kind == "go.function_value.reference"
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        let site = sites[0];
+        assert_eq!(site.role, OccurrenceRole::Reference);
+        assert_eq!(site.enclosing, Some(owner_id));
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target_id }
+        );
+        assert!(
+            output
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.object == RelationEndpoint::Entity(target_id))
+        );
+        assert!(
+            !output
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls
+                    && edge.subject == RelationEndpoint::Entity(owner_id)
+                    && edge.object == RelationEndpoint::Entity(target_id))
+        );
+        assert_eq!(site.source.content_hash(), content_hash(source.as_bytes()));
+    }
+}
+
+#[test]
+fn function_value_shadowing_does_not_borrow_the_file_function_identity() {
+    for source in [
+        "package sample;func target(){};func use(target func()){external(target)}",
+        "package sample;func target(){};func use(){target:=external;external(target)}",
+        "package sample;import . \"external\";func target(){};func use(){external(target)}",
+        "package sample;func target(){};func use(){func(){external(target)}()}",
+    ] {
+        let output = analyze(source);
+        assert!(
+            !output
+                .document()
+                .occurrences
+                .iter()
+                .any(|site| site.syntax_kind == "go.function_value.reference"
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn function_value_materialization_requires_the_independent_native_site_witness() {
+    use rootlight_adapter_sdk::{
+        ParseProvider, SyntaxFact, SyntaxFactKind, SyntaxKindLabel, execute_parse,
+        testkit::MockParseProvider,
+    };
+    for shadowed in [false, true] {
+        let source = if shadowed {
+            "package sample;func target(){};func use(target func()){external(target)}"
+        } else {
+            "package sample;func target(){};func use(){external(target)}"
+        };
+        execute_context_observed(source.as_bytes(), "utf-8", 4096, |_, provider, request| {
+            let cancel = Cancellation::new();
+            let parsed = execute_parse(
+                provider,
+                &request.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            let replay = |facts| {
+                let mock = MockParseProvider::new(
+                    provider.capabilities().clone(),
+                    facts,
+                    parsed.diagnostics().to_vec(),
+                    parsed.report().coverage().clone(),
+                );
+                let analyzer = TreeSitterAnalyzer::new(
+                    Arc::new(mock),
+                    ProducerIdentity::new(
+                        "go-value-witness",
+                        "1.0",
+                        content_hash(b"go-value-witness"),
+                    )
+                    .unwrap(),
+                    LanguageId::new("go").unwrap(),
+                    "go-value-replay",
+                    content_hash(b"go-value-replay"),
+                )
+                .unwrap();
+                execute_analysis(
+                    &analyzer,
+                    request,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancel,
+                )
+            };
+            let start = u64::try_from(source.rfind("target").unwrap()).unwrap();
+            let resolved = |output: &rootlight_adapter_sdk::AnalysisOutput| {
+                output.document().occurrences.iter().any(|site| {
+                    site.source.span().start_byte() == start
+                        && site.role == OccurrenceRole::Reference
+                        && site.syntax_kind == "go.function_value.reference"
+                        && matches!(site.target, OccurrenceTarget::Resolved { .. })
+                })
+            };
+            let baseline = replay(parsed.facts().to_vec())?;
+            assert_eq!(resolved(&baseline), !shadowed);
+            if shadowed {
+                let mut facts = parsed.facts().to_vec();
+                let fact = facts
+                    .iter_mut()
+                    .find(|fact| {
+                        fact.kind() == SyntaxFactKind::Occurrence
+                            && fact.span().start_byte() == start
+                            && fact.syntax_kind().as_str().ends_with(".reference")
+                    })
+                    .unwrap();
+                *fact = SyntaxFact::new(
+                    fact.local_id(),
+                    fact.parent(),
+                    fact.kind(),
+                    fact.span(),
+                    fact.depth(),
+                    SyntaxKindLabel::new("go.function_value.reference").unwrap(),
+                );
+                assert!(!resolved(&replay(facts)?));
+            } else {
+                let context = parsed
+                    .facts()
+                    .iter()
+                    .find(|fact| {
+                        fact.span().start_byte() == start
+                            && fact.syntax_kind().as_str() == "go.function_value_context.signature"
+                    })
+                    .unwrap();
+                for mode in 0..3 {
+                    let mut facts = parsed.facts().to_vec();
+                    if mode == 0 {
+                        facts.retain(|fact| fact.local_id() != context.local_id());
+                    } else if mode == 1 {
+                        let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+                        facts.push(SyntaxFact::new(
+                            next,
+                            context.parent(),
+                            context.kind(),
+                            context.span(),
+                            context.depth(),
+                            context.syntax_kind().clone(),
+                        ));
+                    } else {
+                        let fact = facts
+                            .iter_mut()
+                            .find(|fact| fact.local_id() == context.local_id())
+                            .unwrap();
+                        *fact = SyntaxFact::new(
+                            fact.local_id(),
+                            fact.parent(),
+                            fact.kind(),
+                            fact.span(),
+                            fact.depth(),
+                            SyntaxKindLabel::new("go.foreign.signature").unwrap(),
+                        );
+                    }
+                    assert!(!resolved(&replay(facts)?), "mode {mode}");
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn function_value_required_artifacts_keep_both_site_roles_at_the_exact_boundary() {
+    execute_context_observed(
+        b"package sample;func target(){};func use(){external(target)}",
+        "utf-8",
+        4096,
+        |analyzer, provider, request| {
+            let cancel = Cancellation::new();
+            let required =
+                provider.required_syntax_fact_count(&request.to_parse_request(), &cancel)?;
+            let artifact = analyzer.prepare_artifact(request, &cancel)?;
+            assert_eq!(artifact.required_syntax_fact_count(&cancel)?, required);
+            let syntax = request.limits().syntax_stream();
+            let for_capacity = |capacity| {
+                AnalysisLimits::new(
+                    request.limits().max_source_bytes(),
+                    request.limits().max_syntax_nodes(),
+                    request.limits().max_syntax_depth(),
+                    request.limits().max_embedded_ranges(),
+                    request.limits().max_reported_memory_bytes(),
+                    StreamLimits::new(
+                        syntax.max_batches(),
+                        capacity,
+                        syntax.max_output_bytes(),
+                        syntax.max_diagnostics(),
+                        syntax.max_diagnostic_bytes(),
+                        syntax.max_string_bytes(),
+                        BatchThresholds::new(
+                            capacity.min(syntax.batch().max_records()),
+                            syntax.batch().max_output_bytes(),
+                            syntax.batch().max_diagnostics(),
+                            syntax.batch().max_diagnostic_bytes(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                    request.limits().ir_stream().clone(),
+                    request.limits().ir().clone(),
+                )
+                .unwrap()
+            };
+            let exact_limits = for_capacity(required);
+            let exact = AnalysisRequest::new_with_parse_context(
+                request.source().clone(),
+                request.language().clone(),
+                request.encoding().clone(),
+                Vec::new(),
+                AnalysisTier::TierD,
+                request.build_context(),
+                &exact_limits,
+            )
+            .unwrap()
+            .with_generated_status(false);
+            let exact_artifact = analyzer.prepare_artifact(&exact, &cancel)?;
+            assert_eq!(
+                exact_artifact.required_syntax_fact_count(&cancel)?,
+                required
+            );
+            assert_eq!(exact_artifact.syntax_fact_count(), required);
+            let output = execute_analysis(
+                analyzer,
+                &exact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            let replay = analyzer.analyze_from_artifact(
+                &exact,
+                &exact_artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            assert_eq!(output.document(), replay.document());
+            assert!(
+                output
+                    .document()
+                    .occurrences
+                    .iter()
+                    .any(|site| site.syntax_kind == "go.function_value.reference"
+                        && matches!(site.target, OccurrenceTarget::Resolved { .. }))
+            );
+            let small_limits = for_capacity(required - 1);
+            let small = AnalysisRequest::new_with_parse_context(
+                request.source().clone(),
+                request.language().clone(),
+                request.encoding().clone(),
+                Vec::new(),
+                AnalysisTier::TierD,
+                request.build_context(),
+                &small_limits,
+            )
+            .unwrap()
+            .with_generated_status(false);
+            let expected = AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1,
+            });
+            assert_eq!(
+                analyzer.prepare_artifact(&small, &cancel).unwrap_err(),
+                expected
+            );
+            // Preflight measures demand independently of output admission.
+            assert_eq!(
+                provider.required_syntax_fact_count(&small.to_parse_request(), &cancel)?,
+                required
+            );
+            assert_eq!(
+                rootlight_adapter_sdk::execute_parse(
+                    provider,
+                    &small.to_parse_request(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancel,
+                )
+                .unwrap_err(),
+                expected
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn native_package_call_candidates_remain_unresolved_without_project_target_authority() {
+    use rootlight_adapter_sdk::execute_parse;
+    let source = "package sample;func use(){external()}";
+    execute_context_observed(
+        source.as_bytes(),
+        "utf-8",
+        4096,
+        |analyzer, provider, request| {
+            let cancel = Cancellation::new();
+            let parsed = execute_parse(
+                provider,
+                &request.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            let site = parsed
+                .facts()
+                .iter()
+                .find(|fact| {
+                    fact.syntax_kind().as_str() == "go.package_function_candidate.reference"
+                })
+                .unwrap();
+            let marker = parsed
+                .facts()
+                .iter()
+                .find(|fact| fact.syntax_kind().as_str() == "go.package_function_context.signature")
+                .unwrap();
+            assert_eq!(site.span(), marker.span());
+            assert_eq!(site.parent(), marker.parent());
+            assert_eq!(site.depth(), marker.depth());
+            let required =
+                provider.required_syntax_fact_count(&request.to_parse_request(), &cancel)?;
+            assert_eq!(
+                analyzer
+                    .prepare_artifact(request, &cancel)?
+                    .required_syntax_fact_count(&cancel)?,
+                required
+            );
+            let output = execute_analysis(
+                analyzer,
+                request,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            assert!(
+                output
+                    .document()
+                    .occurrences
+                    .iter()
+                    .any(
+                        |site| site.syntax_kind == "go.package_function_candidate.reference"
+                            && site.role == OccurrenceRole::Reference
+                            && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+                    )
+            );
+            assert!(
+                !output
+                    .document()
+                    .relations
+                    .iter()
+                    .any(|edge| edge.predicate == RelationPredicate::Calls)
+            );
+            assert!(
+                output
+                    .document()
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "go-package-function-target-unavailable")
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+}

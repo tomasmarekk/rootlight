@@ -210,6 +210,13 @@ fn project_predecessor_cannot_reuse_deep_provider_contexts() {
         ])
         .unwrap();
         assert_ne!(current, preceding_trait_candidates);
+        let preceding_package_functions = hash_static_components(&[
+            b"rootlight.first-slice.project-provider/25",
+            structural.as_bytes(),
+            project,
+        ])
+        .unwrap();
+        assert_ne!(current, preceding_package_functions);
         assert_ne!(current, structural);
     }
     assert_eq!(
@@ -823,5 +830,23 @@ fn rust_bom_proof_context_invalidates_preceding_parser_identity() {
         grammar.as_bytes(),
     ])
     .unwrap();
+    assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
+}
+
+#[test]
+fn go_function_value_references_invalidate_preceding_parser_identity() {
+    let grammar = first_slice_grammar_revision_hash().unwrap();
+    let previous = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        b"rootlight.first-slice.treesitter-structural/325",
+        grammar.as_bytes(),
+    ])
+    .unwrap();
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/326"
+    );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
