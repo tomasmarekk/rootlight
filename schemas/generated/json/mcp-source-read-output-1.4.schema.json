@@ -103,6 +103,11 @@
           "description": "Encoded generation text under its durable reader contract.",
           "type": "string",
           "const": "generation_encoded_text_bytes"
+        },
+        {
+          "description": "Conservative modeled Oracle reservation bytes, not measured allocations.\nThe corresponding limit is usable free space after margin and other reservations.",
+          "type": "string",
+          "const": "oracle_filesystem_reservation_bytes"
         }
       ]
     },
@@ -118,6 +123,11 @@
           "description": "Complete canonical generation text exceeded its reader/writer contract.",
           "type": "string",
           "const": "generation_text"
+        },
+        {
+          "description": "Pre-staging Oracle output reservation exceeded usable filesystem space.",
+          "type": "string",
+          "const": "oracle_output_reservation"
         }
       ]
     },
@@ -147,7 +157,7 @@
           "minimum": 0
         },
         "observed": {
-          "description": "Actual combined observation, excluding arithmetic-overflow sentinels.",
+          "description": "Actual combined count or issued conservative Oracle byte requirement.\nThis is not an allocation or peak-usage measurement.",
           "type": "integer",
           "format": "uint64",
           "maximum": 18446744073709551615,

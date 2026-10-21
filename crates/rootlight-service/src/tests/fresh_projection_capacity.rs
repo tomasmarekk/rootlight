@@ -1208,3 +1208,6 @@ fn true_origins_foreign_parser_stale_source_and_cancellation_remain_strict() {
         ));
     }
 }
+
+#[path = "fresh_projection_capacity/projection_profile.rs"]
+mod projection_profile;

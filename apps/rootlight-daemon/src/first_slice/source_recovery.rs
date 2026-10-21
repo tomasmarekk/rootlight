@@ -93,6 +93,9 @@ fn cause_to_wire(cause: AggregateSourceRecovery) -> daemon::AggregateSourceRecov
         AggregateCapacityStage::GenerationText => {
             daemon::AggregateSourceRecoveryStage::GenerationText
         }
+        AggregateCapacityStage::OracleOutputReservation => {
+            daemon::AggregateSourceRecoveryStage::OracleOutputReservation
+        }
     };
     let resource = match cause.resource {
         AggregateCapacityResource::Files => daemon::AggregateSourceRecoveryResource::Files,
@@ -135,6 +138,9 @@ fn cause_to_wire(cause: AggregateSourceRecovery) -> daemon::AggregateSourceRecov
         }
         AggregateCapacityResource::GenerationEncodedTextBytes => {
             daemon::AggregateSourceRecoveryResource::GenerationEncodedTextBytes
+        }
+        AggregateCapacityResource::OracleFilesystemReservationBytes => {
+            daemon::AggregateSourceRecoveryResource::OracleFilesystemReservationBytes
         }
     };
     daemon::AggregateSourceRecoveryCause {

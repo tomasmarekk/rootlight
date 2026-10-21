@@ -5504,6 +5504,8 @@ pub enum AggregateSourceRecoveryStage {
     StructuralAppend = 1,
     #[allow(missing_docs)]
     GenerationText = 2,
+    #[allow(missing_docs)]
+    OracleOutputReservation = 3,
 }
 impl AggregateSourceRecoveryStage {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -5515,6 +5517,9 @@ impl AggregateSourceRecoveryStage {
             Self::Unspecified => "AGGREGATE_SOURCE_RECOVERY_STAGE_UNSPECIFIED",
             Self::StructuralAppend => "AGGREGATE_SOURCE_RECOVERY_STAGE_STRUCTURAL_APPEND",
             Self::GenerationText => "AGGREGATE_SOURCE_RECOVERY_STAGE_GENERATION_TEXT",
+            Self::OracleOutputReservation => {
+                "AGGREGATE_SOURCE_RECOVERY_STAGE_ORACLE_OUTPUT_RESERVATION"
+            }
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -5526,6 +5531,9 @@ impl AggregateSourceRecoveryStage {
             }
             "AGGREGATE_SOURCE_RECOVERY_STAGE_GENERATION_TEXT" => {
                 Some(Self::GenerationText)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_STAGE_ORACLE_OUTPUT_RESERVATION" => {
+                Some(Self::OracleOutputReservation)
             }
             _ => None,
         }
@@ -5571,6 +5579,8 @@ pub enum AggregateSourceRecoveryResource {
     GenerationTextBytes = 16,
     #[allow(missing_docs)]
     GenerationEncodedTextBytes = 17,
+    #[allow(missing_docs)]
+    OracleFilesystemReservationBytes = 18,
 }
 impl AggregateSourceRecoveryResource {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -5602,6 +5612,9 @@ impl AggregateSourceRecoveryResource {
             }
             Self::GenerationEncodedTextBytes => {
                 "AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_ENCODED_TEXT_BYTES"
+            }
+            Self::OracleFilesystemReservationBytes => {
+                "AGGREGATE_SOURCE_RECOVERY_RESOURCE_ORACLE_FILESYSTEM_RESERVATION_BYTES"
             }
         }
     }
@@ -5637,6 +5650,9 @@ impl AggregateSourceRecoveryResource {
             }
             "AGGREGATE_SOURCE_RECOVERY_RESOURCE_GENERATION_ENCODED_TEXT_BYTES" => {
                 Some(Self::GenerationEncodedTextBytes)
+            }
+            "AGGREGATE_SOURCE_RECOVERY_RESOURCE_ORACLE_FILESYSTEM_RESERVATION_BYTES" => {
+                Some(Self::OracleFilesystemReservationBytes)
             }
             _ => None,
         }

@@ -360,6 +360,9 @@ impl DiagnosticSession {
                         )?;
                         return Ok((rows, snapshot.metadata().configuration_hash(), json!({
                             "report_scope":"retained_source_accounting",
+                            "source_file_fallback_diagnostics":source_file_fallback_diagnostics(
+                                &snapshot.document().diagnostics
+                            ),
                             "source_accounting":accounting,
                             "aggregate_source_recovery":inspect_aggregate_source_recovery(
                                 snapshot.document(), snapshot.metadata(), snapshot.file_count()
@@ -395,6 +398,9 @@ impl DiagnosticSession {
                         snapshot.metadata().configuration_hash(),
                         json!({
                             "gap_census":census,
+                            "source_file_fallback_diagnostics":source_file_fallback_diagnostics(
+                                &snapshot.document().diagnostics
+                            ),
                             "exported_provenance":evidence.provenance,
                             "exported_fact_identities":evidence.fact_identities,
                             "exported_fact_identity_scope":"terminal_source_witnesses_not_semantic_records",
@@ -453,6 +459,17 @@ impl DiagnosticSession {
         *lifetime = ServiceLifetime::Warm;
         Ok(report)
     }
+}
+
+// This is retained warning evidence, not an inferred parser failure or a new
+// capacity allowance. Keep complete messages and every matching record.
+fn source_file_fallback_diagnostics(
+    diagnostics: &[rootlight_ir::DiagnosticRecord],
+) -> Vec<&rootlight_ir::DiagnosticRecord> {
+    diagnostics
+        .iter()
+        .filter(|record| record.code == "source-file-fallback-resource-bounded")
+        .collect()
 }
 
 fn index_with_optional_analysis_profile(
@@ -3060,6 +3077,49 @@ mod tests {
         assert_eq!(accounting["normalized_witness_details_exported"], false);
         assert_eq!(accounting["full_semantic_completeness_proven"], false);
         assert_eq!(accounting["installed_mcp_qualified"], false);
+    }
+
+    #[test]
+    fn fallback_diagnostic_export_preserves_exact_capacity_messages_and_identity() {
+        use rootlight_ids::{FactId, GenerationId, RepositoryId};
+        use rootlight_ir::{CoverageStatus, DiagnosticRecord, DiagnosticSeverity, FactEvidence};
+
+        let make = |id, code: &str, message: &str| DiagnosticRecord {
+            id: FactId::from_bytes([id; 20]),
+            repository: RepositoryId::from_bytes([1; 16]),
+            generation: GenerationId::from_bytes([2; 20]),
+            code: code.to_owned(),
+            message: message.to_owned(),
+            severity: DiagnosticSeverity::Warning,
+            source: None,
+            coverage_effect: CoverageStatus::Unknown,
+            provenance: FactId::from_bytes([3; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        };
+        // These records exercise report projection; they do not attest to an
+        // executed capacity refusal or authenticate any repository analysis.
+        let diagnostics = [
+            make(4, "other-warning", "unrelated"),
+            make(
+                5,
+                "source-file-fallback-resource-bounded",
+                "fresh projection capacity (full projection peak) requires 17179869185 modeled bytes above limit 17179869184; exact source retrieval remains available",
+            ),
+            make(
+                6,
+                "source-file-fallback-resource-bounded",
+                "complete semantic oracle restore requires 17179869186 modeled bytes above limit 17179869184; exact source retrieval remains available",
+            ),
+        ];
+        let selected = source_file_fallback_diagnostics(&diagnostics);
+        assert_eq!(selected, vec![&diagnostics[1], &diagnostics[2]]);
+        let encoded = serde_json::to_value(selected).unwrap();
+        assert_eq!(encoded, serde_json::to_value(&diagnostics[1..]).unwrap());
+        assert!(source_file_fallback_diagnostics(&diagnostics[..1]).is_empty());
+        assert!(source_file_fallback_diagnostics(&[]).is_empty());
     }
 
     fn aggregate_recovery_projection_fixture() -> (

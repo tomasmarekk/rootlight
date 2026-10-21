@@ -1,0 +1,10 @@
+{
+  "upstream_repository": "https://github.com/json-schema-org/JSON-Schema-Test-Suite",
+  "revision": "15fe552d6cf76e29cc8165306fb6a72503fd360b",
+  "upstream_path": "bin/annotation-tests.ts",
+  "license": "MIT",
+  "source_bytes": 856,
+  "source_sha256": "d7d8a45645fb0d87d3a81439a9ebe71767d3ce96c84a8e8972d1ef6006649ddf",
+  "preservation": "Complete original physical UTF8 bytes,31 paired CRLF; no text substitution or snippet extraction.",
+  "semantic_scope": "Written local const Definition/Reference/Read only; imported APIs and runtime function-value Calls remain unqualified."
+}

@@ -935,3 +935,498 @@ fn unavailable_competing_source_withholds_generic_singleton_resolution() {
     );
     assert_eq!(call.source.content_hash(), content_hash(caller));
 }
+// Public source preservation for a genuine native census refusal.
+// Native limits and native proof requirements stay unchanged throughout.
+
+// Bounded fanout keeps native depth and sibling lookup small while the complete
+// C formal census genuinely exceeds its unchanged two-million-step allowance.
+fn many_native_census_nodes() -> Vec<u8> {
+    let mut branch = vec![b'0'];
+    for _ in 0..4 {
+        let mut group = vec![b'{'];
+        for index in 0..32 {
+            if index != 0 {
+                group.push(b',');
+            }
+            group.extend_from_slice(&branch);
+        }
+        group.push(b'}');
+        branch = group;
+    }
+    let mut bytes =
+        b"/*ababa*/\nvoid forward(int value) { sink(value); }\nstatic int values[] = ".to_vec();
+    bytes.extend_from_slice(&branch);
+    bytes.extend_from_slice(b";\n");
+    bytes
+}
+
+fn assert_native_helper_gap(service: &FirstSliceService, receipt: &FirstSliceIndexReceipt) {
+    let reference = source_reference(service, receipt, "values.c");
+    let lease = service
+        .generation_lease(receipt.generation, &Cancellation::new())
+        .unwrap();
+    let document = lease.generation().document();
+    let file = reference.span().file();
+    assert!(
+        document
+            .files
+            .iter()
+            .any(|record| record.id == file && record.language == "c")
+    );
+    assert!(!document.entities.iter().any(|record| {
+        record
+            .evidence
+            .source
+            .as_ref()
+            .is_some_and(|source| source.span().file() == file)
+    }));
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(|record| record.source.span().file() == file)
+    );
+    assert!(!document.relations.iter().any(|record| {
+        record
+            .evidence
+            .source
+            .as_ref()
+            .is_some_and(|source| source.span().file() == file)
+    }));
+    let diagnostic = document
+        .diagnostics
+        .iter()
+        .find(|record| {
+            record.code == "native-query-refusal" && record.source.as_ref() == Some(&reference)
+        })
+        .unwrap();
+    assert!(
+        diagnostic
+            .message
+            .contains("origin=query-identity-c-formal-reads-limit")
+    );
+    assert!(diagnostic.message.contains("unit=checked-native-work"));
+    assert!(
+        diagnostic
+            .message
+            .contains("observed=2097153 limit=2097152")
+    );
+    assert!(!diagnostic.message.contains("resource Records"));
+    assert!(!diagnostic.message.contains("ababa"));
+    assert!(!diagnostic.message.contains("forward"));
+    assert!(!diagnostic.message.contains("values.c"));
+    assert_eq!(diagnostic.coverage_effect, CoverageStatus::Unknown);
+    for domain in [
+        IrFactDomain::Entities,
+        IrFactDomain::Occurrences,
+        IrFactDomain::Relations,
+    ] {
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.source == reference
+                    && gap.domain == domain
+                    && gap.reason == SkippedRegionReason::ResourceLimit
+                    && gap.detail == "native-query-refusal")
+        );
+    }
+    let coverage = service
+        .source_file_coverage_until(receipt.generation, file, &Cancellation::new())
+        .unwrap();
+    assert_eq!(coverage.status, CoverageStatus::Unknown);
+    assert_eq!(
+        coverage.reason,
+        Some(FirstSliceSourceCoverageReason::ResourceBounded)
+    );
+    assert!(
+        document
+            .entities
+            .iter()
+            .any(|entity| entity.canonical_name == "retained_sibling")
+    );
+}
+
+#[test]
+fn native_helper_refusal_preserves_source_across_reopen_and_repair() {
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let storage = durable_test_tempdir();
+    let bytes = many_native_census_nodes();
+    fs::write(root.path().join("values.c"), &bytes).unwrap();
+    fs::write(
+        root.path().join("lib.rs"),
+        b"pub fn retained_sibling() {}\n",
+    )
+    .unwrap();
+    let paths =
+        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let cancellation = Cancellation::new();
+    let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &cancellation).unwrap();
+    let first = service
+        .index_repository(root.path(), &cancellation)
+        .expect("genuine native helper refusal preserves exact captured source");
+    assert_native_helper_gap(&service, &first);
+    assert_source(&service, &first, "values.c", &bytes);
+    assert_eq!(
+        service
+            .index_repository(root.path(), &cancellation)
+            .unwrap(),
+        first
+    );
+    assert_eq!(
+        service
+            .generation_cache
+            .lock()
+            .unwrap()
+            .reserved_memory_bytes()
+            .unwrap(),
+        0
+    );
+    drop(service);
+    let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &cancellation).unwrap();
+    assert_native_helper_gap(&service, &first);
+    assert_source(&service, &first, "values.c", &bytes);
+    let restored = b"void restored_analysis(int value) { sink(value); }\n";
+    fs::write(root.path().join("values.c"), restored).unwrap();
+    let second = service
+        .index_repository(root.path(), &cancellation)
+        .unwrap();
+    assert_eq!(second.parent, Some(first.generation));
+    let lease = service
+        .generation_lease(second.generation, &cancellation)
+        .unwrap();
+    let entity = lease
+        .generation()
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.language == "c" && entity.canonical_name == "restored_analysis")
+        .unwrap();
+    let evidence = entity.evidence.source.as_ref().unwrap();
+    assert_eq!(evidence.generation(), second.generation);
+    assert_eq!(evidence.content_hash(), content_hash(restored));
+    assert!(
+        !lease
+            .generation()
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "native-query-refusal")
+    );
+    let reference = source_reference(&service, &second, "values.c");
+    let read = service
+        .source_read_with_options_and_budget(
+            second.generation,
+            vec![reference.clone()],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0)
+                .with_encoding(SourceEncoding::Bytes),
+            FirstSliceBudget::default(),
+            &cancellation,
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks.len(), 1);
+    assert_eq!(read.data.chunks[0].reference, reference);
+    assert_eq!(read.data.chunks[0].bytes, restored);
+    assert_source(&service, &first, "values.c", &bytes);
+}
+
+#[test]
+fn helper_refusal_preserves_explicit_policy_and_deep_mode_failure() {
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    fs::write(root.path().join("values.c"), many_native_census_nodes()).unwrap();
+    for mode in [FirstSliceIndexMode::Structural, FirstSliceIndexMode::Deep] {
+        let mut service = FirstSliceService::new(2).unwrap();
+        if mode == FirstSliceIndexMode::Structural {
+            let current = &service.analysis_limits;
+            let mut ir = current.ir().clone();
+            ir.max_entities = 1;
+            service.analysis_limits = AnalysisLimits::new(
+                current.max_source_bytes(),
+                current.max_syntax_nodes(),
+                current.max_syntax_depth(),
+                current.max_embedded_ranges(),
+                current.max_reported_memory_bytes(),
+                current.syntax_stream().clone(),
+                current.ir_stream().clone(),
+                ir,
+            )
+            .unwrap();
+        }
+        assert!(
+            service
+                .index_repository_with_mode(root.path(), mode, &Cancellation::new())
+                .is_err()
+        );
+        assert!(service.active_generation().is_none());
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reserved_memory_bytes()
+                .unwrap(),
+            0
+        );
+    }
+}
+// Genuine native issuance, source binding and admission must agree.
+// Copied source-free error codes never authorize file-only publication.
+
+#[test]
+fn native_helper_certificate_conserves_source_provider_and_admission() {
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let bytes = many_native_census_nodes();
+    fs::write(root.path().join("values.c"), &bytes).unwrap();
+    let repository = derive_repository(b"native-helper-certificate-fixture").id();
+    let generation = GenerationId::from_bytes([82; 20]);
+    let repository_root = RepositoryRoot::open(repository, root.path()).unwrap();
+    let snapshot = repository_root
+        .snapshot(
+            &RelativePath::parse(Path::new("values.c")).unwrap(),
+            bytes.len() as u64,
+        )
+        .unwrap();
+    let service = FirstSliceService::new(2).unwrap();
+    let request = structural_analysis_request(
+        repository,
+        generation,
+        &snapshot,
+        false,
+        "c",
+        "utf-8",
+        &service.analysis_limits,
+    )
+    .unwrap()
+    .to_parse_request();
+    let proof = service.structural_parsers["c"]
+        .certify_intrinsic_identity_refusal(&request, &Cancellation::new())
+        .unwrap()
+        .unwrap();
+    assert!(service.structural_parsers["c"].owns_native_identity_refusal(&proof));
+    assert!(proof.matches_request(&request));
+    assert!(proof.matches_error(&proof.adapter_error()));
+    assert_eq!(
+        proof.details().origin(),
+        "query-identity-c-formal-reads-limit"
+    );
+    assert_eq!(
+        (proof.details().observed(), proof.details().limit()),
+        (Some(2_097_153), Some(2_097_152))
+    );
+    assert!(proof.details().progress().0.unwrap() < 100);
+    assert!(proof.details().progress().1.unwrap() < 100);
+    assert!(!proof.matches_error(&generic_records_error()));
+    let other = structural_analysis_request(
+        repository,
+        GenerationId::from_bytes([83; 20]),
+        &snapshot,
+        false,
+        "c",
+        "utf-8",
+        &service.analysis_limits,
+    )
+    .unwrap()
+    .to_parse_request();
+    assert!(!proof.matches_request(&other));
+    assert!(!proof.matches_source(proof.source(), "cpp", "utf-8"));
+    assert!(!proof.matches_source(proof.source(), "c", "utf-16le"));
+    let foreign = TreeSitterProvider::new_deferred(
+        parser_config(service.analysis_limits.max_source_bytes()).unwrap(),
+    )
+    .unwrap();
+    assert!(!proof.was_issued_by(&foreign));
+    assert!(matches!(
+        foreign.certify_intrinsic_identity_refusal(
+            &request,
+            MemoryAdmissionPolicy::RequireHardOrAccounted,
+            &Cancellation::new()
+        ),
+        Err(AdapterError::RejectedRequest(
+            rootlight_adapter_sdk::RequestError::MemoryEnforcementUnavailable
+        ))
+    ));
+    let current = &service.analysis_limits;
+    let constrained = AnalysisLimits::new(
+        current.max_source_bytes(),
+        1,
+        current.max_syntax_depth(),
+        current.max_embedded_ranges(),
+        current.max_reported_memory_bytes(),
+        current.syntax_stream().clone(),
+        current.ir_stream().clone(),
+        current.ir().clone(),
+    )
+    .unwrap();
+    let constrained_request = structural_analysis_request(
+        repository,
+        generation,
+        &snapshot,
+        false,
+        "c",
+        "utf-8",
+        &constrained,
+    )
+    .unwrap()
+    .to_parse_request();
+    assert!(!proof.matches_request(&constrained_request));
+    assert!(
+        service.structural_parsers["c"]
+            .certify_intrinsic_identity_refusal(&constrained_request, &Cancellation::new())
+            .is_err()
+    );
+    let encoded = structural_analysis_request(
+        repository, generation, &snapshot, false, "c", "bytes", current,
+    )
+    .unwrap()
+    .to_parse_request();
+    assert!(matches!(
+        service.structural_parsers["c"]
+            .certify_intrinsic_identity_refusal(&encoded, &Cancellation::new()),
+        Err(AdapterError::RejectedRequest(
+            rootlight_adapter_sdk::RequestError::UnsupportedEncoding
+        ))
+    ));
+    let cancelled = Cancellation::new();
+    cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+    assert!(matches!(
+        service.structural_parsers["c"].certify_intrinsic_identity_refusal(&request, &cancelled),
+        Err(AdapterError::Cancelled { .. })
+    ));
+    assert_eq!(
+        service
+            .generation_cache
+            .lock()
+            .unwrap()
+            .reserved_memory_bytes()
+            .unwrap(),
+        0
+    );
+}
+
+struct UncertifiedRefusalParser {
+    capabilities: rootlight_adapter_sdk::ParseCapabilities,
+    foreign: Option<rootlight_adapter_treesitter::NativeIdentityRefusal>,
+}
+
+impl ParseProvider for UncertifiedRefusalParser {
+    fn capabilities(&self) -> &rootlight_adapter_sdk::ParseCapabilities {
+        &self.capabilities
+    }
+    fn parse(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _sink: &mut dyn rootlight_adapter_sdk::SyntaxFactSink,
+        _cancellation: &Cancellation,
+    ) -> Result<rootlight_adapter_sdk::ParseReport, AdapterError> {
+        Err(AdapterError::ProviderFailed {
+            code: rootlight_adapter_sdk::DiagnosticCode::new("query-identity-c-formal-reads-limit")
+                .unwrap(),
+        })
+    }
+}
+
+impl StructuralPreflight for UncertifiedRefusalParser {
+    fn required_syntax_fact_count(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        Err(AdapterError::ProviderFailed {
+            code: rootlight_adapter_sdk::DiagnosticCode::new("query-identity-c-formal-reads-limit")
+                .unwrap(),
+        })
+    }
+    fn certify_intrinsic_identity_refusal(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeIdentityRefusal>, AdapterError> {
+        Ok(self.foreign.clone())
+    }
+}
+
+#[test]
+fn copied_refusal_code_and_foreign_proof_cannot_authorize_source_only() {
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let bytes = many_native_census_nodes();
+    fs::write(root.path().join("values.c"), &bytes).unwrap();
+    let repository = derive_repository(b"uncertified-helper-fixture").id();
+    let generation = GenerationId::from_bytes([84; 20]);
+    let repository_root = RepositoryRoot::open(repository, root.path()).unwrap();
+    let snapshot = repository_root
+        .snapshot(
+            &RelativePath::parse(Path::new("values.c")).unwrap(),
+            bytes.len() as u64,
+        )
+        .unwrap();
+    let service = FirstSliceService::new(2).unwrap();
+    let request = structural_analysis_request(
+        repository,
+        generation,
+        &snapshot,
+        false,
+        "c",
+        "utf-8",
+        &service.analysis_limits,
+    )
+    .unwrap()
+    .to_parse_request();
+    let proof = service.structural_parsers["c"]
+        .certify_intrinsic_identity_refusal(&request, &Cancellation::new())
+        .unwrap()
+        .unwrap();
+    for foreign in [None, Some(proof)] {
+        let parser = Arc::new(UncertifiedRefusalParser {
+            capabilities: service.structural_parsers["c"].capabilities().clone(),
+            foreign,
+        });
+        let analyzer = TreeSitterAnalyzer::new(
+            Arc::clone(&parser) as Arc<dyn ParseProvider>,
+            ProducerIdentity::new(
+                "uncertified-helper-fixture",
+                "1.0",
+                first_slice_build_context(),
+            )
+            .unwrap(),
+            LanguageId::new("c").unwrap(),
+            "fixture-native",
+            content_hash(b"uncertified-helper-fixture"),
+        )
+        .unwrap();
+        let original = AdapterError::ProviderFailed {
+            code: rootlight_adapter_sdk::DiagnosticCode::new("query-identity-c-formal-reads-limit")
+                .unwrap(),
+        };
+        let result = crate::native_source_admission::certify(
+            &service.analysis_limits,
+            FirstSliceIndexMode::Structural,
+            &analyzer,
+            parser.as_ref(),
+            &request,
+            &original,
+            &Cancellation::new(),
+        );
+        if parser.foreign.is_none() {
+            assert!(result.unwrap().is_none());
+        } else {
+            assert!(matches!(result, Err(AdapterError::ProviderFailed { code })
+                if code.as_str() == "native-refusal-certificate-mismatch"));
+        }
+        assert!(
+            crate::native_source_admission::certify(
+                &service.analysis_limits,
+                FirstSliceIndexMode::Structural,
+                &analyzer,
+                parser.as_ref(),
+                &request,
+                &AdapterError::Sink(SinkError::AllocationFailed),
+                &Cancellation::new()
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}

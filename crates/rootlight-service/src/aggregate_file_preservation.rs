@@ -154,10 +154,7 @@ impl Reservation {
         generation: GenerationId,
         sources: &[RustSourceInput],
         languages: &BTreeMap<FileId, String>,
-        native_unavailable: &BTreeMap<
-            FileId,
-            rootlight_adapter_treesitter::NativeIdentityWorkLimit,
-        >,
+        native_unavailable: &BTreeMap<FileId, native_source_admission::NativeSourceRefusal>,
         limits: &IrLimits,
         reserved_bytes: &mut u64,
         memory: &mut GenerationMemoryReservation,
@@ -203,10 +200,7 @@ impl Reservation {
         generation: GenerationId,
         sources: &[RustSourceInput],
         languages: &BTreeMap<FileId, String>,
-        native_unavailable: &BTreeMap<
-            FileId,
-            rootlight_adapter_treesitter::NativeIdentityWorkLimit,
-        >,
+        native_unavailable: &BTreeMap<FileId, native_source_admission::NativeSourceRefusal>,
         limits: &IrLimits,
         reserved_bytes: &mut u64,
         memory: &mut GenerationMemoryReservation,

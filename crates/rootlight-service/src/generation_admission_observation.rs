@@ -205,6 +205,8 @@ pub(super) struct ProjectionPeak {
     pub(super) lexical_coverage_bytes: u64,
     /// Compact graph workspace allowance.
     pub(super) workspace_bytes: u64,
+    /// Ordinary snapshot metadata retained for authenticated source recovery.
+    pub(super) snapshot_metadata_bytes: u64,
     /// Currently retained structural-cache allowance.
     pub(super) structural_cache_bytes: u64,
     /// Explain-index construction peak allowance.
@@ -228,6 +230,7 @@ impl ProjectionPeak {
             .checked_add(self.lexical_coverage_bytes)
             .and_then(|bytes| bytes.checked_mul(3))
             .and_then(|bytes| bytes.checked_add(self.workspace_bytes))
+            .and_then(|bytes| bytes.checked_add(self.snapshot_metadata_bytes))
             .and_then(|bytes| bytes.checked_add(self.structural_cache_bytes))
             .and_then(|bytes| bytes.checked_add(self.explain_index_bytes))
             .ok_or(FirstSliceError::Limits)?;
@@ -1228,6 +1231,7 @@ mod tests {
             document_bytes: 2,
             lexical_coverage_bytes: 1,
             workspace_bytes: 3,
+            snapshot_metadata_bytes: 0,
             structural_cache_bytes: 4,
             explain_index_bytes: 5,
             peak_bytes: 21,
@@ -1353,5 +1357,40 @@ mod tests {
             }
             assert_eq!(original, FirstSliceError::Limits);
         }
+    }
+}
+
+#[cfg(test)]
+mod projection_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_metadata_is_conserved_in_projection_peak_and_overflow_is_strict() {
+        let peak = ProjectionPeak {
+            document_bytes: 2,
+            lexical_coverage_bytes: 1,
+            workspace_bytes: 3,
+            snapshot_metadata_bytes: 7,
+            structural_cache_bytes: 4,
+            explain_index_bytes: 5,
+            peak_bytes: 28,
+        };
+        assert_eq!(peak.validate(), Ok(()));
+        assert_eq!(
+            ProjectionPeak {
+                peak_bytes: 21,
+                ..peak
+            }
+            .validate(),
+            Err(FirstSliceError::Identity)
+        );
+        assert_eq!(
+            ProjectionPeak {
+                snapshot_metadata_bytes: u64::MAX,
+                ..peak
+            }
+            .validate(),
+            Err(FirstSliceError::Limits)
+        );
     }
 }

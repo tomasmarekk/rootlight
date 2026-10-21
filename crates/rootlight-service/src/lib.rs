@@ -13,6 +13,9 @@ mod fresh_projection_capacity;
 #[cfg(test)]
 #[path = "tests/fresh_projection_capacity.rs"]
 mod fresh_projection_capacity_tests;
+#[cfg(test)]
+mod oracle_storage_source_recovery_tests;
+mod projection_profile;
 pub use aggregate_source_recovery::{
     AggregateCapacityFailure, FirstSliceSourceRecovery, FirstSliceTextSearchCoverage,
 };
@@ -135,7 +138,7 @@ use rootlight_adapters::{
     AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, FluxParseProvider,
     IniParseProvider, LessParseProvider, MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider,
     PrologParseProvider, RuntimeTraceImportRequest, SassParseProvider, ScssParseProvider,
-    TclParseProvider, import_runtime_trace,
+    TclParseProvider, ThinkScriptParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
@@ -278,6 +281,8 @@ pub struct FirstSliceAnalysisProfile {
     tracked_new_chunks_with_strong_owners_at_finish: u64,
     first_irreversible_collector_overflow: Option<AnalysisProfileOverflow>,
     terminal_file_failure: Option<AnalysisProfileFileFailure>,
+    last_fresh_projection_admission: Option<projection_profile::Observation>,
+    last_fresh_projection_records: Option<projection_profile::records::Observation>,
     append: AnalysisProfileAppend,
     append_scope: &'static str,
     phases: Vec<AnalysisProfileEvent>,
@@ -313,6 +318,8 @@ impl Default for FirstSliceAnalysisProfile {
             tracked_new_chunks_with_strong_owners_at_finish: 0,
             first_irreversible_collector_overflow: None,
             terminal_file_failure: None,
+            last_fresh_projection_admission: None,
+            last_fresh_projection_records: None,
             append: AnalysisProfileAppend::default(),
             append_scope: "inclusive_append_substages_nested_search_and_classification_decoder_times_overlap_decoder_counters_cover_classification_calls_only",
             phases: Vec::new(),
@@ -932,7 +939,7 @@ const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
-const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/16";
+const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/24";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
@@ -944,8 +951,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/292";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/123";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/325";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/140";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/14";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -3207,7 +3214,16 @@ enum UnsupportedSourceDisposition {
     AdmissionResourceBounded,
     ParserSizeLimit,
     AggregateFileCapacity,
-    IntrinsicIdentityWorkLimit { observed: usize, limit: usize },
+    IntrinsicIdentityWorkLimit {
+        observed: usize,
+        limit: usize,
+    },
+    NativeIdentityRefusal {
+        details: rootlight_adapter_treesitter::NativeIdentityRefusalDetails,
+    },
+    NativeScannerRefusal {
+        details: rootlight_adapter_treesitter::NativeScannerRefusalDetails,
+    },
 }
 
 enum NativeFSharpAdmission {
@@ -6227,6 +6243,36 @@ struct CachedRevisionChangePaths {
 }
 
 trait StructuralPreflight: ParseProvider {
+    fn owns_native_scanner_refusal(
+        &self,
+        _proof: &rootlight_adapter_treesitter::NativeScannerRefusal,
+    ) -> bool {
+        false
+    }
+
+    fn certify_native_scanner_refusal(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeScannerRefusal>, AdapterError> {
+        Ok(None)
+    }
+
+    fn owns_native_identity_refusal(
+        &self,
+        _proof: &rootlight_adapter_treesitter::NativeIdentityRefusal,
+    ) -> bool {
+        false
+    }
+
+    fn certify_intrinsic_identity_refusal(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeIdentityRefusal>, AdapterError> {
+        Ok(None)
+    }
+
     fn owns_native_identity_limit(
         &self,
         _proof: &rootlight_adapter_treesitter::NativeIdentityWorkLimit,
@@ -6270,6 +6316,58 @@ trait StructuralPreflight: ParseProvider {
 }
 
 impl StructuralPreflight for TreeSitterProvider {
+    fn owns_native_scanner_refusal(
+        &self,
+        proof: &rootlight_adapter_treesitter::NativeScannerRefusal,
+    ) -> bool {
+        proof.was_issued_by(self)
+    }
+
+    fn certify_native_scanner_refusal(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeScannerRefusal>, AdapterError> {
+        let memory_policy = match self.capabilities().memory_enforcement() {
+            rootlight_adapter_sdk::MemoryEnforcement::Unavailable => {
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback
+            }
+            _ => MemoryAdmissionPolicy::RequireHardOrAccounted,
+        };
+        TreeSitterProvider::certify_native_scanner_refusal(
+            self,
+            request,
+            memory_policy,
+            cancellation,
+        )
+    }
+
+    fn owns_native_identity_refusal(
+        &self,
+        proof: &rootlight_adapter_treesitter::NativeIdentityRefusal,
+    ) -> bool {
+        proof.was_issued_by(self)
+    }
+
+    fn certify_intrinsic_identity_refusal(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeIdentityRefusal>, AdapterError> {
+        let memory_policy = match self.capabilities().memory_enforcement() {
+            rootlight_adapter_sdk::MemoryEnforcement::Unavailable => {
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback
+            }
+            _ => MemoryAdmissionPolicy::RequireHardOrAccounted,
+        };
+        TreeSitterProvider::certify_intrinsic_identity_refusal(
+            self,
+            request,
+            memory_policy,
+            cancellation,
+        )
+    }
+
     fn supports_fresh_source_preservation(&self) -> bool {
         true
     }
@@ -6334,6 +6432,20 @@ impl StructuralPreflight for AgdaParseProvider {
         cancellation: &Cancellation,
     ) -> Result<usize, AdapterError> {
         AgdaParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
+impl StructuralPreflight for ThinkScriptParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        ThinkScriptParseProvider::required_syntax_fact_count(self, request, cancellation)
     }
 }
 
@@ -7489,6 +7601,10 @@ impl FirstSliceService {
             AgdaParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let thinkscript_parser = Arc::new(
+            ThinkScriptParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let awk_parser = Arc::new(
             AwkParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -7636,6 +7752,36 @@ impl FirstSliceService {
             .insert(
                 "agda".to_owned(),
                 agda_parser as Arc<dyn StructuralPreflight>,
+            )
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let thinkscript_provider: Arc<dyn ParseProvider> =
+            Arc::clone(&thinkscript_parser) as Arc<dyn ParseProvider>;
+        let thinkscript_analyzer = TreeSitterAnalyzer::new(
+            thinkscript_provider,
+            ProducerIdentity::new(
+                "rootlight-first-slice-thinkscript-source",
+                "1.0",
+                config.hash(),
+            )
+            .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("thinkscript").map_err(|_| FirstSliceError::Adapter)?,
+            "thinkscript-source-1",
+            ThinkScriptParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers
+            .insert("thinkscript".to_owned(), thinkscript_analyzer)
+            .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        if structural_parsers
+            .insert(
+                "thinkscript".to_owned(),
+                thinkscript_parser as Arc<dyn StructuralPreflight>,
             )
             .is_some()
         {
@@ -9430,6 +9576,7 @@ impl FirstSliceService {
         // reservation before complete-source admission can reserve the same ID.
         let mut durable_restore_failure = None;
         let mut fresh_projection_failure = None;
+        let mut oracle_storage_failure = None;
         let structural = (|| -> Result<FirstSliceIndexPreparation, FirstSlicePreparationError<ObserverError>> {
             let file_claims = &file_claims;
             let normal_metadata_bytes = if recovery_enabled {
@@ -9501,6 +9648,12 @@ impl FirstSliceService {
                 {
                     return Err(FirstSliceError::DiscoveryDrift.into());
                 }
+                // Bind the opaque-BOM cause to this already authenticated
+                // snapshot. It neither decodes text nor establishes a language.
+                let opaque_unicode_bom = input.encoding == "bytes"
+                    && matches!(snapshot.content(),
+                        [0xef, 0xbb, 0xbf, ..] | [0xff, 0xfe, ..]
+                        | [0xfe, 0xff, ..] | [0, 0, 0xfe, 0xff, ..]);
                 let mut language = supported_source_language(input, &self.analyzers);
                 let admission = if language.is_none() {
                     self.probe_fsharp_source(repository, generation, input, &snapshot, cancellation)?
@@ -9531,6 +9684,7 @@ impl FirstSliceService {
                             UnsupportedSourceDisposition::AdmissionResourceBounded
                         } else if matches!(admission, NativeFSharpAdmission::InvalidEncoding)
                             || input.encoding == "binary"
+                            || opaque_unicode_bom
                             || source_language_route(input, &self.analyzers).is_some()
                         {
                             UnsupportedSourceDisposition::Encoding
@@ -10074,7 +10228,7 @@ impl FirstSliceService {
                                 cancellation,
                             ) {
                                 Ok(output) => (
-                                    output.document().clone(),
+                                    output.into_parts().0,
                                     Some(Arc::clone(&entry.artifact)),
                                     None,
                                     false,
@@ -10089,8 +10243,7 @@ impl FirstSliceService {
                                             cancellation,
                                         )
                                         .map_err(|error| map_adapter_error(error, cancellation))?
-                                        .document()
-                                        .clone(),
+                                        .into_parts().0,
                                     None,
                                     None,
                                     false,
@@ -10181,7 +10334,7 @@ impl FirstSliceService {
                                 } else {
                                     Some(artifact)
                                 };
-                                (output.document().clone(), retained, None, false)
+                                (output.into_parts().0, retained, None, false)
                             }
                             Err(error) if is_invalid_utf8_adapter_failure(&error) => (
                                 analyzer
@@ -10192,8 +10345,7 @@ impl FirstSliceService {
                                         cancellation,
                                     )
                                     .map_err(|error| map_adapter_error(error, cancellation))?
-                                    .document()
-                                    .clone(),
+                                    .into_parts().0,
                                 None,
                                 None,
                                 false,
@@ -10593,7 +10745,7 @@ impl FirstSliceService {
             let mut incremental = incremental_plan.state;
             let serialized_document_bytes = observe_generation_phase!(
                 FinalProjection,
-                normalized_document_serialized_bytes(&document)
+                projection_profile::records::document_serialized_bytes(&document)
             )?;
             let lexical_coverage_bytes = observe_generation_phase!(
                 FinalProjection,
@@ -10643,6 +10795,20 @@ impl FirstSliceService {
                     )
                     .and_then(|bytes| bytes.checked_add(explain_index_peak_bytes))
                     .ok_or(FirstSliceError::Limits)?;
+            projection_profile::observe(projection_profile::Observation {
+                scope: "computed_conservative_modeled_bytes_not_rss_or_allocation_measurement",
+                model: "3*(D+L)+W+M+A+I",
+                stage: "fresh_final_projection_admission_not_cold_reload",
+                document_bytes: serialized_document_bytes,
+                lexical_coverage_bytes,
+                workspace_bytes: logical_workspace_bytes,
+                snapshot_metadata_bytes: normal_metadata_bytes,
+                structural_cache_bytes: u64::try_from(structural_artifacts.accounted_bytes)
+                    .map_err(|_| FirstSliceError::Limits)?,
+                explain_index_bytes: explain_index_peak_bytes,
+                total_bytes: logical_staged_memory_bytes,
+                ceiling_bytes: generation_memory_ceiling(),
+            });
             #[cfg(test)]
             fresh_projection_capacity_tests::observe_projection(
                 reserved_memory_bytes.max(output_admission.reservation_bytes()),
@@ -10655,6 +10821,7 @@ impl FirstSliceService {
                         document_bytes: serialized_document_bytes,
                         lexical_coverage_bytes,
                         workspace_bytes: logical_workspace_bytes,
+                        snapshot_metadata_bytes: normal_metadata_bytes,
                         structural_cache_bytes,
                         explain_index_bytes: explain_index_peak_bytes,
                         peak_bytes: logical_staged_memory_bytes,
@@ -10738,18 +10905,26 @@ impl FirstSliceService {
                     .map_err(|error| map_generation_neutral_digest_error(error, cancellation))
             )?;
             if self.durable.is_some() {
-                estimated_disk_bytes = self
+                let required = self
                     .durable_output_reservation(
                         source_storage_bytes,
                         serialized_document_bytes,
                         representation,
                     )?
                     .max(estimated_disk_bytes);
-                self.resize_durable_storage_reservation(
-                    storage_reservation.reservation.as_ref(),
-                    estimated_disk_bytes,
-                    0,
-                )?;
+                if let Err(error) = self.resize_durable_storage_reservation(
+                    storage_reservation.reservation.as_ref(), required, 0,
+                ) {
+                    check_cancellation(cancellation)?;
+                    if fresh_source_preservation {
+                        oracle_storage_failure =
+                            aggregate_source_recovery::OracleStorageCapacity::from_output_resize(
+                                repository, generation, manifest_hash, required, error,
+                            );
+                    }
+                    return Err(error.into());
+                }
+                estimated_disk_bytes = required;
             }
             let (oracle_allocated_bytes, verified, durable, mut written_bytes, oracle_restore_plan) = if let Some(durable) =
                 &self.durable
@@ -11044,6 +11219,13 @@ impl FirstSliceService {
                                 cause.matches(repository, generation, manifest_hash, error)
                             })
                             .map(|cause| (None, None, Some(cause)))
+                    })
+                    .or_else(|| {
+                        oracle_storage_failure
+                            .filter(|cause| {
+                                cause.matches(repository, generation, manifest_hash, error)
+                            })
+                            .map(|cause| (Some(cause.aggregate_failure()), None, None))
                     })
             }
             _ => None,
@@ -11982,10 +12164,7 @@ impl FirstSliceService {
         sources: &[RustSourceInput],
         configuration_sources: &[RustSourceInput],
         source_languages: &BTreeMap<FileId, String>,
-        native_unavailable: &BTreeMap<
-            FileId,
-            rootlight_adapter_treesitter::NativeIdentityWorkLimit,
-        >,
+        native_unavailable: &BTreeMap<FileId, native_source_admission::NativeSourceRefusal>,
         mode: FirstSliceIndexMode,
         require_complete_project_analysis: bool,
         output_admission: &mut generation_admission::GenerationAdmission,
@@ -16204,7 +16383,10 @@ impl FirstSliceService {
                         "unsupported-encoding" => {
                             Some(FirstSliceSourceCoverageReason::UnsupportedEncoding)
                         }
-                        "language-admission-resource-bounded" | "native-identity-work-limit" => {
+                        "language-admission-resource-bounded"
+                        | "native-identity-work-limit"
+                        | "native-query-refusal"
+                        | "native-scanner-capacity" => {
                             Some(FirstSliceSourceCoverageReason::ResourceBounded)
                         }
                         _ => None,
@@ -17637,7 +17819,7 @@ pub enum FirstSliceError {
     },
     /// Durable publication crossed one configured physical-storage boundary.
     #[error(
-        "durable storage {scope:?} projects {projected_bytes} bytes from {observed_bytes} observed plus {required_bytes} required against {limit_bytes}, preserving {minimum_free_bytes} free bytes"
+        "durable storage {scope:?} requires {required_bytes} bytes; observed {observed_bytes}, projected {projected_bytes}, limit {limit_bytes}, minimum free {minimum_free_bytes}"
     )]
     StorageResourceExhausted {
         /// Closed physical-storage boundary that rejected admission.
@@ -19208,6 +19390,14 @@ fn source_language_route<'a>(
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    if input
+        .language_signals
+        .iter()
+        .any(|signal| signal.language == "thinkscript")
+    {
+        let language = thinkscript_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     for evidence in [
         LanguageEvidence::Filename,
         LanguageEvidence::Extension,
@@ -19261,6 +19451,26 @@ fn json_schema_content_language(input: &ManifestInput) -> Option<&str> {
         ) && signal.language != written.language
     }))
     .then_some(written.language.as_str())
+}
+
+fn thinkscript_content_language(input: &ManifestInput) -> Option<&str> {
+    if !Path::new(&input.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+    {
+        return None;
+    }
+    let written = input.language_signals.iter().find(|signal| {
+        signal.language == "thinkscript" && signal.evidence == LanguageEvidence::Content
+    })?;
+    input
+        .language_signals
+        .iter()
+        .all(|signal| {
+            signal.language == written.language && signal.evidence == LanguageEvidence::Content
+        })
+        .then_some(written.language.as_str())
 }
 
 fn has_haxe_language_conflict(input: &ManifestInput) -> bool {
@@ -19698,6 +19908,62 @@ fn unsupported_source_document(
             "source remains exact and readable; intrinsic native identity work prevented structural analysis",
             SkippedRegionReason::ResourceLimit,
         ),
+        UnsupportedSourceDisposition::NativeIdentityRefusal { .. } => (
+            "native-query-refusal",
+            "source remains exact and readable; native identity query refused complete structural analysis",
+            SkippedRegionReason::ResourceLimit,
+        ),
+        UnsupportedSourceDisposition::NativeScannerRefusal { details } => match details {
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::LeanScannerCapacity => (
+                "native-scanner-capacity", "source remains exact and readable; a finite native scanner state or delimiter bound prevented structural analysis", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::LeanExternalWork { .. } => (
+                "native-scanner-external-work-limit", "source remains exact and readable; intrinsic external scanner work prevented structural analysis", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::DockerfileStateCapacity => (
+                "native-scanner-capacity", "source remains exact and readable; native scanner state cannot fit its complete serialized format", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::DockerfileMarkerSemantics => (
+                "native-scanner-unsupported-marker", "source remains exact and readable; written marker semantics lack complete native scanner support", SkippedRegionReason::UnsupportedConstruct,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::IdrisStateCapacity => (
+                "native-scanner-capacity", "source remains exact and readable; complete native token, state or indentation exceeded fixed capacity", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::IdrisExternalWork { .. } => (
+                "native-scanner-external-work-limit", "source remains exact and readable; intrinsic external scanner work prevented structural analysis", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::SedGroupCapacity => (
+                "native-scanner-capacity", "source remains exact and readable; native regex group state exceeded its fixed uint32 capacity", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::SedExternalWork { .. } => (
+                "native-scanner-external-work-limit", "source remains exact and readable; intrinsic external scanner work prevented structural analysis", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::WolframCommentDepth => (
+                "native-scanner-capacity", "source remains exact and readable; nested native comments exceeded the finite depth policy", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::WolframExternalWork { .. } => (
+                "native-scanner-external-work-limit", "source remains exact and readable; intrinsic external scanner work prevented structural analysis", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::PugStateCapacity => (
+                "native-scanner-capacity", "source remains exact and readable; complete native scanner state or indentation width exceeded capacity", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::PugExternalWork { .. } => (
+                "native-scanner-external-work-limit", "source remains exact and readable; intrinsic external scanner work prevented structural analysis", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::CoffeescriptStateCapacity => (
+                "native-scanner-capacity", "source remains exact and readable; complete native scanner state or indentation width exceeded capacity", SkippedRegionReason::ResourceLimit,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::CoffeescriptNulSemantics => (
+                "native-scanner-unsupported-nul", "source remains exact and readable; native scanner cannot interpret embedded NUL", SkippedRegionReason::UnsupportedConstruct,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::CoffeescriptIndentationSemantics => (
+                "native-scanner-unsupported-indentation", "source remains exact and readable; written dedentation has no complete native scanner interpretation", SkippedRegionReason::UnsupportedConstruct,
+            ),
+            rootlight_adapter_treesitter::NativeScannerRefusalDetails::CoffeescriptExternalWork { .. } => (
+                "native-scanner-external-work-limit", "source remains exact and readable; intrinsic external scanner work prevented structural analysis", SkippedRegionReason::ResourceLimit,
+            ),
+            _ => return Err(FirstSliceError::Adapter),
+        },
         UnsupportedSourceDisposition::AggregateFileCapacity => (
             "aggregate-file-capacity",
             "combined structural capacity prevented this file's analysis; exact original source remains available",
@@ -19826,6 +20092,12 @@ fn unsupported_source_document(
             message: match input.disposition {
                 UnsupportedSourceDisposition::IntrinsicIdentityWorkLimit { observed, limit } => {
                     format!("{message}; resource Records observed {observed} above {limit}")
+                }
+                UnsupportedSourceDisposition::NativeIdentityRefusal { details } => {
+                    details.diagnostic(message)
+                }
+                UnsupportedSourceDisposition::NativeScannerRefusal { details } => {
+                    details.diagnostic(message)
                 }
                 _ => message.to_owned(),
             },
@@ -26369,10 +26641,13 @@ mod tests {
     mod c_preprocessor;
     mod cmake;
     mod cmake_patch;
+    mod coffeescript_source_preservation;
     mod coq_source;
     mod cpp_preprocessor;
+    mod dockerfile_source_preservation;
     mod eiffel_text_reopen;
     mod elm_module_ownership;
+    mod encoded_bom_source_preservation;
     mod encoded_file_fallback;
     mod flux_source;
     mod gap_retention;
@@ -26390,9 +26665,12 @@ mod tests {
     mod modelica_candidates;
     mod modelica_routing_tests;
     mod modelica_source;
+    mod native_identity_revision;
     mod native_identity_source_preservation;
     mod office_sources;
+    mod php_written_calls;
     mod prepared_artifacts;
+    mod pug_source_preservation;
     mod python_parameter_bindings;
     mod python_parameters;
     mod qml_routing_tests;
@@ -26404,8 +26682,11 @@ mod tests {
     mod source_snapshot_selection;
     mod streamed_sources;
     mod tcl_parameters;
+    mod thinkscript_written_inputs;
     mod tsx_source;
     mod typescript_calls;
+    mod wolfram_native_source_preservation;
+    mod wolfram_source_preservation;
     mod yaml_source_names;
 
     use std::{
@@ -34728,6 +35009,9 @@ mod tests {
             "sample.pony",
             "sample.ex",
             "sample.graphql",
+            "written.coffee",
+            "written.pug",
+            "Dockerfile",
             "sample.clj",
             "sample.rkt",
             "sample.vhdl",
@@ -34754,6 +35038,7 @@ mod tests {
             "sample.js",
             "sample.json",
             "sample.kt",
+            "sample.lean",
             "sample.lua",
             "sample.lisp",
             "sample.md",
@@ -34769,6 +35054,8 @@ mod tests {
             "sample.rb",
             "sample.rs",
             "sample.sas",
+            "sample.idr",
+            "sample.sed",
             "sample.scala",
             "sample.dart",
             "sample.ps1",
@@ -34781,6 +35068,7 @@ mod tests {
             "sample.ts",
             "sample.yaml",
             "sample.wgsl",
+            "sample.wl",
             "sample.xml",
             "sample.dtd",
         ]
@@ -34796,6 +35084,23 @@ mod tests {
         write_language_fixture(
             fixture.path(),
             &[
+                (
+                    "written.coffee",
+                    "class Written\n  measure: ->\n    value = 1\n    value\n",
+                ),
+                ("Dockerfile", "FROM scratch AS written\n"),
+                (
+                    "meson.build",
+                    "items = [1]\nforeach item : items\nendforeach\n",
+                ),
+                (
+                    "sample.chpl",
+                    "module Written { proc measure(value: int) { return value; } }\n",
+                ),
+                (
+                    "sample.gd",
+                    "class_name Written\nfunc measure(value):\n    return value\n",
+                ),
                 (
                     "sample.qs",
                     "namespace Written { operation Measure(value : Int) : Unit { External(value); } }\n",
@@ -34864,6 +35169,16 @@ mod tests {
                 ("written.v", "module main\nfn written() {}\n"),
                 ("proof.v", "Definition written : nat := 1.\n"),
                 ("rtl.v", "module written;\nendmodule\n"),
+                (
+                    "sample.idr",
+                    include_str!(
+                        "../../rootlight-adapter-treesitter/tests/fixtures/idris/stlc_small.idr"
+                    ),
+                ),
+                (
+                    "sample.sed",
+                    include_str!("../../rootlight-adapter-treesitter/tests/fixtures/sed/mario.sed"),
+                ),
                 ("written.sv", "module written; logic value; endmodule\n"),
             ],
         );
@@ -34882,7 +35197,56 @@ mod tests {
             .expect("MATLAB source is retained");
         assert_eq!(matlab.language, "matlab");
         mapped.insert(matlab.language.as_str());
-        assert_eq!(receipt.indexed_files, 27);
+        assert_eq!(receipt.indexed_files, 34);
+        let idris = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "sample.idr")
+            .unwrap();
+        assert_eq!(idris.language, "idris");
+        assert_eq!(source_language_from_path("sample.idr"), Some("idris"));
+        for (name, start, end) in [("var", 1215, 1218), ("v0", 1587, 1589)] {
+            let definitions: Vec<_> = generation.document().occurrences.iter().filter(|site| {
+                site.file == idris.id && site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == start && site.source.span().end_byte() == end
+                    && matches!(site.target, OccurrenceTarget::Resolved { symbol } if generation.document().entities.iter().any(|entity| entity.id == symbol && entity.language == "idris" && entity.kind == EntityKind::Function && entity.canonical_name == name))
+            }).collect();
+            assert_eq!(definitions.len(), 1, "{name}");
+            assert_eq!(
+                definitions[0].source.content_hash(),
+                content_hash(include_bytes!(
+                    "../../rootlight-adapter-treesitter/tests/fixtures/idris/stlc_small.idr"
+                ))
+            );
+        }
+        let sed = generation
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "sample.sed")
+            .unwrap();
+        assert_eq!(sed.language, "sed");
+        assert_eq!(source_language_from_path("sample.sed"), Some("sed"));
+        for (name, start, end) in [
+            ("none", 975, 979),
+            ("left", 990, 994),
+            ("right", 1020, 1025),
+            ("end", 5403, 5406),
+        ] {
+            let definitions: Vec<_> = generation.document().occurrences.iter().filter(|site| {
+                site.file == sed.id && site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == start && site.source.span().end_byte() == end
+                    && matches!(site.target, OccurrenceTarget::Resolved { symbol } if generation.document().entities.iter().any(|entity| entity.id == symbol && entity.language == "sed" && entity.kind == EntityKind::StatementLabel && entity.canonical_name == name))
+            }).collect();
+            assert_eq!(definitions.len(), 1, "{name}");
+            assert_eq!(
+                definitions[0].source.content_hash(),
+                content_hash(include_bytes!(
+                    "../../rootlight-adapter-treesitter/tests/fixtures/sed/mario.sed"
+                ))
+            );
+        }
         assert_eq!(source_language_from_path("clock.bas"), None);
         let vba = generation
             .document()
@@ -35108,6 +35472,46 @@ mod tests {
             mapped.insert(file.language.as_str());
         }
         for (path, language, kind, name, bytes, path_language) in [
+            (
+                "written.coffee",
+                "coffeescript",
+                EntityKind::Class,
+                "Written",
+                "class Written\n  measure: ->\n    value = 1\n    value\n",
+                "coffeescript",
+            ),
+            (
+                "Dockerfile",
+                "dockerfile",
+                EntityKind::BuildTarget,
+                "written",
+                "FROM scratch AS written\n",
+                "dockerfile",
+            ),
+            (
+                "meson.build",
+                "meson",
+                EntityKind::Variable,
+                "items",
+                "items = [1]\nforeach item : items\nendforeach\n",
+                "meson",
+            ),
+            (
+                "sample.gd",
+                "gdscript",
+                EntityKind::Class,
+                "Written",
+                "class_name Written\nfunc measure(value):\n    return value\n",
+                "gdscript",
+            ),
+            (
+                "sample.chpl",
+                "chapel",
+                EntityKind::Module,
+                "Written",
+                "module Written { proc measure(value: int) { return value; } }\n",
+                "chapel",
+            ),
             (
                 "sample.qs",
                 "qsharp",
@@ -39212,6 +39616,56 @@ mod tests {
     }
 
     #[test]
+    fn malformed_rust_coverage_retains_parse_and_binding_refusal_reasons() {
+        let fixture = TempDir::new().unwrap();
+        fs::write(fixture.path().join("malformed.rs"), "pub fn broken( {\n").unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let generation = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = generation.document();
+        let gaps = service
+            .coverage_gaps_until(receipt.repository, receipt.generation, &deadline())
+            .unwrap();
+        assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::ParseError
+                && gap.language.as_deref() == Some("rust")
+                && gap.files == 1
+        }));
+        assert!(gaps.iter().any(|gap| {
+            gap.reason == FirstSliceCoverageGapReason::Unsupported
+                && gap.language.as_deref() == Some("rust")
+                && gap.files == 1
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.domain == IrFactDomain::Relations
+                && gap.reason == SkippedRegionReason::UnsupportedConstruct
+                && gap.detail == "rust-namespace-and-binding-target-unavailable"
+        }));
+        assert_eq!(document.files.len(), 1);
+        assert!(document.coverage_records.iter().any(|coverage| {
+            coverage.domain == IrFactDomain::Entities && coverage.status != CoverageStatus::Complete
+        }));
+        let reference = document.files[0].evidence.source.as_ref().unwrap().clone();
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0)
+                    .with_encoding(SourceEncoding::Bytes),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, b"pub fn broken( {\n");
+    }
+
+    #[test]
     fn unsupported_primary_languages_remain_visible_in_coverage() {
         let fixture = TempDir::new().expect("fixture root exists");
         let languages = [
@@ -39465,7 +39919,18 @@ mod tests {
                         SkippedRegionReason::ResourceLimit,
                         FirstSliceSourceCoverageReason::ResourceBounded,
                     ),
-                    UnsupportedSourceDisposition::AggregateFileCapacity => (
+                    UnsupportedSourceDisposition::NativeIdentityRefusal { .. } => (
+                        "native-query-refusal",
+                        SkippedRegionReason::ResourceLimit,
+                        FirstSliceSourceCoverageReason::ResourceBounded,
+                    ),
+                    UnsupportedSourceDisposition::NativeScannerRefusal { details } => match details {
+                        rootlight_adapter_treesitter::NativeScannerRefusalDetails::DockerfileStateCapacity => (
+                            "native-scanner-capacity", SkippedRegionReason::ResourceLimit, FirstSliceSourceCoverageReason::ResourceBounded,
+                        ),
+                        _ => panic!("construct refusal is checked by its separate source-preservation test"),
+                    },
+        UnsupportedSourceDisposition::AggregateFileCapacity => (
                         "aggregate-file-capacity",
                         SkippedRegionReason::ResourceLimit,
                         FirstSliceSourceCoverageReason::ResourceBounded,
@@ -42365,6 +42830,203 @@ mod tests {
         assert_eq!(
             resolver_plan.artifact_decisions()[0].kind(),
             ArtifactDecisionKind::Reuse
+        );
+    }
+
+    #[test]
+    fn preceding_structural_and_resolver_revisions_invalidate_cache_contexts() {
+        let cancellation = Cancellation::new();
+        let limits = PlanningLimits::default();
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let file = FileId::from_bytes([2; 20]);
+        let provider = derive_fact("incremental-provider", INCREMENTAL_PROVIDER_SEED).id();
+        let adapter_key = InputKey::AdapterVersion(provider);
+        let grammar = first_slice_grammar_revision_hash().unwrap();
+        let previous_parser = |revision: &[u8]| {
+            hash_static_components(&[
+                PARSER_PROVIDER_SET_SEED,
+                TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+                TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+                revision,
+                grammar.as_bytes(),
+            ])
+            .unwrap()
+        };
+        let current = InputSnapshot::new(
+            [
+                InputFingerprint::new(
+                    InputKey::FileContent(file),
+                    content_hash(b"unchanged-content"),
+                ),
+                InputFingerprint::new(InputKey::FilePath(file), content_hash(b"unchanged-path")),
+                InputFingerprint::new(adapter_key, first_slice_parser_provider_hash().unwrap()),
+                InputFingerprint::new(
+                    InputKey::ResolverVersion,
+                    content_hash(RESOLVER_BINARY_SEED),
+                ),
+            ],
+            limits,
+            &cancellation,
+        )
+        .unwrap();
+        let keys = incremental_input_keys(&current, &current, &cancellation).unwrap();
+        let passes = first_slice_passes().unwrap();
+        let (nodes, edges) = first_slice_dependency_parts(
+            repository,
+            &BTreeSet::from([file]),
+            &keys,
+            &passes,
+            &cancellation,
+        )
+        .unwrap();
+        let graph_limits = GraphLimits::new(5, nodes.len(), edges.len()).unwrap();
+        let registry =
+            DependencyRegistry::new(passes.declarations().unwrap(), graph_limits, &cancellation)
+                .unwrap();
+        verify_first_slice_observations(&registry, &passes).unwrap();
+        let graph =
+            DependencyGraph::new(nodes, edges, &registry, graph_limits, &cancellation).unwrap();
+        let artifact_id = parser_artifact_id(file);
+        let summary = |inputs: InputSnapshot| {
+            let artifact = ArtifactSummary::new(
+                artifact_id,
+                [FactNode::new(file_analysis_unit(file), FactDomain::Syntax)],
+                inputs
+                    .iter()
+                    .filter(|input| parser_artifact_depends_on(input.key(), file)),
+                limits,
+                &cancellation,
+            )
+            .unwrap();
+            GenerationSummary::new(inputs, [artifact], limits, &cancellation).unwrap()
+        };
+        let unchanged = summary(current.clone());
+        let reuse = plan_invalidation(&unchanged, &current, &graph, limits, &cancellation).unwrap();
+        assert!(reuse.changes().changes().is_empty());
+        assert_eq!(reuse.invalidated_nodes().count(), 0);
+        assert_eq!(reuse.artifact_decisions().len(), 1);
+        assert_eq!(
+            reuse.artifact_decisions()[0].kind(),
+            ArtifactDecisionKind::Reuse
+        );
+        for (changed_key, previous, expected_decision) in [
+            (
+                adapter_key,
+                previous_parser(b"rootlight.first-slice.treesitter-structural/292"),
+                ArtifactDecisionKind::Rebuild,
+            ),
+            (
+                adapter_key,
+                previous_parser(b"rootlight.first-slice.treesitter-structural/293"),
+                ArtifactDecisionKind::Rebuild,
+            ),
+            (
+                InputKey::ResolverVersion,
+                content_hash(b"rootlight.first-slice.resolve/123"),
+                ArtifactDecisionKind::Reuse,
+            ),
+            (
+                InputKey::ResolverVersion,
+                content_hash(b"rootlight.first-slice.resolve/124"),
+                ArtifactDecisionKind::Reuse,
+            ),
+        ] {
+            let previous_inputs = InputSnapshot::new(
+                current.iter().map(|input| {
+                    if input.key() == changed_key {
+                        InputFingerprint::new(changed_key, previous)
+                    } else {
+                        input
+                    }
+                }),
+                limits,
+                &cancellation,
+            )
+            .unwrap();
+            let parent = summary(previous_inputs);
+            let plan = plan_invalidation(&parent, &current, &graph, limits, &cancellation).unwrap();
+            assert_eq!(
+                plan.changes()
+                    .changes()
+                    .iter()
+                    .map(|change| change.key())
+                    .collect::<Vec<_>>(),
+                vec![changed_key]
+            );
+            assert!(plan.fallback().is_none());
+            assert_eq!(plan.artifact_decisions().len(), 1);
+            assert_eq!(plan.artifact_decisions()[0].artifact(), artifact_id);
+            assert_eq!(plan.artifact_decisions()[0].kind(), expected_decision);
+            if changed_key == adapter_key {
+                assert!(plan.invalidated_nodes().any(|node| {
+                    node == FactNode::new(file_analysis_unit(file), FactDomain::Syntax)
+                }));
+            } else {
+                assert_eq!(
+                    plan.invalidated_nodes()
+                        .map(|node| node.domain())
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([
+                        FactDomain::Resolution,
+                        FactDomain::DerivedGraph,
+                        FactDomain::Search,
+                    ])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preceding_project_provider_revision_changes_both_deep_contexts() {
+        let unavailable = FirstSliceService::new(2).expect("structural service initializes");
+        let project_identity = content_hash(b"unchanged-project-analyzer");
+        let configured = FirstSliceService::new_with_storage(
+            2,
+            MAX_RETAINED_SOURCE_BYTES,
+            None,
+            Some(Arc::new(FailingProjectAnalyzer {
+                identity: project_identity,
+                error: FirstSliceProjectAnalysisError::Analysis,
+                calls: Arc::new(AtomicUsize::new(0)),
+            })),
+        )
+        .expect("configured project service initializes");
+        let contexts: [(&FirstSliceService, &[u8]); 2] = [
+            (&unavailable, b"unavailable"),
+            (&configured, project_identity.as_bytes()),
+        ];
+        for (service, project) in contexts {
+            let structural = service
+                .provider_set_hash(FirstSliceIndexMode::Structural)
+                .expect("structural context derives");
+            let current = service
+                .provider_set_hash(FirstSliceIndexMode::Deep)
+                .expect("deep context derives");
+            assert_eq!(
+                current,
+                hash_static_components(&[
+                    PROJECT_PROVIDER_SET_SEED,
+                    structural.as_bytes(),
+                    project
+                ])
+                .expect("current project recipe derives")
+            );
+            for revision in [
+                b"rootlight.first-slice.project-provider/16".as_slice(),
+                b"rootlight.first-slice.project-provider/17",
+            ] {
+                let previous = hash_static_components(&[revision, structural.as_bytes(), project])
+                    .expect("preceding project context derives");
+                assert_ne!(current, previous);
+            }
+        }
+        assert_eq!(
+            unavailable
+                .provider_set_hash(FirstSliceIndexMode::Structural)
+                .unwrap(),
+            configured
+                .provider_set_hash(FirstSliceIndexMode::Structural)
+                .unwrap()
         );
     }
 

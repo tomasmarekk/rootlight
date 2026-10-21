@@ -370,3 +370,129 @@ fn recovery_cannot_claim_complete_or_structural_analysis() {
         ));
     }
 }
+
+#[test]
+fn oracle_storage_wire_cause_retains_exact_fields_and_refuses_unknown_or_false_pairs() {
+    let files = [1, 2, 3].map(|value| FileId::from_bytes([value; 20]));
+    let mut wire = fixture(&files);
+    let cause = wire.cause.as_mut().unwrap();
+    cause.stage = 3;
+    cause.resource = 18;
+    let result = parse(wire.clone(), &files).unwrap().unwrap();
+    assert_eq!(
+        result.cause,
+        AggregateSourceRecovery {
+            source_inventory: ContentHash::from_bytes([9; 32]),
+            members: 100,
+            derived_members: 2,
+            stage: AggregateCapacityStage::OracleOutputReservation,
+            resource: AggregateCapacityResource::OracleFilesystemReservationBytes,
+            observed: 101,
+            limit: 100,
+            text_snapshot_bytes: 8192,
+        }
+    );
+    assert_eq!(
+        result.files.iter().map(|row| row.file).collect::<Vec<_>>(),
+        files
+    );
+    assert_eq!(
+        result.files[0].text_search,
+        SourceTextSearchCoverage::WholeSourceProjection
+    );
+    assert_eq!(
+        result.files[1].text_search,
+        SourceTextSearchCoverage::MetadataOnlyCaptured
+    );
+    assert_eq!(
+        result.files[2].text_search,
+        SourceTextSearchCoverage::UnsupportedEncoding
+    );
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["cause"]["stage"], "oracle_output_reservation");
+    assert_eq!(
+        json["cause"]["resource"],
+        "oracle_filesystem_reservation_bytes"
+    );
+    for (stage, resource) in [
+        (0, 18),
+        (1, 18),
+        (2, 18),
+        (3, 0),
+        (3, 2),
+        (3, 16),
+        (3, 17),
+        (4, 18),
+        (3, 19),
+    ] {
+        let mut invalid = wire.clone();
+        let cause = invalid.cause.as_mut().unwrap();
+        cause.stage = stage;
+        cause.resource = resource;
+        assert!(matches!(
+            parse(invalid, &files),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+    }
+    assert!(parse_source_recovery(Some(wire), files.into_iter(), 29).is_err());
+}
+
+#[test]
+fn oracle_storage_exact_bytes_and_text_retain_unknown_coverage_and_source_identity() {
+    let source = test_source(4, 0, 3);
+    let mut wire = wire_source_read(&source);
+    let mut recovery = fixture(&[source.file]);
+    recovery.cause.as_mut().unwrap().stage = 3;
+    recovery.cause.as_mut().unwrap().resource = 18;
+    wire.source_recovery = Some(recovery);
+    wire.context.as_mut().unwrap().tier = daemon::FirstSliceAnalysisTier::FirstSliceTierD as i32;
+    wire.context.as_mut().unwrap().coverage_status =
+        daemon::FirstSliceCoverageStatus::FirstSliceCoverageUnknown as i32;
+    wire.chunks[0].tier = daemon::FirstSliceAnalysisTier::FirstSliceTierD as i32;
+    let bytes = parse_source_read(
+        wire.clone(),
+        test_repository(),
+        GenerationSelector::Active,
+        std::slice::from_ref(&source),
+        SourceReadOptions::new(),
+    )
+    .unwrap();
+    assert_eq!(bytes.chunks[0].source, source);
+    assert_eq!(bytes.chunks[0].content, b"abc");
+    wire.total_text_bytes = 3;
+    wire.chunks[0].encoding = daemon::SourceReadEncoding::LosslessText as i32;
+    wire.chunks[0].physical_encoding = Some(daemon::SourcePhysicalEncoding::Utf8 as i32);
+    wire.chunks[0].exact_content.clear();
+    let text = crate::source_text::parse_source_text_read_for_minor(
+        wire.clone(),
+        test_repository(),
+        GenerationSelector::Active,
+        std::slice::from_ref(&source),
+        SourceTextReadOptions::new(),
+        CURRENT_PROTOCOL_MINOR,
+    )
+    .unwrap();
+    assert_eq!(text.chunks[0].source, source);
+    assert_eq!(text.chunks[0].content, "abc");
+    assert_eq!(bytes.source_recovery, text.source_recovery);
+    for structural in [false, true] {
+        let mut invalid = wire.clone();
+        if structural {
+            invalid.chunks[0].tier = daemon::FirstSliceAnalysisTier::FirstSliceTierB as i32;
+        } else {
+            invalid.context.as_mut().unwrap().coverage_status =
+                daemon::FirstSliceCoverageStatus::FirstSliceCoverageComplete as i32;
+        }
+        assert!(matches!(
+            crate::source_text::parse_source_text_read_for_minor(
+                invalid,
+                test_repository(),
+                GenerationSelector::Active,
+                std::slice::from_ref(&source),
+                SourceTextReadOptions::new(),
+                CURRENT_PROTOCOL_MINOR,
+            ),
+            Err(ClientError::InvalidResponseCorrelation)
+        ));
+    }
+}

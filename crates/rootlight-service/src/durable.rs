@@ -2260,6 +2260,12 @@ impl DurableCatalog {
             .map_err(|_| FirstSliceError::Retention)?;
         let available_bytes = rootlight_vfs::available_space(&self.repositories_path)
             .map_err(|_| FirstSliceError::Catalog)?;
+        #[cfg(test)]
+        let available_bytes = crate::oracle_storage_source_recovery_tests::available_bytes(
+            available_bytes,
+            policy.required_catalog_bytes,
+            policy.minimum_free_bytes,
+        );
         if accounting.dirty || accounting.repositories.is_none() {
             return Err(FirstSliceError::Retention);
         }

@@ -186,3 +186,39 @@ fn aggregate_recovery_preserves_text_total_and_closed_field_validation() {
     invalid["source_recovery"]["files"][0]["full_language_support"] = Value::Bool(true);
     assert!(serde_json::from_value::<SourceReadDataV1_4>(invalid).is_err());
 }
+
+#[test]
+fn oracle_storage_public_json_preserves_exact_chunks_and_rejects_false_capacity_pairs() {
+    let mut value = data();
+    let cause = &mut value.source_recovery.as_mut().unwrap().cause;
+    cause.stage = AggregateCapacityStage::OracleOutputReservation;
+    cause.resource = AggregateCapacityResource::OracleFilesystemReservationBytes;
+    let wire = serde_json::to_value(&value).unwrap();
+    assert_eq!(
+        wire["source_recovery"]["cause"]["stage"],
+        "oracle_output_reservation"
+    );
+    assert_eq!(
+        wire["source_recovery"]["cause"]["resource"],
+        "oracle_filesystem_reservation_bytes"
+    );
+    let read: SourceReadDataV1_4 = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(read, value);
+    assert_eq!(wire["chunks"], serde_json::to_value(&value.chunks).unwrap());
+    for (stage, resource) in [
+        ("structural_append", "oracle_filesystem_reservation_bytes"),
+        ("generation_text", "oracle_filesystem_reservation_bytes"),
+        ("oracle_output_reservation", "entities"),
+        ("oracle_output_reservation", "generation_text_bytes"),
+        ("future_stage", "oracle_filesystem_reservation_bytes"),
+    ] {
+        let mut invalid = wire.clone();
+        invalid["source_recovery"]["cause"]["stage"] = json!(stage);
+        invalid["source_recovery"]["cause"]["resource"] = json!(resource);
+        assert!(serde_json::from_value::<SourceReadDataV1_4>(invalid).is_err());
+    }
+    let mut invalid = wire;
+    let observed = invalid["source_recovery"]["cause"]["observed"].clone();
+    invalid["source_recovery"]["cause"]["limit"] = observed;
+    assert!(serde_json::from_value::<SourceReadDataV1_4>(invalid).is_err());
+}

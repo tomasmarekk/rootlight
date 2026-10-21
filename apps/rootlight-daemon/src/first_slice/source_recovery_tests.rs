@@ -88,3 +88,62 @@ fn rejected_or_overflow_sentinel_causes_cannot_be_projected() {
         assert!(recovery_records_to_wire(vec![value]).is_err());
     }
 }
+
+#[test]
+fn oracle_storage_cause_preserves_stable_wire_values_and_rejects_false_pairs() {
+    let mut expected = cause();
+    expected.stage = AggregateCapacityStage::OracleOutputReservation;
+    expected.resource = AggregateCapacityResource::OracleFilesystemReservationBytes;
+    let files = [
+        (1, FirstSliceTextSearchCoverage::WholeSourceProjection),
+        (2, FirstSliceTextSearchCoverage::MetadataOnlyCaptured),
+        (3, FirstSliceTextSearchCoverage::UnsupportedEncoding),
+    ];
+    let records = files
+        .map(|(id, text_search)| {
+            (
+                FileId::from_bytes([id; 20]),
+                Some(FirstSliceSourceRecovery {
+                    cause: expected,
+                    text_search,
+                }),
+            )
+        })
+        .to_vec();
+    let wire = recovery_records_to_wire(records.clone()).unwrap().unwrap();
+    let actual = wire.cause.unwrap();
+    assert_eq!(actual.stage, 3);
+    assert_eq!(actual.resource, 18);
+    assert_eq!(actual.members, expected.members);
+    assert_eq!(actual.derived_members, expected.derived_members);
+    assert_eq!(actual.observed, expected.observed);
+    assert_eq!(actual.limit, expected.limit);
+    assert_eq!(actual.text_snapshot_bytes, expected.text_snapshot_bytes);
+    assert_eq!(
+        actual.source_inventory,
+        Some(content_hash_to_wire(expected.source_inventory))
+    );
+    for (row, (id, _)) in wire.files.iter().zip(files) {
+        assert_eq!(row.file, Some(file_to_wire(FileId::from_bytes([id; 20]))));
+    }
+    assert_eq!(
+        wire.files
+            .iter()
+            .map(|row| row.text_search)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    for mutation in 0..4 {
+        let mut invalid = records.clone();
+        for (_, value) in &mut invalid {
+            let cause = &mut value.as_mut().unwrap().cause;
+            match mutation {
+                0 => cause.stage = AggregateCapacityStage::StructuralAppend,
+                1 => cause.resource = AggregateCapacityResource::Entities,
+                2 => cause.observed = cause.limit,
+                _ => cause.observed = u64::MAX,
+            }
+        }
+        assert!(recovery_records_to_wire(invalid).is_err());
+    }
+}

@@ -14,7 +14,8 @@ pub const AGGREGATE_SOURCE_RECOVERY_DIAGNOSTIC: &str = "aggregate-source-recover
 /// Registered namespace for each exact derived-to-container source ownership.
 pub const AGGREGATE_SOURCE_ORIGIN_NAMESPACE: &str = "rootlight.aggregate_source_origin";
 /// Source and policy identity revision, independent of any repository name.
-pub const AGGREGATE_SOURCE_RECOVERY_REVISION: &[u8] = b"rootlight.aggregate-source-recovery/1";
+pub const AGGREGATE_SOURCE_RECOVERY_REVISION: &[u8] =
+    b"rootlight.aggregate-source-recovery/2-oracle-storage";
 
 /// Exact pre-persistence boundary that rejected combined structural output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +26,8 @@ pub enum AggregateCapacityStage {
     StructuralAppend,
     /// Complete canonical generation text exceeded its reader/writer contract.
     GenerationText,
+    /// Pre-staging Oracle output reservation exceeded usable filesystem space.
+    OracleOutputReservation,
 }
 
 /// Closed count or byte family in a genuine aggregate capacity observation.
@@ -66,6 +69,9 @@ pub enum AggregateCapacityResource {
     GenerationTextBytes,
     /// Encoded generation text under its durable reader contract.
     GenerationEncodedTextBytes,
+    /// Conservative modeled Oracle reservation bytes, not measured allocations.
+    /// The corresponding limit is usable free space after margin and other reservations.
+    OracleFilesystemReservationBytes,
 }
 
 /// Source-free universal cause bound to every member of the sealed manifest.
@@ -83,7 +89,8 @@ pub struct AggregateSourceRecovery {
     pub stage: AggregateCapacityStage,
     /// Exact aggregate count or byte family.
     pub resource: AggregateCapacityResource,
-    /// Actual combined observation, excluding arithmetic-overflow sentinels.
+    /// Actual combined count or issued conservative Oracle byte requirement.
+    /// This is not an allocation or peak-usage measurement.
     pub observed: u64,
     /// Actual rejected capacity.
     pub limit: u64,
@@ -103,6 +110,9 @@ impl AggregateSourceRecovery {
             && matches!(
                 (self.stage, self.resource),
                 (
+                    AggregateCapacityStage::OracleOutputReservation,
+                    AggregateCapacityResource::OracleFilesystemReservationBytes
+                ) | (
                     AggregateCapacityStage::GenerationText,
                     AggregateCapacityResource::GenerationTextBytes
                         | AggregateCapacityResource::GenerationEncodedTextBytes
@@ -158,9 +168,14 @@ pub fn new_aggregate_source_recovery_envelope(
         return Err(AggregateSourceRecoveryError);
     }
     let subject = FactRef::File(source.span().file());
+    let (version, domain) = if recovery.stage == AggregateCapacityStage::OracleOutputReservation {
+        ("2", "rootlight.aggregate_source_recovery/v2")
+    } else {
+        ("1", "rootlight.aggregate_source_recovery/v1")
+    };
     let identity = serde_json::to_vec(&(
         AGGREGATE_SOURCE_RECOVERY_NAMESPACE,
-        "1",
+        version,
         repository,
         generation,
         provenance,
@@ -170,11 +185,11 @@ pub fn new_aggregate_source_recovery_envelope(
     ))
     .map_err(|_| AggregateSourceRecoveryError)?;
     Ok(ExtensionEnvelope {
-        id: derive_fact("rootlight.aggregate_source_recovery/v1", &identity).id(),
+        id: derive_fact(domain, &identity).id(),
         repository,
         generation,
         namespace: AGGREGATE_SOURCE_RECOVERY_NAMESPACE.to_owned(),
-        version: "1".to_owned(),
+        version: version.to_owned(),
         criticality: ExtensionCriticality::Noncritical,
         payload,
         provenance,
@@ -185,7 +200,7 @@ pub fn new_aggregate_source_recovery_envelope(
     })
 }
 
-/// Decodes only canonical version-one evidence with an exact typed identity.
+/// Decodes canonical version-one aggregate or version-two storage evidence.
 ///
 /// # Errors
 /// Rejects unknown versions, forged IDs/ownership/evidence, altered causes,
@@ -431,5 +446,75 @@ mod tests {
         let mut corrupt = envelope;
         corrupt.payload.push(' ');
         assert!(decode_aggregate_source_origin_envelope(&corrupt).is_err());
+    }
+    #[test]
+    fn oracle_storage_cause_uses_v2_while_existing_aggregate_causes_keep_the_v1_recipe() {
+        let anchor = source(3);
+        let provenance = FactId::from_bytes([4; 20]);
+        let legacy = new_aggregate_source_recovery_envelope(
+            anchor.repository(),
+            anchor.generation(),
+            provenance,
+            anchor.clone(),
+            cause(),
+        )
+        .unwrap();
+        let payload = serde_json::to_string(&cause()).unwrap();
+        let subject = FactRef::File(anchor.span().file());
+        let old_identity = serde_json::to_vec(&(
+            AGGREGATE_SOURCE_RECOVERY_NAMESPACE,
+            "1",
+            anchor.repository(),
+            anchor.generation(),
+            provenance,
+            &anchor,
+            &payload,
+            subject,
+        ))
+        .unwrap();
+        assert_eq!(legacy.version, "1");
+        assert_eq!(legacy.payload.as_bytes(), payload.as_bytes());
+        assert_eq!(
+            legacy.id,
+            derive_fact("rootlight.aggregate_source_recovery/v1", &old_identity).id()
+        );
+        assert_eq!(
+            decode_aggregate_source_recovery_envelope(&legacy).unwrap(),
+            cause()
+        );
+
+        let mut storage = serde_json::to_value(cause()).unwrap();
+        storage["stage"] = serde_json::json!("oracle_output_reservation");
+        storage["resource"] = serde_json::json!("oracle_filesystem_reservation_bytes");
+        let storage: AggregateSourceRecovery = serde_json::from_value(storage).unwrap();
+        assert!(storage.is_valid());
+        let current = new_aggregate_source_recovery_envelope(
+            anchor.repository(),
+            anchor.generation(),
+            provenance,
+            anchor,
+            storage,
+        )
+        .unwrap();
+        assert_eq!(current.version, "2");
+        assert_eq!(
+            decode_aggregate_source_recovery_envelope(&current).unwrap(),
+            storage
+        );
+        let mut forged = current.clone();
+        forged.version = "1".to_owned();
+        assert!(decode_aggregate_source_recovery_envelope(&forged).is_err());
+        let mut wrong = serde_json::to_value(storage).unwrap();
+        wrong["resource"] = serde_json::json!("entities");
+        assert!(
+            !serde_json::from_value::<AggregateSourceRecovery>(wrong)
+                .unwrap()
+                .is_valid()
+        );
+        let mut altered = current;
+        let mut value: serde_json::Value = serde_json::from_str(&altered.payload).unwrap();
+        value["limit"] = serde_json::json!(storage.observed);
+        altered.payload = serde_json::to_string(&value).unwrap();
+        assert!(decode_aggregate_source_recovery_envelope(&altered).is_err());
     }
 }

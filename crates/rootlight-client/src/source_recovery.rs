@@ -75,6 +75,9 @@ pub(super) fn parse_source_recovery(
         Ok(daemon::AggregateSourceRecoveryStage::GenerationText) => {
             AggregateCapacityStage::GenerationText
         }
+        Ok(daemon::AggregateSourceRecoveryStage::OracleOutputReservation) => {
+            AggregateCapacityStage::OracleOutputReservation
+        }
         _ => return Err(ClientError::InvalidResponseCorrelation),
     };
     let resource = match daemon::AggregateSourceRecoveryResource::try_from(cause.resource) {
@@ -124,6 +127,9 @@ pub(super) fn parse_source_recovery(
         }
         Ok(daemon::AggregateSourceRecoveryResource::GenerationEncodedTextBytes) => {
             AggregateCapacityResource::GenerationEncodedTextBytes
+        }
+        Ok(daemon::AggregateSourceRecoveryResource::OracleFilesystemReservationBytes) => {
+            AggregateCapacityResource::OracleFilesystemReservationBytes
         }
         _ => return Err(ClientError::InvalidResponseCorrelation),
     };

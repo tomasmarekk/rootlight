@@ -188,6 +188,78 @@ impl DurableRestoreCapacity {
     }
 }
 
+/// Stage-owned refusal of the conservative Oracle output reservation.
+/// It is not evidence that these modeled bytes were physically allocated.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OracleStorageCapacity {
+    repository: RepositoryId,
+    generation: GenerationId,
+    manifest: ContentHash,
+    error: FirstSliceError,
+    required: u64,
+    usable: u64,
+}
+
+impl OracleStorageCapacity {
+    pub(super) fn from_output_resize(
+        repository: RepositoryId,
+        generation: GenerationId,
+        manifest: ContentHash,
+        required: u64,
+        error: FirstSliceError,
+    ) -> Option<Self> {
+        let FirstSliceError::StorageResourceExhausted {
+            scope: FirstSliceStorageScope::Filesystem,
+            required_bytes,
+            observed_bytes,
+            projected_bytes,
+            limit_bytes,
+            minimum_free_bytes,
+            repository_amplification: None,
+        } = error
+        else {
+            return None;
+        };
+        (required == required_bytes
+            && projected_bytes == required
+            && required > limit_bytes
+            && required != u64::MAX
+            && observed_bytes
+                .checked_sub(minimum_free_bytes)
+                .is_some_and(|after_margin| after_margin >= limit_bytes))
+        .then_some(Self {
+            repository,
+            generation,
+            manifest,
+            error,
+            required,
+            usable: limit_bytes,
+        })
+    }
+
+    pub(super) fn matches(
+        self,
+        repository: RepositoryId,
+        generation: GenerationId,
+        manifest: ContentHash,
+        error: &FirstSliceError,
+    ) -> bool {
+        self.repository == repository
+            && self.generation == generation
+            && self.manifest == manifest
+            && self.error == *error
+    }
+
+    pub(super) fn aggregate_failure(self) -> AggregateCapacityFailure {
+        AggregateCapacityFailure {
+            stage: Stage::OracleOutputReservation,
+            resource: Resource::OracleFilesystemReservationBytes,
+            observed: self.required,
+            limit: self.usable,
+        }
+    }
+}
+
 pub(super) struct PreparedSourceFrame {
     pub(super) inputs: Vec<ManifestInput>,
     pub(super) claims: Vec<FileIdentityClaim>,
@@ -730,7 +802,14 @@ pub(super) fn attach_cause_and_origins(
         .iter_mut()
         .find(|diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE)
         .ok_or(FirstSliceError::Identity)?;
-    diagnostic.message = "aggregate structural capacity exceeded - exact source bytes retained; analysis unknown; lexical scope reported per file".to_owned();
+    diagnostic.message = if cause.stage == Stage::OracleOutputReservation {
+        format!(
+            "prospective Oracle storage reservation requires {} modeled bytes above checked usable filesystem capacity {}; exact source bytes retained with unknown analysis; lexical scope reported per file",
+            cause.observed, cause.limit,
+        )
+    } else {
+        "aggregate structural capacity exceeded - exact source bytes retained; analysis unknown; lexical scope reported per file".to_owned()
+    };
     diagnostic.id =
         derive_diagnostic_record_id(diagnostic).map_err(|_| FirstSliceError::Identity)?;
     let mut marker = diagnostic.clone();
@@ -750,4 +829,102 @@ pub(super) fn attach_cause_and_origins(
     coverage.indexed = 2;
     coverage.id = derive_coverage_record_id(coverage).map_err(|_| FirstSliceError::Identity)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod oracle_storage_tests {
+    use super::*;
+
+    #[test]
+    fn oracle_output_cause_requires_the_exact_checked_filesystem_failure_and_context() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let manifest = content_hash(b"complete immutable source union");
+        let error = FirstSliceError::StorageResourceExhausted {
+            scope: FirstSliceStorageScope::Filesystem,
+            required_bytes: 11,
+            observed_bytes: 12,
+            projected_bytes: 11,
+            limit_bytes: 10,
+            minimum_free_bytes: 2,
+            repository_amplification: None,
+        };
+        let cause =
+            OracleStorageCapacity::from_output_resize(repository, generation, manifest, 11, error)
+                .unwrap();
+        assert!(cause.matches(repository, generation, manifest, &error));
+        assert!(!cause.matches(
+            RepositoryId::from_bytes([3; 16]),
+            generation,
+            manifest,
+            &error
+        ));
+        assert!(!cause.matches(
+            repository,
+            GenerationId::from_bytes([3; 20]),
+            manifest,
+            &error
+        ));
+        assert!(!cause.matches(
+            repository,
+            generation,
+            content_hash(b"different source union"),
+            &error
+        ));
+        assert!(
+            OracleStorageCapacity::from_output_resize(repository, generation, manifest, 12, error)
+                .is_none()
+        );
+        for error in [
+            FirstSliceError::Catalog,
+            FirstSliceError::Cancelled(CancellationReason::ClientRequest),
+            FirstSliceError::InsufficientDiskSpace {
+                required_bytes: 11,
+                available_bytes: 10,
+            },
+            FirstSliceError::StorageResourceExhausted {
+                scope: FirstSliceStorageScope::Catalog,
+                required_bytes: 11,
+                observed_bytes: 12,
+                projected_bytes: 11,
+                limit_bytes: 10,
+                minimum_free_bytes: 2,
+                repository_amplification: None,
+            },
+            FirstSliceError::StorageResourceExhausted {
+                scope: FirstSliceStorageScope::Filesystem,
+                required_bytes: 11,
+                observed_bytes: 12,
+                projected_bytes: 12,
+                limit_bytes: 10,
+                minimum_free_bytes: 2,
+                repository_amplification: None,
+            },
+            FirstSliceError::StorageResourceExhausted {
+                scope: FirstSliceStorageScope::Filesystem,
+                required_bytes: 11,
+                observed_bytes: 10,
+                projected_bytes: 11,
+                limit_bytes: 10,
+                minimum_free_bytes: 2,
+                repository_amplification: None,
+            },
+        ] {
+            assert!(!cause.matches(repository, generation, manifest, &error));
+            assert!(
+                OracleStorageCapacity::from_output_resize(
+                    repository, generation, manifest, 11, error
+                )
+                .is_none()
+            );
+        }
+        let public = cause
+            .aggregate_failure()
+            .bind(manifest, 2, 0, 4096)
+            .unwrap();
+        assert_eq!(public.observed, 11);
+        assert_eq!(public.limit, 10);
+        assert_eq!(public.members, 2);
+        assert!(public.is_valid());
+    }
 }

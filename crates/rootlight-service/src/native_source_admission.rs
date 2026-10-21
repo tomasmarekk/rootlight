@@ -3,11 +3,46 @@
 //! source owners and all authenticated origin mappings survive normal sealing.
 
 use super::*;
-use rootlight_adapter_treesitter::NativeIdentityWorkLimit;
+use rootlight_adapter_treesitter::{
+    NativeIdentityRefusal, NativeIdentityWorkLimit, NativeScannerRefusal,
+};
+
+// Share source-document admission without changing the public Match certificate.
+// The new query refusal remains an independently issued opaque native proof.
+pub(super) enum NativeSourceRefusal {
+    Match(NativeIdentityWorkLimit),
+    Query(NativeIdentityRefusal),
+    Scanner(NativeScannerRefusal),
+}
+
+impl NativeSourceRefusal {
+    fn matches_source(&self, source: &SourceRef, language: &str, encoding: &str) -> bool {
+        match self {
+            Self::Match(proof) => proof.matches_source(source, language, encoding),
+            Self::Query(proof) => proof.matches_source(source, language, encoding),
+            Self::Scanner(proof) => proof.matches_source(source, language, encoding),
+        }
+    }
+
+    fn disposition(&self) -> UnsupportedSourceDisposition {
+        match self {
+            Self::Match(proof) => UnsupportedSourceDisposition::IntrinsicIdentityWorkLimit {
+                observed: proof.observed(),
+                limit: proof.limit(),
+            },
+            Self::Query(proof) => UnsupportedSourceDisposition::NativeIdentityRefusal {
+                details: proof.details(),
+            },
+            Self::Scanner(proof) => UnsupportedSourceDisposition::NativeScannerRefusal {
+                details: proof.details(),
+            },
+        }
+    }
+}
 
 pub(super) fn certificate_entry_bytes() -> Result<u64, FirstSliceError> {
     // Reserve key/value storage plus a conservative per-entry B-tree allowance.
-    u64::try_from(size_of::<(FileId, NativeIdentityWorkLimit)>() + size_of::<[usize; 8]>())
+    u64::try_from(size_of::<(FileId, NativeSourceRefusal)>() + size_of::<[usize; 8]>())
         .map_err(|_| FirstSliceError::Limits)
 }
 
@@ -19,16 +54,17 @@ pub(super) fn certify(
     request: &rootlight_adapter_sdk::ParseRequest<'_>,
     original: &AdapterError,
     cancellation: &Cancellation,
-) -> Result<Option<NativeIdentityWorkLimit>, AdapterError> {
+) -> Result<Option<NativeSourceRefusal>, AdapterError> {
     cancellation.check()?;
     if mode != FirstSliceIndexMode::Structural
-        || !matches!(
+        || !(matches!(
             original,
             AdapterError::Sink(rootlight_adapter_sdk::SinkError::StreamLimit {
                 resource: rootlight_adapter_sdk::ResourceKind::Records,
                 ..
             })
-        )
+        ) || NativeIdentityRefusal::recognizes_error(original)
+            || NativeScannerRefusal::recognizes_error(original))
         || !analyzer.uses_parse_provider(parser)
     {
         return Ok(None);
@@ -39,6 +75,46 @@ pub(super) fn certify(
     if *limits != defaults {
         return Ok(None);
     }
+    if NativeScannerRefusal::recognizes_error(original) {
+        let proof = parser.certify_native_scanner_refusal(request, cancellation)?;
+        cancellation.check()?;
+        return match proof {
+            Some(proof)
+                if parser.owns_native_scanner_refusal(&proof)
+                    && proof.matches_request(request)
+                    && proof.matches_error(original) =>
+            {
+                Ok(Some(NativeSourceRefusal::Scanner(proof)))
+            }
+            Some(_) => Err(AdapterError::ProviderFailed {
+                code: rootlight_adapter_sdk::DiagnosticCode::new(
+                    "native-scanner-certificate-mismatch",
+                )
+                .expect("static diagnostic is valid"),
+            }),
+            None => Ok(None),
+        };
+    }
+    if NativeIdentityRefusal::recognizes_error(original) {
+        let proof = parser.certify_intrinsic_identity_refusal(request, cancellation)?;
+        cancellation.check()?;
+        return match proof {
+            Some(proof)
+                if parser.owns_native_identity_refusal(&proof)
+                    && proof.matches_request(request)
+                    && proof.matches_error(original) =>
+            {
+                Ok(Some(NativeSourceRefusal::Query(proof)))
+            }
+            Some(_) => Err(AdapterError::ProviderFailed {
+                code: rootlight_adapter_sdk::DiagnosticCode::new(
+                    "native-refusal-certificate-mismatch",
+                )
+                .expect("static diagnostic is valid"),
+            }),
+            None => Ok(None),
+        };
+    }
     let proof = parser.certify_intrinsic_identity_limit(request, cancellation)?;
     cancellation.check()?;
     match proof {
@@ -47,7 +123,7 @@ pub(super) fn certify(
                 && proof.matches_request(request)
                 && proof.matches_error(original) =>
         {
-            Ok(Some(proof))
+            Ok(Some(NativeSourceRefusal::Match(proof)))
         }
         Some(_) => Err(AdapterError::ProviderFailed {
             code: rootlight_adapter_sdk::DiagnosticCode::new("native-limit-certificate-mismatch")
@@ -66,7 +142,7 @@ pub(super) fn source_document(
     generation: GenerationId,
     input: &RustSourceInput,
     language: &str,
-    proof: &NativeIdentityWorkLimit,
+    proof: &NativeSourceRefusal,
     sources: &[RustSourceInput],
     limits: &rootlight_ir::IrLimits,
     cancellation: &Cancellation,
@@ -90,10 +166,7 @@ pub(super) fn source_document(
         language: fallible_copy_string(language)?,
         encoding: fallible_copy_string(&input.encoding)?,
         generated: input.generated,
-        disposition: UnsupportedSourceDisposition::IntrinsicIdentityWorkLimit {
-            observed: proof.observed(),
-            limit: proof.limit(),
-        },
+        disposition: proof.disposition(),
     };
     let mut document = unsupported_source_document(repository, generation, &disposition)?;
     // A file-only disposition must not erase already authenticated generation
