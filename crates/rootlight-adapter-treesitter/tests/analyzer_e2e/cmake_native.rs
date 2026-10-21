@@ -774,7 +774,7 @@ fn cmake_header_utf16_and_utf8_boms_keep_c_definitions_on_original_bytes() {
 }
 
 #[test]
-fn cmake_header_exhaustion_retains_c_language_and_explicit_body_gap() {
+fn cmake_header_work_refusal_releases_parser_and_same_provider_recovers_c_language() {
     let source = "#cmakedefine FEATURE\nstruct Written { int member; };\n";
     let provider = Arc::new(provider());
     let fixture = Fixture::new(CMAKE_HEADER, source.as_bytes());
@@ -791,34 +791,62 @@ fn cmake_header_exhaustion_retains_c_language_and_explicit_body_gap() {
     )
     .unwrap();
     let input = request(&fixture.snapshot, &fixture.source, CMAKE_HEADER, &bounded);
-    let result = analyze(
-        &analyzer(&provider, CMAKE_HEADER),
+    let analyzer = analyzer(&provider, CMAKE_HEADER);
+    let error = execute_analysis(
+        &analyzer,
         &input,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .expect_err("one native work unit cannot commit a partial header document");
+    assert!(matches!(error, AdapterError::ProviderFailed { code }
+        if code.as_str() == "syntax-node-parse-work-limit"));
+    assert_eq!(provider.stats().checked_out_parsers, 0);
+
+    let recovered = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, CMAKE_HEADER, &defaults),
         &ExtensionSupport::default(),
     );
-    assert_physical(&result, source);
+    // The requested template remains the host file; its written C body has
+    // independent language evidence below.
+    assert_physical(&recovered, source);
+    let document = recovered.document();
     assert!(
-        result
-            .document()
+        document
             .entities
             .iter()
-            .any(|entity| entity.kind == EntityKind::Module && entity.language == "c")
+            .any(|entity| { entity.kind == EntityKind::Module && entity.language == "c" })
     );
-    assert!(
-        result
-            .document()
-            .entities
-            .iter()
-            .all(|entity| entity.canonical_name != "Written")
+    let written: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.canonical_name == "Written" && entity.language == "c")
+        .collect();
+    assert_eq!(written.len(), 1);
+    let definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.target
+                    == (OccurrenceTarget::Resolved {
+                        symbol: written[0].id,
+                    })
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(text(source, &definitions[0].source), "Written");
+    assert_eq!(
+        definitions[0].source.content_hash(),
+        fixture.source.content_hash()
     );
-    assert!(
-        result
-            .document()
-            .skipped_regions
-            .iter()
-            .any(|gap| gap.detail == "cmake-header-body-analysis-unavailable"
-                && gap.source.span() == fixture.source.span())
+    assert_eq!(
+        definitions[0].source.generation(),
+        fixture.source.generation()
     );
+    assert_eq!(provider.stats().checked_out_parsers, 0);
 }
 
 #[test]
@@ -2299,7 +2327,9 @@ fn c_preprocessor_condition_markers_ignore_comments_and_replacement_strings() {
     assert_condition_gaps(&result, source, &[]);
     assert_eq!(
         result.report().coverage().status(),
-        CoverageStatus::Complete
+        CoverageStatus::Complete,
+        "current semantic gaps: {:#?}",
+        result.document().skipped_regions
     );
     assert_eq!(
         string_evidence_in_source_order(&result, source),
@@ -3668,4 +3698,75 @@ fn c_macro_projection_clean_proof_and_inspection_share_one_node_budget() {
             ));
         }
     }
+}
+
+#[test]
+fn c_written_prototype_formals_keep_exact_parameter_ownership_without_reads() {
+    let source = "int chosen(int value);\nconst char *buffer(const char *text);\n";
+    let result = conditional_c_output(source);
+    let document = result.document();
+    assert_eq!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    for (name, owner_name, written) in [
+        ("value", "chosen", "int value"),
+        ("text", "buffer", "const char *text"),
+    ] {
+        let parameters: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == name)
+            .collect();
+        assert_eq!(parameters.len(), 1);
+        let parameter = parameters[0];
+        let owners: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Function && entity.canonical_name == owner_name
+            })
+            .collect();
+        assert_eq!(owners.len(), 1);
+        let owner = owners[0];
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == (OccurrenceTarget::Resolved {
+                            symbol: parameter.id,
+                        })
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(text(source, &definitions[0].source), name);
+        assert_eq!(
+            definitions[0].source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        assert_eq!(definitions[0].source.generation(), parameter.generation);
+        assert!(source.contains(written));
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::Contains
+                    && edge.subject == RelationEndpoint::Entity(owner.id)
+                    && edge.object == RelationEndpoint::Entity(parameter.id))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        document
+            .occurrences
+            .iter()
+            .all(|site| !matches!(site.role, OccurrenceRole::Read | OccurrenceRole::CallSite))
+    );
+    assert!(document.relations.iter().all(|edge| !matches!(
+        edge.predicate,
+        RelationPredicate::Reads | RelationPredicate::Calls
+    )));
 }

@@ -1,6 +1,6 @@
-//! Prove named scalar/pointer formals in clean C function-definition headers.
-//! Prototype and nested function-pointer binders cannot borrow an outer body's
-//! owner; this structural evidence does not resolve parameter value reads.
+//! Preserve written scalar/pointer names in clean C callable headers.
+//! Prototype names retain declaration ownership; only function-definition
+//! headers can supply native parameter-read certificates.
 
 use rootlight_adapter_sdk::AdapterError;
 use rootlight_cancel::Cancellation;
@@ -20,6 +20,14 @@ pub(super) fn is_parameter_capture(node: Node<'_>, role: StructuralRole) -> bool
 /// Unsupported declarators and cancellation retain their existing outcomes.
 pub(super) fn written_name<'tree>(
     parameter: Node<'tree>,
+    cancellation: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    header_name(parameter, false, cancellation)
+}
+
+fn header_name<'tree>(
+    parameter: Node<'tree>,
+    prototype_declarations: bool,
     cancellation: &Cancellation,
 ) -> Result<Option<Node<'tree>>, AdapterError> {
     cancellation.check()?;
@@ -60,6 +68,29 @@ pub(super) fn written_name<'tree>(
                 header = parent;
             }
             "function_definition" if parent.child_by_field_name("declarator") == Some(header) => {
+                break parent;
+            }
+            "declaration"
+                if prototype_declarations
+                    && parent.child_by_field_name("declarator") == Some(header) =>
+            {
+                let mut declarators = 0usize;
+                let mut cursor = parent.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        cancellation.check()?;
+                        declarators += usize::from(cursor.field_name() == Some("declarator"));
+                        if declarators > 1 {
+                            return Ok(None);
+                        }
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+                if declarators != 1 {
+                    return Ok(None);
+                }
                 break parent;
             }
             _ => return Ok(None),
@@ -105,7 +136,7 @@ pub(super) fn candidate(
     let Some(parameter) = parameter else {
         return Ok(None);
     };
-    let Some(name) = written_name(parameter, cancellation)? else {
+    let Some(name) = header_name(parameter, true, cancellation)? else {
         return Ok(None);
     };
     let selected = if role == StructuralRole::Definition {
@@ -125,4 +156,124 @@ pub(super) fn candidate(
         required: role.belongs_to_identity_closure(),
         native_depth: native_depth(selected, cancellation)?,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parameter_nodes(tree: &tree_sitter::Tree) -> Vec<Node<'_>> {
+        let mut result = Vec::new();
+        let mut cursor = tree.root_node().walk();
+        loop {
+            if cursor.node().kind() == "parameter_declaration" {
+                result.push(cursor.node());
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return result;
+                }
+            }
+        }
+    }
+
+    fn parse(source: &[u8]) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::registry::language_for(crate::GrammarFamily::C))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        tree
+    }
+
+    #[test]
+    fn ordinary_prototype_names_are_declarations_without_body_read_certificates() {
+        for (source, expected) in [
+            ("int written(int value);", "value"),
+            ("const unsigned char **load_buffer(int count);", "count"),
+            ("void written(const char *text);", "text"),
+        ] {
+            let tree = parse(source.as_bytes());
+            let parameters = parameter_nodes(&tree);
+            assert_eq!(parameters.len(), 1);
+            let parameter = parameters[0];
+            let name = header_name(parameter, true, &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(&source[name.byte_range()], expected);
+            assert!(
+                written_name(parameter, &Cancellation::new())
+                    .unwrap()
+                    .is_none()
+            );
+            let declaration =
+                candidate(parameter, StructuralRole::Declaration, &Cancellation::new())
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(declaration.syntax, "c.parameter");
+            assert_eq!(
+                (declaration.start, declaration.end),
+                (parameter.start_byte(), parameter.end_byte())
+            );
+            assert!(declaration.required);
+            let definition = candidate(
+                parameter.child_by_field_name("declarator").unwrap(),
+                StructuralRole::Definition,
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(definition.syntax, "c.identifier");
+            assert_eq!(&source[definition.start..definition.end], expected);
+            assert!(definition.required);
+        }
+        let tree = parse(b"void body(int value) { external(value); }");
+        assert!(
+            written_name(parameter_nodes(&tree)[0], &Cancellation::new())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn prototype_pointer_variables_nested_binders_and_competing_declarators_stay_closed() {
+        for source in [
+            "int (*slot)(int nested);",
+            "int outer(int (*callback)(int nested));",
+            "int first(int value), second(int other);",
+            "typedef int callable(int hidden);",
+        ] {
+            let tree = parse(source.as_bytes());
+            let parameters = parameter_nodes(&tree);
+            assert!(!parameters.is_empty());
+            for parameter in parameters {
+                assert!(
+                    header_name(parameter, true, &Cancellation::new())
+                        .unwrap()
+                        .is_none(),
+                    "{source}"
+                );
+                assert!(
+                    written_name(parameter, &Cancellation::new())
+                        .unwrap()
+                        .is_none(),
+                    "{source}"
+                );
+            }
+        }
+        let tree = parse(b"int written(int value);");
+        let cancel = Cancellation::new();
+        cancel.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            header_name(parameter_nodes(&tree)[0], true, &cancel),
+            Err(AdapterError::Cancelled { .. })
+        ));
+    }
 }
