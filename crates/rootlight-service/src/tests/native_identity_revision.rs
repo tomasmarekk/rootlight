@@ -224,6 +224,13 @@ fn project_predecessor_cannot_reuse_deep_provider_contexts() {
         ])
         .unwrap();
         assert_ne!(current, preceding_test_imports);
+        let preceding_php_method_proofs = hash_static_components(&[
+            b"rootlight.first-slice.project-provider/27",
+            structural.as_bytes(),
+            project,
+        ])
+        .unwrap();
+        assert_ne!(current, preceding_php_method_proofs);
         assert_ne!(current, structural);
     }
     assert_eq!(

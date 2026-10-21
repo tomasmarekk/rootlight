@@ -12,6 +12,7 @@ mod dart;
 mod ecmascript;
 mod go;
 mod module_resolution;
+mod php;
 mod rust_modules;
 mod rust_source;
 
@@ -1468,6 +1469,7 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
             || formal_binding_context_metadata(fact).is_some()
             || is_ocaml_written_binding_metadata(fact)
             || go::mandatory(fact)
+            || php::mandatory(fact)
             || (fact.kind() == SyntaxFactKind::Signature
                 && matches!(
                     fact.syntax_kind().as_str(),
@@ -1904,6 +1906,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     rust_module_calls: BTreeMap<SourceSpan, rust_modules::CallProof>,
     rust_trait_calls: BTreeMap<SourceSpan, rust_modules::TraitCallProof>,
     go_bindings: BTreeMap<SourceSpan, go::Proof>,
+    php_bindings: BTreeMap<SourceSpan, php::Proof>,
     rust_local_symbols: BTreeSet<SymbolId>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
@@ -1940,6 +1943,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             rust_module_calls: BTreeMap::new(),
             rust_trait_calls: BTreeMap::new(),
             go_bindings: BTreeMap::new(),
+            php_bindings: BTreeMap::new(),
             rust_local_symbols: BTreeSet::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
@@ -1970,6 +1974,19 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     FactDomain::Relations,
                     "rust-generic-call-target-unavailable",
                 )?;
+            }
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Php {
+            self.php_bindings = php::resolve(&self)?;
+            for occurrence in &mut self.occurrences {
+                self.cancellation.check()?;
+                if occurrence.role == OccurrenceRole::Reference
+                    && php::site(&occurrence.syntax_kind)
+                    && let Some(proof) = self.php_bindings.get(&occurrence.source.span())
+                {
+                    occurrence.enclosing_declaration = Some(proof.owner_local);
+                    occurrence.role = OccurrenceRole::CallSite;
+                }
             }
         }
         if self.analyzer.language == SemanticProjectLanguage::Go {
@@ -3337,6 +3354,17 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     "java-native-local-receiver-project-owner-join-unavailable",
                 )?;
             }
+            if self.analyzer.language == SemanticProjectLanguage::Php
+                && php::site(&draft.syntax_kind)
+                && candidates.is_empty()
+            {
+                let input = self.input_for_file(draft.file)?.clone();
+                self.push_relation_gap(
+                    &input,
+                    draft.source.span(),
+                    "php-native-instance-call-project-proof-unavailable",
+                )?;
+            }
             if candidates.is_empty() && ecmascript::references::is_member_name(&draft.syntax_kind) {
                 let input = self.input_for_file(draft.file)?;
                 self.push_relation_gap(
@@ -3437,6 +3465,10 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             };
             if go::occurrence(&record.syntax_kind)
                 && let Some(proof) = self.go_bindings.get(&record.source.span())
+            {
+                record.evidence.derivation = proof.derivation.clone();
+            } else if php::site(&record.syntax_kind)
+                && let Some(proof) = self.php_bindings.get(&record.source.span())
             {
                 record.evidence.derivation = proof.derivation.clone();
             } else if let Some(proof) = self.rust_module_calls.get(&record.source.span()) {
@@ -4455,7 +4487,16 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .starts_with("php.unproven_this_method."))
         {
             return ResolutionCandidates {
-                symbols: Vec::new(),
+                symbols: if php::site(&occurrence.syntax_kind)
+                    && occurrence.role == OccurrenceRole::CallSite
+                {
+                    self.php_bindings
+                        .get(&occurrence.source.span())
+                        .map(|proof| vec![proof.target])
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
                 kind: ResolutionKind::Binding,
             };
         }
@@ -5072,6 +5113,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .go_bindings
                     .get(&source.span())
                     .map(|proof| proof.derivation.clone())
+                    .or_else(|| {
+                        self.php_bindings
+                            .get(&source.span())
+                            .map(|proof| proof.derivation.clone())
+                    })
                     .or_else(|| {
                         self.rust_module_calls
                             .get(&source.span())

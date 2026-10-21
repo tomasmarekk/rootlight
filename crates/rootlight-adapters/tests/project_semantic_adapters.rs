@@ -55,6 +55,8 @@ mod infer_bindings;
 mod inheritance;
 #[path = "project_semantic_adapters/inner_type_bindings.rs"]
 mod inner_type_bindings;
+#[path = "project_semantic_adapters/php_written_methods.rs"]
+mod php_written_methods;
 #[path = "project_semantic_adapters/receiver_dispatch.rs"]
 mod receiver_dispatch;
 #[path = "project_semantic_adapters/reexports.rs"]
