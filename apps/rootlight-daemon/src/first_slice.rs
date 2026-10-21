@@ -17696,6 +17696,9 @@ mod tests {
             let mut document =
                 NormalizedIrDocument::empty(request.repository(), request.generation());
             for input in request.inputs() {
+                let relative =
+                    rootlight_vfs::RelativePath::parse(std::path::Path::new(input.path()))
+                        .expect("test project path is canonical");
                 let length = u64::try_from(input.source().len())
                     .expect("test project source length is bounded");
                 let source = SourceRef::new(
@@ -17734,7 +17737,7 @@ mod tests {
                     repository: request.repository(),
                     generation: request.generation(),
                     path: input.path().to_owned(),
-                    path_locator: None,
+                    path_locator: Some(relative.to_locator()),
                     content_hash: input.content_hash(),
                     byte_length: length,
                     language: request.language().to_owned(),
@@ -17766,23 +17769,13 @@ mod tests {
                 coverage.id = derive_coverage_record_id(&coverage)
                     .expect("test project coverage identity derives");
                 document.coverage_records.push(coverage);
-                // The deep-output fixture must carry the same component framing
-                // as VFS file identity or admission fails before exercising no-op behavior.
-                let mut path_identity = Vec::new();
-                for component in input.path().split('/') {
-                    let mut canonical = Vec::with_capacity(component.len().saturating_add(1));
-                    canonical.push(0);
-                    canonical.extend_from_slice(component.as_bytes());
-                    let component_length =
-                        u32::try_from(canonical.len()).expect("test path component is bounded");
-                    path_identity.extend_from_slice(&component_length.to_be_bytes());
-                    path_identity.extend_from_slice(&canonical);
-                }
+                // Durable source authority requires the locator and identity claim to
+                // describe the same platform-native path, including its component framing.
                 let claim = FileIdentityClaim {
                     file: input.file(),
                     repository: request.repository(),
                     path: input.path().to_owned(),
-                    path_identity,
+                    path_identity: relative.identity_bytes().to_vec(),
                     content_hash: input.content_hash(),
                     byte_length: length,
                 };

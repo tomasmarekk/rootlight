@@ -1981,6 +1981,7 @@ dependencies = [
  "rootlight-query",
  "rootlight-runtime",
  "rootlight-service",
+ "rootlight-vfs",
  "serde",
  "serde_json",
  "sysinfo",

@@ -33,6 +33,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+rootlight-vfs = { path = "../../crates/rootlight-vfs" }
 tempfile.workspace = true
 
 [lints]
