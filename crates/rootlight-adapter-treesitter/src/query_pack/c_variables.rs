@@ -400,7 +400,12 @@ impl<'source> CaptureCache<'source> {
         candidate: &mut QueryCandidate,
         cancel: &Cancellation,
     ) -> Result<Option<bool>, AdapterError> {
-        if role == StructuralRole::Declaration && node.kind() == "declaration" {
+        // Native prototypes already have a source-backed callable classification.
+        // Variable proof may refine only the generic declaration label.
+        if role == StructuralRole::Declaration
+            && node.kind() == "declaration"
+            && candidate.syntax == "c.declaration"
+        {
             let mut supported = false;
             if self.census(node, cancel)?
                 && let Some(declarator) = node.child_by_field_name("declarator")

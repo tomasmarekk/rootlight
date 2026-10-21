@@ -853,7 +853,7 @@ fn go_function_value_references_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/327"
+        b"rootlight.first-slice.treesitter-structural/328"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -871,7 +871,21 @@ fn complete_native_query_captures_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/327"
+        b"rootlight.first-slice.treesitter-structural/328"
     );
+    assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
+}
+
+#[test]
+fn c_declaration_proofs_invalidate_preceding_parser_identity() {
+    let grammar = first_slice_grammar_revision_hash().unwrap();
+    let previous = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        b"rootlight.first-slice.treesitter-structural/327",
+        grammar.as_bytes(),
+    ])
+    .unwrap();
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }

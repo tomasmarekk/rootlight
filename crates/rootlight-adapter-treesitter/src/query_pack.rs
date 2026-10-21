@@ -1099,10 +1099,15 @@ impl QueryPack {
                         && candidate.syntax == "haxe.local_read")
                 {
                     // Ordinary scopes become mandatory only when they contain a
-                    // declaration; runtime marks those after deduplication.
+                    // declaration; runtime marks those after deduplication. C's
+                    // source-certified lexical scopes must also survive without
+                    // a declaration, matching the artifact's required partition.
                     // Data scalar siblings are needed to count array positions,
                     // even when they contain no named declaration themselves.
                     candidate.required = candidate.role != StructuralRole::Scope
+                        || (family == GrammarFamily::C
+                            && candidate.required
+                            && matches!(candidate.syntax, "c.block" | "c.for"))
                         || matches!(
                             family,
                             GrammarFamily::Json
@@ -5758,6 +5763,49 @@ mod tests {
         drop(parser);
         scope.finish().unwrap();
         tree
+    }
+
+    #[test]
+    fn c_lexical_scopes_without_declarations_remain_required_identity_facts() {
+        let source = b"void owned(void) { for (;;) { } }\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_c::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::C).unwrap();
+        let candidates = pack
+            .extract_identity(GrammarFamily::C, &tree, source, 4096, &Cancellation::new())
+            .unwrap();
+        let scopes: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.role == StructuralRole::Scope)
+            .collect();
+        assert_eq!(scopes.len(), 3);
+        assert_eq!(
+            scopes
+                .iter()
+                .filter(|scope| scope.syntax == "c.block")
+                .count(),
+            2
+        );
+        assert_eq!(
+            scopes
+                .iter()
+                .filter(|scope| scope.syntax == "c.for")
+                .count(),
+            1
+        );
+        for scope in scopes {
+            assert!(scope.required, "{}", scope.syntax);
+            assert!(!candidates.iter().any(|candidate| {
+                candidate.role == StructuralRole::Declaration
+                    && scope.start <= candidate.start
+                    && candidate.end <= scope.end
+            }));
+        }
     }
 
     #[test]
