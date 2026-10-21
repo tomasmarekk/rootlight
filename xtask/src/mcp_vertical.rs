@@ -5375,6 +5375,15 @@ fn wait_until_daemon_available(
             return Ok(());
         };
         if Instant::now() >= deadline {
+            // Health is source-free; a best-effort timeout observation must not
+            // replace the original readiness failure or relax its admission rule.
+            if let Ok(client) =
+                Client::connect_or_start(paths, [0x71; 16], ConnectPolicy::ExistingOnly)
+                && let Ok(health) = client.health()
+                && let Ok(snapshot) = serde_json::to_string(&health)
+            {
+                eprintln!("daemon_readiness_timeout_health={snapshot}");
+            }
             return Err(VerticalError::DaemonReadyTimedOut { stage });
         }
         thread::sleep(POLL_INTERVAL);
@@ -5392,11 +5401,37 @@ fn probe_daemon_readiness(
         .map_err(|_| DaemonReadinessStage::Connection)?;
     if require_ready_health {
         let health = client.health().map_err(|_| DaemonReadinessStage::Health)?;
-        if !health.ready {
+        if !vertical_health_permits_requests(&health) {
             return Err(DaemonReadinessStage::NotReady);
         }
     }
     Ok(())
+}
+
+fn vertical_health_permits_requests(health: &rootlight_client::Health) -> bool {
+    use rootlight_client::{DaemonLifecycle, HealthStatus, ResourcePressure};
+
+    // Public readiness permits an unconfigured generation and unknown initial
+    // pressure. Only elevated or high pressure may relax that ready flag;
+    // admission and subsystem failures still block bounded matrix requests.
+    health.lifecycle == DaemonLifecycle::Ready
+        && health.accepting_operations
+        && health.journal_healthy
+        && health.catalog_status == HealthStatus::Healthy
+        && [
+            health.generation_status,
+            health.adapter_status,
+            health.watcher_status,
+            health.endpoint_status,
+        ]
+        .into_iter()
+        .all(|status| matches!(status, HealthStatus::Healthy | HealthStatus::NotConfigured))
+        && health.resource_pressure != ResourcePressure::Critical
+        && (health.ready
+            || matches!(
+                health.resource_pressure,
+                ResourcePressure::Elevated | ResourcePressure::High
+            ))
 }
 
 fn wait_until_connections_released(client: &Client) -> Result<(), VerticalError> {
@@ -7033,6 +7068,103 @@ mod tests {
             );
             assert!(!paths.state_dir().exists());
             assert!(!paths.runtime_dir().exists());
+        }
+    }
+
+    #[test]
+    fn vertical_readiness_preserves_public_ready_and_only_pressure_degradation() {
+        use rootlight_client::{DaemonLifecycle, Health, HealthStatus, ResourcePressure};
+
+        let baseline = Health {
+            ready: true,
+            active_operations: 0,
+            admitted_operations: 0,
+            protocol_version: "1.30".to_owned(),
+            lifecycle: DaemonLifecycle::Ready,
+            accepting_operations: true,
+            active_connections: 1,
+            connection_limit: 128,
+            queued_operations: 0,
+            running_operations: 0,
+            operation_queue_limit: 256,
+            journal_healthy: true,
+            catalog_status: HealthStatus::Healthy,
+            catalog_schema_version: 5,
+            generation_status: HealthStatus::Healthy,
+            adapter_status: HealthStatus::Healthy,
+            watcher_status: HealthStatus::Healthy,
+            resource_pressure: ResourcePressure::Normal,
+            endpoint_status: HealthStatus::Healthy,
+            endpoint_schema_version: 2,
+        };
+        for ready in [false, true] {
+            for (pressure, expected) in [
+                (ResourcePressure::Normal, ready),
+                (ResourcePressure::Elevated, true),
+                (ResourcePressure::High, true),
+                (ResourcePressure::Critical, false),
+                (ResourcePressure::Unknown, ready),
+            ] {
+                let mut health = baseline.clone();
+                health.ready = ready;
+                health.resource_pressure = pressure;
+                assert_eq!(super::vertical_health_permits_requests(&health), expected);
+            }
+        }
+        let mut startup = baseline.clone();
+        startup.generation_status = HealthStatus::NotConfigured;
+        startup.resource_pressure = ResourcePressure::Unknown;
+        assert!(super::vertical_health_permits_requests(&startup));
+        startup.ready = false;
+        assert!(!super::vertical_health_permits_requests(&startup));
+        for lifecycle in [
+            DaemonLifecycle::Starting,
+            DaemonLifecycle::Draining,
+            DaemonLifecycle::Faulted,
+            DaemonLifecycle::Stopped,
+        ] {
+            let mut health = baseline.clone();
+            health.lifecycle = lifecycle;
+            assert!(!super::vertical_health_permits_requests(&health));
+        }
+        let mut health = baseline.clone();
+        health.accepting_operations = false;
+        assert!(!super::vertical_health_permits_requests(&health));
+        health = baseline.clone();
+        health.journal_healthy = false;
+        assert!(!super::vertical_health_permits_requests(&health));
+        for status in [
+            HealthStatus::Degraded,
+            HealthStatus::Unavailable,
+            HealthStatus::Failed,
+        ] {
+            for component in 0..5 {
+                let mut health = baseline.clone();
+                match component {
+                    0 => health.catalog_status = status,
+                    1 => health.generation_status = status,
+                    2 => health.adapter_status = status,
+                    3 => health.watcher_status = status,
+                    4 => health.endpoint_status = status,
+                    _ => unreachable!(),
+                }
+                assert!(!super::vertical_health_permits_requests(&health));
+            }
+        }
+        for component in 0..5 {
+            let mut health = baseline.clone();
+            match component {
+                0 => health.catalog_status = HealthStatus::NotConfigured,
+                1 => health.generation_status = HealthStatus::NotConfigured,
+                2 => health.adapter_status = HealthStatus::NotConfigured,
+                3 => health.watcher_status = HealthStatus::NotConfigured,
+                4 => health.endpoint_status = HealthStatus::NotConfigured,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                super::vertical_health_permits_requests(&health),
+                component != 0
+            );
         }
     }
 

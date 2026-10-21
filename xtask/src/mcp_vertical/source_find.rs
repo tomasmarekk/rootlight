@@ -949,7 +949,9 @@ fn storage_failures(
             None,
         )?;
         let mut daemon = SupervisedDaemon::spawn(daemon_binary, &environment)?;
-        wait_until_ready(&paths, &mut daemon)?;
+        // The pinned request must trigger deferred validation of this damaged
+        // generation before the daemon can finish its recovery state.
+        wait_until_requestable(&paths, &mut daemon)?;
         let (mut process, catalog, _) = open_session(
             "literal-storage-fault",
             mcp_binary,
@@ -957,7 +959,7 @@ fn storage_failures(
             temporary,
             transcript,
         )?;
-        let outcome = call_tool(
+        let outcome = call_tool_with_admission_retry(
             &format!("literal.{state}"),
             &mut process,
             &catalog,
@@ -983,7 +985,7 @@ fn storage_failures(
             "repo.status",
             json!({"repository":{"repository_id":index.repository},"response_profile":"compact"}),
         )?;
-        let recovered = record_storage_trace(
+        record_storage_trace(
             storage_trace,
             state,
             "after_repository_status",
@@ -1012,7 +1014,67 @@ fn storage_failures(
                 "recovered predecessor scan did not complete",
             ));
         }
+        if status.structured["data"]["publication_state"] != "published"
+            || status.structured["data"]["repository_state"] != "ready"
+            || status.structured["data"]["resolved_generation"] != base.generation
+            || status.structured["data"]["active_generation"]["generation_id"] != base.generation
+        {
+            return Err(VerticalError::Invariant(
+                "storage recovery did not restore its verified predecessor",
+            ));
+        }
+        // Restore quarantines an invalid payload and selects its verified parent;
+        // only an explicit index request can publish the current authored source.
+        let republication = index_repository_deep(
+            &format!("literal.{state}.republication"),
+            &mut process,
+            &catalog,
+            transcript,
+            &root,
+        )?;
+        verify_storage_republication_receipt(&index, &republication)?;
+        wait_until_journal_idle(&paths.operation_journal_path())?;
+        let status = call_tool(
+            &format!("literal.{state}.republication-status"),
+            &mut process,
+            &catalog,
+            transcript,
+            "repo.status",
+            json!({"repository":{"repository_id":index.repository},"response_profile":"compact"}),
+        )?;
+        let recovered = record_storage_trace(
+            storage_trace,
+            state,
+            "after_explicit_republication",
+            &index,
+            &manifest,
+            Some(&status.structured),
+        )?;
         verify_storage_recovery(&before, &altered, &recovered, &index)?;
+        // The triggering request can observe quarantine. Retry only after the
+        // explicit index operation and exact manifest/activation checks prove
+        // republication of the same authenticated generation.
+        let outcome = if outcome.is_error {
+            require_domain_error(&outcome, "STALE_GENERATION")?;
+            if outcome.structured["error"]["repository"] != index.repository
+                || outcome.structured["error"]["generation"] != index.generation
+                || outcome.structured["error"]["retryable"] != false
+            {
+                return Err(VerticalError::Invariant(
+                    "storage recovery refusal changed its pinned identity",
+                ));
+            }
+            call_tool(
+                &format!("literal.{state}.verified-republication"),
+                &mut process,
+                &catalog,
+                transcript,
+                "source.find",
+                arguments(&index, &reference, LITERAL),
+            )?
+        } else {
+            outcome
+        };
         require_tool_success(&outcome, "source.find")?;
         require_matrix_usage(&outcome.structured)?;
         let restored: SourceFindEnvelope =
@@ -1248,6 +1310,23 @@ fn head_activation<'a>(
         ));
     }
     Ok(record)
+}
+
+fn verify_storage_republication_receipt(
+    original: &IndexReceipt,
+    republication: &IndexReceipt,
+) -> Result<(), VerticalError> {
+    if republication.repository != original.repository
+        || republication.generation != original.generation
+        || republication.parent_generation != original.parent_generation
+        || republication.operation.is_empty()
+        || republication.operation == original.operation
+    {
+        return Err(VerticalError::Invariant(
+            "storage republication changed its inputs or reused its original operation",
+        ));
+    }
+    Ok(())
 }
 
 fn verify_storage_recovery(
@@ -1648,6 +1727,27 @@ mod tests {
                 durable_written_bytes_reported: true,
             },
         };
+        let publication = || super::IndexReceipt {
+            repository: index.repository.clone(),
+            generation: index.generation.clone(),
+            parent_generation: index.parent_generation.clone(),
+            operation: "recovery-operation".to_owned(),
+            syntax_recovery_diagnostic_observed: false,
+            status_evidence: index.status_evidence.clone(),
+        };
+        super::verify_storage_republication_receipt(&index, &publication()).unwrap();
+        for mutation in 0..5 {
+            let mut candidate = publication();
+            match mutation {
+                0 => candidate.repository = "foreign-repository".to_owned(),
+                1 => candidate.generation = "foreign-generation".to_owned(),
+                2 => candidate.parent_generation = Some("foreign-parent".to_owned()),
+                3 => candidate.operation = index.operation.clone(),
+                4 => candidate.operation.clear(),
+                _ => unreachable!(),
+            }
+            assert!(super::verify_storage_republication_receipt(&index, &candidate).is_err());
+        }
         let record = |directory: &str, name: &str, value: Value| {
             let bytes = serde_json::to_vec(&value).unwrap();
             json!({"directory":directory,"name":name,"value":value,
