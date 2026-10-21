@@ -328,6 +328,69 @@ fn structured_field_names_without_expected_values_do_not_earn_facts() {
 }
 
 #[test]
+fn dead_candidate_requires_candidate_membership_when_the_tool_was_used() {
+    let mut task = fixture_consumer_task(17);
+    task.family = TrajectoryWorkflowFamily::DeadCodeInvestigation;
+    task.rootlight_tools = vec!["code.dead".to_owned()];
+    let key = WorkflowAnswerKey {
+        workflow_id: task.workflow_id.clone(),
+        attempt_index: 0,
+        deterministic_seed: 17,
+        entity_ids: BTreeMap::from([("budget_unused".to_owned(), "sym1_expected".to_owned())]),
+        generation_ids: BTreeMap::new(),
+        repository_ids: BTreeMap::new(),
+        required_facts: BTreeSet::new(),
+        actionable_facts: BTreeSet::new(),
+    };
+    let source = "fn budget_unused() {}";
+    let observe = |response| {
+        let call = ObservableCall {
+            tool: "code.dead".to_owned(),
+            response,
+            source_frame: source.as_bytes().to_vec(),
+            truncated: false,
+            continuation_available: false,
+        };
+        let execution = ObservableExecution {
+            attempt_index: 0,
+            task: task.clone(),
+            answer: synthesize_answer(&task, std::slice::from_ref(&call)),
+            calls: vec![call],
+        };
+        dead_candidate_observed(&execution, &key, "budget_unused", source)
+    };
+    for candidates in [json!([]), json!([{"symbol_id": "sym1_other"}]), json!(null)] {
+        assert!(!observe(json!({"result": {"structuredContent": {"data": {
+            "candidates": candidates,
+            "entry_points": {"entry_symbols": ["sym1_expected"]},
+            "explanation": {"symbol_id": "sym1_expected"}
+        }}}})));
+    }
+    assert!(observe(json!({"result": {"structuredContent": {"data": {
+        "candidates": [{"symbol_id": "sym1_expected"}],
+        "entry_points": {"entry_symbols": []}
+    }}}})));
+    let execution = ObservableExecution {
+        attempt_index: 0,
+        task: task.clone(),
+        answer: synthesize_answer(&task, &[]),
+        calls: Vec::new(),
+    };
+    assert!(dead_candidate_observed(
+        &execution,
+        &key,
+        "budget_unused",
+        source
+    ));
+    assert!(!dead_candidate_observed(
+        &execution,
+        &key,
+        "budget_unused",
+        "fn other() {}"
+    ));
+}
+
+#[test]
 fn test_rationale_requires_the_exact_test_and_a_nonempty_reason() {
     assert!(object_with_identity_has_nonempty_reason(
         &json!({
@@ -2017,9 +2080,20 @@ fn dead_candidate_observed(
     let Some(symbol_id) = entity_id(key, name) else {
         return false;
     };
-    tool_responses(execution, "code.dead")
-        .any(|response| value_contains_exact_string(response, symbol_id))
-        || source.matches(&format!("fn {name}(")).count() == 1
+    let mut responses = tool_responses(execution, "code.dead").peekable();
+    if responses.peek().is_some() {
+        return responses.any(|response| {
+            response
+                .pointer("/result/structuredContent/data/candidates")
+                .and_then(Value::as_array)
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|candidate| {
+                        candidate.get("symbol_id").and_then(Value::as_str) == Some(symbol_id)
+                    })
+                })
+        });
+    }
+    source.matches(&format!("fn {name}(")).count() == 1
 }
 
 fn generation_observed(
