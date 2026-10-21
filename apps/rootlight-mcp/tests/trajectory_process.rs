@@ -391,6 +391,78 @@ fn dead_candidate_requires_candidate_membership_when_the_tool_was_used() {
 }
 
 #[test]
+fn history_added_fact_requires_the_exact_added_record() {
+    let mut task = fixture_consumer_task(17);
+    task.family = TrajectoryWorkflowFamily::HistoryComparison;
+    task.rootlight_tools = vec!["history.compare".to_owned()];
+    let key = WorkflowAnswerKey {
+        workflow_id: task.workflow_id.clone(),
+        attempt_index: 0,
+        deterministic_seed: 17,
+        entity_ids: BTreeMap::from([("trajectory_added".to_owned(), "sym1_expected".to_owned())]),
+        generation_ids: BTreeMap::new(),
+        repository_ids: BTreeMap::new(),
+        required_facts: BTreeSet::new(),
+        actionable_facts: BTreeSet::new(),
+    };
+    let source = "pub fn trajectory_added() {}";
+    let observe = |changes| {
+        let call = ObservableCall {
+            tool: "history.compare".to_owned(),
+            response: json!({"result": {"structuredContent": {"data": {
+                "changes": changes,
+                "lineage": [{"head_symbol_id": "sym1_expected"}],
+                "explanation": {"symbol_id": "sym1_expected"}
+            }}}}),
+            source_frame: source.as_bytes().to_vec(),
+            truncated: false,
+            continuation_available: false,
+        };
+        let execution = ObservableExecution {
+            attempt_index: 0,
+            task: task.clone(),
+            answer: synthesize_answer(&task, std::slice::from_ref(&call)),
+            calls: vec![call],
+        };
+        history_observed(&execution, &key, "trajectory_added", source)
+    };
+    for changes in [
+        json!([]),
+        json!(null),
+        json!([{"kind": "relation_changed", "symbol_id": "sym1_expected"}]),
+        json!([{"kind": "removed", "symbol_id": "sym1_expected"}]),
+        json!([{"kind": "added", "symbol_id": "sym1_other"}]),
+        json!([
+            {"kind": "added", "symbol_id": "sym1_other"},
+            {"kind": "relation_changed", "symbol_id": "sym1_expected"}
+        ]),
+    ] {
+        assert!(!observe(changes));
+    }
+    assert!(observe(json!([{
+        "kind": "added", "symbol_id": "sym1_expected"
+    }])));
+    let execution = ObservableExecution {
+        attempt_index: 0,
+        task: task.clone(),
+        answer: synthesize_answer(&task, &[]),
+        calls: Vec::new(),
+    };
+    assert!(history_observed(
+        &execution,
+        &key,
+        "trajectory_added",
+        source
+    ));
+    assert!(!history_observed(
+        &execution,
+        &key,
+        "trajectory_added",
+        "pub fn other() {}"
+    ));
+}
+
+#[test]
 fn test_rationale_requires_the_exact_test_and_a_nonempty_reason() {
     assert!(object_with_identity_has_nonempty_reason(
         &json!({
@@ -509,7 +581,11 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
         &second,
         "budget_entry",
         "trajectory-entry",
-        &["src/lib.rs", "tests/integration.rs"],
+        &[
+            "src/lib.rs",
+            "tests/integration.rs",
+            "src/trajectory_tests.rs",
+        ],
     );
     let helper = locate(
         &mut mcp,
@@ -572,7 +648,7 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
         &second,
         "entry_combines_bounded_helpers",
         "trajectory-unit-test",
-        &["src/lib.rs"],
+        &["src/trajectory_tests.rs"],
     );
     let consumer_migration = locate(
         &mut mcp,
@@ -720,9 +796,22 @@ fn preregistered_trajectories_run_through_daemon_and_mcp_processes() {
         .filter(|call| call.tool == "flow.trace")
         .map(|call| &call.response)
         .collect::<Vec<_>>();
+    let history_responses = rootlight
+        .workflow_observations
+        .iter()
+        .filter(|execution| execution.task.workflow_id == "history-comparison")
+        .flat_map(|execution| &execution.calls)
+        .filter(|call| call.tool == "history.compare")
+        .map(|call| &call.response)
+        .collect::<Vec<_>>();
+    let history_setup = (
+        &rootlight.first.generation_id,
+        &rootlight.second.generation_id,
+        &rootlight.added.symbol_id,
+    );
     assert!(
         quality.threshold_passed,
-        "every workflow must retain Rootlight quality within two points of the task-driven baseline: summaries={:#?}; missing_facts={rootlight_missing_facts:#?}; cross_service_flow_responses={cross_service_flow_responses:#?}",
+        "every workflow must retain Rootlight quality within two points of the task-driven baseline: summaries={:#?}; missing_facts={rootlight_missing_facts:#?}; cross_service_flow_responses={cross_service_flow_responses:#?}; history_setup_base_head_added={history_setup:#?}; history_responses={history_responses:#?}",
         quality.workflows,
     );
     assert!(
@@ -2117,9 +2206,21 @@ fn history_observed(
     let Some(symbol_id) = entity_id(key, name) else {
         return false;
     };
-    tool_responses(execution, "history.compare")
-        .any(|response| value_contains_exact_string(response, symbol_id))
-        || source_declares(source, name)
+    let mut responses = tool_responses(execution, "history.compare").peekable();
+    if responses.peek().is_some() {
+        return responses.any(|response| {
+            response
+                .pointer("/result/structuredContent/data/changes")
+                .and_then(Value::as_array)
+                .is_some_and(|changes| {
+                    changes.iter().any(|change| {
+                        change.get("kind").and_then(Value::as_str) == Some("added")
+                            && change.get("symbol_id").and_then(Value::as_str) == Some(symbol_id)
+                    })
+                })
+        });
+    }
+    source_declares(source, name)
 }
 
 fn batch_operation_observed(execution: &ObservableExecution, operation: &str) -> bool {
@@ -2845,7 +2946,8 @@ impl RootlightProcessAdapter<'_> {
                     json!({
                         "repository": repository(),
                         "generation": generation(),
-                        "scope": {"symbols": [self.unused.symbol_id]}
+                        "scope": {"symbols": [self.unused.symbol_id]},
+                        "include_exported": true
                     }),
                 ),
                 (
@@ -2958,6 +3060,7 @@ impl RootlightProcessAdapter<'_> {
                         "repository": repository(),
                         "base": self.first.generation_id,
                         "head": self.second.generation_id,
+                        "scope": {"symbols": [self.added.symbol_id]},
                         "max_results": 20
                     }),
                 ),
@@ -3519,13 +3622,41 @@ fn fixture_root() -> PathBuf {
 }
 
 fn augment_runtime_service_fixture(root: &Path) {
-    fs::OpenOptions::new()
-        .append(true)
-        .open(root.join("src").join("lib.rs"))
-        .and_then(|mut file| {
-            file.write_all(b"\npub mod cycle;\npub mod gateway;\npub mod worker;\n")
-        })
-        .expect("runtime service module declarations are written");
+    let library_path = root.join("src").join("lib.rs");
+    let library = fs::read_to_string(&library_path).expect("runtime library fixture reads");
+    let helper = "pub fn budget_helper(value: usize) -> usize {\n    value.saturating_add(1)\n}\n";
+    let inline_tests = concat!(
+        "#[cfg(test)]\nmod tests {\n    use super::budget_entry;\n\n",
+        "    #[test]\n    fn entry_combines_bounded_helpers() {\n",
+        "        assert_eq!(budget_entry(2), 7);\n    }\n}\n",
+    );
+    assert_eq!(library.matches(helper).count(), 1);
+    assert_eq!(library.matches(inline_tests).count(), 1);
+    // A clean root and explicit module call use the production written-module
+    // proof; test attributes remain confined to their explicitly owned child module.
+    let library = library
+        .replace("+ budget_helper(value)", "+ helpers::budget_helper(value)")
+        .replace(
+            helper,
+            "mod helpers {\n    pub fn budget_helper(value: usize) -> usize {\n        value.saturating_add(1)\n    }\n}\n",
+        )
+        .replace(inline_tests, "");
+    fs::write(
+        &library_path,
+        format!(
+            "{library}\npub mod cycle;\npub mod gateway;\npub mod worker;\nmod trajectory_tests;\n"
+        ),
+    )
+    .expect("runtime service module declarations are written");
+    fs::write(
+        root.join("src").join("trajectory_tests.rs"),
+        concat!(
+            "use crate::budget_entry;\n\n",
+            "#[test]\nfn entry_combines_bounded_helpers() {\n",
+            "    let actual = budget_entry(2);\n    assert_eq!(actual, 7);\n}\n",
+        ),
+    )
+    .expect("trajectory test source is written");
     fs::write(
         root.join("src").join("gateway.rs"),
         "//! HTTP-style entry point for the cross-service trajectory fixture.\n\n\
@@ -3697,7 +3828,8 @@ fn configure_history_retention(state_dir: &Path, runtime_dir: &Path) {
 }
 
 fn index_repository(mcp: &mut McpProcess, root: &Path, id: &str) -> IndexReceipt {
-    let arguments = json!({"root": root, "mode": "auto", "detached": false});
+    // Pin the completed semantic publication instead of cold Auto's structural stage.
+    let arguments = json!({"root": root, "mode": "deep", "detached": false});
     let response = process_support::retry_transient_busy(id, |attempt_id| {
         mcp.call(attempt_id, "repo.index", arguments.clone())
     });
