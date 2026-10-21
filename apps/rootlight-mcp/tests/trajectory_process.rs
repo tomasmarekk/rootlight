@@ -2768,7 +2768,11 @@ impl RootlightProcessAdapter<'_> {
             TrajectoryWorkflowFamily::DeadCodeInvestigation => vec![
                 (
                     "code.dead",
-                    json!({"repository": repository(), "generation": generation()}),
+                    json!({
+                        "repository": repository(),
+                        "generation": generation(),
+                        "scope": {"symbols": [self.unused.symbol_id]}
+                    }),
                 ),
                 (
                     "symbol.explain",
