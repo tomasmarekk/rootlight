@@ -64,11 +64,20 @@ fn children<'tree>(
 
 fn only_command<'tree>(
     sentence: Node<'tree>,
+    source: &[u8],
     cache: &mut CaptureCache<'tree>,
     cancel: &Cancellation,
 ) -> Result<Option<Node<'tree>>, AdapterError> {
     let mut command: Option<Node<'tree>> = None;
+    let mut hint_attribute = false;
     for child in children(sentence, cache, cancel)? {
+        if child.kind() == "attributes" {
+            if hint_attribute || !ordinary_hint_attribute(child, source, cache, cancel)? {
+                return Ok(None);
+            }
+            hint_attribute = true;
+            continue;
+        }
         if child.is_named() {
             if let Some(previous) = command {
                 if previous.kind() == "theorem_command"
@@ -85,7 +94,317 @@ fn only_command<'tree>(
             return Ok(None);
         }
     }
+    if hint_attribute && command.is_none_or(|node| node.kind() != "hint_command") {
+        return Ok(None);
+    }
     Ok(command)
+}
+
+fn boundary_visit(
+    at: usize,
+    next: &mut usize,
+    cache: &mut CaptureCache<'_>,
+    cancel: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if at < *next {
+        return Ok(true);
+    }
+    *next = at.saturating_add(64);
+    cache.visit(cancel)
+}
+
+fn tactic_sentence_boundary(
+    source: &[u8],
+    body_start: usize,
+    cache: &mut CaptureCache<'_>,
+    cancel: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let mut at = 0;
+    let mut next = 0;
+    let mut delimiters = Vec::new();
+    let mut body_written = false;
+    while at < source.len() {
+        if !boundary_visit(at, &mut next, cache, cancel)? {
+            return Ok(false);
+        }
+        let byte = source[at];
+        if byte.is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        if source.get(at..at + 2) == Some(b"(*") {
+            let mut depth = 1_usize;
+            at += 2;
+            while at < source.len() && depth != 0 {
+                if !boundary_visit(at, &mut next, cache, cancel)? {
+                    return Ok(false);
+                }
+                if source.get(at..at + 2) == Some(b"(*") {
+                    let Some(nested) = depth.checked_add(1) else {
+                        return Ok(false);
+                    };
+                    depth = nested;
+                    at += 2;
+                } else if source.get(at..at + 2) == Some(b"*)") {
+                    depth -= 1;
+                    at += 2;
+                } else {
+                    at += 1;
+                }
+            }
+            if depth != 0 {
+                return Ok(false);
+            }
+            continue;
+        }
+        if byte == b'.' {
+            if at > 0
+                && source[at - 1].is_ascii_alphanumeric()
+                && source.get(at + 1).is_some_and(u8::is_ascii_alphabetic)
+            {
+                at += 1;
+                continue;
+            }
+            at += 1;
+            while at < source.len() && source[at].is_ascii_whitespace() {
+                if !boundary_visit(at, &mut next, cache, cancel)? {
+                    return Ok(false);
+                }
+                at += 1;
+            }
+            return Ok(at == source.len() && delimiters.is_empty() && body_written);
+        }
+        body_written |= at >= body_start;
+        if byte == b'"' {
+            at += 1;
+            let mut closed = false;
+            while at < source.len() {
+                if !boundary_visit(at, &mut next, cache, cancel)? {
+                    return Ok(false);
+                }
+                if source[at] == b'"' {
+                    at += 1;
+                    if source.get(at) == Some(&b'"') {
+                        at += 1;
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    at += 1;
+                }
+            }
+            if !closed {
+                return Ok(false);
+            }
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = at;
+            at += 1;
+            while at < source.len()
+                && (source[at].is_ascii_alphanumeric() || matches!(source[at], b'_' | b'\''))
+            {
+                if !boundary_visit(at, &mut next, cache, cancel)? {
+                    return Ok(false);
+                }
+                at += 1;
+            }
+            if matches!(
+                &source[start..at],
+                b"Module"
+                    | b"Section"
+                    | b"End"
+                    | b"Include"
+                    | b"Declare"
+                    | b"Load"
+                    | b"Definition"
+                    | b"Lemma"
+                    | b"Theorem"
+                    | b"Fact"
+                    | b"Remark"
+                    | b"Corollary"
+                    | b"Proposition"
+                    | b"Property"
+                    | b"Record"
+                    | b"Class"
+                    | b"Inductive"
+                    | b"CoInductive"
+                    | b"Fixpoint"
+                    | b"CoFixpoint"
+                    | b"Context"
+                    | b"Variable"
+                    | b"Variables"
+                    | b"Hypothesis"
+                    | b"Hypotheses"
+                    | b"Parameter"
+                    | b"Parameters"
+                    | b"Axiom"
+                    | b"Axioms"
+                    | b"Require"
+                    | b"Import"
+                    | b"Export"
+                    | b"Set"
+                    | b"Unset"
+                    | b"Notation"
+                    | b"Ltac"
+                    | b"Tactic"
+                    | b"Proof"
+                    | b"Qed"
+                    | b"Defined"
+                    | b"Admitted"
+                    | b"Abort"
+                    | b"Fail"
+                    | b"Redirect"
+            ) && start >= body_start
+            {
+                return Ok(false);
+            }
+            continue;
+        }
+        match byte {
+            b'(' | b'[' | b'{' => push(&mut delimiters, byte)?,
+            b')' | b']' | b'}' => {
+                let expected = match byte {
+                    b')' => b'(',
+                    b']' => b'[',
+                    _ => b'{',
+                };
+                if delimiters.pop() != Some(expected) {
+                    return Ok(false);
+                }
+            }
+            b'#' => return Ok(false),
+            _ => {}
+        }
+        at += 1;
+    }
+    Ok(false)
+}
+
+fn recovered_tactic_ownership<'tree>(
+    sentence: Node<'tree>,
+    source: &[u8],
+    cache: &mut CaptureCache<'tree>,
+    cancel: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let members = children(sentence, cache, cancel)?;
+    let Some(command) = members.first().copied().filter(|node| {
+        node.start_byte() == sentence.start_byte()
+            && matches!(node.kind(), "ltac_definition" | "tactic_notation_command")
+    }) else {
+        return Ok(false);
+    };
+    for child in members.iter().skip(1) {
+        if !cache.visit(cancel)?
+            || !((child.is_error() && child.start_byte() >= command.end_byte())
+                || (!child.is_named() && child.kind() == "."))
+        {
+            return Ok(false);
+        }
+    }
+    let keywords_match = match command.kind() {
+        "ltac_definition" => command.child(0).and_then(|node| text(node, source)) == Some("Ltac"),
+        "tactic_notation_command" => {
+            command.child(0).and_then(|node| text(node, source)) == Some("Tactic")
+                && command.child(1).and_then(|node| text(node, source)) == Some("Notation")
+        }
+        _ => false,
+    };
+    if !keywords_match {
+        return Ok(false);
+    }
+    let Some(body) = command.child_by_field_name("body").filter(|node| {
+        !node.is_missing()
+            && !node.is_error()
+            && node.start_byte() < node.end_byte()
+            && command.start_byte() < node.start_byte()
+            && node.end_byte() <= command.end_byte()
+    }) else {
+        return Ok(false);
+    };
+    let members = children(command, cache, cancel)?;
+    let Some(assignment) = members.iter().copied().find(|child| child.kind() == ":=") else {
+        return Ok(false);
+    };
+    if text(assignment, source) != Some(":=") || assignment.end_byte() > body.start_byte() {
+        return Ok(false);
+    }
+    for child in &members {
+        if child.start_byte() <= assignment.start_byte() && !clean(*child, source) {
+            return Ok(false);
+        }
+    }
+    let Some(written) = source.get(sentence.byte_range()) else {
+        return Ok(false);
+    };
+    tactic_sentence_boundary(
+        written,
+        assignment.end_byte() - sentence.start_byte(),
+        cache,
+        cancel,
+    )
+}
+
+fn declaration_module_name<'tree>(
+    command: Node<'tree>,
+    source: &[u8],
+    cache: &mut CaptureCache<'tree>,
+    cancel: &Cancellation,
+) -> Result<Option<Node<'tree>>, AdapterError> {
+    let members = children(command, cache, cancel)?;
+    let name = match (command.kind(), members.as_slice()) {
+        ("module_type_command", [module, ty, name])
+            if text(*module, source) == Some("Module") && text(*ty, source) == Some("Type") =>
+        {
+            *name
+        }
+        ("end_command", [end, name]) if text(*end, source) == Some("End") => *name,
+        _ => return Ok(None),
+    };
+    Ok((name.kind() == "ident" && named(name, source)).then_some(name))
+}
+
+fn resolve_hint<'tree>(
+    command: Node<'tree>,
+    source: &[u8],
+    cache: &mut CaptureCache<'tree>,
+    cancel: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if !cache.visit(cancel)? {
+        return Ok(false);
+    }
+    Ok(
+        command.child(0).and_then(|node| text(node, source)) == Some("Hint")
+            && command.child(1).and_then(|node| text(node, source)) == Some("Resolve"),
+    )
+}
+
+fn ordinary_hint_attribute<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+    cache: &mut CaptureCache<'tree>,
+    cancel: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if !clean(node, source) {
+        return Ok(false);
+    }
+    let members = children(node, cache, cancel)?;
+    let [hash, open, attribute, close] = members.as_slice() else {
+        return Ok(false);
+    };
+    if text(*hash, source) != Some("#")
+        || text(*open, source) != Some("[")
+        || attribute.kind() != "attribute"
+        || text(*close, source) != Some("]")
+    {
+        return Ok(false);
+    }
+    let attribute = children(*attribute, cache, cancel)?;
+    let [name] = attribute.as_slice() else {
+        return Ok(false);
+    };
+    Ok(name.kind() == "ident" && matches!(text(*name, source), Some("global" | "local")))
 }
 
 fn ordinary_names<'tree>(
@@ -140,6 +459,27 @@ fn ordinary_names<'tree>(
     Ok((!(names.is_empty() || !implicit && !colon || colon && !ty)).then_some((names, implicit)))
 }
 
+fn assertion_names<'tree>(
+    group: Node<'tree>,
+    source: &[u8],
+    cache: &mut CaptureCache<'tree>,
+    cancel: &Cancellation,
+) -> Result<Option<(Vec<Node<'tree>>, bool, bool)>, AdapterError> {
+    if !clean(group, source) || !cache.visit(cancel)? {
+        return Ok(None);
+    }
+    if group.child_count() == 1
+        && let Some(name) = group.child(0).filter(|name| name.kind() == "ident")
+        && named(name, source)
+    {
+        let mut names = Vec::new();
+        push(&mut names, name)?;
+        return Ok(Some((names, false, false)));
+    }
+    Ok(ordinary_names(group, source, cache, cancel)?
+        .map(|(names, implicit)| (names, implicit, !implicit)))
+}
+
 fn header<'tree>(
     command: Node<'tree>,
     context_known: bool,
@@ -177,6 +517,7 @@ fn header<'tree>(
     let mut colon_end = None;
     let mut inventory = Vec::<Node<'tree>>::new();
     let mut formals = Vec::new();
+    let mut typed_formal = false;
     for child in members.iter().skip(1) {
         if !cache.visit(cancel)? {
             return Ok(HeaderAdmission::Blocked);
@@ -202,9 +543,12 @@ fn header<'tree>(
                 name_seen = true;
             }
             "binder" if name_seen => {
-                let Some((names, implicit)) = ordinary_names(*child, source, cache, cancel)? else {
+                let Some((names, implicit, typed)) =
+                    assertion_names(*child, source, cache, cancel)?
+                else {
                     return Ok(HeaderAdmission::Blocked);
                 };
+                typed_formal |= typed;
                 for name in names {
                     for previous in &inventory {
                         if !cache.visit(cancel)? {
@@ -237,6 +581,10 @@ fn header<'tree>(
         } else {
             HeaderAdmission::Blocked
         })
+    } else if !typed_formal {
+        // Bare-only headers still need a wider inference contract; mixed
+        // headers retain their written names without claiming inferred types.
+        Ok(HeaderAdmission::Blocked)
     } else {
         Ok(HeaderAdmission::Proved(Header {
             prefix: command.start_byte()..end,
@@ -518,21 +866,61 @@ impl Proofs {
         let mut proofs = Self::default();
         let mut targets = Vec::<Target<'tree>>::new();
         let (mut ownership, mut environment, mut proof) = (complete, complete, false);
+        let mut declaration_module = None;
+
         for sentence in children(cache.root, cache, cancel)? {
             if sentence.kind() == "comment" {
                 continue;
             }
             if sentence.kind() != "sentence" {
+                declaration_module = None;
                 ownership = false;
                 environment = false;
                 continue;
             }
-            let Some(command) = only_command(sentence, cache, cancel)? else {
+            if ownership
+                && !proof
+                && !clean(sentence, source)
+                && recovered_tactic_ownership(sentence, source, cache, cancel)?
+            {
+                // A closed tactic sentence cannot open vernacular ownership. Its
+                // recovered interior still supplies no checked term environment.
+                environment = false;
+                continue;
+            }
+            let Some(command) = only_command(sentence, source, cache, cancel)? else {
+                declaration_module = None;
                 ownership = false;
                 environment = false;
                 continue;
             };
             let sentence_clean = clean(sentence, source);
+            if let Some(opened) = declaration_module {
+                if sentence_clean
+                    && command.kind() == "declare_instance_command"
+                    && command.child(0).and_then(|node| text(node, source)) == Some("Declare")
+                    && command.child(1).and_then(|node| text(node, source)) == Some("Instance")
+                {
+                    continue;
+                }
+                declaration_module = None;
+                if sentence_clean
+                    && let Some(closed) = declaration_module_name(command, source, cache, cancel)?
+                    && command.kind() == "end_command"
+                    && let (Some(opened), Some(closed)) =
+                        (text(opened, source), text(closed, source))
+                    && same_name(opened, closed, cache, cancel)? == Some(true)
+                {
+                    // Only this clean declaration-only frame can return to its
+                    // previously known outer owner. Unknown interiors never reset it.
+                    ownership = true;
+                    environment = false;
+                    continue;
+                }
+                ownership = false;
+                environment = false;
+            }
+
             if command.kind() == "theorem_command" {
                 proofs
                     .headers
@@ -669,6 +1057,20 @@ impl Proofs {
                     // this certificate is limited to the already closed prefix.
                     environment = false;
                 }
+                "module_type_command" if ownership && !proof => {
+                    declaration_module = declaration_module_name(command, source, cache, cancel)?;
+                    ownership = false;
+                    environment = false;
+                }
+                "instance_command"
+                    if ownership
+                        && !proof
+                        && command.child(0).and_then(|node| text(node, source))
+                            == Some("Instance")
+                        && command.child_by_field_name("body").is_some() =>
+                {
+                    environment = false;
+                }
                 "arguments_command" if ownership && !proof => {}
                 "proof_command" if proof => {}
                 "qed_command" | "defined_command" | "admitted_command" | "abort_command"
@@ -684,6 +1086,16 @@ impl Proofs {
                 | "match_goal"
                 | "match_tactic"
                     if proof => {}
+                "ltac_definition" | "tactic_notation_command" if ownership && !proof => {
+                    // These clean native commands extend tactics, not the enclosing
+                    // vernacular namespace. They establish no term-target authority.
+                    environment = false
+                }
+                "hint_command"
+                    if ownership && !proof && resolve_hint(command, source, cache, cancel)? =>
+                {
+                    environment = false
+                }
                 "require_command" | "import_command" | "export_command" if ownership && !proof => {
                     environment = false
                 }
@@ -1210,5 +1622,320 @@ mod tests {
             notation_head(notation, source.as_bytes(), &mut cache, &cancel),
             Err(AdapterError::Cancelled { .. })
         ));
+    }
+
+    #[test]
+    fn original_mrutils_retains_all_five_written_assertion_headers() {
+        let original = include_str!(
+            "../../../../../tests/native-grammars/tests/fixtures/coq-tactic-notations/MRUtils.v"
+        );
+        let (proved, exhausted) = proofs(original, true, 65_536);
+        assert!(!exhausted);
+        for (name, prefix, expected) in [
+            (
+                "iff_forall",
+                "Lemma iff_forall {A} B C (H : forall x : A, B x <-> C x)\r\n  :",
+                &["B", "C", "H"][..],
+            ),
+            (
+                "iff_ex",
+                "Lemma iff_ex {A} B C (H : forall x : A, B x <-> C x)\r\n  :",
+                &["B", "C", "H"][..],
+            ),
+            (
+                "if_true_false",
+                "Lemma if_true_false (b : bool) :",
+                &["b"][..],
+            ),
+            (
+                "iff_is_true_eq_bool",
+                "Lemma iff_is_true_eq_bool (b b' : bool) :",
+                &["b", "b'"][..],
+            ),
+            (
+                "uip_bool",
+                "Lemma uip_bool (b1 b2 : bool) (p q : b1 = b2) :",
+                &["b1", "b2", "p", "q"][..],
+            ),
+        ] {
+            let start = original.find(&format!("Lemma {name} ")).unwrap();
+            let Some(HeaderAdmission::Proved(header)) = proved.headers.get(&start) else {
+                panic!("missing original written header {name}")
+            };
+            assert_eq!(&original[header.prefix.clone()], prefix);
+            let written: Vec<_> = header
+                .formals
+                .iter()
+                .map(|span| &original[span.clone()])
+                .collect();
+            assert_eq!(written, expected);
+        }
+        assert!(proved.notations.is_empty());
+        assert!(proved.references.is_empty());
+    }
+
+    #[test]
+    fn clean_tactic_commands_keep_only_vernacular_ownership_for_mixed_binders() {
+        for command in [
+            "Ltac helper t := idtac.",
+            "Tactic Notation \"helper\" := idtac.",
+            "Hint Resolve I : core.",
+            "#[global] Hint Resolve I : core.",
+            "#[local] Hint Resolve I : core.",
+        ] {
+            let source = format!(
+                "{command}\nLemma renamed {{A}} B C (H : forall x : A, B x <-> C x) : True."
+            );
+            let (proved, exhausted) = proofs(&source, true, 16_384);
+            assert!(!exhausted, "{source}");
+            let start = source.find("Lemma renamed").unwrap();
+            let Some(HeaderAdmission::Proved(header)) = proved.headers.get(&start) else {
+                panic!("missing renamed mixed header after {command}")
+            };
+            let written: Vec<_> = header
+                .formals
+                .iter()
+                .map(|span| &source[span.clone()])
+                .collect();
+            assert_eq!(written, ["B", "C", "H"]);
+            let source =
+                format!("Definition target := 0. {command} Notation \"! T\" := (target T).");
+            let (closed, exhausted) = proofs(&source, true, 16_384);
+            assert!(!exhausted, "{source}");
+            assert!(closed.notations.is_empty(), "{source}");
+            assert!(closed.references.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn mixed_binder_tactic_prefixes_preserve_scope_attribute_and_identity_barriers() {
+        for source in [
+            "Ltac helper := idtac. Lemma bad {A} B (B : A) : True.",
+            "Ltac helper := idtac. Lemma bad {A} M.B (x : A) : True.",
+            "Ltac helper := idtac. Lemma bad {A} B : True.",
+            "#[custom] Hint Resolve I : core. Lemma bad (x : nat) : True.",
+            "#[global, custom] Hint Resolve I : core. Lemma bad (x : nat) : True.",
+            "#[global] Lemma bad (x : nat) : True.",
+            "Fail Hint Resolve I : core. Lemma bad (x : nat) : True.",
+            "Hint Unfold target : core. Lemma bad (x : nat) : True.",
+            "Hint Extern 0 => idtac : core. Lemma bad (x : nat) : True.",
+            "Module M. Ltac helper := idtac. Lemma bad (x : nat) : True.",
+            "Lemma pending : True. Ltac helper := idtac. Lemma bad (x : nat) : True.",
+            "Ltac helper := . Lemma bad (x : nat) : True.",
+        ] {
+            let (proved, exhausted) = proofs(source, true, 16_384);
+            assert!(!exhausted, "{source}");
+            let start = source.find("Lemma bad").unwrap();
+            assert!(
+                !matches!(proved.headers.get(&start), Some(HeaderAdmission::Proved(_))),
+                "{source}"
+            );
+        }
+        let source = "#[global] Hint Resolve I : core. Lemma renamed {A} B (x : A) : True.";
+        let (partial, exhausted) = proofs(source, false, 16_384);
+        assert!(!exhausted);
+        assert!(
+            !partial
+                .headers
+                .values()
+                .any(|header| matches!(header, HeaderAdmission::Proved(_)))
+        );
+        for maximum in [0, 1, 2, 4] {
+            assert!(proofs(source, true, maximum).1);
+        }
+    }
+
+    #[test]
+    fn recovered_tactic_sentences_preserve_only_existing_flat_ownership() {
+        let original = include_str!(
+            "../../../../../tests/native-grammars/tests/fixtures/coq-tactic-notations/MRUtils.v"
+        );
+        let tactic = &original[650..871];
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Coq))
+            .unwrap();
+        assert!(parser.parse(tactic, None).unwrap().root_node().has_error());
+        for prefix in [
+            tactic.to_owned(),
+            format!("{tactic}\nClass Fuel := fuel : nat."),
+        ] {
+            let source = format!("{prefix}\nLemma renamed (x : nat) : True.");
+            let (proved, exhausted) = proofs(&source, true, 16_384);
+            assert!(!exhausted);
+            let start = source.find("Lemma renamed").unwrap();
+            assert!(
+                matches!(proved.headers.get(&start), Some(HeaderAdmission::Proved(_))),
+                "{source}"
+            );
+            assert!(proved.notations.is_empty());
+            assert!(proved.references.is_empty());
+            for barrier in [
+                "Module Hidden.",
+                "Section Hidden.",
+                "Lemma pending : True.",
+                "#[custom] Hint Resolve I : core.",
+            ] {
+                let source = format!("{barrier}\n{source}");
+                let (blocked, exhausted) = proofs(&source, true, 16_384);
+                assert!(!exhausted);
+                let start = source.find("Lemma renamed").unwrap();
+                assert!(
+                    !matches!(
+                        blocked.headers.get(&start),
+                        Some(HeaderAdmission::Proved(_))
+                    ),
+                    "{source}"
+                );
+            }
+        }
+        let source = format!("Definition target := 0.\n{tactic}\nNotation \"! T\" := (target T).");
+        let (proved, exhausted) = proofs(&source, true, 16_384);
+        assert!(!exhausted);
+        assert!(proved.notations.is_empty());
+        assert!(proved.references.is_empty());
+    }
+
+    #[test]
+    fn recovered_tactic_boundary_rejects_open_or_foreign_sentence_shells() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Coq))
+            .unwrap();
+        let tree = parser.parse("Ltac helper := idtac.", None).unwrap();
+        for body in [
+            "idtac.",
+            "idtac \"Module M.\".",
+            "(* outer (* nested *) *) idtac.",
+            "match goal with [ |- context[match X with _ => _ end]] => idtac end.",
+        ] {
+            let mut cache = CaptureCache::new(tree.root_node(), 16_384);
+            assert!(
+                tactic_sentence_boundary(body.as_bytes(), 0, &mut cache, &Cancellation::new())
+                    .unwrap(),
+                "{body}"
+            );
+        }
+        for body in [
+            ".",
+            "(* only comment *) .",
+            "idtac. Module M.",
+            "idtac Module M.",
+            "idtac Section M.",
+            "idtac End M.",
+            "idtac #[custom].",
+            "idtac (.",
+            "idtac ].",
+            "idtac \"open.",
+            "idtac (* open.",
+            "idtac",
+        ] {
+            let mut cache = CaptureCache::new(tree.root_node(), 16_384);
+            assert!(
+                !tactic_sentence_boundary(body.as_bytes(), 0, &mut cache, &Cancellation::new())
+                    .unwrap(),
+                "{body}"
+            );
+        }
+        let long = format!("{}idtac.", " ".repeat(1024));
+        let mut cache = CaptureCache::new(tree.root_node(), 2);
+        assert!(
+            !tactic_sentence_boundary(long.as_bytes(), 0, &mut cache, &Cancellation::new())
+                .unwrap()
+        );
+        assert!(cache.exhausted());
+        let cancel = Cancellation::new();
+        cancel.cancel(CancellationReason::ClientRequest);
+        let mut cache = CaptureCache::new(tree.root_node(), 16_384);
+        assert!(matches!(
+            tactic_sentence_boundary(b"idtac.", 0, &mut cache, &cancel),
+            Err(AdapterError::Cancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn combined_original_declarations_keep_later_mrutils_written_headers() {
+        let source = concat!(
+            "(* λ😀 *)\nDefinition written_value : nat := 1.\nLemma statement : True. Proof. exact I. Qed.\n",
+            "Definition chosen := 0.\nDefinition consumer (chosen : nat) : nat := chosen.\n",
+            include_str!("../../../tests/fixtures/coq-instances/subst_instance_list.v"),
+            "\nModule Type Contract.\nDeclare Instance promised : nat.\nEnd Contract.\n",
+            include_str!("../../../tests/fixtures/coq-records/binder_annot.v"),
+            "\n",
+            include_str!("../../../tests/fixtures/coq-records/debug_opt.v"),
+            "\n",
+            include_str!("../../../tests/fixtures/coq-records/listable.v"),
+            "\n",
+            include_str!("../../../tests/fixtures/coq-projections/singleton.v"),
+            "\n",
+            include_str!("../../../tests/fixtures/coq-projections/neighbor.v"),
+            "\n",
+            include_str!(
+                "../../../../../tests/native-grammars/tests/fixtures/coq-tactic-notations/MRUtils.v"
+            ),
+            "\n",
+        );
+        let (proved, exhausted) = proofs(source, true, 65_536);
+        assert!(!exhausted);
+        for name in [
+            "iff_forall",
+            "iff_ex",
+            "if_true_false",
+            "iff_is_true_eq_bool",
+            "uip_bool",
+        ] {
+            let start = source.find(&format!("Lemma {name} ")).unwrap();
+            assert!(
+                matches!(proved.headers.get(&start), Some(HeaderAdmission::Proved(_))),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn declaration_only_module_frames_close_exactly_without_reviving_unknown_context() {
+        for prefix in [
+            "Instance authored : nat := 0.",
+            "Module Type Renamed. Declare Instance promised : nat. End Renamed.",
+            "Module Type Renamed. End Renamed.",
+        ] {
+            let source = format!("{prefix} Lemma accepted (x : nat) : True.");
+            let (proved, exhausted) = proofs(&source, true, 16_384);
+            assert!(!exhausted);
+            let start = source.find("Lemma accepted").unwrap();
+            assert!(
+                matches!(proved.headers.get(&start), Some(HeaderAdmission::Proved(_))),
+                "{source}"
+            );
+            let source =
+                format!("{prefix} Definition target := 0. Notation \"! T\" := (target T).");
+            let (closed, exhausted) = proofs(&source, true, 16_384);
+            assert!(!exhausted);
+            assert!(closed.notations.is_empty());
+            assert!(closed.references.is_empty());
+        }
+        for prefix in [
+            "Instance unfinished : nat.",
+            "#[refine] Instance unfinished : nat := _.",
+            "Module Type Open.",
+            "Module Type Open. Declare Instance promised : nat. End Other.",
+            "Module Type Outer. Module Type Inner. End Inner. End Outer.",
+            "Module Type Open. Lemma nested (x : nat) : True. Qed. End Open.",
+            "Module Type Open. Definition unsupported := 0. End Open.",
+            "Module Type Open. Declare Instance promised : . End Open.",
+            "Module Type Aliased := Existing.",
+            "Module Outer. Module Type Renamed. End Renamed. End Outer.",
+            "Section Outer. Module Type Renamed. End Renamed. End Outer.",
+            "Lemma pending : True. Module Type Renamed. End Renamed.",
+        ] {
+            let source = format!("{prefix} Lemma refused (x : nat) : True.");
+            let (proved, exhausted) = proofs(&source, true, 16_384);
+            assert!(!exhausted, "{source}");
+            let start = source.find("Lemma refused").unwrap();
+            assert!(
+                !matches!(proved.headers.get(&start), Some(HeaderAdmission::Proved(_))),
+                "{source}"
+            );
+        }
     }
 }

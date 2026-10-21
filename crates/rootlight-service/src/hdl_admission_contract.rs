@@ -259,30 +259,28 @@ fn coq_structure_keeps_attribution_literal_matches_and_exact_encoded_reads() {
                 OccurrenceRole::Declaration,
                 "coq.declared_instance_name.definition",
             ),
-            (
-                "iff_forall",
-                OccurrenceRole::Definition,
-                "coq.name.definition",
-            ),
-            ("iff_ex", OccurrenceRole::Definition, "coq.name.definition"),
-            (
-                "if_true_false",
-                OccurrenceRole::Definition,
-                "coq.name.definition",
-            ),
-            (
-                "iff_is_true_eq_bool",
-                OccurrenceRole::Definition,
-                "coq.name.definition",
-            ),
-            (
-                "uip_bool",
-                OccurrenceRole::Definition,
-                "coq.name.definition",
-            ),
         ]
         .into_iter()
         .map(|(name, role, syntax)| (name, EntityKind::Constant, role, syntax, name))
+        .chain(
+            [
+                "iff_forall",
+                "iff_ex",
+                "if_true_false",
+                "iff_is_true_eq_bool",
+                "uip_bool",
+            ]
+            .into_iter()
+            .map(|name| {
+                (
+                    name,
+                    EntityKind::Function,
+                    OccurrenceRole::Definition,
+                    "coq.name.definition",
+                    name,
+                )
+            }),
+        )
         .chain([
             (
                 "binder_annot",
