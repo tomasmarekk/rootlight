@@ -156,9 +156,9 @@ fn spelling_bytes(raw: &[u8], source: &SourceRef, encoding: &str) -> Vec<u8> {
     match encoding {
         "utf-8" => bytes.to_vec(),
         "utf-16le" | "utf-16be" => {
-            let mut pairs = bytes.chunks_exact(2);
+            let (pairs, remainder) = bytes.as_chunks::<2>();
             let units = pairs
-                .by_ref()
+                .iter()
                 .map(|pair| {
                     if encoding == "utf-16le" {
                         u16::from_le_bytes([pair[0], pair[1]])
@@ -167,7 +167,7 @@ fn spelling_bytes(raw: &[u8], source: &SourceRef, encoding: &str) -> Vec<u8> {
                     }
                 })
                 .collect::<Vec<_>>();
-            assert!(pairs.remainder().is_empty());
+            assert!(remainder.is_empty());
             String::from_utf16(&units).unwrap().into_bytes()
         }
         _ => panic!("unexpected fixture encoding: {encoding}"),

@@ -384,7 +384,9 @@ fn jsonc_utf16_definitions_keep_exact_physical_offsets_and_original_hashes() {
             let end = usize::try_from(definition.source.span().end_byte()).unwrap();
             assert_eq!(definition.source.content_hash(), content_hash(&bytes));
             let units: Vec<_> = bytes[start..end]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     if little {
                         u16::from_le_bytes([pair[0], pair[1]])

@@ -484,7 +484,9 @@ fn rust_raw_and_unicode_bindings_preserve_utf16_physical_evidence() {
                 None => String::from_utf8(physical_bytes.to_vec()).unwrap(),
                 Some(little_endian) => String::from_utf16(
                     &physical_bytes
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|pair| {
                             let pair = [pair[0], pair[1]];
                             if little_endian {

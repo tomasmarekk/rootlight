@@ -1861,7 +1861,9 @@ fn cmake_utf16_bom_definitions_keep_raw_hashes_and_physical_coordinates() {
             let end = usize::try_from(definition.source.span().end_byte()).unwrap();
             assert_eq!(definition.source.content_hash(), content_hash(&bytes));
             let units = bytes[start..end]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     if little {
                         u16::from_le_bytes([pair[0], pair[1]])

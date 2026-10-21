@@ -991,7 +991,9 @@ fn validate(result: &AnalysisOutput, source: &[u8], encoding: &str) {
             assert_eq!(bytes.len() % 2, 0);
             String::from_utf16(
                 &bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|unit| {
                         let unit = [unit[0], unit[1]];
                         if encoding == "utf-16le" {
@@ -2544,7 +2546,9 @@ fn validate_written_callable_original(
             assert_eq!(bytes.len() % 2, 0);
             String::from_utf16(
                 &bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|unit| {
                         let unit = [unit[0], unit[1]];
                         if encoding == "utf-16le" {
