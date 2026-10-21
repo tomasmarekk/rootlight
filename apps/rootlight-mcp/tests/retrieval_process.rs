@@ -1911,7 +1911,13 @@ fn markup_analysis_gaps_preserve_scoped_exact_source_access() {
     for (ordinal, (query, mode, language, path, partial)) in [
         ("embedded", "lexical", "html", "view.html", true),
         ("view.html", "path", "html", "view.html", true),
-        ("matrix_target_alpha", "exact", "rust", "src/lib.rs", false),
+        (
+            "scope_page_candidate",
+            "exact",
+            "rust",
+            "src/scope_page.rs",
+            false,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -2670,7 +2676,7 @@ fn ini_value_gaps_warn_only_for_scoped_ini_queries() {
         RetrievalFixture::spawn_with_layout(Some(("settings.ini", source)), FixtureLayout::Data);
     for (query, language, path, bounded) in [
         ("Host", "ini", "settings.ini", true),
-        ("matrix_target_alpha", "rust", "src/lib.rs", false),
+        ("scope_page_candidate", "rust", "src/scope_page.rs", false),
     ] {
         let located = fixture.standalone(
             &format!("ini-scoped-coverage-{language}"),
@@ -3485,7 +3491,12 @@ fn yaml_tagged_value_gaps_cross_real_process_boundaries_with_exact_sources() {
     for (index, (query, modes, path, partial)) in [
         ("affected", json!(["exact"]), "data.yaml", true),
         ("secret_value", json!(["lexical"]), "data.yaml", true),
-        ("matrix_target_alpha", json!(["exact"]), "src/lib.rs", false),
+        (
+            "scope_page_candidate",
+            json!(["exact"]),
+            "src/scope_page.rs",
+            false,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -3677,14 +3688,26 @@ fn bash_symbols_and_heredoc_text_cross_real_process_boundaries() {
         assert_standalone_batch_parity(&located, &batch, "code.locate");
         let output = &located["result"]["structuredContent"];
         assert_common_read_contract(output, &fixture.repository_id);
+        let language_coverage = output["coverage"]["languages"]
+            .as_array()
+            .expect("Bash coverage languages")
+            .iter()
+            .find(|entry| entry["language"] == "bash")
+            .expect("Bash-only query retains its language coverage");
+        assert_eq!(language_coverage["status"], "bounded", "{output:#}");
+        let warnings = output["warnings"].as_array().expect("warnings");
         assert!(
-            output["warnings"]
-                .as_array()
-                .expect("warnings")
-                .iter()
-                .all(|warning| warning["code"] != "coverage_unsupported"),
-            "Bash-only query returned unsupported coverage: {output:#}"
+            warnings.iter().any(|warning| {
+                warning["code"] == "coverage_unsupported"
+                    && warning["message"]
+                        .as_str()
+                        .is_some_and(|message| message.ends_with("language bash"))
+            }),
+            "Unproved module and complex parameters must retain their Bash gap: {output:#}"
         );
+        assert!(warnings.iter().all(|warning| {
+            warning["code"] != "coverage_parse_error" && warning["code"] != "coverage_truncated"
+        }));
         let matches = output["data"]["matches"].as_array().expect("Bash matches");
         let found = matches
             .iter()
@@ -4187,11 +4210,16 @@ fn supported_symbol_explain_projection_crosses_process_boundaries(fixture: &mut 
             .as_str()
             .is_some_and(|preview| preview.contains("matrix_target_alpha"))
     );
-    assert!(
-        explanation["relation_samples"]
-            .as_array()
-            .is_some_and(|samples| samples.len() <= 1)
-    );
+    let samples = explanation["relation_samples"]
+        .as_array()
+        .expect("relation samples retain their bounded array");
+    assert!(samples.len() <= 250);
+    let mut per_kind = std::collections::BTreeMap::new();
+    for sample in samples {
+        let kind = sample["kind"].as_str().expect("sample has a relation kind");
+        *per_kind.entry(kind).or_insert(0_usize) += 1;
+    }
+    assert!(per_kind.values().all(|count| *count <= 1));
     assert!(
         explanation["provenance"]
             .as_array()
@@ -4723,7 +4751,8 @@ fn retrieval_limits_cursors_and_unresolved_ids_are_truthful(fixture: &mut Retrie
         first_exhaustion, second_exhaustion,
         "multi-page locate ordering must be repeatable"
     );
-    assert_eq!(first_exhaustion.len(), 13);
+    // Each of the twelve written functions also owns a searchable formal.
+    assert_eq!(first_exhaustion.len(), 25);
     assert_eq!(
         first_exhaustion
             .iter()
@@ -4851,6 +4880,7 @@ fn collect_locate_pages(fixture: &mut RetrievalFixture, run_id: &str) -> Vec<Str
     let mut cursor = None;
     let mut identity = None;
     let mut identities = Vec::new();
+    let mut kinds = std::collections::BTreeMap::new();
     for page_index in 0..16 {
         let mut arguments = json!({
             "query": "matrix_target",
@@ -4885,6 +4915,10 @@ fn collect_locate_pages(fixture: &mut RetrievalFixture, run_id: &str) -> Vec<Str
             !matches.is_empty(),
             "locate emitted an empty intermediate page"
         );
+        for matched in matches {
+            let kind = matched["kind"].as_str().expect("match kind is retained");
+            *kinds.entry(kind.to_owned()).or_insert(0_usize) += 1;
+        }
         identities.extend(matches.iter().map(|matched| {
             if let Some(symbol) = matched["symbol_id"].as_str() {
                 symbol.to_owned()
@@ -4901,6 +4935,14 @@ fn collect_locate_pages(fixture: &mut RetrievalFixture, run_id: &str) -> Vec<Str
             assert_eq!(output["truncated"], false);
             assert_eq!(output["completeness"]["state"], "complete");
             assert_eq!(output["completeness"]["continuation"], "not_applicable");
+            assert_eq!(
+                kinds,
+                std::collections::BTreeMap::from([
+                    ("file".to_owned(), 1),
+                    ("function".to_owned(), 12),
+                    ("parameter".to_owned(), 12),
+                ])
+            );
             return identities;
         };
         assert_eq!(output["truncated"], true);
