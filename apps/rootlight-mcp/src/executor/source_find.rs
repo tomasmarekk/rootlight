@@ -379,9 +379,9 @@ fn validate_request_result(
                 | SourceFindStop::ResultLimit
                 | SourceFindStop::MatcherMemoryLimit
                 | SourceFindStop::ResponseMemoryLimit
-        ) && !matches
+        ) && matches
             .last()
-            .is_some_and(|source| source.span().end_byte() == scanned.end))
+            .is_none_or(|source| source.span().end_byte() != scanned.end))
         || (matches!(
             stop,
             SourceFindStop::ScanLimit

@@ -10402,14 +10402,12 @@ impl FirstSliceService {
                     lowered_files = lowered_files
                         .checked_add(1)
                         .ok_or(FirstSliceError::Limits)?;
+                } else if let Some(original_metadata) = &original_metadata {
+                    reused_normalized_records.insert_document_with_metadata_origin(
+                        file_document, Some(original_metadata),
+                    )?;
                 } else {
-                    if let Some(original_metadata) = &original_metadata {
-                        reused_normalized_records.insert_document_with_metadata_origin(
-                            file_document, Some(original_metadata),
-                        )?;
-                    } else {
-                        reused_normalized_records.insert_document(file_document)?;
-                    }
+                    reused_normalized_records.insert_document(file_document)?;
                 }
                 drop(original_metadata);
                 let normalized_supplied = normalized.is_some();
