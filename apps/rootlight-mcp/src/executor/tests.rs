@@ -110,6 +110,9 @@ mod context_interruption_tests;
 #[path = "context_relationship_tests.rs"]
 mod context_relationship_tests;
 
+#[path = "context_locate_tests.rs"]
+mod context_locate_tests;
+
 #[path = "source_metadata_quote_tests.rs"]
 mod source_metadata_quote_tests;
 

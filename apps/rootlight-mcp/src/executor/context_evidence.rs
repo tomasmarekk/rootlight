@@ -1131,14 +1131,21 @@ where
         .max(1);
     let maximum_results = u32::try_from(per_query).unwrap_or(u32::MAX);
     for (query, mode) in queries {
+        // A path seed selects its physical file. The scoped source route avoids
+        // expanding every qualified symbol in that file under a locate budget.
+        let path_prefixes = if mode == LocateMode::Prefix {
+            vec![query.clone()]
+        } else {
+            Vec::new()
+        };
         let request = CodeLocatePortRequest {
-            kinds: None,
+            kinds: (mode == LocateMode::Prefix).then(|| vec!["file".to_owned()]),
             repository: invocation.repository(),
             generation: client::GenerationSelector::Generation(invocation.generation()),
             query,
             mode,
             languages: Vec::new(),
-            path_prefixes: Vec::new(),
+            path_prefixes,
             maximum_results,
             page_offset: 0,
         };
@@ -1314,8 +1321,24 @@ where
             .await?;
     let mut observations = Vec::new();
     for hit in resolved.hits {
-        let Some(symbol) = hit.symbol else {
-            continue;
+        let (symbol_id, identity) = match hit.symbol {
+            Some(symbol) => (Some(symbol), symbol.to_string()),
+            None if hit.kind == "file" => {
+                let Some(source) = hit.source.as_ref() else {
+                    continue;
+                };
+                if source.file() != hit.file
+                    || source.repository() != invocation.repository()
+                    || source.generation() != invocation.generation()
+                {
+                    return Err(context_evidence_error(
+                        ContextEvidencePortErrorKind::InvalidResponse,
+                        resolved.usage,
+                    ));
+                }
+                (None, hit.file.to_string())
+            }
+            None => continue,
         };
         let source_refs = match hit.source.as_ref() {
             Some(source) => context_source_refs(std::slice::from_ref(source))?,
@@ -1328,8 +1351,8 @@ where
             .saturating_add(hit.path.len());
         observations.push(EvidenceProviderObservation {
             kind: EvidenceProviderObservationKind::Primary,
-            symbol_id: Some(symbol),
-            identity: symbol.to_string(),
+            symbol_id,
+            identity,
             observed_score: Some(u16::try_from(hit.score.min(1_000)).unwrap_or(1_000)),
             observed_relevance: None,
             estimated_tokens: u64::try_from(tokens).unwrap_or(u64::MAX),
