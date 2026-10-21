@@ -24,7 +24,7 @@ fn policy(snapshot_bytes: u64) -> FirstSliceStoragePolicy {
     FirstSliceStoragePolicy::from_config(config, 3)
 }
 
-fn assert_opaque(
+pub(super) fn assert_opaque(
     service: &FirstSliceService,
     receipt: &FirstSliceIndexReceipt,
     path: &str,

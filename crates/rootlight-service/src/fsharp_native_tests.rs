@@ -12007,10 +12007,7 @@ fn assert_tuple_formal_generation(
         .filter(|entity| entity.kind == EntityKind::Module && entity.canonical_name == "Tuples.fs")
         .collect::<Vec<_>>();
     assert_eq!(file_modules.len(), 1);
-    assert_eq!(
-        file_modules[0].evidence.source.as_ref(),
-        Some(&reference(0, source))
-    );
+    assert_eq!(file_modules[0].evidence.source.as_ref(), Some(full));
     check_source(file_modules[0].evidence.source.as_ref().unwrap());
     let modules = document
         .entities

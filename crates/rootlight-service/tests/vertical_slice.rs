@@ -29,6 +29,9 @@ use rootlight_service::{
 };
 use tempfile::TempDir;
 
+#[path = "vertical_slice/real_project_fixture.rs"]
+mod real_project_fixture;
+
 const BEFORE: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const AFTER: &str = "pub fn answer() -> u32 {\n    43\n}\n";
 const OTHER: &str = "pub fn other() -> u32 {\n    7\n}\n";
@@ -591,15 +594,80 @@ fn invalid_utf8_publishes_a_bounded_successor_without_losing_the_prior_generatio
         .expect("valid generation indexes");
     let mut invalid_utf8 = BEFORE.as_bytes().to_vec();
     invalid_utf8.push(0xff);
-    fs::write(source_path, invalid_utf8).expect("invalid UTF-8 source writes");
+    fs::write(source_path, &invalid_utf8).expect("invalid UTF-8 source writes");
 
     let second = service
         .index_rust_fixture(fixture.path(), &cancellation)
         .expect("invalid UTF-8 publishes bounded file coverage");
     assert_eq!(second.parent, Some(first.generation));
+    let message = "raw source bytes remain readable but unsupported text encoding prevents structural analysis and lexical vocabulary projection and literal text matching";
     assert!(second.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "invalid-utf8" && diagnostic.message == "source is not valid utf-8"
+        diagnostic.code == "unsupported-encoding" && diagnostic.message == message
     }));
+    let file = service
+        .inspect_generation(
+            second.repository,
+            Some(second.generation),
+            &cancellation,
+            |snapshot| {
+                let document = snapshot.document();
+                let file = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == "src/lib.rs")
+                    .unwrap();
+                assert_eq!(file.encoding, "bytes");
+                assert_eq!(file.content_hash, content_hash(&invalid_utf8));
+                assert_eq!(file.byte_length, u64::try_from(invalid_utf8.len()).unwrap());
+                let reference = file.evidence.source.as_ref().unwrap();
+                assert_eq!(reference.repository(), second.repository);
+                assert_eq!(reference.generation(), second.generation);
+                assert_eq!(reference.content_hash(), content_hash(&invalid_utf8));
+                assert_eq!(reference.span().file(), file.id);
+                assert_eq!(reference.span().start_byte(), 0);
+                assert_eq!(reference.span().end_byte(), file.byte_length);
+                let diagnostic = document
+                    .diagnostics
+                    .iter()
+                    .find(|diagnostic| {
+                        diagnostic.code == "unsupported-encoding"
+                            && diagnostic.source.as_ref() == Some(reference)
+                    })
+                    .unwrap();
+                assert_eq!(diagnostic.message, message);
+                assert_eq!(diagnostic.coverage_effect, CoverageStatus::Unknown);
+                assert_eq!(diagnostic.provenance, file.provenance);
+                assert_eq!(diagnostic.evidence.source.as_ref(), Some(reference));
+                assert!(document.entities.is_empty());
+                assert!(document.occurrences.is_empty());
+                file.clone()
+            },
+        )
+        .expect("opaque source identity remains inspectable");
+    let coverage = service
+        .source_file_coverage_until(second.generation, file.id, &cancellation)
+        .expect("opaque file coverage remains explicit");
+    assert_eq!(coverage.status, CoverageStatus::Unknown);
+    assert_eq!(
+        coverage.reason,
+        Some(rootlight_service::FirstSliceSourceCoverageReason::UnsupportedEncoding)
+    );
+    let reference = file.evidence.source.unwrap();
+    let raw = service
+        .source_read_with_options_and_budget(
+            second.generation,
+            vec![reference.clone()],
+            rootlight_service::SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0)
+                .with_encoding(rootlight_source::SourceEncoding::Bytes),
+            FirstSliceBudget::default(),
+            &cancellation,
+        )
+        .expect("invalid text remains exactly readable as raw bytes");
+    assert_eq!(raw.data.chunks.len(), 1);
+    assert_eq!(raw.data.chunks[0].bytes, invalid_utf8);
+    assert_eq!(raw.data.chunks[0].reference, reference);
     assert_eq!(
         service.active_generation_for(first.repository),
         Some(second.generation)
@@ -1192,9 +1260,14 @@ fn flow_trace_resolves_a_multifile_rust_scoped_call_path() {
     )
     .expect("worker source writes");
     let cancellation = deadline();
-    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let state = TempDir::new().expect("project fixture state exists");
+    let mut service = real_project_fixture::service(state.path(), &cancellation);
     let indexed = service
-        .index_rust_fixture(fixture.path(), &cancellation)
+        .index_repository_with_mode(
+            fixture.path(),
+            rootlight_service::FirstSliceIndexMode::Deep,
+            &cancellation,
+        )
         .expect("multifile fixture indexes");
     let locate = |name: &str| {
         service
@@ -1450,12 +1523,17 @@ fn architecture_overview_reports_an_honest_file_granularity_result_for_a_known_f
 
 #[test]
 fn tests_select_returns_a_direct_rust_test() {
-    let source = "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n\n#[test]\nfn caller_works() {\n    assert_eq!(caller(), 42);\n}\n";
+    let source = "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n\n#[test]\nfn caller_works() {\n    let actual = caller();\n    assert_eq!(actual, 42);\n}\n";
     let fixture = fixture(source);
     let cancellation = deadline();
-    let mut service = FirstSliceService::new(2).expect("first-slice service initializes");
+    let state = TempDir::new().expect("project fixture state exists");
+    let mut service = real_project_fixture::service(state.path(), &cancellation);
     let indexed = service
-        .index_rust_fixture(fixture.path(), &cancellation)
+        .index_repository_with_mode(
+            fixture.path(),
+            rootlight_service::FirstSliceIndexMode::Deep,
+            &cancellation,
+        )
         .expect("fixture generation indexes");
 
     let located = service

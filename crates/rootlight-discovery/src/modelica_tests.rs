@@ -420,11 +420,9 @@ fn modelica_discovery_preserves_encodings_bytes_and_unproved_sources() {
         } else {
             0xd800_u16.to_be_bytes()
         });
-        std::fs::write(
-            directory.path().join(format!("malformed-{encoding}.mo")),
-            source,
-        )
-        .unwrap();
+        // Malformed BOM-bearing source remains available as exact opaque bytes;
+        // it supplies no Modelica or other decoded language evidence.
+        cases.insert(format!("malformed-{encoding}.mo"), (source, false));
     }
     for (name, (bytes, _)) in &cases {
         std::fs::write(directory.path().join(name), bytes).unwrap();
@@ -455,7 +453,8 @@ fn modelica_discovery_preserves_encodings_bytes_and_unproved_sources() {
     .unwrap();
     let (manifest, snapshots) = result.into_parts();
     assert_eq!(manifest.inputs.len(), cases.len());
-    assert_eq!(manifest.exclusions.len(), 3);
+    assert_eq!(manifest.exclusions.len(), 1);
+    assert_eq!(manifest.exclusions[0].path, "binary.mo");
     assert!(
         manifest
             .exclusions
@@ -476,8 +475,12 @@ fn modelica_discovery_preserves_encodings_bytes_and_unproved_sources() {
             "{}",
             input.path
         );
-        if input.path == "invalid-tail.mo" {
+        if input.path == "invalid-tail.mo" || input.path.starts_with("malformed-") {
             assert_eq!(input.encoding, "bytes");
+        }
+        if input.path.starts_with("malformed-") {
+            assert_eq!(input.class, InputClass::Source);
+            assert!(input.language_signals.is_empty());
         }
         if input.path == "utf-16le.mo" {
             assert_eq!(input.encoding, "utf-16le");

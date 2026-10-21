@@ -29872,6 +29872,8 @@ mod tests {
                 ("typescript", "typescriptValue"),
                 ("javascript", "javascriptValue"),
             ],
+            "complete",
+            None,
         );
     }
 
@@ -29960,6 +29962,8 @@ mod tests {
         assert_public_language_repository(
             &[("src/value.py", "def python_value():\n    return 1\n")],
             &[("python", "python_value")],
+            "bounded",
+            Some("python-function-binding-proof-is-limited-to-the-ordinary-formal-read-subset"),
         );
     }
 
@@ -30021,6 +30025,10 @@ mod tests {
                 "package sample\n\nfunc GoValue() int { return 1 }\n",
             )],
             &[("go", "GoValue")],
+            "bounded",
+            Some(
+                "go-formal-proof-is-limited-to-ascii-free-functions-and-direct-single-return-literal-values",
+            ),
         );
     }
 
@@ -32520,7 +32528,18 @@ mod tests {
         assert!(status.coverage.iter().any(|coverage| {
             coverage.language == "python"
                 && coverage.tier == "tier_d"
-                && coverage.status == "complete"
+                && coverage.status == "bounded"
+        }));
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .expect("fallback structural generation remains retained");
+        assert!(snapshot.document().skipped_regions.iter().any(|gap| {
+            gap.domain == IrFactDomain::Relations
+                && gap.reason == SkippedRegionReason::UnsupportedConstruct
+                && gap.detail
+                    == "python-function-binding-proof-is-limited-to-the-ordinary-formal-read-subset"
+                && gap.source.content_hash() == content_hash(b"def python_value():\n    return 1\n")
+                && gap.source.generation() == receipt.generation
         }));
         assert_eq!(status.semantic_freshness, "pending_refinement");
     }
@@ -33100,6 +33119,51 @@ mod tests {
             FirstSliceService::new_with_storage(2, MAX_RETAINED_SOURCE_BYTES, None, Some(analyzer))
                 .expect("service initializes with a project adapter");
 
+        let structural = service
+            .index_repository_with_mode(
+                fixture.path(),
+                FirstSliceIndexMode::Structural,
+                &deadline(),
+            )
+            .expect("original structural evidence publishes before bounded refinement");
+        let unsupported = |document: &NormalizedIrDocument| {
+            let mut gaps: Vec<_> = document
+                .skipped_regions
+                .iter()
+                .filter(|gap| gap.reason == SkippedRegionReason::UnsupportedConstruct)
+                .map(|gap| (gap.domain, gap.detail.clone(), gap.source.span()))
+                .collect();
+            gaps.sort();
+            gaps
+        };
+        let expected_unsupported = {
+            let baseline = service
+                .loaded_generation_snapshot(structural.generation)
+                .expect("structural baseline remains retained");
+            let file = &baseline.document().files[0];
+            let span = SourceSpan::new(file.id, 0, 32).expect("original source span is exact");
+            let expected: Vec<_> = [
+                IrFactDomain::Entities,
+                IrFactDomain::Occurrences,
+                IrFactDomain::Relations,
+            ]
+            .into_iter()
+            .map(|domain| {
+                (
+                    domain,
+                    "python-module-read-proof-is-lexical-only-values-calls-and-dynamic-namespace-semantics-unqualified".to_owned(),
+                    span,
+                )
+            })
+            .collect();
+            assert_eq!(unsupported(baseline.document()), expected);
+            assert!(baseline.document().skipped_regions.iter().all(|gap| {
+                gap.source.content_hash() == content_hash(b"print('bounded project syntax')\n")
+                    && gap.source.generation() == structural.generation
+            }));
+            expected
+        };
+
         let receipt = service
             .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
             .expect("bounded project output publishes when it preserves declarations");
@@ -33124,10 +33188,31 @@ mod tests {
                 && gap.language.as_deref() == Some("python")
                 && gap.files == 1
         }));
-        assert!(!gaps.iter().any(|gap| {
+        assert!(gaps.iter().any(|gap| {
             gap.reason == FirstSliceCoverageGapReason::Unsupported
                 && gap.language.as_deref() == Some("python")
+                && gap.files == 1
         }));
+        // Project records replace entity/relation metadata; refinement keeps
+        // the structural occurrence limitation at its original source span.
+        let expected_deep_unsupported: Vec<_> = expected_unsupported
+            .into_iter()
+            .filter(|(domain, _, _)| *domain == IrFactDomain::Occurrences)
+            .collect();
+        assert_eq!(
+            unsupported(bounded_snapshot.document()),
+            expected_deep_unsupported
+        );
+        assert!(
+            bounded_snapshot
+                .document()
+                .skipped_regions
+                .iter()
+                .all(|gap| {
+                    gap.source.content_hash() == content_hash(b"print('bounded project syntax')\n")
+                        && gap.source.generation() == receipt.generation
+                })
+        );
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(status.coverage.iter().any(|coverage| {
@@ -39751,13 +39836,15 @@ mod tests {
             let receipt = service
                 .index_repository(fixture.path(), &deadline())
                 .unwrap();
-            assert_eq!(receipt.discovered_inputs, 5);
-            assert_eq!(receipt.binary_inputs, 1);
+            assert_eq!(receipt.discovered_inputs, 6);
+            // This counter covers excluded binaries; opaque containers retain
+            // an admitted source record with their separate disposition below.
+            assert_eq!(receipt.binary_inputs, 0);
             let snapshot = service
                 .loaded_generation_snapshot(receipt.generation)
                 .unwrap();
             let document = snapshot.document();
-            assert_eq!(document.files.len(), 5);
+            assert_eq!(document.files.len(), 6);
             assert_eq!(
                 document.entities.len(),
                 2,
@@ -39765,11 +39852,12 @@ mod tests {
                 document.entities,
                 document.diagnostics
             );
-            assert!(
-                document
-                    .files
-                    .iter()
-                    .all(|file| file.path != "malformed.rs")
+            encoded_bom_source_preservation::assert_opaque(
+                &service,
+                &receipt,
+                "malformed.rs",
+                &malformed,
+                "rust",
             );
             for (path, text, language, disposition) in cases {
                 let bytes = encode(text);
@@ -40150,14 +40238,15 @@ mod tests {
                 .expect("source coverage resolves");
             assert_eq!(coverage.language, language);
             assert_eq!(coverage.tier, AnalysisTier::TierD);
-            let (expected_status, expected_reason) = if language == "pony" {
-                (CoverageStatus::Bounded, None)
-            } else {
-                (
-                    CoverageStatus::Unknown,
-                    Some(FirstSliceSourceCoverageReason::UnsupportedLanguage),
-                )
-            };
+            let (expected_status, expected_reason) =
+                if matches!(language, "pony" | "idris" | "lean" | "less") {
+                    (CoverageStatus::Bounded, None)
+                } else {
+                    (
+                        CoverageStatus::Unknown,
+                        Some(FirstSliceSourceCoverageReason::UnsupportedLanguage),
+                    )
+                };
             assert_eq!(
                 coverage.status, expected_status,
                 "{path}: language={language}, reason={:?}",
@@ -40231,7 +40320,7 @@ mod tests {
                     .data
                     .hits
                     .iter()
-                    .find(|hit| hit.file == file.id)
+                    .find(|hit| hit.file == file.id && hit.symbol.is_none())
                     .expect("file-only source hit is returned");
                 assert_eq!(hit.symbol, None);
                 assert_eq!(hit.kind, "file");
@@ -60214,7 +60303,14 @@ mod tests {
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("generation manifest reads"))
                 .expect("generation manifest is valid JSON");
+        assert_eq!(manifest["version"], 5);
+        assert!(manifest.get("source_authority").is_some());
         manifest["version"] = serde_json::json!(1);
+        // A real legacy inline manifest predates compact source authority.
+        manifest
+            .as_object_mut()
+            .expect("generation manifest is an object")
+            .remove("source_authority");
         manifest
             .as_object_mut()
             .expect("generation manifest is an object")
@@ -60532,7 +60628,9 @@ mod tests {
                 .expect("generation manifest remains readable"),
         )
         .expect("generation manifest is valid JSON");
-        assert_eq!(generation_manifest["version"], 4);
+        assert_eq!(generation_manifest["version"], 5);
+        assert!(generation_manifest.get("source_authority").is_some());
+        assert!(active_directory.join("source-authority.json").is_file());
         assert!(generation_manifest.get("recovery").is_none());
         assert_eq!(generation_manifest["source_storage"]["version"], 1);
         assert!(active_directory.join("oracle.sqlite3").is_file());
@@ -69072,6 +69170,8 @@ mod tests {
     fn assert_public_language_repository(
         files: &[(&str, &str)],
         expected_symbols: &[(&str, &str)],
+        expected_status: &str,
+        expected_gap_detail: Option<&str>,
     ) {
         let fixture = TempDir::new().expect("fixture root exists");
         write_language_fixture(fixture.path(), files);
@@ -69100,9 +69200,29 @@ mod tests {
                 .find(|coverage| coverage.language == *language)
                 .expect("expected language coverage is reported");
             assert_eq!(coverage.tier, "tier_d");
-            assert_eq!(coverage.status, "complete");
+            assert_eq!(coverage.status, expected_status);
             assert_eq!(coverage.discovered_files, 1);
             assert_eq!(coverage.indexed_files, 1);
+
+            if let Some(detail) = expected_gap_detail {
+                let snapshot = service
+                    .loaded_generation_snapshot(receipt.generation)
+                    .expect("indexed source gaps remain retained");
+                let file = snapshot
+                    .document()
+                    .files
+                    .iter()
+                    .find(|file| file.language == *language)
+                    .expect("fixture language has exact file evidence");
+                assert!(snapshot.document().skipped_regions.iter().any(|gap| {
+                    gap.domain == IrFactDomain::Relations
+                        && gap.reason == SkippedRegionReason::UnsupportedConstruct
+                        && gap.detail == detail
+                        && gap.source.span().file() == file.id
+                        && gap.source.content_hash() == file.content_hash
+                        && gap.source.generation() == receipt.generation
+                }));
+            }
 
             let located = service
                 .code_locate(

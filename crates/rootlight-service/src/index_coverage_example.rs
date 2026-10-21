@@ -3291,6 +3291,7 @@ mod tests {
             "coverage",
             "files",
             "full_semantic_completeness_proven",
+            "source_file_fallback_diagnostics",
             "gap_census",
             "exported_provenance",
             "exported_fact_identities",

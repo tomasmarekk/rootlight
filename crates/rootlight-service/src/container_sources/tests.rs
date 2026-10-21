@@ -5971,7 +5971,8 @@ fn extracted_counts_restore_legacy_manifests_and_reject_false_current_counts() {
         .join("manifest.json");
     let original = fs::read(&manifest_path).unwrap();
     let manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    assert_eq!(manifest["version"], 4);
+    assert_eq!(manifest["version"], 5);
+    assert!(manifest.get("source_authority").is_some());
     assert_eq!(manifest["receipt"]["extracted_files"], 2);
     let retained_without_manifest = receipt
         .retained_durable_bytes
@@ -5979,6 +5980,12 @@ fn extracted_counts_restore_legacy_manifests_and_reject_false_current_counts() {
         .unwrap();
     fs::remove_file(&book).unwrap();
     for (version, extracted, discovered, valid) in [
+        (5, Some(2), 1, true),
+        (5, None, 1, false),
+        (5, Some(0), 1, false),
+        (5, Some(3), 1, false),
+        (5, Some(u64::MAX), 1, false),
+        (5, Some(2), 0, false),
         (4, Some(2), 1, true),
         (4, None, 1, false),
         (4, Some(0), 1, false),
@@ -5990,6 +5997,10 @@ fn extracted_counts_restore_legacy_manifests_and_reject_false_current_counts() {
     ] {
         let mut changed = manifest.clone();
         changed["version"] = version.into();
+        if version < 5 {
+            // Legacy manifests cannot carry the v5-only source-authority descriptor.
+            changed.as_object_mut().unwrap().remove("source_authority");
+        }
         changed["receipt"]["discovered_inputs"] = discovered.into();
         match extracted {
             Some(count) => changed["receipt"]["extracted_files"] = count.into(),
