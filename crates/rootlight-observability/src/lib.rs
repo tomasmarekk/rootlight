@@ -2389,7 +2389,7 @@ fn validate_production_input(
             || !language
                 .suffixes
                 .iter()
-                .all(|label| is_language_capability_label(label))
+                .all(|label| is_language_capability_suffix(label))
             || !language
                 .aliases
                 .iter()
@@ -2841,6 +2841,19 @@ fn is_support_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+fn is_language_capability_suffix(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix('.') else {
+        return false;
+    };
+    value.len() <= 128
+        && suffix.split('.').all(|part| !part.is_empty())
+        && suffix.chars().all(|character| {
+            character.is_alphanumeric()
+                || matches!(character, '_' | '-' | '.' | '+' | '#')
+                || !character.is_ascii() && !character.is_control() && !character.is_whitespace()
+        })
 }
 
 fn is_language_capability_label(value: &str) -> bool {
@@ -4120,6 +4133,75 @@ mod tests {
             "language-079"
         );
         assert!(bytes.len() <= MAX_SUPPORT_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn schema_v9_preserves_unicode_filename_suffixes_without_accepting_paths() {
+        let mut input = complete_language_input(1);
+        let capability = &mut input.inventory.as_mut().unwrap().languages[0];
+        capability.language = "mojo".to_owned();
+        capability.suffixes = vec![".mojo".to_owned(), ".🔥".to_owned()];
+        let expected = input.inventory.clone().unwrap();
+        let bundle = build_support_bundle_for_schema(&input, SupportBundleSchema::V9)
+            .expect("declared Unicode suffixes are filename metadata");
+        let mut archive = zip::ZipArchive::new(Cursor::new(bundle.archive())).unwrap();
+        let mut bytes = Vec::new();
+        archive
+            .by_name("inventory.json")
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<SupportInventory>(&bytes).unwrap(),
+            expected
+        );
+
+        for suffix in [
+            "🔥",
+            ".",
+            "..",
+            ".🔥/source",
+            ".🔥\\source",
+            ".🔥:source",
+            ".🔥 source",
+            ".🔥\nsource",
+            ".🔥\0source",
+        ] {
+            let mut invalid = input.clone();
+            invalid.inventory.as_mut().unwrap().languages[0].suffixes = vec![suffix.to_owned()];
+            assert!(
+                matches!(
+                    build_support_bundle_for_schema(&invalid, SupportBundleSchema::V9),
+                    Err(SupportBundleError::InvalidInventory)
+                ),
+                "suffix {suffix:?}"
+            );
+        }
+        for field in [
+            "language",
+            "aliases",
+            "detectors",
+            "analyzers",
+            "maximum_tier",
+        ] {
+            let mut invalid = input.clone();
+            let capability = &mut invalid.inventory.as_mut().unwrap().languages[0];
+            match field {
+                "language" => capability.language = "🔥".to_owned(),
+                "aliases" => capability.aliases = vec!["🔥".to_owned()],
+                "detectors" => capability.detectors = vec!["🔥".to_owned()],
+                "analyzers" => capability.analyzers = vec!["🔥".to_owned()],
+                "maximum_tier" => capability.maximum_tier = "🔥".to_owned(),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    build_support_bundle_for_schema(&invalid, SupportBundleSchema::V9),
+                    Err(SupportBundleError::InvalidInventory)
+                ),
+                "field {field}"
+            );
+        }
     }
 
     #[test]
