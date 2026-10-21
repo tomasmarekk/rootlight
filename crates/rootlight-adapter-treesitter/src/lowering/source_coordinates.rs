@@ -25,7 +25,7 @@ impl<'context, 'source> SourceCoordinates<'context, 'source> {
         cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
         cancellation.check()?;
-        if view.encoding().is_none() {
+        if view.is_identity() {
             return Ok(Self {
                 view,
                 facts: Cow::Borrowed(facts),
@@ -232,5 +232,67 @@ fn require_owned(observed: usize, limit: usize) -> Result<(), AdapterError> {
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod line_ending_tests {
+    use rootlight_adapter_sdk::{LanguageId, SyntaxFactKind, SyntaxKindLabel};
+    use rootlight_ids::FileId;
+
+    use crate::source_view::LineEndingPolicy;
+
+    use super::*;
+
+    #[test]
+    fn mapped_utf8_coordinates_project_physical_facts_and_ranges_before_helpers() {
+        let raw = b"a\r\nb";
+        let file = FileId::from_bytes([62; 20]);
+        let written = SourceSpan::new(file, 3, 4).unwrap();
+        let full = SourceSpan::new(file, 0, 4).unwrap();
+        let facts = [SyntaxFact::new(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            written,
+            0,
+            SyntaxKindLabel::new("identifier").unwrap(),
+        )];
+        let ranges = [IncludedRange::new(
+            full,
+            LanguageId::new("fixture").unwrap(),
+        )];
+        let cancellation = Cancellation::new();
+        let view = NativeSourceView::new_with_policy(
+            raw,
+            "utf-8",
+            LineEndingPolicy::CrlfFileText,
+            usize::MAX,
+            usize::MAX,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(view.encoding(), None);
+        assert!(!view.is_identity());
+        let coordinates =
+            SourceCoordinates::new(&view, &facts, &ranges, usize::MAX, &cancellation).unwrap();
+        let projected = SourceSpan::new(file, 2, 3).unwrap();
+        assert_eq!(coordinates.facts()[0].span(), projected);
+        assert_eq!(
+            coordinates.ranges()[0].span(),
+            SourceSpan::new(file, 0, 3).unwrap()
+        );
+        assert_eq!(coordinates.physical(projected).unwrap(), written);
+        assert!(matches!(coordinates.facts, Cow::Owned(_)));
+        assert!(
+            SourceCoordinates::new(&view, &facts, &ranges, view.owned_bytes(), &cancellation)
+                .is_err()
+        );
+        let preserve = NativeSourceView::new(raw, "utf-8", usize::MAX, 0, &cancellation).unwrap();
+        let coordinates =
+            SourceCoordinates::new(&preserve, &facts, &ranges, 0, &cancellation).unwrap();
+        assert_eq!(coordinates.facts().as_ptr(), facts.as_ptr());
+        assert_eq!(coordinates.ranges().as_ptr(), ranges.as_ptr());
+        assert_eq!(coordinates.facts()[0].span(), written);
     }
 }

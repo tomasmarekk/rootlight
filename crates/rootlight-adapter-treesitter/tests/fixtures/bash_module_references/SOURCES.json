@@ -1,0 +1,2630 @@
+{
+  "source_authorities": [
+    {
+      "ordinal": 54,
+      "repository": "54_D_vibe.d",
+      "language": "bash",
+      "origin": "https://github.com/vibe-d/vibe.d",
+      "revision": "b59c5542a802ac0bd39b3d7af54d07fac75da3b5",
+      "git_source_modes": "100644 c9a58ae4ebc3c6e4173e2f4af89e89b92e6e62f3 0\tLICENSE.txt\n100755 8d4a51c24499652222c01a9dcc18ae8197d86f36 0\tscripts/tag_version.sh",
+      "complete_original": {
+        "path": "target/secondary-six-source-obligations-20261021-r1/originals/54/scripts/tag_version.sh",
+        "bytes": 343,
+        "sha256": "0a2e71e584f5c763ad818eafaf617686ed2698eb2393f6900d7fa266de7d424e"
+      },
+      "license": {
+        "path": "target/secondary-six-source-obligations-20261021-r1/originals/54/LICENSE.txt",
+        "bytes": 1067,
+        "sha256": "21198f42534ec5300462193d190aa74ddfa5294b6900bc66fa1dd5e8cac0e51d"
+      },
+      "closed_source_file_records": {
+        "path": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/fresh.files.jsonl",
+        "bytes": 206421,
+        "sha256": "985899cc51b3f8b3fd6381c2324d64f2e8804a6c4d934d1a638550f15a5da341"
+      },
+      "closed_source_record": {
+        "path": "scripts/tag_version.sh",
+        "bytes": 343,
+        "sha256": "0a2e71e584f5c763ad818eafaf617686ed2698eb2393f6900d7fa266de7d424e",
+        "disposition": "admitted",
+        "reason": null,
+        "indexed": true,
+        "product_language_signals": [
+          {
+            "language": "bash",
+            "evidence": "extension"
+          },
+          {
+            "language": "bash",
+            "evidence": "shebang"
+          }
+        ],
+        "language": "bash",
+        "exact_source_read": true,
+        "observed_facts": {
+          "entities:module": 1,
+          "entities:variable": 1,
+          "call_site:unresolved": 6,
+          "definition:resolved": 1,
+          "documentation:unresolved": 1,
+          "reference:candidates": 4,
+          "reference:unresolved": 2,
+          "string_evidence:unresolved": 5,
+          "relation:contains": 2
+        },
+        "structural_coverage": "unknown",
+        "semantic_coverage": "unknown"
+      },
+      "physical_file_count_in_observed_catalog": 272,
+      "observed_probe_status": {
+        "structural": "unprobed",
+        "semantic": "unprobed"
+      },
+      "frozen_view_row": {
+        "ordinal": 54,
+        "repository": "54_D_vibe.d",
+        "primary_label": "D",
+        "observed_language": "bash",
+        "index_mode": "structural",
+        "language_membership": "Product routing observation, not an independent exhaustive language census",
+        "source_frame": {
+          "path": "target/corpus-audit/build-d-explain-source-authority-20261019/source-frame.json",
+          "bytes": 13785581,
+          "sha256": "d6a26d1b14fededa3e826bec3582ad826342f6b3e601ff078fe01d90307ea504"
+        },
+        "result": {
+          "path": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json",
+          "bytes": 67292,
+          "sha256": "7127e802b16d8de65ec0961313ff6823b8c9c8924e74f83ef80ac396921a122d"
+        },
+        "source_file_records": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/fresh.files.jsonl",
+        "source_file_records_by_phase": {
+          "fresh": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/fresh.files.jsonl",
+          "incremental": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/incremental.files.jsonl",
+          "restored": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/restored.files.jsonl"
+        },
+        "observed_attempt_outcome": "partial",
+        "evidence_completed_utc": "2026-10-19T10:12:05.733306Z",
+        "evidence_recency": "latest repository attempt",
+        "latest_repository_attempt": {
+          "completed_utc": "2026-10-19T10:12:05.733306Z",
+          "outcome": "partial",
+          "index_mode": "structural",
+          "source_frame": {
+            "path": "target/corpus-audit/build-d-explain-source-authority-20261019/source-frame.json",
+            "bytes": 13785581,
+            "sha256": "d6a26d1b14fededa3e826bec3582ad826342f6b3e601ff078fe01d90307ea504"
+          },
+          "result": {
+            "path": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json",
+            "bytes": 67292,
+            "sha256": "7127e802b16d8de65ec0961313ff6823b8c9c8924e74f83ef80ac396921a122d"
+          },
+          "executed_phases": [
+            "fresh",
+            "incremental",
+            "restored"
+          ],
+          "observed_languages": [
+            "bash",
+            "css",
+            "d",
+            "html",
+            "javascript",
+            "json",
+            "markdown",
+            "unknown",
+            "yaml"
+          ]
+        },
+        "latest_repository_language_status": "observed",
+        "current_probe_status": {
+          "structural": "unprobed",
+          "semantic": "unprobed"
+        },
+        "observing_attempt_history": [
+          {
+            "completed_utc": "2026-10-19T09:57:21.868179Z",
+            "outcome": "failed",
+            "index_mode": "structural",
+            "source_frame": {
+              "path": "target/corpus-audit/build-written-relations-zig-20261019/source-frame.json",
+              "bytes": 13172209,
+              "sha256": "d2cf01aca5fe8b15901b210af0038a83f928163895f64adfdb80b6c523a814fa"
+            },
+            "result": {
+              "path": "development-docs/language-coverage/audit-results/current-source-remaining-corpus-20261019-r2/054/054-54_D_vibe.d/summary.json",
+              "bytes": 77244,
+              "sha256": "90a8b23eebc2f8e106c8d38682a6691567f05f97889de276baf65d0f09280476"
+            },
+            "executed_phases": [
+              "fresh",
+              "incremental",
+              "restored"
+            ],
+            "observed_languages": [
+              "bash",
+              "cpp",
+              "css",
+              "d",
+              "html",
+              "javascript",
+              "json",
+              "markdown",
+              "unknown",
+              "yaml"
+            ]
+          },
+          {
+            "completed_utc": "2026-10-19T10:12:05.733306Z",
+            "outcome": "partial",
+            "index_mode": "structural",
+            "source_frame": {
+              "path": "target/corpus-audit/build-d-explain-source-authority-20261019/source-frame.json",
+              "bytes": 13785581,
+              "sha256": "d6a26d1b14fededa3e826bec3582ad826342f6b3e601ff078fe01d90307ea504"
+            },
+            "result": {
+              "path": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json",
+              "bytes": 67292,
+              "sha256": "7127e802b16d8de65ec0961313ff6823b8c9c8924e74f83ef80ac396921a122d"
+            },
+            "executed_phases": [
+              "fresh",
+              "incremental",
+              "restored"
+            ],
+            "observed_languages": [
+              "bash",
+              "css",
+              "d",
+              "html",
+              "javascript",
+              "json",
+              "markdown",
+              "unknown",
+              "yaml"
+            ]
+          }
+        ],
+        "phases": [
+          {
+            "phase": "fresh",
+            "routed_file_observations": {
+              "physical_files": 10,
+              "indexed_files": 10,
+              "exact_reads": 10,
+              "physical_bytes": 27793,
+              "indexed_bytes": 27793,
+              "exact_read_bytes": 27793,
+              "gaps": 8,
+              "parse_errors": 0
+            },
+            "analysis_publication": {
+              "scope": "per-language product status",
+              "product_coverage": {
+                "discovered_files": 10,
+                "indexed_files": 10,
+                "language": "bash",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              "aggregate_source_recovery": null
+            },
+            "independent_finite_controls": {},
+            "structural_probe_status": "unprobed",
+            "semantic_probe_status": "unprobed"
+          },
+          {
+            "phase": "incremental",
+            "routed_file_observations": {
+              "physical_files": 10,
+              "indexed_files": 10,
+              "exact_reads": 10,
+              "physical_bytes": 27793,
+              "indexed_bytes": 27793,
+              "exact_read_bytes": 27793,
+              "gaps": 8,
+              "parse_errors": 0
+            },
+            "analysis_publication": {
+              "scope": "per-language product status",
+              "product_coverage": {
+                "discovered_files": 10,
+                "indexed_files": 10,
+                "language": "bash",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              "aggregate_source_recovery": null
+            },
+            "independent_finite_controls": {},
+            "structural_probe_status": "unprobed",
+            "semantic_probe_status": "unprobed"
+          },
+          {
+            "phase": "restored",
+            "routed_file_observations": {
+              "physical_files": 10,
+              "indexed_files": 10,
+              "exact_reads": 10,
+              "physical_bytes": 27793,
+              "indexed_bytes": 27793,
+              "exact_read_bytes": 27793,
+              "gaps": 8,
+              "parse_errors": 0
+            },
+            "analysis_publication": {
+              "scope": "per-language product status",
+              "product_coverage": {
+                "discovered_files": 10,
+                "indexed_files": 10,
+                "language": "bash",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              "aggregate_source_recovery": null
+            },
+            "independent_finite_controls": {},
+            "structural_probe_status": "unprobed",
+            "semantic_probe_status": "unprobed"
+          }
+        ],
+        "whole_language_qualified": false,
+        "installed_mcp_qualified": false
+      },
+      "canonical_selected_latest_attempt": {
+        "schema": "rootlight.development-native-validation/1",
+        "source_revision": "4ba8124bfe8d81529bb465cc9abbd5253f8fedc9",
+        "source_frame": {
+          "path": "target/corpus-audit/build-d-explain-source-authority-20261019/source-frame.json",
+          "bytes": 13785581,
+          "sha256": "d6a26d1b14fededa3e826bec3582ad826342f6b3e601ff078fe01d90307ea504"
+        },
+        "build_receipt": {
+          "path": "target/corpus-audit/build-d-explain-source-authority-20261019/receipt.json",
+          "bytes": 3879,
+          "sha256": "95d0bb94e203232d49ca031a374abed7483eb8f314cb5940e195587bc2449854"
+        },
+        "build_receipt_sha256": "95d0bb94e203232d49ca031a374abed7483eb8f314cb5940e195587bc2449854",
+        "result": {
+          "path": "development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json",
+          "bytes": 67292,
+          "sha256": "7127e802b16d8de65ec0961313ff6823b8c9c8924e74f83ef80ac396921a122d"
+        },
+        "completed_utc": "2026-10-19T10:12:05.733306Z",
+        "outcome": "partial",
+        "complete": true,
+        "all_direct_children_closed": true,
+        "installed_mcp_qualified": false,
+        "whole_language_qualified": false,
+        "index_mode": "structural",
+        "facets": {
+          "availability": {
+            "status": "partial",
+            "verified": 271,
+            "total": 272,
+            "scope": "All independently copied non-Git regular repository files; development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json. Current index_coverage diagnostic uses structural mode. This is not structural or semantic completeness or validation of default Auto/Deep modes.",
+            "display_scope": "repository files"
+          },
+          "exact_retrieval": {
+            "status": "partial",
+            "verified": 271,
+            "total": 272,
+            "scope": "All independently copied non-Git regular repository files; development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json. Current index_coverage diagnostic uses structural mode. This is not structural or semantic completeness or validation of default Auto/Deep modes. Retrieval interface: actual service API; not installed MCP transport. Literal source-find coverage is separate. Finite public literal queries: 2/2 passed, 0 pending.",
+            "display_scope": "repository files; literal queries 2/2"
+          },
+          "structural": {
+            "status": "partial",
+            "verified": null,
+            "total": null,
+            "scope": "5 finite source-authored structural checks in the fresh structural-index phase for d; 0 failed. Default Auto/Deep paths and whole-language denominator unassessed; see development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json.",
+            "display_scope": "d: definitions 4/4; negatives 1/1; full scope unknown; structural index"
+          },
+          "semantic": {
+            "status": "partial",
+            "verified": null,
+            "total": null,
+            "scope": "3 finite source-authored semantic checks in the fresh structural-index phase for d; 0 failed. Default Auto/Deep paths and whole-language denominator unassessed; see development-docs/language-coverage/audit-results/current-source-d-explain-source-authority-20261019/054/054-54_D_vibe.d/summary.json.",
+            "display_scope": "d: relations 3/3; full scope unknown; structural index"
+          }
+        },
+        "phases": [
+          {
+            "phase": "fresh",
+            "generation": "gen1_unnfhkbm6gtyao5hybc6l3el5ozzzirwx7bvesq",
+            "discovery_complete": true,
+            "index_seconds": 7.249381,
+            "noop_seconds": 0.528867,
+            "service_open_wall_micros": 21829,
+            "service_open_seconds": 0.021829,
+            "service_lifetime": "fresh",
+            "open_plus_index_wall_micros": 7271210,
+            "open_plus_index_seconds": 7.27121,
+            "index_child_wall_seconds": 8.560019399999874,
+            "index_child_pid": 50688,
+            "index_child_wall_scope": "Execute wall through direct-child closure: capture setup, process startup, service opening, index/update, immediate no-op, source accounting, serialization and shutdown; excludes parent SQLite and literal-query checks",
+            "index_timing": {
+              "unit": "microseconds",
+              "wall_micros": 7249381,
+              "prepare_micros": 7203018,
+              "publish_micros": 46363,
+              "after_last_progress_micros": 14837,
+              "completed_stages": [
+                {
+                  "bytes_examined": 1285684,
+                  "completed": 1,
+                  "files_examined": 271,
+                  "stage": "Discovery",
+                  "wall_micros": 322960,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 1285684,
+                  "completed": 2,
+                  "files_examined": 271,
+                  "stage": "Snapshot",
+                  "wall_micros": 190967,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3762348,
+                  "completed": 3,
+                  "files_examined": 587,
+                  "stage": "Analysis",
+                  "wall_micros": 3558911,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3762348,
+                  "completed": 4,
+                  "files_examined": 587,
+                  "stage": "Merge",
+                  "wall_micros": 0,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3762348,
+                  "completed": 5,
+                  "files_examined": 587,
+                  "stage": "Persistence",
+                  "wall_micros": 2953985,
+                  "written_bytes": 32007607
+                },
+                {
+                  "bytes_examined": 3762348,
+                  "completed": 6,
+                  "files_examined": 587,
+                  "stage": "Search",
+                  "wall_micros": 161354,
+                  "written_bytes": 32234902
+                }
+              ],
+              "progress_events": {
+                "retained": false,
+                "total_count": 16,
+                "reason": "Per-event timeline omitted; exact completed stages and aggregate operation timings retained"
+              }
+            },
+            "noop_timing": {
+              "unit": "microseconds",
+              "wall_micros": 528867,
+              "prepare_micros": 487714,
+              "publish_micros": 41153,
+              "after_last_progress_micros": 155729,
+              "completed_stages": [
+                {
+                  "bytes_examined": 1291428,
+                  "completed": 1,
+                  "files_examined": 272,
+                  "stage": "Discovery",
+                  "wall_micros": 331985,
+                  "written_bytes": 0
+                }
+              ],
+              "progress_events": {
+                "retained": false,
+                "total_count": 6,
+                "reason": "Per-event timeline omitted; exact completed stages and aggregate operation timings retained"
+              }
+            },
+            "aggregate_source_recovery": null,
+            "aggregate_source_recovery_observation": "reported_absent",
+            "operation": {
+              "changed_files": 271,
+              "changed_inputs": 1362,
+              "fallback_reason": null,
+              "invalidated_units": 272,
+              "newly_written_bytes": 32236386,
+              "normalized_fact_work": [
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "files",
+                  "facts": 316,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "files",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "entities",
+                  "facts": 2748,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "entities",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "occurrences",
+                  "facts": 14863,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "occurrences",
+                  "facts": 465,
+                  "files": 12,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "occurrences",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "relations",
+                  "facts": 3769,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "relations",
+                  "facts": 71,
+                  "files": 4,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "relations",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "provenance",
+                  "facts": 316,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "provenance",
+                  "facts": 465,
+                  "files": 12,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "provenance",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "source_mappings",
+                  "facts": 158,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "source_mappings",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "diagnostics",
+                  "facts": 4136,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "diagnostics",
+                  "facts": 565,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "extensions",
+                  "facts": 3080,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "extensions",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                }
+              ],
+              "owned_memory_bytes": 36889755,
+              "planned_fact_work": [
+                {
+                  "analysis_units": 271,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "syntax",
+                  "files": 271,
+                  "provider_pass": "first-slice.parser"
+                },
+                {
+                  "analysis_units": 271,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "public_surface",
+                  "files": 271,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 271,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "body",
+                  "files": 271,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "resolution",
+                  "files": 0,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "search",
+                  "files": 0,
+                  "provider_pass": "first-slice.search"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "derived_graph",
+                  "files": 0,
+                  "provider_pass": "first-slice.derived"
+                },
+                {
+                  "analysis_units": 271,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "tests",
+                  "files": 271,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 271,
+                  "cause": "initial_generation",
+                  "disposition": "rebuild",
+                  "domain": "services",
+                  "files": 271,
+                  "provider_pass": "first-slice.lowering"
+                }
+              ],
+              "rebuilt_facts": 32082,
+              "rebuilt_files": 158,
+              "referenced_bytes": 0,
+              "reserved_memory_bytes": 185627471,
+              "retained_durable_bytes": 32236234,
+              "reused_facts": 0,
+              "reused_files": 0,
+              "strategy": "Initial"
+            },
+            "by_language": {
+              "yaml": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 8184,
+                "indexed_bytes": 8184,
+                "exact_read_bytes": 8184,
+                "gaps": 0,
+                "parse_errors": 0
+              },
+              "unknown": {
+                "physical_files": 114,
+                "indexed_files": 113,
+                "exact_reads": 113,
+                "physical_bytes": 53096,
+                "indexed_bytes": 47352,
+                "exact_read_bytes": 47352,
+                "gaps": 339,
+                "parse_errors": 0
+              },
+              "markdown": {
+                "physical_files": 3,
+                "indexed_files": 3,
+                "exact_reads": 3,
+                "physical_bytes": 251636,
+                "indexed_bytes": 251636,
+                "exact_read_bytes": 251636,
+                "gaps": 28,
+                "parse_errors": 0
+              },
+              "css": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 251,
+                "indexed_bytes": 251,
+                "exact_read_bytes": 251,
+                "gaps": 0,
+                "parse_errors": 0
+              },
+              "d": {
+                "physical_files": 108,
+                "indexed_files": 108,
+                "exact_reads": 108,
+                "physical_bytes": 907273,
+                "indexed_bytes": 907273,
+                "exact_read_bytes": 907273,
+                "gaps": 3935,
+                "parse_errors": 0
+              },
+              "html": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 38426,
+                "indexed_bytes": 38426,
+                "exact_read_bytes": 38426,
+                "gaps": 5,
+                "parse_errors": 0
+              },
+              "javascript": {
+                "physical_files": 2,
+                "indexed_files": 2,
+                "exact_reads": 2,
+                "physical_bytes": 1365,
+                "indexed_bytes": 1365,
+                "exact_read_bytes": 1365,
+                "gaps": 2,
+                "parse_errors": 0
+              },
+              "bash": {
+                "physical_files": 10,
+                "indexed_files": 10,
+                "exact_reads": 10,
+                "physical_bytes": 27793,
+                "indexed_bytes": 27793,
+                "exact_read_bytes": 27793,
+                "gaps": 8,
+                "parse_errors": 0
+              },
+              "json": {
+                "physical_files": 23,
+                "indexed_files": 23,
+                "exact_reads": 23,
+                "physical_bytes": 3404,
+                "indexed_bytes": 3404,
+                "exact_read_bytes": 3404,
+                "gaps": 0,
+                "parse_errors": 0
+              }
+            },
+            "embedded_entity_languages": {
+              "d": {
+                "entities": 978
+              },
+              "json": {
+                "entities": 141
+              },
+              "markdown": {
+                "entities": 1148
+              },
+              "javascript": {
+                "entities": 18
+              },
+              "css": {
+                "entities": 21
+              },
+              "bash": {
+                "entities": 103
+              },
+              "html": {
+                "entities": 33
+              },
+              "yaml": {
+                "entities": 148
+              }
+            },
+            "global_native_counts": {},
+            "source_obligations": {
+              "checked": 8,
+              "passed": 8,
+              "definition_checks": 4,
+              "relation_checks": 3,
+              "required_occurrence_checks": 0,
+              "calls_endpoint_policy": "exact-calls/entity-or-occurrence-enclosing/v1",
+              "absent_definition_checks": 1,
+              "absent_relation_checks": 0,
+              "structural_checks": 5,
+              "semantic_checks": 3,
+              "failures": [],
+              "structural": {
+                "checked": 5,
+                "passed": 5,
+                "failures": []
+              },
+              "semantic": {
+                "checked": 3,
+                "passed": 3,
+                "failures": []
+              },
+              "checks": [
+                {
+                  "key": "index-module",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-function",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "request-parameter",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "response-parameter",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "nondeclaration-source-site",
+                  "category": "absent_definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "module-owns-show-home",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-owns-request",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-owns-response",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                }
+              ],
+              "by_language": {
+                "d": {
+                  "definition": {
+                    "checked": 4,
+                    "passed": 4,
+                    "failed": 0
+                  },
+                  "absent_definition": {
+                    "checked": 1,
+                    "passed": 1,
+                    "failed": 0
+                  },
+                  "relation": {
+                    "checked": 3,
+                    "passed": 3,
+                    "failed": 0
+                  }
+                }
+              },
+              "expected_definition_languages": [
+                "d"
+              ],
+              "whole_language_qualified": false,
+              "derived_canonical_name_expectations": []
+            },
+            "literal_queries": {
+              "requested": 2,
+              "checked": 2,
+              "passed": 2,
+              "failures": [],
+              "pending": [],
+              "cases": [
+                {
+                  "key": "written-literal",
+                  "path": "examples/app_skeleton/source/index.d",
+                  "query": "showHome",
+                  "pages": 1,
+                  "matched_spans": [
+                    [
+                      52,
+                      60
+                    ]
+                  ],
+                  "exact_match_reads": 1,
+                  "reached_eof": true
+                },
+                {
+                  "key": "absent-literal",
+                  "path": "examples/app_skeleton/source/index.d",
+                  "query": "showHome__absent_source_control__",
+                  "pages": 1,
+                  "matched_spans": [],
+                  "exact_match_reads": 0,
+                  "reached_eof": true
+                }
+              ],
+              "transport": "actual public service API; cursor parts are not authenticated MCP tokens"
+            },
+            "source_obligation_frame": {
+              "kind": "original_bytes"
+            },
+            "pending_analysis_requirements": [],
+            "physical_unindexed_files": 1,
+            "all_original_files_available": false,
+            "all_discovery_admitted_files_retained": true,
+            "product_language_coverage": [
+              {
+                "discovered_files": 10,
+                "indexed_files": 10,
+                "language": "bash",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "css",
+                "status": "complete",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 108,
+                "indexed_files": 108,
+                "language": "d",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "html",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 2,
+                "indexed_files": 2,
+                "language": "javascript",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 23,
+                "indexed_files": 23,
+                "language": "json",
+                "status": "complete",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 3,
+                "indexed_files": 3,
+                "language": "markdown",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 113,
+                "indexed_files": 0,
+                "language": "unknown",
+                "status": "unknown",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "yaml",
+                "status": "complete",
+                "tier": "tier_d"
+              }
+            ],
+            "structural_status": "partial",
+            "semantic_status": "partial",
+            "whole_language_structural_and_semantic_denominators": null,
+            "public_queries": "finite SourceFind/SourceRead checks only; not installed MCP"
+          },
+          {
+            "phase": "incremental",
+            "generation": "gen1_46i6zf2yik6lt3hgfutpleb7upbihn72l6icqfa",
+            "discovery_complete": true,
+            "index_seconds": 7.180072,
+            "noop_seconds": 0.502652,
+            "service_open_wall_micros": 1651863,
+            "service_open_seconds": 1.651863,
+            "service_lifetime": "reopened",
+            "open_plus_index_wall_micros": 8831935,
+            "open_plus_index_seconds": 8.831935,
+            "index_child_wall_seconds": 10.063722599996254,
+            "index_child_pid": 52120,
+            "index_child_wall_scope": "Execute wall through direct-child closure: capture setup, process startup, service opening, index/update, immediate no-op, source accounting, serialization and shutdown; excludes parent SQLite and literal-query checks",
+            "index_timing": {
+              "unit": "microseconds",
+              "wall_micros": 7180072,
+              "prepare_micros": 7132805,
+              "publish_micros": 47267,
+              "after_last_progress_micros": 16923,
+              "completed_stages": [
+                {
+                  "bytes_examined": 1291429,
+                  "completed": 1,
+                  "files_examined": 272,
+                  "stage": "Discovery",
+                  "wall_micros": 500457,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 1291429,
+                  "completed": 2,
+                  "files_examined": 272,
+                  "stage": "Snapshot",
+                  "wall_micros": 212407,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3768095,
+                  "completed": 3,
+                  "files_examined": 588,
+                  "stage": "Analysis",
+                  "wall_micros": 3402876,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3768095,
+                  "completed": 4,
+                  "files_examined": 588,
+                  "stage": "Merge",
+                  "wall_micros": 0,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3768095,
+                  "completed": 5,
+                  "files_examined": 588,
+                  "stage": "Persistence",
+                  "wall_micros": 2845657,
+                  "written_bytes": 31319154
+                },
+                {
+                  "bytes_examined": 3768095,
+                  "completed": 6,
+                  "files_examined": 588,
+                  "stage": "Search",
+                  "wall_micros": 154481,
+                  "written_bytes": 31546535
+                }
+              ],
+              "progress_events": {
+                "retained": false,
+                "total_count": 21,
+                "reason": "Per-event timeline omitted; exact completed stages and aggregate operation timings retained"
+              }
+            },
+            "noop_timing": {
+              "unit": "microseconds",
+              "wall_micros": 502652,
+              "prepare_micros": 454443,
+              "publish_micros": 48209,
+              "after_last_progress_micros": 150084,
+              "completed_stages": [
+                {
+                  "bytes_examined": 1291429,
+                  "completed": 1,
+                  "files_examined": 272,
+                  "stage": "Discovery",
+                  "wall_micros": 304358,
+                  "written_bytes": 0
+                }
+              ],
+              "progress_events": {
+                "retained": false,
+                "total_count": 6,
+                "reason": "Per-event timeline omitted; exact completed stages and aggregate operation timings retained"
+              }
+            },
+            "aggregate_source_recovery": null,
+            "aggregate_source_recovery_observation": "reported_absent",
+            "operation": {
+              "changed_files": 1,
+              "changed_inputs": 1,
+              "fallback_reason": null,
+              "invalidated_units": 1,
+              "newly_written_bytes": 31548061,
+              "normalized_fact_work": [
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "files",
+                  "facts": 316,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "files",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "entities",
+                  "facts": 2748,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "entities",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "occurrences",
+                  "facts": 14863,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "occurrences",
+                  "facts": 465,
+                  "files": 12,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "occurrences",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "relations",
+                  "facts": 3769,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "relations",
+                  "facts": 71,
+                  "files": 4,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "relations",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "provenance",
+                  "facts": 316,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "provenance",
+                  "facts": 465,
+                  "files": 12,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "provenance",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "source_mappings",
+                  "facts": 158,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "source_mappings",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "diagnostics",
+                  "facts": 4136,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "diagnostics",
+                  "facts": 565,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "extensions",
+                  "facts": 3080,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "extensions",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                }
+              ],
+              "owned_memory_bytes": 36889766,
+              "planned_fact_work": [
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "syntax",
+                  "files": 1,
+                  "provider_pass": "first-slice.parser"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "public_surface",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "body",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "tests",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "services",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "syntax",
+                  "files": 270,
+                  "provider_pass": "first-slice.parser"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "public_surface",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "body",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "resolution",
+                  "files": 0,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "search",
+                  "files": 0,
+                  "provider_pass": "first-slice.search"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "derived_graph",
+                  "files": 0,
+                  "provider_pass": "first-slice.derived"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "tests",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "services",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                }
+              ],
+              "rebuilt_facts": 32082,
+              "rebuilt_files": 158,
+              "referenced_bytes": 0,
+              "reserved_memory_bytes": 185627519,
+              "retained_durable_bytes": 31547909,
+              "reused_facts": 0,
+              "reused_files": 0,
+              "strategy": "DependencyDirected"
+            },
+            "by_language": {
+              "yaml": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 8184,
+                "indexed_bytes": 8184,
+                "exact_read_bytes": 8184,
+                "gaps": 0,
+                "parse_errors": 0
+              },
+              "unknown": {
+                "physical_files": 114,
+                "indexed_files": 113,
+                "exact_reads": 113,
+                "physical_bytes": 53096,
+                "indexed_bytes": 47352,
+                "exact_read_bytes": 47352,
+                "gaps": 339,
+                "parse_errors": 0
+              },
+              "markdown": {
+                "physical_files": 3,
+                "indexed_files": 3,
+                "exact_reads": 3,
+                "physical_bytes": 251636,
+                "indexed_bytes": 251636,
+                "exact_read_bytes": 251636,
+                "gaps": 28,
+                "parse_errors": 0
+              },
+              "css": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 251,
+                "indexed_bytes": 251,
+                "exact_read_bytes": 251,
+                "gaps": 0,
+                "parse_errors": 0
+              },
+              "d": {
+                "physical_files": 108,
+                "indexed_files": 108,
+                "exact_reads": 108,
+                "physical_bytes": 907274,
+                "indexed_bytes": 907274,
+                "exact_read_bytes": 907274,
+                "gaps": 3935,
+                "parse_errors": 0
+              },
+              "html": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 38426,
+                "indexed_bytes": 38426,
+                "exact_read_bytes": 38426,
+                "gaps": 5,
+                "parse_errors": 0
+              },
+              "javascript": {
+                "physical_files": 2,
+                "indexed_files": 2,
+                "exact_reads": 2,
+                "physical_bytes": 1365,
+                "indexed_bytes": 1365,
+                "exact_read_bytes": 1365,
+                "gaps": 2,
+                "parse_errors": 0
+              },
+              "bash": {
+                "physical_files": 10,
+                "indexed_files": 10,
+                "exact_reads": 10,
+                "physical_bytes": 27793,
+                "indexed_bytes": 27793,
+                "exact_read_bytes": 27793,
+                "gaps": 8,
+                "parse_errors": 0
+              },
+              "json": {
+                "physical_files": 23,
+                "indexed_files": 23,
+                "exact_reads": 23,
+                "physical_bytes": 3404,
+                "indexed_bytes": 3404,
+                "exact_read_bytes": 3404,
+                "gaps": 0,
+                "parse_errors": 0
+              }
+            },
+            "embedded_entity_languages": {
+              "d": {
+                "entities": 978
+              },
+              "json": {
+                "entities": 141
+              },
+              "markdown": {
+                "entities": 1148
+              },
+              "javascript": {
+                "entities": 18
+              },
+              "css": {
+                "entities": 21
+              },
+              "bash": {
+                "entities": 103
+              },
+              "html": {
+                "entities": 33
+              },
+              "yaml": {
+                "entities": 148
+              }
+            },
+            "global_native_counts": {},
+            "source_obligations": {
+              "checked": 8,
+              "passed": 8,
+              "definition_checks": 4,
+              "relation_checks": 3,
+              "required_occurrence_checks": 0,
+              "calls_endpoint_policy": "exact-calls/entity-or-occurrence-enclosing/v1",
+              "absent_definition_checks": 1,
+              "absent_relation_checks": 0,
+              "structural_checks": 5,
+              "semantic_checks": 3,
+              "failures": [],
+              "structural": {
+                "checked": 5,
+                "passed": 5,
+                "failures": []
+              },
+              "semantic": {
+                "checked": 3,
+                "passed": 3,
+                "failures": []
+              },
+              "checks": [
+                {
+                  "key": "index-module",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-function",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "request-parameter",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "response-parameter",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "nondeclaration-source-site",
+                  "category": "absent_definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "module-owns-show-home",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-owns-request",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-owns-response",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                }
+              ],
+              "by_language": {
+                "d": {
+                  "definition": {
+                    "checked": 4,
+                    "passed": 4,
+                    "failed": 0
+                  },
+                  "absent_definition": {
+                    "checked": 1,
+                    "passed": 1,
+                    "failed": 0
+                  },
+                  "relation": {
+                    "checked": 3,
+                    "passed": 3,
+                    "failed": 0
+                  }
+                }
+              },
+              "expected_definition_languages": [
+                "d"
+              ],
+              "whole_language_qualified": false,
+              "derived_canonical_name_expectations": []
+            },
+            "literal_queries": {
+              "requested": 2,
+              "checked": 2,
+              "passed": 2,
+              "failures": [],
+              "pending": [],
+              "cases": [
+                {
+                  "key": "written-literal",
+                  "path": "examples/app_skeleton/source/index.d",
+                  "query": "showHome",
+                  "pages": 1,
+                  "matched_spans": [
+                    [
+                      52,
+                      60
+                    ]
+                  ],
+                  "exact_match_reads": 1,
+                  "reached_eof": true
+                },
+                {
+                  "key": "absent-literal",
+                  "path": "examples/app_skeleton/source/index.d",
+                  "query": "showHome__absent_source_control__",
+                  "pages": 1,
+                  "matched_spans": [],
+                  "exact_match_reads": 0,
+                  "reached_eof": true
+                }
+              ],
+              "transport": "actual public service API; cursor parts are not authenticated MCP tokens"
+            },
+            "source_obligation_frame": {
+              "kind": "append_lf_projection",
+              "projection": {
+                "schema": "rootlight.append-lf-obligation-projection/1",
+                "path": "examples/app_skeleton/source/index.d",
+                "before": {
+                  "bytes": 191,
+                  "sha256": "e27ed01a073c346919b6da284ead768df67939285ef3326e6c3e546d34b5edd1"
+                },
+                "after": {
+                  "bytes": 192,
+                  "sha256": "be72ba961a66e5fe9e9ab66bc3befabf8f53f7caf91e6d2d85749dfd0d1d48e9"
+                },
+                "original_obligations_sha256": "eacc51ec76b153c6f78619589e4ce0a0614158ec43366e687e9a3fc72695358d",
+                "unchanged_authored_spans": 9,
+                "literal_queries": [
+                  {
+                    "key": "written-literal",
+                    "before_matches": 1,
+                    "after_matches": 1
+                  },
+                  {
+                    "key": "absent-literal",
+                    "before_matches": 0,
+                    "after_matches": 0
+                  }
+                ],
+                "scope": "Finite original-span preservation probes after one appended LF; literal truth uses complete mutated bytes. Whole-file structural/semantic equivalence is unproven."
+              },
+              "obligations": {
+                "path": "incremental.obligations.json",
+                "bytes": 7176,
+                "sha256": "71eb852fa50cb3825c937d028bb82946554de6f169855649f9c4e31bd4b02467"
+              }
+            },
+            "pending_analysis_requirements": [],
+            "physical_unindexed_files": 1,
+            "all_original_files_available": false,
+            "all_discovery_admitted_files_retained": true,
+            "product_language_coverage": [
+              {
+                "discovered_files": 10,
+                "indexed_files": 10,
+                "language": "bash",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "css",
+                "status": "complete",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 108,
+                "indexed_files": 108,
+                "language": "d",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "html",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 2,
+                "indexed_files": 2,
+                "language": "javascript",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 23,
+                "indexed_files": 23,
+                "language": "json",
+                "status": "complete",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 3,
+                "indexed_files": 3,
+                "language": "markdown",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 113,
+                "indexed_files": 0,
+                "language": "unknown",
+                "status": "unknown",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "yaml",
+                "status": "complete",
+                "tier": "tier_d"
+              }
+            ],
+            "structural_status": "partial",
+            "semantic_status": "partial",
+            "whole_language_structural_and_semantic_denominators": null,
+            "public_queries": "finite SourceFind/SourceRead checks only; not installed MCP"
+          },
+          {
+            "phase": "restored",
+            "generation": "gen1_nbbg44pe6zflqtex5qumgpvbergrhbm74r2vtty",
+            "discovery_complete": true,
+            "index_seconds": 7.339439,
+            "noop_seconds": 0.605191,
+            "service_open_wall_micros": 3429276,
+            "service_open_seconds": 3.429276,
+            "service_lifetime": "reopened",
+            "open_plus_index_wall_micros": 10768715,
+            "open_plus_index_seconds": 10.768715,
+            "index_child_wall_seconds": 12.083520699990913,
+            "index_child_pid": 52564,
+            "index_child_wall_scope": "Execute wall through direct-child closure: capture setup, process startup, service opening, index/update, immediate no-op, source accounting, serialization and shutdown; excludes parent SQLite and literal-query checks",
+            "index_timing": {
+              "unit": "microseconds",
+              "wall_micros": 7339439,
+              "prepare_micros": 7265192,
+              "publish_micros": 74246,
+              "after_last_progress_micros": 25832,
+              "completed_stages": [
+                {
+                  "bytes_examined": 1291428,
+                  "completed": 1,
+                  "files_examined": 272,
+                  "stage": "Discovery",
+                  "wall_micros": 367434,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 1291428,
+                  "completed": 2,
+                  "files_examined": 272,
+                  "stage": "Snapshot",
+                  "wall_micros": 192871,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3768092,
+                  "completed": 3,
+                  "files_examined": 588,
+                  "stage": "Analysis",
+                  "wall_micros": 3436725,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3768092,
+                  "completed": 4,
+                  "files_examined": 588,
+                  "stage": "Merge",
+                  "wall_micros": 0,
+                  "written_bytes": 0
+                },
+                {
+                  "bytes_examined": 3768092,
+                  "completed": 5,
+                  "files_examined": 588,
+                  "stage": "Persistence",
+                  "wall_micros": 3062202,
+                  "written_bytes": 31323249
+                },
+                {
+                  "bytes_examined": 3768092,
+                  "completed": 6,
+                  "files_examined": 588,
+                  "stage": "Search",
+                  "wall_micros": 180126,
+                  "written_bytes": 31550630
+                }
+              ],
+              "progress_events": {
+                "retained": false,
+                "total_count": 21,
+                "reason": "Per-event timeline omitted; exact completed stages and aggregate operation timings retained"
+              }
+            },
+            "noop_timing": {
+              "unit": "microseconds",
+              "wall_micros": 605191,
+              "prepare_micros": 555412,
+              "publish_micros": 49779,
+              "after_last_progress_micros": 177083,
+              "completed_stages": [
+                {
+                  "bytes_examined": 1291428,
+                  "completed": 1,
+                  "files_examined": 272,
+                  "stage": "Discovery",
+                  "wall_micros": 378328,
+                  "written_bytes": 0
+                }
+              ],
+              "progress_events": {
+                "retained": false,
+                "total_count": 6,
+                "reason": "Per-event timeline omitted; exact completed stages and aggregate operation timings retained"
+              }
+            },
+            "aggregate_source_recovery": null,
+            "aggregate_source_recovery_observation": "reported_absent",
+            "operation": {
+              "changed_files": 1,
+              "changed_inputs": 1,
+              "fallback_reason": null,
+              "invalidated_units": 1,
+              "newly_written_bytes": 31552156,
+              "normalized_fact_work": [
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "files",
+                  "facts": 316,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "files",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "entities",
+                  "facts": 2748,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "entities",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "occurrences",
+                  "facts": 14863,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "occurrences",
+                  "facts": 465,
+                  "files": 12,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "occurrences",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "relations",
+                  "facts": 3769,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "relations",
+                  "facts": 71,
+                  "files": 4,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "relations",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "provenance",
+                  "facts": 316,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "resolution",
+                  "domain": "provenance",
+                  "facts": 465,
+                  "files": 12,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "provenance",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "source_mappings",
+                  "facts": 158,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "source_mappings",
+                  "facts": 113,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "diagnostics",
+                  "facts": 4136,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "diagnostics",
+                  "facts": 565,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "extensions",
+                  "facts": 3080,
+                  "files": 158,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "cause": "generation_bound_lowering",
+                  "domain": "extensions",
+                  "facts": 226,
+                  "files": 113,
+                  "provider_pass": "rootlight-language-disposition"
+                }
+              ],
+              "owned_memory_bytes": 36889775,
+              "planned_fact_work": [
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "syntax",
+                  "files": 1,
+                  "provider_pass": "first-slice.parser"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "public_surface",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "body",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "tests",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "dependency_closure",
+                  "disposition": "rebuild",
+                  "domain": "services",
+                  "files": 1,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "syntax",
+                  "files": 270,
+                  "provider_pass": "first-slice.parser"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "public_surface",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "body",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "resolution",
+                  "files": 0,
+                  "provider_pass": "first-slice.resolver"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "search",
+                  "files": 0,
+                  "provider_pass": "first-slice.search"
+                },
+                {
+                  "analysis_units": 1,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "derived_graph",
+                  "files": 0,
+                  "provider_pass": "first-slice.derived"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "tests",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                },
+                {
+                  "analysis_units": 270,
+                  "cause": "complete_dependency_match",
+                  "disposition": "reuse",
+                  "domain": "services",
+                  "files": 270,
+                  "provider_pass": "first-slice.lowering"
+                }
+              ],
+              "rebuilt_facts": 32082,
+              "rebuilt_files": 158,
+              "referenced_bytes": 0,
+              "reserved_memory_bytes": 185627471,
+              "retained_durable_bytes": 31552004,
+              "reused_facts": 0,
+              "reused_files": 0,
+              "strategy": "DependencyDirected"
+            },
+            "by_language": {
+              "yaml": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 8184,
+                "indexed_bytes": 8184,
+                "exact_read_bytes": 8184,
+                "gaps": 0,
+                "parse_errors": 0
+              },
+              "unknown": {
+                "physical_files": 114,
+                "indexed_files": 113,
+                "exact_reads": 113,
+                "physical_bytes": 53096,
+                "indexed_bytes": 47352,
+                "exact_read_bytes": 47352,
+                "gaps": 339,
+                "parse_errors": 0
+              },
+              "markdown": {
+                "physical_files": 3,
+                "indexed_files": 3,
+                "exact_reads": 3,
+                "physical_bytes": 251636,
+                "indexed_bytes": 251636,
+                "exact_read_bytes": 251636,
+                "gaps": 28,
+                "parse_errors": 0
+              },
+              "css": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 251,
+                "indexed_bytes": 251,
+                "exact_read_bytes": 251,
+                "gaps": 0,
+                "parse_errors": 0
+              },
+              "d": {
+                "physical_files": 108,
+                "indexed_files": 108,
+                "exact_reads": 108,
+                "physical_bytes": 907273,
+                "indexed_bytes": 907273,
+                "exact_read_bytes": 907273,
+                "gaps": 3935,
+                "parse_errors": 0
+              },
+              "html": {
+                "physical_files": 4,
+                "indexed_files": 4,
+                "exact_reads": 4,
+                "physical_bytes": 38426,
+                "indexed_bytes": 38426,
+                "exact_read_bytes": 38426,
+                "gaps": 5,
+                "parse_errors": 0
+              },
+              "javascript": {
+                "physical_files": 2,
+                "indexed_files": 2,
+                "exact_reads": 2,
+                "physical_bytes": 1365,
+                "indexed_bytes": 1365,
+                "exact_read_bytes": 1365,
+                "gaps": 2,
+                "parse_errors": 0
+              },
+              "bash": {
+                "physical_files": 10,
+                "indexed_files": 10,
+                "exact_reads": 10,
+                "physical_bytes": 27793,
+                "indexed_bytes": 27793,
+                "exact_read_bytes": 27793,
+                "gaps": 8,
+                "parse_errors": 0
+              },
+              "json": {
+                "physical_files": 23,
+                "indexed_files": 23,
+                "exact_reads": 23,
+                "physical_bytes": 3404,
+                "indexed_bytes": 3404,
+                "exact_read_bytes": 3404,
+                "gaps": 0,
+                "parse_errors": 0
+              }
+            },
+            "embedded_entity_languages": {
+              "d": {
+                "entities": 978
+              },
+              "json": {
+                "entities": 141
+              },
+              "markdown": {
+                "entities": 1148
+              },
+              "javascript": {
+                "entities": 18
+              },
+              "css": {
+                "entities": 21
+              },
+              "bash": {
+                "entities": 103
+              },
+              "html": {
+                "entities": 33
+              },
+              "yaml": {
+                "entities": 148
+              }
+            },
+            "global_native_counts": {},
+            "source_obligations": {
+              "checked": 8,
+              "passed": 8,
+              "definition_checks": 4,
+              "relation_checks": 3,
+              "required_occurrence_checks": 0,
+              "calls_endpoint_policy": "exact-calls/entity-or-occurrence-enclosing/v1",
+              "absent_definition_checks": 1,
+              "absent_relation_checks": 0,
+              "structural_checks": 5,
+              "semantic_checks": 3,
+              "failures": [],
+              "structural": {
+                "checked": 5,
+                "passed": 5,
+                "failures": []
+              },
+              "semantic": {
+                "checked": 3,
+                "passed": 3,
+                "failures": []
+              },
+              "checks": [
+                {
+                  "key": "index-module",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-function",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "request-parameter",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "response-parameter",
+                  "category": "definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "nondeclaration-source-site",
+                  "category": "absent_definition",
+                  "domain": "structural",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "module-owns-show-home",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-owns-request",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                },
+                {
+                  "key": "show-home-owns-response",
+                  "category": "relation",
+                  "domain": "semantic",
+                  "languages": [
+                    "d"
+                  ],
+                  "passed": true
+                }
+              ],
+              "by_language": {
+                "d": {
+                  "definition": {
+                    "checked": 4,
+                    "passed": 4,
+                    "failed": 0
+                  },
+                  "absent_definition": {
+                    "checked": 1,
+                    "passed": 1,
+                    "failed": 0
+                  },
+                  "relation": {
+                    "checked": 3,
+                    "passed": 3,
+                    "failed": 0
+                  }
+                }
+              },
+              "expected_definition_languages": [
+                "d"
+              ],
+              "whole_language_qualified": false,
+              "derived_canonical_name_expectations": []
+            },
+            "literal_queries": {
+              "requested": 2,
+              "checked": 2,
+              "passed": 2,
+              "failures": [],
+              "pending": [],
+              "cases": [
+                {
+                  "key": "written-literal",
+                  "path": "examples/app_skeleton/source/index.d",
+                  "query": "showHome",
+                  "pages": 1,
+                  "matched_spans": [
+                    [
+                      52,
+                      60
+                    ]
+                  ],
+                  "exact_match_reads": 1,
+                  "reached_eof": true
+                },
+                {
+                  "key": "absent-literal",
+                  "path": "examples/app_skeleton/source/index.d",
+                  "query": "showHome__absent_source_control__",
+                  "pages": 1,
+                  "matched_spans": [],
+                  "exact_match_reads": 0,
+                  "reached_eof": true
+                }
+              ],
+              "transport": "actual public service API; cursor parts are not authenticated MCP tokens"
+            },
+            "source_obligation_frame": {
+              "kind": "original_bytes"
+            },
+            "pending_analysis_requirements": [],
+            "physical_unindexed_files": 1,
+            "all_original_files_available": false,
+            "all_discovery_admitted_files_retained": true,
+            "product_language_coverage": [
+              {
+                "discovered_files": 10,
+                "indexed_files": 10,
+                "language": "bash",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "css",
+                "status": "complete",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 108,
+                "indexed_files": 108,
+                "language": "d",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "html",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 2,
+                "indexed_files": 2,
+                "language": "javascript",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 23,
+                "indexed_files": 23,
+                "language": "json",
+                "status": "complete",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 3,
+                "indexed_files": 3,
+                "language": "markdown",
+                "status": "bounded",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 113,
+                "indexed_files": 0,
+                "language": "unknown",
+                "status": "unknown",
+                "tier": "tier_d"
+              },
+              {
+                "discovered_files": 4,
+                "indexed_files": 4,
+                "language": "yaml",
+                "status": "complete",
+                "tier": "tier_d"
+              }
+            ],
+            "structural_status": "partial",
+            "semantic_status": "partial",
+            "whole_language_structural_and_semantic_denominators": null,
+            "public_queries": "finite SourceFind/SourceRead checks only; not installed MCP"
+          }
+        ],
+        "processes": [
+          {
+            "command": [
+              "$PROJECT\\target\\corpus-audit\\build-d-explain-source-authority-20261019\\bin\\source_inventory.exe",
+              "$WORK\\current-repository\\source"
+            ],
+            "pid": 11104,
+            "spawn_attempted": true,
+            "exit_code": 0,
+            "direct_child_closed": true,
+            "closure_scope": "direct child only",
+            "wall_seconds": 0.598723200004315
+          },
+          {
+            "command": [
+              "$PROJECT\\target\\corpus-audit\\build-d-explain-source-authority-20261019\\bin\\index_coverage.exe",
+              "--source-accounting",
+              "$WORK\\current-repository\\source",
+              "$WORK\\current-repository\\state"
+            ],
+            "pid": 50688,
+            "spawn_attempted": true,
+            "exit_code": 0,
+            "direct_child_closed": true,
+            "closure_scope": "direct child only",
+            "wall_seconds": 8.560019399999874
+          },
+          {
+            "command": [
+              "$PROJECT\\target\\corpus-audit\\build-d-explain-source-authority-20261019\\bin\\reopen_query.exe",
+              "--batch",
+              "$WORK\\current-repository\\state",
+              "$WORK\\current-repository\\source",
+              "$RESULTS\\054-54_D_vibe.d\\fresh-literal-0.requests.jsonl"
+            ],
+            "pid": 46596,
+            "spawn_attempted": true,
+            "exit_code": 0,
+            "direct_child_closed": true,
+            "closure_scope": "direct child only",
+            "wall_seconds": 0.37832049999269657
+          },
+          {
+            "command": [
+              "$PROJECT\\target\\corpus-audit\\build-d-explain-source-authority-20261019\\bin\\index_coverage.exe",
+              "--resume",
+              "--source-accounting",
+              "$WORK\\current-repository\\source",
+              "$WORK\\current-repository\\state"
+            ],
+            "pid": 52120,
+            "spawn_attempted": true,
+            "exit_code": 0,
+            "direct_child_closed": true,
+            "closure_scope": "direct child only",
+            "wall_seconds": 10.063722599996254
+          },
+          {
+            "command": [
+              "$PROJECT\\target\\corpus-audit\\build-d-explain-source-authority-20261019\\bin\\reopen_query.exe",
+              "--batch",
+              "$WORK\\current-repository\\state",
+              "$WORK\\current-repository\\source",
+              "$RESULTS\\054-54_D_vibe.d\\incremental-literal-0.requests.jsonl"
+            ],
+            "pid": 2144,
+            "spawn_attempted": true,
+            "exit_code": 0,
+            "direct_child_closed": true,
+            "closure_scope": "direct child only",
+            "wall_seconds": 0.07332870000391267
+          },
+          {
+            "command": [
+              "$PROJECT\\target\\corpus-audit\\build-d-explain-source-authority-20261019\\bin\\index_coverage.exe",
+              "--resume",
+              "--source-accounting",
+              "$WORK\\current-repository\\source",
+              "$WORK\\current-repository\\state"
+            ],
+            "pid": 52564,
+            "spawn_attempted": true,
+            "exit_code": 0,
+            "direct_child_closed": true,
+            "closure_scope": "direct child only",
+            "wall_seconds": 12.083520699990913
+          },
+          {
+            "command": [
+              "$PROJECT\\target\\corpus-audit\\build-d-explain-source-authority-20261019\\bin\\reopen_query.exe",
+              "--batch",
+              "$WORK\\current-repository\\state",
+              "$WORK\\current-repository\\source",
+              "$RESULTS\\054-54_D_vibe.d\\restored-literal-0.requests.jsonl"
+            ],
+            "pid": 36200,
+            "spawn_attempted": true,
+            "exit_code": 0,
+            "direct_child_closed": true,
+            "closure_scope": "direct child only",
+            "wall_seconds": 0.06247170001734048
+          }
+        ],
+        "note": "Structural diagnostic; Auto/Deep and installed MCP untested.",
+        "attempt_outcome_scope": "Execution and observed gaps only; completed does not mean full language support",
+        "pending_analysis_requirements": [],
+        "unexecuted_obligation_phases": [],
+        "all_executed_obligations_passed": true,
+        "all_requested_original_obligations_executed": true
+      }
+    },
+    {
+      "ordinal": 164,
+      "repository": "164_Carbon_carbon-examples",
+      "language": "bash",
+      "origin": "https://github.com/saarors/carbon-examples",
+      "revision": "04026c7793552c49ffd19a0901b37c00691141b5",
+      "git_source_modes": "100644 e74a40476191b0a23d4c02c2fb5b427ca90c99b0 0\tLICENSE\n100644 ced619ecf32e5e6890c0d5fa59349c8dd1020eba 0\tbuild.sh",
+      "complete_original": {
+        "path": "target/secondary-breadth-twelve-preparation-20261021-r1/originals/164/build.sh",
+        "bytes": 498,
+        "sha256": "27cfe6de0bb364c9e817cb6696fda31876f2b9087298931a94550c35f1c2b989"
+      },
+      "complete_license": {
+        "path": "target/secondary-breadth-twelve-preparation-20261021-r1/originals/164/LICENSE",
+        "bytes": 1082,
+        "sha256": "4822d7c5e7aa463737d58f672f18bf1a4be440fc67b15a1b7a9aa5e1a476400d"
+      },
+      "closed_catalog": {
+        "path": "development-docs/language-coverage/audit-results/current-source-corrections-common-format-coverage-20261021-r13/164/164-164_Carbon_carbon-examples/fresh.files.jsonl",
+        "bytes": 11092,
+        "sha256": "8be608f5730cb793af90f8d239f481c1e3da688ced38b19ff9dfdaa82bb68b4e"
+      },
+      "closed_source_record": {
+        "path": "build.sh",
+        "bytes": 498,
+        "sha256": "27cfe6de0bb364c9e817cb6696fda31876f2b9087298931a94550c35f1c2b989",
+        "disposition": "admitted",
+        "reason": null,
+        "indexed": true,
+        "product_language_signals": [
+          {
+            "language": "bash",
+            "evidence": "extension"
+          },
+          {
+            "language": "bash",
+            "evidence": "shebang"
+          }
+        ],
+        "language": "bash",
+        "exact_source_read": true,
+        "observed_facts": {
+          "entities:module": 1,
+          "entities:variable": 5,
+          "call_site:unresolved": 5,
+          "definition:resolved": 5,
+          "documentation:unresolved": 1,
+          "read:candidates": 15,
+          "read:resolved": 1,
+          "string_evidence:unresolved": 15,
+          "relation:contains": 6,
+          "gap:relations:unsupported_construct:bash-module-parameter-binding-unavailable": 15
+        },
+        "structural_coverage": "unknown",
+        "semantic_coverage": "unknown"
+      },
+      "physical_files_in_closed_catalog": 18,
+      "observed_probe_status": {
+        "structural": "unprobed",
+        "semantic": "unprobed"
+      },
+      "latest_repository_result": {
+        "path": "development-docs/language-coverage/audit-results/current-source-corrections-common-format-coverage-20261021-r13/164/164-164_Carbon_carbon-examples/summary.json",
+        "bytes": 64830,
+        "sha256": "e250480a794950b3971063265ac302d84876c0746b13ff2ebd871c1e6d63d6b0"
+      },
+      "frozen_view_row_index": 1434,
+      "frozen_view_row_canonical_json_sha256": "6a72a1e9b4ed803375c6cc081ed196359f3e58432882edd1eca653bdfd4ccfcf"
+    }
+  ],
+  "complete_unmodified_originals": true,
+  "scope": "Six unchanged mandatory own-file variable References; external calls and expanded runtime values remain pending."
+}

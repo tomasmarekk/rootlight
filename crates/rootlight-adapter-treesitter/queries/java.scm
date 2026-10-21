@@ -60,6 +60,9 @@
   name: (identifier) @test_attribute)
   (#eq? @test_attribute "Test"))
 (identifier) @reference
+; Separate required carriers keep ordinary optional identifier evidence intact.
+(method_invocation object: (identifier) @signature)
+(method_declaration body: (block) @signature)
 [(line_comment) (block_comment)] @comment
 
 ((block_comment) @documentation

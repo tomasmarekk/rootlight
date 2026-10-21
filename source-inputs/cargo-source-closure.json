@@ -14363,18 +14363,6 @@
     "source-inputs/cargo/oorandom-11.1.5/README.md": 420,
     "source-inputs/cargo/oorandom-11.1.5/src/lib.rs": 420,
     "source-inputs/cargo/oorandom-11.1.5/tarpaulin-report.html": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/.cargo-checksum.json": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/.cargo_vcs_info.json": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/.github/workflows/tests.yaml": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/.gitignore": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/.travis.yml": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/Cargo.toml": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/Cargo.toml.orig": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/LICENSE-MIT": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/README.md": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/rustfmt.toml": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/src/lib.rs": 420,
-    "source-inputs/cargo/ordered-float-3.9.2/tests/test.rs": 420,
     "source-inputs/cargo/ordered-float-5.3.0/.cargo-checksum.json": 420,
     "source-inputs/cargo/ordered-float-5.3.0/.cargo_vcs_info.json": 420,
     "source-inputs/cargo/ordered-float-5.3.0/.github/workflows/tests.yaml": 420,
@@ -33966,7 +33954,6 @@
     "source-inputs/crates/once_cell_polyfill-1.70.2.crate": 420,
     "source-inputs/crates/oneshot-0.1.13.crate": 420,
     "source-inputs/crates/oorandom-11.1.5.crate": 420,
-    "source-inputs/crates/ordered-float-3.9.2.crate": 420,
     "source-inputs/crates/ordered-float-5.3.0.crate": 420,
     "source-inputs/crates/os_str_bytes-6.6.1.crate": 420,
     "source-inputs/crates/outref-0.1.0.crate": 420,
@@ -34267,7 +34254,7 @@
   },
   "frontend_external_source_closure_verified": false,
   "licensing_scope": "supplied metadata and present files; not a completeness or authorship assessment",
-  "local_package_count": 131,
+  "local_package_count": 142,
   "local_packages": [
     {
       "name": "dekobon-tree-sitter-groovy",
@@ -34490,6 +34477,10 @@
       "version": "0.1.0"
     },
     {
+      "name": "rootlight-thinkscript",
+      "version": "0.1.0"
+    },
+    {
       "name": "rootlight-unicode",
       "version": "0.1.0"
     },
@@ -34538,6 +34529,10 @@
       "version": "1.5.0"
     },
     {
+      "name": "tree-sitter-chapel",
+      "version": "0.0.1"
+    },
+    {
       "name": "tree-sitter-clojure",
       "version": "0.0.8"
     },
@@ -34548,6 +34543,10 @@
     {
       "name": "tree-sitter-cobol",
       "version": "0.0.1"
+    },
+    {
+      "name": "tree-sitter-coffeescript",
+      "version": "1.0.0"
     },
     {
       "name": "tree-sitter-commonlisp",
@@ -34570,6 +34569,10 @@
       "version": "0.8.2"
     },
     {
+      "name": "tree-sitter-dockerfile",
+      "version": "0.2.0"
+    },
+    {
       "name": "tree-sitter-eiffel",
       "version": "1.0.0"
     },
@@ -34590,12 +34593,20 @@
       "version": "0.3.12"
     },
     {
+      "name": "tree-sitter-gdscript",
+      "version": "6.1.0"
+    },
+    {
       "name": "tree-sitter-glsl",
       "version": "0.2.0"
     },
     {
       "name": "tree-sitter-graphql",
       "version": "0.0.1"
+    },
+    {
+      "name": "tree-sitter-gsed",
+      "version": "0.4.0"
     },
     {
       "name": "tree-sitter-hare",
@@ -34622,6 +34633,10 @@
       "version": "0.23.2"
     },
     {
+      "name": "tree-sitter-idris",
+      "version": "0.0.1"
+    },
+    {
       "name": "tree-sitter-json",
       "version": "0.24.8"
     },
@@ -34634,12 +34649,20 @@
       "version": "1.1.0"
     },
     {
+      "name": "tree-sitter-lean",
+      "version": "0.2.0"
+    },
+    {
       "name": "tree-sitter-matlab",
       "version": "1.3.0"
     },
     {
       "name": "tree-sitter-md",
       "version": "0.5.3"
+    },
+    {
+      "name": "tree-sitter-meson",
+      "version": "1.0.0"
     },
     {
       "name": "tree-sitter-modelica",
@@ -34683,6 +34706,10 @@
     },
     {
       "name": "tree-sitter-proto",
+      "version": "0.0.1"
+    },
+    {
+      "name": "tree-sitter-pug",
       "version": "0.0.1"
     },
     {
@@ -34774,6 +34801,10 @@
       "version": "0.0.9"
     },
     {
+      "name": "tree-sitter-wolfram",
+      "version": "0.0.1"
+    },
+    {
       "name": "tree-sitter-xml",
       "version": "0.7.0"
     },
@@ -34796,10 +34827,10 @@
   ],
   "lockfiles": [
     {
-      "local_package_count": 120,
+      "local_package_count": 131,
       "path": "Cargo.lock",
-      "registry_package_count": 309,
-      "sha256": "d76fcf3df1c189efe4a32b90b76cbd5bcd3f13c49c69921bfd3c767bb071b648"
+      "registry_package_count": 308,
+      "sha256": "584a2ece63b259b0cbbae3b08b7a72bde74007ab8cbde8548d36f685ed900fdb"
     },
     {
       "local_package_count": 7,
@@ -34817,7 +34848,7 @@
       "local_package_count": 1,
       "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.lock",
       "registry_package_count": 22,
-      "sha256": "242a4e3f9ad272adcbc9afc3b5948037b0bd165b25fa05085d7bb25cc3d6e1c2"
+      "sha256": "1f39b32f108a67a23266204a91fca10b5c6870766f7772533710f10bdd277951"
     },
     {
       "local_package_count": 8,
@@ -34826,13 +34857,13 @@
       "sha256": "907581b789997511b0e60ec6eea0e9e42f29cea5705bf641c5b7a112b2731794"
     },
     {
-      "local_package_count": 59,
+      "local_package_count": 67,
       "path": "tests/native-grammars/Cargo.lock",
       "registry_package_count": 32,
-      "sha256": "b04a0e6c0fa3503b8b69053def6d185edebb872af47b37b1689a71e0283fd7e2"
+      "sha256": "ad28164eb5e5fc1096b92eb1bd48335f89479c49b39a50c7e1182ea3f1d7bf6b"
     }
   ],
-  "package_count": 566,
+  "package_count": 565,
   "packages": [
     {
       "archive": {
@@ -128409,101 +128440,6 @@
       "source_files_sha256": "c57c673dfd54c20ea2be97a5252ef85b082b1cfab8bf0d6b7fa8391416693558",
       "vendor_path": "oorandom-11.1.5",
       "version": "11.1.5"
-    },
-    {
-      "archive": {
-        "bytes": 19788,
-        "path": "ordered-float-3.9.2.crate",
-        "sha256": "f1e1c390732d15f1d48471625cd92d154e66db2c56645e29a9cd26f4699f72dc"
-      },
-      "archive_executable_files": [],
-      "cargo_toml_sha256": "89ee5f78395425d688e9a8dd7cb555b18b8f9863a722dbc04ab08872e2d5a7a7",
-      "checksum_manifest_sha256": "67ef2b1dac5c005edd41666406dc2b3be0d35f9b66f007be21459d3236d6a524",
-      "file_count": 11,
-      "files": [
-        {
-          "archive_mode": 420,
-          "bytes": 94,
-          "path": ".cargo_vcs_info.json",
-          "sha256": "d844394ca3702bef2cce0ead2c0cbae1e4487bd8f84cdc18da5fe2c184a0df79"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 1986,
-          "path": ".github/workflows/tests.yaml",
-          "sha256": "b7ad237336728c0f6d81675b051911c7519a87543812b2e50c01df488084d96a"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 135,
-          "path": ".gitignore",
-          "sha256": "f58cbb29ee4ff8a030c1e32d3f4ac2b19753d7fdf8f72d050d4bda1353364fda"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 271,
-          "path": ".travis.yml",
-          "sha256": "98891ee16c3b83705019d24f51b84a01e6041c7682c5057714bdf492adc7cd95"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 2008,
-          "path": "Cargo.toml",
-          "sha256": "89ee5f78395425d688e9a8dd7cb555b18b8f9863a722dbc04ab08872e2d5a7a7"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 1455,
-          "path": "Cargo.toml.orig",
-          "sha256": "8677c625692543f6ecffeea0454e9afa06889e4477095badb26e71873adee1f5"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 1057,
-          "path": "LICENSE-MIT",
-          "sha256": "f7715d38a3fa1b4ac97c5729740752505a39cb92ee83ab5b102aeb5eaa7cdea4"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 1276,
-          "path": "README.md",
-          "sha256": "ded338028d49080cc1a036a5e62974425c78cdcb904289777a6a71e8430e69a8"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 116,
-          "path": "rustfmt.toml",
-          "sha256": "d72fafaea8c9695f74c40bc666ada205b935bec3f02488bb33e5994e2831bffb"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 79186,
-          "path": "src/lib.rs",
-          "sha256": "c990f2b86c1276a29f4d60fab4ada05f6714644151fdc65d55e6bc6171192e7b"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 28727,
-          "path": "tests/test.rs",
-          "sha256": "6794b482e565b83f5e46ac25cf8b388397be96bce61369e51ebb94c4e730eec6"
-        }
-      ],
-      "license": "MIT",
-      "license_file": null,
-      "license_files": [
-        {
-          "archive_mode": 420,
-          "bytes": 1057,
-          "path": "LICENSE-MIT",
-          "sha256": "f7715d38a3fa1b4ac97c5729740752505a39cb92ee83ab5b102aeb5eaa7cdea4"
-        }
-      ],
-      "name": "ordered-float",
-      "package_checksum": "f1e1c390732d15f1d48471625cd92d154e66db2c56645e29a9cd26f4699f72dc",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "source_files_sha256": "468718e002e028cc15907cc13959a4d973ac8e89d69c58d7ecfd4177b3ab3fea",
-      "vendor_path": "ordered-float-3.9.2",
-      "version": "3.9.2"
     },
     {
       "archive": {

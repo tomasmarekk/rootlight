@@ -77,7 +77,17 @@ fn incremental_executor_accepts_optional_deadlines_and_explicit_memory_admission
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 90] = [
+    let cases: [(&str, &str, &[u8]); 100] = [
+        ("written.idr", "idris", b"global : Type\nglobal = Type\nreader : Type\nreader = global\n"),
+    ("written.sed", "sed", b":entry\r\nb entry\r\n"),
+    ("written.wl", "wolfram", b"owned[value_String] := Module[{}, external[value]];\n"),
+        ("written.pug", "pug", include_bytes!("fixtures/pug/hash.pug")),
+        ("written.lean", "lean", b"def owned (value : Nat) := value\n"),
+    ("written.coffee", "coffeescript", b"class Written\n  measure: ->\n    value = 1\n    value\n"),
+        ("Dockerfile", "dockerfile", b"FROM scratch AS written\n"),
+        ("meson.build", "meson", b"items = [1]\nforeach item : items\nendforeach\n"),
+        ("written.gd", "gdscript", b"class_name Written\nfunc measure():\n    return 1\n"),
+        ("written.chpl", "chapel", b"module Written { proc measure(value: int) { return value; } }\n"),
         ("written.qs","qsharp",b"namespace Written { operation Measure(value : Int) : Unit { External(value); } }\n"),
         ("written.sml", "standard-ml", b"fun measure value = value;\n"),
         ("written.wat", "webassembly", b"(module $written (func $measure (param $value i32) local.get $value))\n"),
@@ -2024,3 +2034,6 @@ fn thrift_nested_throws_facts_keep_actual_native_depth_for_strict_admission() {
     assert!(output.report().resources().max_syntax_depth() >= observed);
     assert!(output.report().resources().max_syntax_depth() <= 128);
 }
+
+#[path = "runtime_contract/sed_native.rs"]
+mod sed_native;

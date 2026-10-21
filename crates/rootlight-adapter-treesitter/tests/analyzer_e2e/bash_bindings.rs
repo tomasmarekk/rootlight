@@ -373,3 +373,131 @@ fn literal_ampersands_and_synchronous_reads_keep_module_binding_proof() {
         check_dependency(&output, source, source.rfind("$REPO").unwrap() + 1);
     }
 }
+
+fn written_shell_owner(output: &AnalysisOutput, source: &str, owner: &str, child: &str) {
+    let document = output.document();
+    let definition = |name: &str, kind, start: usize| {
+        let sites = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(start + name.len()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sites.len(), 1, "one written {name}");
+        let OccurrenceTarget::Resolved { symbol } = sites[0].target else {
+            panic!("written definition is resolved")
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(entity.canonical_name, name);
+        assert_eq!(entity.kind, kind);
+        assert_eq!(
+            sites[0].source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        symbol
+    };
+    let owner_start = source.rfind(&format!("{owner}()")).unwrap();
+    let child_start = source.rfind(&format!("local {child}=")).unwrap() + "local ".len();
+    let owner = definition(owner, EntityKind::Function, owner_start);
+    let child_end = child_start + child.len();
+    let child = definition(child, EntityKind::Variable, child_start);
+    let child_record = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == child)
+        .unwrap();
+    assert_eq!(
+        child_record.container,
+        Some(rootlight_ir::ContainerRef::Entity(owner))
+    );
+    let edges = super::broad_residuals::source_anchored_contains(
+        document,
+        owner,
+        child,
+        u64::try_from(child_start).unwrap(),
+        u64::try_from(child_end).unwrap(),
+    );
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        edges[0].evidence.source.as_ref().unwrap().content_hash(),
+        content_hash(source.as_bytes())
+    );
+    assert!(
+        !document
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Contains
+                && edge.subject == RelationEndpoint::Entity(child)
+                && edge.object == RelationEndpoint::Entity(owner))
+    );
+}
+
+#[test]
+fn source_after_exact_lf_or_crlf_heredoc_delimiter_keeps_written_function_ownership() {
+    let source = "cat <<END\ntext\nEND\nowned() { local item=seed; }\n";
+    for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+        let output = run(&source);
+        written_shell_owner(&output, &source, "owned", "item");
+    }
+}
+
+#[test]
+fn declaration_looking_heredoc_text_never_donates_a_function_or_local() {
+    for suffix in [
+        "END\nowned() { local item=seed; }\n",
+        "END trailing\nowned() { local item=seed; }\n",
+    ] {
+        let source = format!("cat <<END\nfake() {{ local hidden=seed; }}\n{suffix}");
+        for source in [source.clone(), source.replace('\n', "\r\n")] {
+            let output = run(&source);
+            assert!(
+                !output
+                    .document()
+                    .entities
+                    .iter()
+                    .any(|entity| matches!(entity.canonical_name.as_str(), "fake" | "hidden"))
+            );
+            if suffix.starts_with("END\n") {
+                written_shell_owner(&output, &source, "owned", "item");
+            } else {
+                assert!(
+                    !output
+                        .document()
+                        .entities
+                        .iter()
+                        .any(|entity| matches!(entity.canonical_name.as_str(), "owned" | "item"))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn written_local_assignment_ownership_does_not_certify_its_dynamic_value() {
+    let source = "owned() { local item=seed; if condition; then item=later; fi; echo $item; }\n";
+    let output = run(source);
+    written_shell_owner(&output, source, "owned", "item");
+    assert!(
+        !output
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| site.role == OccurrenceRole::Read
+                && matches!(site.target, OccurrenceTarget::Resolved { .. }))
+    );
+    assert!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.domain == FactDomain::Relations
+                && gap.detail == "bash-module-parameter-binding-unavailable")
+    );
+}

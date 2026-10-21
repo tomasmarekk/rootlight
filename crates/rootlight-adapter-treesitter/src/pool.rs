@@ -47,6 +47,7 @@ impl ParserPool {
                 return Ok(ParserLease {
                     parser: Some(parser),
                     inner: Arc::clone(&self.inner),
+                    reusable: true,
                 });
             }
             if state.created < self.inner.capacity {
@@ -61,6 +62,7 @@ impl ParserPool {
                 return Ok(ParserLease {
                     parser: Some(Parser::new()),
                     inner: Arc::clone(&self.inner),
+                    reusable: true,
                 });
             }
             let (next, _) = self
@@ -87,10 +89,19 @@ impl ParserPool {
 
 pub(crate) struct ParserLease {
     parser: Option<Parser>,
+    reusable: bool,
     inner: Arc<PoolInner>,
 }
 
 impl ParserLease {
+    pub(crate) fn withhold_reuse(&mut self) {
+        self.reusable = false;
+    }
+
+    pub(crate) fn allow_reuse(&mut self) {
+        self.reusable = true;
+    }
+
     pub(crate) fn parser_mut(&mut self) -> Result<&mut Parser, PoolError> {
         self.parser.as_mut().ok_or(PoolError::MissingParser)
     }
@@ -105,7 +116,7 @@ impl Drop for ParserLease {
         // Empty ranges are Tree-sitter's documented full-document reset. If a
         // future runtime rejects it, discard the parser instead of risking
         // stale included ranges crossing request boundaries.
-        let reusable = parser.set_included_ranges(&[]).is_ok();
+        let reusable = self.reusable && parser.set_included_ranges(&[]).is_ok();
         let mut state = match self.inner.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
@@ -204,6 +215,33 @@ mod tests {
         let pool = result.expect("lazy pool construction does not panic");
         assert_eq!(pool.stats().created, 0);
         assert_eq!(pool.stats().available, 0);
+    }
+
+    #[test]
+    fn withheld_parser_is_discarded_and_the_next_lease_has_a_fresh_permit() {
+        let pool = ParserPool::new(1);
+        let mut lease = pool.acquire(&Cancellation::new()).unwrap();
+        lease.withhold_reuse();
+        drop(lease);
+        assert_eq!(pool.stats().created, 0);
+        assert_eq!(pool.stats().checked_out, 0);
+        assert_eq!(pool.stats().available, 0);
+        let lease = pool.acquire(&Cancellation::new()).unwrap();
+        assert_eq!(pool.stats().created, 1);
+        drop(lease);
+        assert_eq!(pool.stats().available, 1);
+    }
+
+    #[test]
+    fn only_explicit_healthy_completion_readmits_a_withheld_parser() {
+        let pool = ParserPool::new(1);
+        let mut lease = pool.acquire(&Cancellation::new()).unwrap();
+        lease.withhold_reuse();
+        lease.allow_reuse();
+        drop(lease);
+        assert_eq!(pool.stats().created, 1);
+        assert_eq!(pool.stats().available, 1);
+        assert_eq!(pool.stats().checked_out, 0);
     }
 
     fn deadline(duration: Duration) -> Cancellation {

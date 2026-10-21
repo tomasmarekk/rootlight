@@ -103,6 +103,9 @@ pub(super) fn captured_name_for_fact<'a>(
         ("ocaml", "ocaml.application.call" | "ocaml.value.reference") => {
             value_path(text, maximum_bytes)
         }
+        ("ocaml", "ocaml.match_formal.reference" | "ocaml.direct_file_call.call") => {
+            captured_name(text, maximum_bytes)
+        }
         _ => None,
     }
 }
@@ -378,5 +381,59 @@ mod tests {
             )
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod written_binding_label_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn source_certified_ocaml_names_require_exact_role_profile_and_whole_identifier() {
+        for label in [
+            "ocaml.match_formal.reference",
+            "ocaml.direct_file_call.call",
+        ] {
+            let fact = |kind| {
+                SyntaxFact::new(
+                    1,
+                    None,
+                    kind,
+                    SourceSpan::new(FileId::from_bytes([8; 20]), 0, 5).unwrap(),
+                    0,
+                    SyntaxKindLabel::new(label).unwrap(),
+                )
+            };
+            let site = fact(SyntaxFactKind::Occurrence);
+            assert_eq!(
+                captured_name_for_fact("ocaml", &site, "value", 5),
+                Some("value")
+            );
+            assert_eq!(
+                captured_name_for_fact("ocaml", &site, "é雪", 5),
+                Some("é雪")
+            );
+            assert!(captured_name_for_fact("ocaml", &site, "value", 4).is_none());
+            assert!(captured_name_for_fact("ocaml-interface", &site, "value", 5).is_none());
+            assert!(
+                captured_name_for_fact("ocaml", &fact(SyntaxFactKind::Signature), "value", 5)
+                    .is_none()
+            );
+            for raw in [
+                "_",
+                "Reader.value",
+                "value suffix",
+                "(value)",
+                "value\\suffix",
+            ] {
+                assert!(
+                    captured_name_for_fact("ocaml", &site, raw, 64).is_none(),
+                    "{raw}"
+                );
+            }
+        }
     }
 }

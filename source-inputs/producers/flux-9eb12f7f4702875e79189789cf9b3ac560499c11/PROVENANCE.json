@@ -29,7 +29,14 @@
         "name": "regex-syntax",
         "before": "0.8.8",
         "after": "0.8.11"
+      },
+      {
+        "name": "ordered-float",
+        "before": "3.9.2",
+        "after": "5.3.0"
       }
-    ]
+    ],
+    "ordered_float_before": "=3.9.2",
+    "ordered_float_after": "=5.3.0"
   }
 }

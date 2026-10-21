@@ -955,9 +955,9 @@ fn tokens(text: &str) -> Option<Vec<String>> {
             let end = identifier
                 .char_indices()
                 .find(|(_, character)| {
-                    !(*character == '_'
-                        || character.is_alphanumeric()
-                        || !character.is_ascii() && !character.is_whitespace())
+                    (character.is_whitespace() || character.is_ascii())
+                        && !character.is_alphanumeric()
+                        && *character != '_'
                 })
                 .map_or(identifier.len(), |(offset, _)| offset);
             let size = end + if raw { 2 } else { 0 };

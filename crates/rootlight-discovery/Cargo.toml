@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rootlight-thinkscript = { path = "../rootlight-thinkscript" }
 ignore.workspace = true
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-config = { path = "../rootlight-config" }

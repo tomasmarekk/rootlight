@@ -23,6 +23,7 @@ mod scip_import;
 mod scss;
 mod source_projection;
 mod tcl;
+mod thinkscript;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -77,6 +78,7 @@ pub use scip_import::{
 };
 pub use scss::ScssParseProvider;
 pub use tcl::TclParseProvider;
+pub use thinkscript::ThinkScriptParseProvider;
 
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
 /// Version of the shared first-party semantic adapter implementation.

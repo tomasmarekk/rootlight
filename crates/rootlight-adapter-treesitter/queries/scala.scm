@@ -23,6 +23,11 @@
 ; The checked binding classifier retains only declaration positions from these leaves.
 [(identifier) (operator_identifier)] @declaration @definition
 [(identifier) (operator_identifier) (type_identifier) (stable_type_identifier)] @reference
+; Separate carriers preserve the broad optional reference pattern above.
+; Native proof converts only supported leaves and full method contexts.
+(identifier) @signature
+(function_definition) @expression @signature
+
 (import_declaration) @import
 (export_declaration) @import
 (call_expression) @call

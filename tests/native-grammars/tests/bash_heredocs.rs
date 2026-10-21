@@ -335,3 +335,139 @@ fn nested_group_edits_match_fresh_source_spans() {
         assert_eq!(spans(reset.root_node()), spans(initial.root_node()));
     }
 }
+
+#[test]
+fn exact_lf_and_crlf_heredoc_end_lines_preserve_following_functions() {
+    for delimiter in ["END", "終端"] {
+        for header in [
+            delimiter.to_owned(),
+            format!("'{delimiter}'"),
+            format!("\"{delimiter}\""),
+        ] {
+            let text = format!("cat <<{header}\nbody\n{delimiter}\nowned() {{ :; }}\n");
+            for source in [text.clone(), text.replace('\n', "\r\n")] {
+                let tree = parser()
+                    .parse(&source, None)
+                    .expect("native parse completes");
+                let root = tree.root_node();
+                assert!(!root.has_error(), "{source:?}: {}", root.to_sexp());
+                let ends = nodes(root, "heredoc_end");
+                assert_eq!(ends.len(), 1, "{source:?}");
+                let expected = source
+                    .rfind(&format!("{delimiter}\n"))
+                    .or_else(|| source.rfind(&format!("{delimiter}\r\n")))
+                    .unwrap();
+                assert_eq!(ends[0].start_byte(), expected);
+                assert_eq!(
+                    source[ends[0].byte_range()].trim_end_matches('\r'),
+                    delimiter
+                );
+                let functions = nodes(root, "function_definition");
+                assert_eq!(functions.len(), 1);
+                let name = functions[0]
+                    .child_by_field_name("name")
+                    .expect("written name");
+                assert_eq!(&source[name.byte_range()], "owned");
+                assert!(functions[0].start_byte() > ends[0].end_byte());
+            }
+        }
+    }
+}
+
+#[test]
+fn crlf_heredoc_end_rejects_suffix_space_and_lone_carriage_return() {
+    for false_end in ["END suffix\r\n", "END\r \n", "END\r\r\n", "END\rX\n"] {
+        let source =
+            format!("cat <<END\r\n{false_end}fake() {{ :; }}\r\nEND\r\nowned() {{ :; }}\r\n");
+        let tree = parser()
+            .parse(&source, None)
+            .expect("native parse completes");
+        let root = tree.root_node();
+        assert!(!root.has_error(), "{source:?}: {}", root.to_sexp());
+        let ends = nodes(root, "heredoc_end");
+        assert_eq!(ends.len(), 1, "{source:?}");
+        assert_eq!(ends[0].start_byte(), source.rfind("END\r\n").unwrap());
+        let functions = nodes(root, "function_definition");
+        assert_eq!(functions.len(), 1);
+        let name = functions[0]
+            .child_by_field_name("name")
+            .expect("written name");
+        assert_eq!(&source[name.byte_range()], "owned");
+    }
+    let source = "cat <<END\nbody\nEND\rowned() { :; }\n";
+    let tree = parser()
+        .parse(source, None)
+        .expect("unterminated input is retained");
+    assert!(nodes(tree.root_node(), "function_definition").is_empty());
+}
+
+#[test]
+fn crlf_heredoc_closure_edits_match_fresh_and_reset_parser_state() {
+    let source = "cat <<END\r\nbody\r\nEND\r\nowned() { :; }\r\n";
+    let mut reused = parser();
+    let initial = reused.parse(source, None).expect("initial CRLF parse");
+    assert!(!initial.root_node().has_error());
+    for replacement in ["", " ", "\r", "X"] {
+        let start = source.rfind("END\r\n").unwrap() + 3;
+        let mut changed = source.to_owned();
+        changed.replace_range(start..start + 1, replacement);
+        let mut old = initial.clone();
+        old.edit(&InputEdit {
+            start_byte: start,
+            old_end_byte: start + 1,
+            new_end_byte: start + replacement.len(),
+            start_position: point(source, start),
+            old_end_position: point(source, start + 1),
+            new_end_position: point(&changed, start + replacement.len()),
+        });
+        let incremental = reused
+            .parse(&changed, Some(&old))
+            .expect("incremental parse");
+        let fresh = parser().parse(&changed, None).expect("fresh parse");
+        assert_eq!(spans(incremental.root_node()), spans(fresh.root_node()));
+    }
+    reused.reset();
+    let clean = reused
+        .parse(source, None)
+        .expect("clean source after reset");
+    assert_eq!(spans(clean.root_node()), spans(initial.root_node()));
+}
+
+#[test]
+fn full_original_crlf_source_keeps_written_function_and_local_ancestry() {
+    let source = include_bytes!(
+        "../../../crates/rootlight-adapter-treesitter/tests/fixtures/written_residuals/bash/run"
+    );
+    assert_eq!(source.len(), 3598);
+    assert_eq!(&source[2987..2997], b"select_vim");
+    assert_eq!(&source[3011..3014], b"vim");
+    let tree = parser()
+        .parse(source, None)
+        .expect("complete original parse");
+    let root = tree.root_node();
+    assert_eq!(root.end_byte(), source.len());
+    let name = root
+        .descendant_for_byte_range(3011, 3014)
+        .expect("exact local leaf");
+    assert_eq!(name.kind(), "variable_name");
+    assert_eq!(name.byte_range(), 3011..3014);
+    assert_eq!(
+        name.parent().expect("written assignment").kind(),
+        "variable_assignment"
+    );
+    let mut owner = name.parent();
+    while owner.is_some_and(|node| node.kind() != "function_definition") {
+        let node = owner.unwrap();
+        assert!(!matches!(node.kind(), "heredoc_content" | "heredoc_body"));
+        owner = node.parent();
+    }
+    let owner = owner.expect("local has written function owner");
+    assert!(!owner.has_error());
+    assert_eq!(
+        owner
+            .child_by_field_name("name")
+            .expect("function name")
+            .byte_range(),
+        2987..2997
+    );
+}

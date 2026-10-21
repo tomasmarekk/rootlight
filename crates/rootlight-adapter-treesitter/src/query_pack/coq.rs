@@ -7,6 +7,7 @@ use tree_sitter::Node;
 
 use super::{QueryCandidate, StructuralRole, query_failure};
 
+mod callables;
 mod certificates;
 
 pub(super) struct CaptureCache<'tree> {
@@ -15,6 +16,7 @@ pub(super) struct CaptureCache<'tree> {
     exhausted: bool,
     proofs: Option<certificates::Proofs>,
     complete_context: bool,
+    callables: Option<callables::Proofs>,
 }
 
 impl<'tree> CaptureCache<'tree> {
@@ -25,6 +27,7 @@ impl<'tree> CaptureCache<'tree> {
             exhausted: false,
             proofs: None,
             complete_context: true,
+            callables: None,
         }
     }
 
@@ -315,6 +318,30 @@ pub(super) fn candidate<'tree>(
             cancellation,
         )?);
     }
+    if cache.callables.is_none() {
+        cache.callables = Some(callables::Proofs::build(
+            source,
+            cache.complete_context,
+            cache,
+            cancellation,
+        )?);
+    }
+    if role == StructuralRole::Signature
+        && node.kind() == "application"
+        && let Some(marker) = cache
+            .callables
+            .as_ref()
+            .and_then(|proof| proof.markers.get(&node.start_byte()))
+    {
+        return Ok(Some(QueryCandidate {
+            start: marker.start,
+            end: marker.end,
+            role,
+            syntax: "coq.written_target",
+            required: true,
+            native_depth: cache.depth(cache.root, cancellation)?,
+        }));
+    }
     if let Some(candidate) = certificate_candidate(node, role, source, cancellation, cache)? {
         return Ok(Some(candidate));
     }
@@ -473,6 +500,14 @@ pub(super) fn candidate<'tree>(
                     depth_node = owner;
                 }
                 match owner.kind() {
+                    "definition_command"
+                        if cache
+                            .callables
+                            .as_ref()
+                            .is_some_and(|proof| proof.callables.contains(&owner.start_byte())) =>
+                    {
+                        "coq.written_callable"
+                    }
                     "definition_command" => "coq.definition",
                     "theorem_command" => "coq.theorem",
                     "instance_command" => "coq.instance",
@@ -666,18 +701,51 @@ pub(super) fn candidate<'tree>(
                 .as_ref()
                 .and_then(|proofs| proofs.references.get(&range.end))
                 .map(|(range, _)| range)
-                == Some(&range)),
+                == Some(&range))
+            || (role == StructuralRole::Reference
+                && cache
+                    .callables
+                    .as_ref()
+                    .and_then(|proof| proof.references.get(&range.end))
+                    == Some(&range)),
         native_depth: cache.depth(depth_node, cancellation)?,
     }))
 }
 
-pub(super) fn notation_reference_candidate(
+pub(super) fn required_reference_candidate(
     node: Node<'_>,
     role: StructuralRole,
     cancellation: &Cancellation,
     cache: &CaptureCache<'_>,
 ) -> Result<Option<QueryCandidate>, AdapterError> {
     cancellation.check()?;
+    // Application signatures are mandatory. Carry their certified heads so an
+    // exact required-fact quota cannot discard the corresponding References.
+    if role == StructuralRole::Signature && node.kind() == "application" {
+        let Some(proofs) = cache.callables.as_ref() else {
+            return Ok(None);
+        };
+        let Some(marker) = proofs.markers.get(&node.start_byte()) else {
+            return Ok(None);
+        };
+        let Some(reference) = proofs.references.get(&marker.end) else {
+            return Ok(None);
+        };
+        let Some(head) = node
+            .descendant_for_byte_range(reference.start, reference.end)
+            .filter(|head| head.kind() == "ident" && head.byte_range() == *reference)
+        else {
+            return Ok(None);
+        };
+        return Ok(Some(QueryCandidate {
+            start: reference.start,
+            end: reference.end,
+            role: StructuralRole::Reference,
+            syntax: "coq.written_reference",
+            required: true,
+            native_depth: cache.depth(head, cancellation)?,
+        }));
+    }
     if role != StructuralRole::Signature || node.kind() != "notation_declaration" {
         return Ok(None);
     }

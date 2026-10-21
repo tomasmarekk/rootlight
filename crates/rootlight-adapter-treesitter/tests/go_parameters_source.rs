@@ -1104,3 +1104,494 @@ fn captured_call_argument_artifact_matches_native_required_admission_and_rebinds
         Ok(())
     }).unwrap();
 }
+const WRITTEN_CALLS: &str = include_str!("fixtures/go_written_calls/time.go");
+
+fn written_go_call(
+    output: &rootlight_adapter_sdk::AnalysisOutput,
+    owner: rootlight_ids::SymbolId,
+    target: rootlight_ids::SymbolId,
+    start: usize,
+    end: usize,
+    raw: &[u8],
+) {
+    let sites: Vec<_> = output
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.syntax_kind == "go.direct_file_function.reference"
+                && site.source.span().start_byte() == u64::try_from(start).unwrap()
+                && site.source.span().end_byte() == u64::try_from(end).unwrap()
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "exact written bare callee {start}..{end}");
+    let site = sites[0];
+    assert_eq!(site.role, OccurrenceRole::CallSite);
+    assert_eq!(site.enclosing, Some(owner));
+    assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: target });
+    assert_eq!(site.source.content_hash(), content_hash(raw));
+    let relations: Vec<_> = output
+        .document()
+        .relations
+        .iter()
+        .filter(|relation| {
+            relation.predicate == RelationPredicate::Calls
+                && relation.subject == RelationEndpoint::Entity(owner)
+                && relation.object == RelationEndpoint::Entity(target)
+                && relation.evidence.source.as_ref() == Some(&site.source)
+        })
+        .collect();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(
+        relations[0].id,
+        derive_relation_record_id(relations[0]).unwrap()
+    );
+    for parent in [
+        rootlight_ir::FactRef::Fact(site.id),
+        rootlight_ir::FactRef::Entity(owner),
+        rootlight_ir::FactRef::Entity(target),
+    ] {
+        assert!(relations[0].evidence.derivation.contains(&parent));
+    }
+}
+
+#[test]
+fn original_time_file_keeps_all_three_written_function_dependencies() {
+    assert_eq!(WRITTEN_CALLS.len(), 1478);
+    let output = analyze(WRITTEN_CALLS);
+    let human_time = entity_at(&output, "HumanTime", EntityKind::Function, 993, 9);
+    let lower = entity_at(&output, "HumanTimeLower", EntityKind::Function, 1083, 14);
+    let internal = entity_at(&output, "humanTime", EntityKind::Function, 1195, 9);
+    let duration = entity_at(&output, "humanDuration", EntityKind::Function, 185, 13);
+    for (owner, target, start, end) in [
+        (human_time, internal, 1051, 1060),
+        (lower, internal, 1162, 1171),
+        (internal, duration, 1398, 1411),
+    ] {
+        written_go_call(&output, owner, target, start, end, WRITTEN_CALLS.as_bytes());
+    }
+    let later = WRITTEN_CALLS.rfind("humanDuration(delta)").unwrap();
+    written_go_call(
+        &output,
+        internal,
+        duration,
+        later,
+        later + 13,
+        WRITTEN_CALLS.as_bytes(),
+    );
+    assert!(
+        output
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "go-call-complete-semantic-validation-unavailable")
+    );
+}
+
+#[test]
+fn direct_written_calls_allow_forward_declarations_nested_arguments_and_recursion() {
+    for source in [
+        "package sample\nfunc caller() int { return outer(target()) }; func target() int { return 1 }\n",
+        "package sample\nimport \"unrelated/path/target\"\nfunc caller() int { return target() }; func target() int { return 1 }\n",
+        "package sample\nfunc target() int { return target() }\n",
+    ] {
+        let output = analyze(source);
+        let owner_name = if source.contains("caller") {
+            "caller"
+        } else {
+            "target"
+        };
+        let owner_start = source.find(&format!("func {owner_name}")).unwrap() + 5;
+        let target_start = source.rfind("func target").unwrap() + 5;
+        let site =
+            source.find("return ").unwrap() + 7 + if source.contains("outer(") { 6 } else { 0 };
+        let owner = entity_at(
+            &output,
+            owner_name,
+            EntityKind::Function,
+            owner_start,
+            owner_name.len(),
+        );
+        let target = entity_at(&output, "target", EntityKind::Function, target_start, 6);
+        written_go_call(&output, owner, target, site, site + 6, source.as_bytes());
+    }
+}
+
+#[test]
+fn lexical_shadow_dot_import_collision_method_and_function_value_calls_stay_unproved() {
+    for source in [
+        "package sample\nfunc target(){}; func caller(target func()){target()}\n",
+        "package sample\nfunc target(){}; func caller(){target := external; target()}\n",
+        "package sample\nfunc target(){}; func caller(){var target func(); target()}\n",
+        "package sample\nfunc target(){}; func caller(){for target := range values {target()}}\n",
+        "package sample\nfunc target(){}; func caller(){switch target := value.(type) {default: target()}}\n",
+        "package sample\nfunc target(){}; func caller(){select {case target := <-channel: target()}}\n",
+        "package sample\nfunc target(){}; func caller()(target func()){target(); return}\n",
+        "package sample\nimport . \"external\"\nfunc target(){}; func caller(){target()}\n",
+        "package sample\nimport target \"external\"\nfunc target(){}; func caller(){target()}\n",
+        "package sample\nfunc target(){}; var target func(); func caller(){target()}\n",
+        "package sample\nfunc target(){}; type target int; func caller(){target()}\n",
+        "package sample\nfunc target(){}; func target(){}; func caller(){target()}\n",
+        "package sample\nfunc target(){}; func caller(){func(){target()}()}\n",
+        "package sample\nfunc target[T any](){}; func caller(){target()}\n",
+        "package sample\nfunc target(){}; func (r Item) caller(){target()}\n",
+        "package sample\nfunc caller(){variable()}; var variable func()\n",
+        "package sample\nfunc init(){}; func caller(){init()}\n",
+        "package sample\nfunc target(){}; func caller(){receiver.target()}\n",
+        "package sample\nfunc target(){}; func caller(){ target( }\n",
+    ] {
+        let output = analyze(source);
+        assert!(
+            !output
+                .document()
+                .occurrences
+                .iter()
+                .any(
+                    |site| site.syntax_kind == "go.direct_file_function.reference"
+                        && matches!(site.target, OccurrenceTarget::Resolved { .. })
+                ),
+            "{source}"
+        );
+        assert!(
+            !output
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn original_written_calls_keep_physical_bom_and_utf16_coordinates() {
+    for (encoding, little_endian) in [("utf-16le", true), ("utf-16be", false)] {
+        let raw: Vec<u8> = std::iter::once(0xfeff)
+            .chain(WRITTEN_CALLS.encode_utf16())
+            .flat_map(|unit| {
+                if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                }
+            })
+            .collect();
+        let output = analyze_raw(&raw, encoding);
+        let owner = entity_at(
+            &output,
+            "HumanTimeLower",
+            EntityKind::Function,
+            2 + 1083 * 2,
+            28,
+        );
+        let target = entity_at(&output, "humanTime", EntityKind::Function, 2 + 1195 * 2, 18);
+        written_go_call(&output, owner, target, 2 + 1162 * 2, 2 + 1171 * 2, &raw);
+    }
+    let raw = [b"\xef\xbb\xbf".as_slice(), WRITTEN_CALLS.as_bytes()].concat();
+    let output = analyze_raw(&raw, "utf-8");
+    let owner = entity_at(&output, "HumanTime", EntityKind::Function, 3 + 993, 9);
+    let target = entity_at(&output, "humanTime", EntityKind::Function, 3 + 1195, 9);
+    written_go_call(&output, owner, target, 3 + 1051, 3 + 1060, &raw);
+}
+
+#[test]
+fn written_function_calls_agree_at_exact_provider_artifact_admission_and_one_less() {
+    execute_context_observed(
+        WRITTEN_CALLS.as_bytes(),
+        "utf-8",
+        4096,
+        |analyzer, provider, request| {
+            let cancel = Cancellation::new();
+            let required =
+                provider.required_syntax_fact_count(&request.to_parse_request(), &cancel)?;
+            let artifact = analyzer.prepare_artifact(request, &cancel)?;
+            assert_eq!(artifact.required_syntax_fact_count(&cancel)?, required);
+            let syntax = request.limits().syntax_stream();
+            let for_capacity = |capacity| {
+                AnalysisLimits::new(
+                    request.limits().max_source_bytes(),
+                    request.limits().max_syntax_nodes(),
+                    request.limits().max_syntax_depth(),
+                    request.limits().max_embedded_ranges(),
+                    request.limits().max_reported_memory_bytes(),
+                    StreamLimits::new(
+                        syntax.max_batches(),
+                        capacity,
+                        syntax.max_output_bytes(),
+                        syntax.max_diagnostics(),
+                        syntax.max_diagnostic_bytes(),
+                        syntax.max_string_bytes(),
+                        BatchThresholds::new(
+                            capacity.min(syntax.batch().max_records()),
+                            syntax.batch().max_output_bytes(),
+                            syntax.batch().max_diagnostics(),
+                            syntax.batch().max_diagnostic_bytes(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                    request.limits().ir_stream().clone(),
+                    request.limits().ir().clone(),
+                )
+                .unwrap()
+            };
+            let exact_limits = for_capacity(required);
+            let exact = AnalysisRequest::new_with_parse_context(
+                request.source().clone(),
+                request.language().clone(),
+                request.encoding().clone(),
+                Vec::new(),
+                AnalysisTier::TierD,
+                request.build_context(),
+                &exact_limits,
+            )
+            .unwrap()
+            .with_generated_status(false);
+            let exact_artifact = analyzer.prepare_artifact(&exact, &cancel)?;
+            assert_eq!(
+                exact_artifact.required_syntax_fact_count(&cancel)?,
+                required
+            );
+            assert_eq!(exact_artifact.syntax_fact_count(), required);
+            let output = execute_analysis(
+                analyzer,
+                &exact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            let replay = analyzer.analyze_from_artifact(
+                &exact,
+                &exact_artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            assert_eq!(output.document(), replay.document());
+            let owner = entity_at(&output, "HumanTime", EntityKind::Function, 993, 9);
+            let target = entity_at(&output, "humanTime", EntityKind::Function, 1195, 9);
+            written_go_call(&output, owner, target, 1051, 1060, WRITTEN_CALLS.as_bytes());
+            let small_limits = for_capacity(required - 1);
+            let small = AnalysisRequest::new_with_parse_context(
+                request.source().clone(),
+                request.language().clone(),
+                request.encoding().clone(),
+                Vec::new(),
+                AnalysisTier::TierD,
+                request.build_context(),
+                &small_limits,
+            )
+            .unwrap()
+            .with_generated_status(false);
+            let expected = AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::RequiredSyntaxFacts,
+                observed: required,
+                limit: required - 1,
+            });
+            assert_eq!(
+                analyzer.prepare_artifact(&small, &cancel).unwrap_err(),
+                expected
+            );
+            // Preflight measures demand independently of output admission.
+            assert_eq!(
+                provider.required_syntax_fact_count(&small.to_parse_request(), &cancel)?,
+                required
+            );
+            assert_eq!(
+                rootlight_adapter_sdk::execute_parse(
+                    provider,
+                    &small.to_parse_request(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancel,
+                )
+                .unwrap_err(),
+                expected
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn duplicate_missing_foreign_and_wrong_owner_native_witnesses_cannot_donate_calls() {
+    use rootlight_adapter_sdk::{
+        ParseProvider, SyntaxFact, SyntaxFactKind, SyntaxKindLabel, execute_parse,
+        testkit::MockParseProvider,
+    };
+    execute_context_observed(
+        WRITTEN_CALLS.as_bytes(),
+        "utf-8",
+        4096,
+        |_, provider, request| {
+            let cancel = Cancellation::new();
+            let parsed = execute_parse(
+                provider,
+                &request.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &cancel,
+            )?;
+            let replay = |facts| {
+                let mock = MockParseProvider::new(
+                    provider.capabilities().clone(),
+                    facts,
+                    parsed.diagnostics().to_vec(),
+                    parsed.report().coverage().clone(),
+                );
+                let analyzer = TreeSitterAnalyzer::new(
+                    Arc::new(mock),
+                    ProducerIdentity::new(
+                        "go-call-witness",
+                        "1.0",
+                        content_hash(b"go-call-witness"),
+                    )
+                    .unwrap(),
+                    LanguageId::new("go").unwrap(),
+                    "go-written-call-replay",
+                    content_hash(b"go-call-replay"),
+                )
+                .unwrap();
+                execute_analysis(
+                    &analyzer,
+                    request,
+                    ExtensionSupport::default(),
+                    MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                    &cancel,
+                )
+            };
+            let baseline = replay(parsed.facts().to_vec())?;
+            let owner = entity_at(&baseline, "HumanTime", EntityKind::Function, 993, 9);
+            let target = entity_at(&baseline, "humanTime", EntityKind::Function, 1195, 9);
+            written_go_call(
+                &baseline,
+                owner,
+                target,
+                1051,
+                1060,
+                WRITTEN_CALLS.as_bytes(),
+            );
+            let declaration = parsed
+                .facts()
+                .iter()
+                .find(|fact| {
+                    fact.kind() == SyntaxFactKind::Declaration
+                        && fact.syntax_kind().as_str() == "go.function.declaration"
+                        && fact.span().start_byte() < 1195
+                        && fact.span().end_byte() > 1411
+                })
+                .unwrap();
+            let definition = parsed
+                .facts()
+                .iter()
+                .find(|fact| {
+                    fact.parent() == Some(declaration.local_id())
+                        && fact.syntax_kind().as_str() == "go.identifier.definition"
+                })
+                .unwrap();
+            let context = parsed
+                .facts()
+                .iter()
+                .find(|fact| {
+                    fact.kind() == SyntaxFactKind::Signature
+                        && fact.span() == declaration.span()
+                        && matches!(
+                            fact.syntax_kind().as_str(),
+                            "go.call_formal_context.signature"
+                                | "go.composite_formal_context.signature"
+                        )
+                })
+                .unwrap();
+            let root = parsed
+                .facts()
+                .iter()
+                .find(|fact| fact.kind() == SyntaxFactKind::Root)
+                .unwrap();
+            for witness in [declaration, definition, context] {
+                for mode in 0..3 {
+                    let mut facts = parsed.facts().to_vec();
+                    if mode == 0 {
+                        facts.retain(|fact| fact.local_id() != witness.local_id());
+                        for child in &mut facts {
+                            if child.parent() == Some(witness.local_id()) {
+                                *child = SyntaxFact::new(
+                                    child.local_id(),
+                                    witness.parent(),
+                                    child.kind(),
+                                    child.span(),
+                                    child.depth(),
+                                    child.syntax_kind().clone(),
+                                );
+                            }
+                        }
+                    } else if mode == 1 {
+                        let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+                        facts.push(SyntaxFact::new(
+                            next,
+                            witness.parent(),
+                            witness.kind(),
+                            witness.span(),
+                            witness.depth(),
+                            witness.syntax_kind().clone(),
+                        ));
+                    } else {
+                        let changed = facts
+                            .iter_mut()
+                            .find(|fact| fact.local_id() == witness.local_id())
+                            .unwrap();
+                        *changed = SyntaxFact::new(
+                            changed.local_id(),
+                            changed.parent(),
+                            changed.kind(),
+                            changed.span(),
+                            changed.depth(),
+                            SyntaxKindLabel::new("go.foreign.signature").unwrap(),
+                        );
+                    }
+                    let output = replay(facts)?;
+                    assert!(
+                        !output
+                            .document()
+                            .occurrences
+                            .iter()
+                            .any(
+                                |site| site.syntax_kind == "go.direct_file_function.reference"
+                                    && site.source.span().start_byte() == 1051
+                                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+                            ),
+                        "mode {mode}"
+                    );
+                }
+            }
+            let mut facts = parsed.facts().to_vec();
+            let site = facts
+                .iter_mut()
+                .find(|fact| {
+                    fact.syntax_kind().as_str() == "go.direct_file_function.reference"
+                        && fact.span().start_byte() == 1051
+                })
+                .unwrap();
+            *site = SyntaxFact::new(
+                site.local_id(),
+                Some(root.local_id()),
+                site.kind(),
+                site.span(),
+                site.depth(),
+                site.syntax_kind().clone(),
+            );
+            let output = replay(facts)?;
+            assert!(
+                !output
+                    .document()
+                    .occurrences
+                    .iter()
+                    .any(
+                        |site| site.syntax_kind == "go.direct_file_function.reference"
+                            && site.source.span().start_byte() == 1051
+                            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+                    )
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+}

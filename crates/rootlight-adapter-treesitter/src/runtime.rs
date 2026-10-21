@@ -10,14 +10,47 @@ mod c_preprocessor;
 mod cmake_command_template;
 mod cmake_header;
 mod cmake_patch;
+mod coffeescript_scope;
+#[cfg(test)]
+#[path = "runtime/dockerfile_cache_tests.rs"]
+mod dockerfile_cache_tests;
+#[cfg(test)]
+#[path = "runtime/dockerfile_callback_owner_tests.rs"]
+mod dockerfile_callback_owner_tests;
+mod dockerfile_scope;
 mod embedded;
 mod expression;
 mod fortran;
 mod fsharp_admission;
+mod gdscript_scope;
+#[cfg(test)]
+#[path = "runtime/gdscript_scope_tests.rs"]
+mod gdscript_scope_tests;
+mod identity_refusal;
 mod identity_work;
+mod idris_scope;
+#[cfg(test)]
+mod idris_scope_tests;
 mod jsonc;
+mod lean_scope;
+#[cfg(test)]
+mod lean_scope_tests;
 mod markdown;
 mod perl;
+mod pug_scope;
+#[cfg(test)]
+#[path = "runtime/pug_scope_tests.rs"]
+mod pug_scope_tests;
+mod scanner_refusal;
+mod sed_scope;
+pub(crate) const SED_FRONTEND_POLICY: &str = sed_scope::FRONTEND_POLICY;
+pub(crate) const SED_SCANNER_CONTRACT_IDENTITY: &str = sed_scope::SCANNER_CONTRACT_IDENTITY;
+#[cfg(test)]
+mod sed_scope_tests;
+mod wolfram_scope;
+#[cfg(test)]
+#[path = "runtime/wolfram_scope_tests.rs"]
+mod wolfram_scope_tests;
 
 pub(crate) use c_preprocessor::C_PREPROCESSOR_PROJECTION_POLICY;
 pub(crate) use cmake_command_template::CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY;
@@ -55,9 +88,12 @@ fn cmake_patch_input(
     }
     Ok(plan)
 }
+pub use crate::query_pack::NativeIdentityRefusalDetails;
 pub use fsharp_admission::{FSharpAdmissionKind, FSharpAdmissionWitness};
+pub use identity_refusal::NativeIdentityRefusal;
 pub use identity_work::NativeIdentityWorkLimit;
 pub(crate) use jsonc::JSONC_PARSE_INPUT_POLICY;
+pub use scanner_refusal::{NativeScannerRefusal, NativeScannerRefusalDetails};
 
 mod native_input;
 
@@ -95,7 +131,7 @@ use crate::{
     pool::{ParserPool, PoolError},
     query_pack::{QueryCandidate, QueryPackRegistry, StructuralRole},
     registry::{language_for, native_family_for_source},
-    source_view::{NATIVE_SOURCE_PROJECTION_POLICY, NativeSourceView},
+    source_view::{LineEndingPolicy, NATIVE_SOURCE_PROJECTION_POLICY, NativeSourceView},
 };
 
 const LOGICAL_TREE_NODE_BYTES: usize = 64;
@@ -296,6 +332,7 @@ impl TreeSitterProvider {
             self.config.default_settings(),
             &source,
             cancellation,
+            None,
         )?;
         if !prepared.traversal.fully_traversed {
             cancellation.check()?;
@@ -362,6 +399,8 @@ impl TreeSitterProvider {
                     sink,
                     cancellation,
                     None,
+                    None,
+                    None,
                 )
                 .map(RawParseWithPrevious::into_transaction_parts)
             },
@@ -395,6 +434,8 @@ impl TreeSitterProvider {
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
         identity_limit: Option<&mut Option<crate::query_pack::IntrinsicIdentityMatchLimit>>,
+        identity_refusal: Option<&mut Option<crate::query_pack::identity_refusal::IdentityRefusal>>,
+        scanner_refusal: Option<&mut Option<NativeScannerRefusalDetails>>,
     ) -> Result<RawParseWithPrevious, AdapterError> {
         let source = self.native_source_view(request, cancellation)?;
         let PreparedParse {
@@ -406,7 +447,15 @@ impl TreeSitterProvider {
             reuse_key,
             c_macro_projected,
             cache_nodes,
-        } = self.prepare_tree(request, previous, edits, settings, &source, cancellation)?;
+        } = self.prepare_tree(
+            request,
+            previous,
+            edits,
+            settings,
+            &source,
+            cancellation,
+            scanner_refusal,
+        )?;
         let source_bytes = request.source().bytes();
         let extraction = if traversal.fully_traversed {
             self.extract_syntax_facts(
@@ -418,6 +467,7 @@ impl TreeSitterProvider {
                 sink,
                 cancellation,
                 identity_limit,
+                identity_refusal,
             )?
         } else {
             emit_primary_diagnostic(&traversal, request, sink, cancellation)?;
@@ -473,7 +523,7 @@ impl TreeSitterProvider {
         })
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn prepare_tree(
         &self,
         request: &ParseRequest<'_>,
@@ -482,6 +532,7 @@ impl TreeSitterProvider {
         settings: ParserSettings,
         source: &NativeSourceView<'_>,
         cancellation: &Cancellation,
+        scanner_refusal: Option<&mut Option<NativeScannerRefusalDetails>>,
     ) -> Result<PreparedParse, AdapterError> {
         let (family, native_family) =
             self.admit_parse_input(request, previous, edits, settings, cancellation)?;
@@ -501,6 +552,7 @@ impl TreeSitterProvider {
             included_ranges: Arc::clone(&included_ranges),
             settings,
             virtual_line_ending: needs_virtual_matlab_line_ending(request, source.as_bytes()),
+            line_endings: source.line_ending_policy(),
             cmake_header_path: request.language().as_str() == "cmake"
                 && cmake_header::is_header_path(request.source().path().as_str()),
         };
@@ -515,6 +567,7 @@ impl TreeSitterProvider {
             family,
             native_family,
             cmake_header_path: identity.cmake_header_path,
+            line_endings: identity.line_endings,
             grammar_version: identity.grammar_version,
             encoding: identity.encoding.clone(),
             included_ranges,
@@ -540,6 +593,7 @@ impl TreeSitterProvider {
             None,
             0,
             cancellation,
+            scanner_refusal,
         )?;
         let c_macro_projected = parsed.projection_changed || parsed.projection_unavailable;
         if c_macro_projected && matches!(reuse_status, ReuseStatus::Reused { .. }) {
@@ -604,9 +658,10 @@ impl TreeSitterProvider {
             // obtains its checked UTF-8 string without copying the snapshot.
             validate_utf8_cancellable(request.source().bytes(), cancellation)?;
         }
-        NativeSourceView::new(
+        NativeSourceView::new_with_policy(
             request.source().bytes(),
             request.encoding().as_str(),
+            LineEndingPolicy::for_language(request.language().as_str()),
             maximum,
             request.limits().max_reported_memory_bytes(),
             cancellation,
@@ -633,7 +688,10 @@ impl TreeSitterProvider {
         let native_family = native_family_for_source(family, request.source().path().as_str());
         // Arbitrary public ranges can join unrelated physical text. Markdown
         // separately admits only a qualified complete physical-line body.
-        if native_family.is_cobol() && !request.included_ranges().is_empty() {
+        if (native_family.is_cobol()
+            || matches!(native_family, GrammarFamily::Sed | GrammarFamily::Idris))
+            && !request.included_ranges().is_empty()
+        {
             return Err(RequestError::EmbeddedRangesUnsupported.into());
         }
         if !matches!(
@@ -695,6 +753,7 @@ impl TreeSitterProvider {
             None,
             0,
             cancellation,
+            None,
         )
         .map(|parsed| parsed.tree)
     }
@@ -711,6 +770,7 @@ impl TreeSitterProvider {
         parse_input: Option<&[u8]>,
         upstream_owned_bytes: usize,
         cancellation: &Cancellation,
+        scanner_refusal: Option<&mut Option<NativeScannerRefusalDetails>>,
     ) -> Result<NativeParsedTree, AdapterError> {
         if !matches!(request.language().as_str(), "c" | "cpp") {
             return self
@@ -723,6 +783,7 @@ impl TreeSitterProvider {
                     context,
                     parse_input,
                     cancellation,
+                    scanner_refusal,
                 )
                 .map(NativeParsedTree::ordinary);
         }
@@ -748,6 +809,7 @@ impl TreeSitterProvider {
             Some(&mut *shared),
             parse_input,
             cancellation,
+            None,
         )?;
         let recognize = if request.language().as_str() == "cpp" {
             c_preprocessor::MacroProjection::recognize_cpp
@@ -821,6 +883,7 @@ impl TreeSitterProvider {
             Some(shared),
             Some(plan.as_bytes()),
             cancellation,
+            None,
         )?;
         Ok(NativeParsedTree {
             tree,
@@ -843,6 +906,7 @@ impl TreeSitterProvider {
         mut context: Option<&mut NativeParseContext>,
         parse_input: Option<&[u8]>,
         cancellation: &Cancellation,
+        mut scanner_refusal: Option<&mut Option<NativeScannerRefusalDetails>>,
     ) -> Result<Tree, AdapterError> {
         cancellation.check()?;
         let parse_work_limit = ParseWorkLimit::from_syntax_limits(
@@ -931,7 +995,51 @@ impl TreeSitterProvider {
                     .as_ref()
                     .map_or_else(|| source.as_bytes(), fortran::FortranParseInput::as_bytes)
             });
+        let gdscript_scope = (request.language().as_str() == "gdscript")
+            .then(gdscript_scope::begin)
+            .transpose()?;
+        let dockerfile_scope = (request.language().as_str() == "dockerfile")
+            .then(|| dockerfile_scope::begin(cancellation))
+            .transpose()?;
+        let coffeescript_scope = (request.language().as_str() == "coffeescript")
+            .then(|| {
+                coffeescript_scope::begin(cancellation, parse_work_limit.max_total_progress_checks)
+            })
+            .transpose()?;
+        let idris_scope = (request.language().as_str() == "idris")
+            .then(|| idris_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
+            .transpose()?;
+        let sed_scope = (request.language().as_str() == "sed")
+            .then(|| sed_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
+            .transpose()?;
+        let wolfram_scope = (request.language().as_str() == "wolfram")
+            .then(|| wolfram_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
+            .transpose()?;
+        let pug_scope = (request.language().as_str() == "pug")
+            .then(|| pug_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
+            .transpose()?;
+        let lean_scope = (request.language().as_str() == "lean")
+            .then(|| {
+                lean_scope::begin(
+                    cancellation,
+                    source.as_bytes(),
+                    parse_work_limit.max_total_progress_checks,
+                )
+            })
+            .transpose()?;
         let mut lease = self.pool.acquire(cancellation).map_err(map_pool_error)?;
+        if dockerfile_scope.is_some()
+            || coffeescript_scope.is_some()
+            || pug_scope.is_some()
+            || lean_scope.is_some()
+            || wolfram_scope.is_some()
+            || sed_scope.is_some()
+            || idris_scope.is_some()
+        {
+            // Keep a refused or interrupted native scanner transaction out of the
+            // reusable pool until its native scope and returned tree are admitted.
+            lease.withhold_reuse();
+        }
         let parser = lease.parser_mut().map_err(map_pool_error)?;
         parser
             .set_language(language)
@@ -1019,6 +1127,10 @@ impl TreeSitterProvider {
         };
         let options = ParseOptions::new().progress_callback(&mut progress);
         let tree = parser.parse_with_options(&mut input, old_tree, Some(options));
+        #[cfg(test)]
+        if request.language().as_str() == "gdscript" {
+            gdscript_scope_tests::after_native_parse();
+        }
         if let Some(context) = context.as_mut() {
             context.remaining_progress_checks = shared_progress.get().unwrap_or(0);
         }
@@ -1038,8 +1150,69 @@ impl TreeSitterProvider {
             parser.reset();
             return Err(provider_failure(code));
         }
+        cancellation.check()?;
+        if let Some(scope) = dockerfile_scope
+            && let Err(error) =
+                dockerfile_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = coffeescript_scope
+            && let Err(error) =
+                coffeescript_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = lean_scope
+            && let Err(error) =
+                lean_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = pug_scope
+            && let Err(error) =
+                pug_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = idris_scope
+            && let Err(error) =
+                idris_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = sed_scope
+            && let Err(error) =
+                sed_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = wolfram_scope
+            && let Err(error) = wolfram_scope::finish(scope, cancellation, scanner_refusal)
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
         let tree = tree.ok_or_else(|| provider_failure("parse-aborted"))?;
         cancellation.check()?;
+        lease.allow_reuse();
+        drop(lease);
+        if let Some(scope) = gdscript_scope {
+            gdscript_scope::finish(scope)?;
+        }
         Ok(tree)
     }
 
@@ -1054,6 +1227,7 @@ impl TreeSitterProvider {
         sink: &mut dyn SyntaxFactSink,
         cancellation: &Cancellation,
         identity_limit: Option<&mut Option<crate::query_pack::IntrinsicIdentityMatchLimit>>,
+        identity_refusal: Option<&mut Option<crate::query_pack::identity_refusal::IdentityRefusal>>,
     ) -> Result<ExtractionReport, AdapterError> {
         cancellation.check()?;
         let budget = sink.remaining_budget();
@@ -1063,17 +1237,22 @@ impl TreeSitterProvider {
             request.source().path().as_str(),
             cancellation,
         )?;
-        let mut extraction = match identity_limit {
-            Some(identity_limit) => pack.extract_with_identity_limit(
-                family,
-                tree,
-                source.as_bytes(),
-                request.limits().max_syntax_nodes(),
-                max_facts,
-                cancellation,
-                Some(identity_limit),
-            ),
-            None => pack.extract(
+        let mut extraction = match (identity_limit, identity_refusal) {
+            (identity_limit, identity_refusal)
+                if identity_limit.is_some() || identity_refusal.is_some() =>
+            {
+                pack.extract_with_identity_limit(
+                    family,
+                    tree,
+                    source.as_bytes(),
+                    request.limits().max_syntax_nodes(),
+                    max_facts,
+                    cancellation,
+                    identity_limit,
+                    identity_refusal,
+                )
+            }
+            _ => pack.extract(
                 family,
                 tree,
                 source.as_bytes(),
@@ -1291,6 +1470,8 @@ impl ParseProvider for TreeSitterProvider {
             sink,
             cancellation,
             None,
+            None,
+            None,
         )
         .map(|output| output.report)
     }
@@ -1404,6 +1585,16 @@ impl ParseCache {
             cmake_header_projection_policy: CMAKE_HEADER_PROJECTION_POLICY,
             cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
+            pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
+            lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_scanner_contract: idris_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_frontend_policy: idris_scope::FRONTEND_POLICY,
+            sed_scanner_contract: sed_scope::SCANNER_CONTRACT_IDENTITY,
+            sed_frontend_policy: sed_scope::FRONTEND_POLICY,
+            wolfram_scanner_contract: wolfram_scope::SCANNER_CONTRACT_IDENTITY,
+            coffeescript_scanner_contract: coffeescript_scope::SCANNER_CONTRACT_IDENTITY,
+            gdscript_scanner_contract: gdscript_scope::CACHE_CONTRACT_IDENTITY,
+            dockerfile_scanner_contract: dockerfile_scope::SCANNER_CONTRACT_IDENTITY,
             identity,
             source,
             tree: Some(tree.clone()),
@@ -1438,6 +1629,16 @@ struct CachedParse {
     cmake_header_projection_policy: &'static str,
     cmake_patch_projection_policy: &'static str,
     cmake_command_template_projection_policy: &'static str,
+    pug_scanner_contract: &'static str,
+    lean_scanner_contract: &'static str,
+    idris_scanner_contract: &'static str,
+    idris_frontend_policy: &'static str,
+    sed_scanner_contract: &'static str,
+    sed_frontend_policy: &'static str,
+    wolfram_scanner_contract: &'static str,
+    coffeescript_scanner_contract: &'static str,
+    gdscript_scanner_contract: &'static str,
+    dockerfile_scanner_contract: &'static str,
     identity: ParseIdentity,
     source: Arc<Vec<u8>>,
     tree: Option<Tree>,
@@ -1455,6 +1656,16 @@ impl CachedParse {
             cmake_header_projection_policy: CMAKE_HEADER_PROJECTION_POLICY,
             cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
+            pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
+            lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_scanner_contract: idris_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_frontend_policy: idris_scope::FRONTEND_POLICY,
+            sed_scanner_contract: sed_scope::SCANNER_CONTRACT_IDENTITY,
+            sed_frontend_policy: sed_scope::FRONTEND_POLICY,
+            wolfram_scanner_contract: wolfram_scope::SCANNER_CONTRACT_IDENTITY,
+            coffeescript_scanner_contract: coffeescript_scope::SCANNER_CONTRACT_IDENTITY,
+            gdscript_scanner_contract: gdscript_scope::CACHE_CONTRACT_IDENTITY,
+            dockerfile_scanner_contract: dockerfile_scope::SCANNER_CONTRACT_IDENTITY,
             identity: invalid_identity(),
             source: Arc::new(Vec::new()),
             tree: None,
@@ -1472,6 +1683,16 @@ impl CachedParse {
             cmake_header_projection_policy: self.cmake_header_projection_policy,
             cmake_patch_projection_policy: self.cmake_patch_projection_policy,
             cmake_command_template_projection_policy: self.cmake_command_template_projection_policy,
+            pug_scanner_contract: self.pug_scanner_contract,
+            lean_scanner_contract: self.lean_scanner_contract,
+            idris_scanner_contract: self.idris_scanner_contract,
+            idris_frontend_policy: self.idris_frontend_policy,
+            sed_scanner_contract: self.sed_scanner_contract,
+            sed_frontend_policy: self.sed_frontend_policy,
+            wolfram_scanner_contract: self.wolfram_scanner_contract,
+            coffeescript_scanner_contract: self.coffeescript_scanner_contract,
+            gdscript_scanner_contract: self.gdscript_scanner_contract,
+            dockerfile_scanner_contract: self.dockerfile_scanner_contract,
             identity: self.identity.clone(),
             source: self.source.clone(),
             tree: self.tree.clone(),
@@ -1491,6 +1712,7 @@ fn invalid_identity() -> ParseIdentity {
         settings: ParserSettings::new(1).expect("hard-coded parser setting is nonzero"),
         virtual_line_ending: false,
         cmake_header_path: false,
+        line_endings: LineEndingPolicy::Preserve,
     }
 }
 
@@ -1585,6 +1807,80 @@ fn prepare_reuse(
             ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
         ));
     }
+    if current.family == GrammarFamily::Dockerfile
+        && cached.dockerfile_scanner_contract != dockerfile_scope::SCANNER_CONTRACT_IDENTITY
+    {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Wolfram
+        && cached.wolfram_scanner_contract != wolfram_scope::SCANNER_CONTRACT_IDENTITY
+    {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Idris
+        && (cached.idris_scanner_contract != idris_scope::SCANNER_CONTRACT_IDENTITY
+            || cached.idris_frontend_policy != idris_scope::FRONTEND_POLICY
+            || !edits.is_empty())
+    {
+        // The initial scanner admission qualifies exact no-op state, not edited snapshots.
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Sed
+        && (cached.sed_scanner_contract != sed_scope::SCANNER_CONTRACT_IDENTITY
+            || cached.sed_frontend_policy != sed_scope::FRONTEND_POLICY)
+    {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if cached.identity.line_endings != current.line_endings {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Pug
+        && cached.pug_scanner_contract != pug_scope::SCANNER_CONTRACT_IDENTITY
+    {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Lean
+        && cached.lean_scanner_contract != lean_scope::SCANNER_CONTRACT_IDENTITY
+    {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Coffeescript
+        && cached.coffeescript_scanner_contract != coffeescript_scope::SCANNER_CONTRACT_IDENTITY
+    {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Gdscript
+        && cached.gdscript_scanner_contract != gdscript_scope::CACHE_CONTRACT_IDENTITY
+    {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
     if cached.identity.family != current.family {
         return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Language)));
     }
@@ -1627,6 +1923,14 @@ fn prepare_reuse(
         // SourceEdit is explicitly sequential UTF-8. Applying it to physical
         // UTF-16 or to a projected tree would fabricate an edit contract.
         return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Encoding)));
+    }
+    if current.line_endings != LineEndingPolicy::Preserve && !edits.is_empty() {
+        // Physical edits do not describe projected tree offsets. Invalidate
+        // before cloning/editing a tree, including no-CRLF files under this policy.
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
     }
     if current.family == GrammarFamily::Fortran
         && !edits.is_empty()
@@ -1671,7 +1975,9 @@ fn prepare_reuse(
     let Some(tree) = cached.tree.clone() else {
         return Ok((None, ReuseStatus::Invalidated(ReuseInvalidation::Evicted)));
     };
-    if matches!(current.encoding.as_str(), "utf-16le" | "utf-16be") {
+    if matches!(current.encoding.as_str(), "utf-16le" | "utf-16be")
+        || current.line_endings != LineEndingPolicy::Preserve
+    {
         if cached.source.len() != current_source.len() {
             return Ok((
                 None,
@@ -3606,7 +3912,15 @@ fn inspect_tree(
 ) -> Result<TraversalReport, AdapterError> {
     let pointer_source = matches!(request.language().as_str(), "vba" | "visual-basic-classic")
         .then(|| source.as_bytes());
-    let traversal = traverse_syntax(tree, max_nodes, max_depth, pointer_source, cancellation)?;
+    let issue_kind = (request.language().as_str() == "sed").then_some("syntax_issue");
+    let traversal = traverse_syntax(
+        tree,
+        max_nodes,
+        max_depth,
+        pointer_source,
+        issue_kind,
+        cancellation,
+    )?;
     cancellation.check()?;
     let SyntaxTraversal {
         processed_nodes,
@@ -3708,6 +4022,7 @@ fn traverse_syntax(
     max_nodes: usize,
     max_depth: usize,
     pointer_source: Option<&[u8]>,
+    issue_kind: Option<&str>,
     cancellation: &Cancellation,
 ) -> Result<SyntaxTraversal, AdapterError> {
     cancellation.check()?;
@@ -3731,7 +4046,9 @@ fn traverse_syntax(
             .checked_add(1)
             .ok_or_else(|| provider_failure("node-accounting"))?;
         observed_depth = observed_depth.max(depth);
-        if error_span.is_none() && (node.is_error() || node.is_missing()) {
+        if error_span.is_none()
+            && (node.is_error() || node.is_missing() || issue_kind == Some(node.kind()))
+        {
             let recovered_pointer = if let Some(source) = pointer_source {
                 crate::query_pack::vba::is_pointer_comparison_recovery(node, source, cancellation)?
             } else {
@@ -4255,6 +4572,16 @@ mod tests {
             cmake_header_projection_policy: CMAKE_HEADER_PROJECTION_POLICY,
             cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
+            pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
+            lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_scanner_contract: idris_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_frontend_policy: idris_scope::FRONTEND_POLICY,
+            sed_scanner_contract: sed_scope::SCANNER_CONTRACT_IDENTITY,
+            sed_frontend_policy: sed_scope::FRONTEND_POLICY,
+            wolfram_scanner_contract: wolfram_scope::SCANNER_CONTRACT_IDENTITY,
+            coffeescript_scanner_contract: coffeescript_scope::SCANNER_CONTRACT_IDENTITY,
+            gdscript_scanner_contract: gdscript_scope::CACHE_CONTRACT_IDENTITY,
+            dockerfile_scanner_contract: dockerfile_scope::SCANNER_CONTRACT_IDENTITY,
             identity: base.clone(),
             source: Arc::new(b"fn one() {}".to_vec()),
             tree: Some(tree),
@@ -4440,7 +4767,7 @@ mod tests {
         let tree = language_tree(GrammarFamily::Rust, b"fn cancelled() {}");
 
         assert!(matches!(
-            traverse_syntax(&tree, 1024, 64, None, &cancellation),
+            traverse_syntax(&tree, 1024, 64, None, None, &cancellation),
             Err(AdapterError::Cancelled {
                 reason: rootlight_cancel::CancellationReason::ClientRequest
             })
@@ -5153,13 +5480,24 @@ mod tests {
     }
 
     fn language_tree(family: GrammarFamily, source: &[u8]) -> Tree {
+        let scope = (family == GrammarFamily::Gdscript)
+            .then(tree_sitter_gdscript::ScannerScope::begin)
+            .transpose()
+            .expect("native test scanner scope begins");
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&language_for(family))
             .expect("audited grammar ABI is supported");
-        parser
+        let tree = parser
             .parse(source, None)
-            .expect("test parser has a language")
+            .expect("test parser has a language");
+        drop(parser);
+        if let Some(scope) = scope {
+            scope
+                .finish()
+                .expect("native test scanner scope admits the tree");
+        }
+        tree
     }
 }
 
@@ -5296,3 +5634,8 @@ mod crossing_metadata_parent_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coffeescript_callback_owner_tests;
+#[cfg(test)]
+mod coffeescript_scope_tests;

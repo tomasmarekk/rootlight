@@ -25,7 +25,7 @@ pub(super) fn written_identity(kind: EntityKind, label: &str) -> bool {
                 | "coq.declared_instance.declaration"
         ) | (
             EntityKind::Function,
-            "coq.parameterized_assertion.declaration"
+            "coq.parameterized_assertion.declaration" | "coq.written_callable.declaration"
         ) | (EntityKind::Parameter, "coq.header_parameter.declaration")
             | (EntityKind::Enum, "coq.inductive.declaration")
             | (EntityKind::Struct, "coq.record.declaration")
@@ -177,7 +177,10 @@ pub(super) fn notation_ends(
     for fact in facts {
         cancellation.check()?;
         if fact.kind() == SyntaxFactKind::Signature
-            && fact.syntax_kind().as_str() == "coq.notation_target.signature"
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "coq.notation_target.signature" | "coq.written_target.signature"
+            )
         {
             ends.try_reserve(1)
                 .map_err(|_| SinkError::AllocationFailed)?;
@@ -272,6 +275,7 @@ impl NotationTargets {
                 "coq.record.declaration" => EntityKind::Struct,
                 "coq.class.declaration" => EntityKind::Class,
                 "coq.definition.declaration" => EntityKind::Constant,
+                "coq.written_callable.declaration" => EntityKind::Function,
                 _ => continue,
             };
             let Some(definition) = definitions.get(&declaration.local_id()).copied().flatten()

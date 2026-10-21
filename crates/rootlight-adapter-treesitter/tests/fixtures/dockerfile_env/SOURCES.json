@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/telemetry-sh/graphql-200-blindspot-lab",
+  "revision": "8c9155c17aee7c37c3a2ecd790208ffac8b75f2b",
+  "original_path": "Dockerfile",
+  "original_mode": "100644",
+  "original_bytes": 475,
+  "original_sha256": "e68a360ba3ce3b9c72d4c7db113324b5d22348bf63821320306d6541f5042800",
+  "license": "MIT; complete original LICENSE retained",
+  "scope": "complete unchanged CRLF source; no build execution or value evaluation"
+}

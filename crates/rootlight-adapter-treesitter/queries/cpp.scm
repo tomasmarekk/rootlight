@@ -85,3 +85,12 @@
   (#match? @documentation "^/\\*\\*"))
 
 [(string_literal) (raw_string_literal) (concatenated_string)] @string
+
+; Structural formals and receiver certificates have separate admission proofs.
+(parameter_declaration) @declaration
+(parameter_declaration declarator: (identifier) @definition)
+(parameter_declaration declarator: (pointer_declarator declarator: (identifier) @definition))
+(parameter_declaration declarator: (reference_declarator (identifier) @definition))
+(function_definition) @signature
+; The identity pass certifies receivers without making ordinary names required.
+(identifier) @signature

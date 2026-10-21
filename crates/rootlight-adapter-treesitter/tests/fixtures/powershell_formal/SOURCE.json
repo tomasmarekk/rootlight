@@ -1,0 +1,19 @@
+{
+  "schema": "rootlight.licensed-original-fixture/1",
+  "repository": "https://github.com/korygill/technical-analysis",
+  "repository_label": "149_ThinkScript_technical-analysis",
+  "path": "PowerShell/Get-StrategyReportCsvStatistics.ps1",
+  "bytes": 8690,
+  "sha256": "1f5875f916e8418b330ea3080f26bea5359162154ddaaf9ced5cf1ef5ffa6bb2",
+  "license": {
+    "path": "LICENSE",
+    "bytes": 1087,
+    "sha256": "daa6c6c74c8c4fba26091a22af8c9a2767b335bf318da7d4fd597f4ed3e976af"
+  },
+  "authority": {
+    "path": "target/next-language-breadth-preparation-20261021-r1/assembled-r1/combined-176.json",
+    "sha256": "c62399796bfacbde96f33096e9f2e100643b9cf804d48559e8dc91479989a12a"
+  },
+  "scope": "Complete original; no runtime execution or command/module assumptions.",
+  "revision": "63c2df0044419649f951b8edb4ad99a955f39b72"
+}

@@ -1303,8 +1303,11 @@ fn coq_local_let_and_match_bindings_remain_explicitly_incomplete() {
         "{:?}",
         document.diagnostics
     );
-    for name in ["local", "choose"] {
-        named_definition(document, name, EntityKind::Constant);
+    for (name, kind) in [
+        ("local", EntityKind::Constant),
+        ("choose", EntityKind::Function),
+    ] {
+        named_definition(document, name, kind);
     }
     for name in ["x", "y", "n"] {
         assert!(
@@ -2006,4 +2009,860 @@ fn coq_malformed_namespace_prefix_cannot_publish_a_notation_certificate() {
             .iter()
             .any(|fact| fact.syntax_kind().as_str() == "coq.notation_target.signature")
     );
+}
+
+// Complete original callable requirements accompany a separate native observer.
+// The observer reports actual geometry without requiring a future producer label.
+
+const WRITTEN_CALLABLE_ORIGINAL: &[u8] =
+    include_bytes!("../fixtures/coq-written-callables/stlc_small.v");
+
+fn written_callable_original_entity<'document>(
+    document: &'document rootlight_ir::NormalizedIrDocument,
+    name: &str,
+    start: u64,
+    end: u64,
+) -> &'document rootlight_ir::EntityRecord {
+    let definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == end
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1, "one exact original definition {name}");
+    let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+        panic!("a written definition must identify its own entity");
+    };
+    let entity = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == symbol)
+        .unwrap();
+    assert_eq!(entity.language, "coq");
+    assert_eq!(entity.canonical_name, name);
+    assert_eq!(entity.provenance, definitions[0].provenance);
+    assert_eq!(
+        definitions[0].source.content_hash(),
+        content_hash(WRITTEN_CALLABLE_ORIGINAL)
+    );
+    let evidence = entity.evidence.source.as_ref().unwrap();
+    assert_eq!(
+        evidence.content_hash(),
+        content_hash(WRITTEN_CALLABLE_ORIGINAL)
+    );
+    assert_eq!(evidence.repository(), definitions[0].repository);
+    assert_eq!(evidence.generation(), definitions[0].generation);
+    assert_eq!(evidence.span().file(), definitions[0].file);
+    assert!(evidence.span().start_byte() <= start && evidence.span().end_byte() >= end);
+    entity
+}
+
+fn written_callable_original() -> AnalysisOutput {
+    assert_eq!(WRITTEN_CALLABLE_ORIGINAL.len(), 2182);
+    for (start, end, text) in [
+        (11, 13, b"Ty".as_slice()),
+        (16, 19, b"Set"),
+        (1226, 1229, b"var"),
+        (1622, 1624, b"v0"),
+        (1656, 1659, b"var"),
+    ] {
+        assert_eq!(&WRITTEN_CALLABLE_ORIGINAL[start..end], text);
+    }
+    certificate_output(std::str::from_utf8(WRITTEN_CALLABLE_ORIGINAL).unwrap())
+}
+
+#[test]
+fn original_callables_retain_exact_function_definitions_and_ordinary_constant() {
+    let output = written_callable_original();
+    let document = output.document();
+    for (name, start, end) in [("var", 1226, 1229), ("v0", 1622, 1624)] {
+        let entity = written_callable_original_entity(document, name, start, end);
+        assert_eq!(entity.kind, EntityKind::Function, "written callable {name}");
+    }
+    let type_value = written_callable_original_entity(document, "Ty", 11, 13);
+    assert_eq!(type_value.kind, EntityKind::Constant);
+    assert!(!document.occurrences.iter().any(|site| {
+        site.role == OccurrenceRole::Definition
+            && site.source.span().start_byte() == 16
+            && site.source.span().end_byte() == 19
+    }));
+    assert!(!document.skipped_regions.is_empty());
+}
+
+#[test]
+fn original_v0_reference_selects_the_earlier_written_var_callable() {
+    let output = written_callable_original();
+    let document = output.document();
+    let target = written_callable_original_entity(document, "var", 1226, 1229);
+    let owner = written_callable_original_entity(document, "v0", 1622, 1624);
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == 1656
+                && site.source.span().end_byte() == 1659
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "one exact original var reference");
+    assert_eq!(
+        sites[0].target,
+        OccurrenceTarget::Resolved { symbol: target.id }
+    );
+    assert_eq!(sites[0].enclosing, Some(owner.id));
+    assert_eq!(sites[0].provenance, owner.provenance);
+    assert_eq!(sites[0].provenance, target.provenance);
+    assert_eq!(
+        sites[0].source.content_hash(),
+        content_hash(WRITTEN_CALLABLE_ORIGINAL)
+    );
+    assert_eq!(sites[0].repository, target.repository);
+    assert_eq!(sites[0].generation, target.generation);
+    assert_eq!(target.kind, EntityKind::Function);
+    assert_eq!(owner.kind, EntityKind::Function);
+}
+
+fn written_callable_native_description(node: tree_sitter::Node<'_>) -> String {
+    let field = node.parent().and_then(|parent| {
+        (0..parent.child_count()).find_map(|index| {
+            let index = u32::try_from(index).unwrap();
+            (parent.child(index) == Some(node))
+                .then(|| parent.field_name_for_child(index))
+                .flatten()
+        })
+    });
+    format!(
+        "id={} parent={:?} kind={} field={field:?} bytes={}..{} error={} missing={} has_error={}",
+        node.id(),
+        node.parent().map(|parent| parent.id()),
+        node.kind(),
+        node.start_byte(),
+        node.end_byte(),
+        node.is_error(),
+        node.is_missing(),
+        node.has_error()
+    )
+}
+
+#[test]
+fn original_callables_native_raw_and_normalized_observation() {
+    use rootlight_adapter_sdk::execute_parse;
+
+    assert_eq!(WRITTEN_CALLABLE_ORIGINAL.len(), 2182);
+    println!("source-sha256=a8b32fce2d84355b050fded6d794f313ca068080816a46620d1df69f2af16ffd");
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_rocq::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(WRITTEN_CALLABLE_ORIGINAL, None).unwrap();
+    let root = tree.root_node();
+    assert!(
+        root.start_byte() <= root.end_byte() && root.end_byte() <= WRITTEN_CALLABLE_ORIGINAL.len()
+    );
+    println!("native-root {}", written_callable_native_description(root));
+    println!("native-full-sexp {}", root.to_sexp());
+    let mut cursor = root.walk();
+    let mut nodes = 0;
+    let mut errors = 0;
+    let mut missing = 0;
+    loop {
+        let node = cursor.node();
+        nodes += 1;
+        assert!(nodes <= 8192, "finite complete original observation");
+        assert!(
+            node.start_byte() <= node.end_byte()
+                && node.end_byte() <= WRITTEN_CALLABLE_ORIGINAL.len()
+        );
+        errors += usize::from(node.is_error());
+        missing += usize::from(node.is_missing());
+        println!("native-node {}", written_callable_native_description(node));
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                break;
+            }
+        }
+        if cursor.node() == root {
+            break;
+        }
+    }
+    println!("native-summary nodes={nodes} errors={errors} missing={missing}");
+    for (start, end, text) in [
+        (1226, 1229, b"var".as_slice()),
+        (1622, 1624, b"v0"),
+        (1656, 1659, b"var"),
+    ] {
+        assert_eq!(&WRITTEN_CALLABLE_ORIGINAL[start..end], text);
+        let mut current = Some(root.descendant_for_byte_range(start, end).unwrap());
+        for _ in 0..256 {
+            let Some(node) = current else { break };
+            println!(
+                "native-anchor={start}..{end} {}",
+                written_callable_native_description(node)
+            );
+            if node.kind().ends_with("_command") {
+                println!("native-owner={} sexp={}", node.kind(), node.to_sexp());
+            }
+            current = node.parent();
+        }
+        assert!(current.is_none(), "finite original anchor ancestry");
+    }
+    let native = Arc::new(provider());
+    let fixture = Fixture::new(COQ, WRITTEN_CALLABLE_ORIGINAL);
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, COQ, &bounds);
+    let parsed = execute_parse(
+        native.as_ref(),
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    for fact in parsed.facts() {
+        println!("raw-fact {fact:?}");
+    }
+    let result = analyze(
+        &analyzer(&native, COQ),
+        &input,
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(result.document(), bounds.ir(), &ExtensionSupport::default()).unwrap();
+    for entity in &result.document().entities {
+        println!("normalized-entity {entity:?}");
+    }
+    for occurrence in &result.document().occurrences {
+        if [(1226, 1229), (1622, 1624), (1656, 1659)].contains(&(
+            occurrence.source.span().start_byte(),
+            occurrence.source.span().end_byte(),
+        )) {
+            println!("normalized-occurrence {occurrence:?}");
+        }
+    }
+    for relation in &result.document().relations {
+        println!("normalized-relation {relation:?}");
+    }
+    for gap in &result.document().skipped_regions {
+        println!("normalized-gap {gap:?}");
+    }
+}
+
+// Written callable classification and lexical targets do not assert elaboration.
+fn written_callable_reference(
+    document: &rootlight_ir::NormalizedIrDocument,
+    start: u64,
+    end: u64,
+) -> &rootlight_ir::OccurrenceRecord {
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == end
+        })
+        .collect();
+    assert_eq!(sites.len(), 1);
+    sites[0]
+}
+
+#[test]
+fn written_formals_and_direct_lambda_classify_callables_without_promoting_values_or_quantifiers() {
+    let source = "Definition scalar := 0.\nDefinition quantified := forall (A : Set), A -> A.\nDefinition lambda := fun x => x.\nDefinition choose (n : nat) : nat := match n with | O => O | S m => m end.\nDefinition renamed {A} (x : A) : A := x.\n";
+    let output = certificate_output(source);
+    for name in ["lambda", "choose", "renamed"] {
+        named_definition(output.document(), name, EntityKind::Function);
+    }
+    for name in ["scalar", "quantified"] {
+        named_definition(output.document(), name, EntityKind::Constant);
+    }
+    assert!(
+        output
+            .document()
+            .entities
+            .iter()
+            .all(|entity| !matches!(entity.canonical_name.as_str(), "A" | "n" | "x" | "m"))
+    );
+    assert!(output.document().skipped_regions.iter().any(|gap| gap.detail == "coq-term-and-module-binder-entities-and-lifetime-unavailable"));
+    assert!(
+        output
+            .document()
+            .relations
+            .iter()
+            .all(|relation| relation.predicate != RelationPredicate::Calls)
+    );
+}
+
+#[test]
+fn direct_application_targets_require_an_earlier_unique_callable_and_unshadowed_closed_environment()
+{
+    let source =
+        "Definition renamed (x : nat) : nat := x. Definition owned (y : nat) : nat := renamed y.\n";
+    let output = certificate_output(source);
+    let definition = named_definition(output.document(), "renamed", EntityKind::Function);
+    let OccurrenceTarget::Resolved { symbol } = definition.target else {
+        panic!("written target")
+    };
+    let start = u64::try_from(source.rfind("renamed").unwrap()).unwrap();
+    assert_eq!(
+        written_callable_reference(output.document(), start, start + 7).target,
+        OccurrenceTarget::Resolved { symbol }
+    );
+    for source in [
+        "Require Import Other. Definition target (x : nat) := x. Definition owned (y : nat) := target y.",
+        "Section S. Definition target (x : nat) := x. Definition owned (y : nat) := target y. End S.",
+        "Definition target (x : nat) := x. Definition owned (target : nat) := target 0.",
+        "Definition target (x : nat) := x. Definition target (x : nat) := x. Definition owned (y : nat) := target y.",
+        "Definition owned (y : nat) := target y. Definition target (x : nat) := x.",
+        "Definition target := 0. Definition owned (y : nat) := target y.",
+        "Fixpoint target (x : nat) := x. Definition owned (y : nat) := target y.",
+        "Definition target (x : nat) := x. Definition owned (y : nat) := let target := y in target 0.",
+        "Definition target (x : nat) := x. Definition owned (y : nat) := (fun target => target y) target.",
+    ] {
+        let output = certificate_output(source);
+        assert!(
+            output
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Reference)
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+            "{source}"
+        );
+        assert!(
+            output.document().relations.iter().all(|edge| !matches!(
+                edge.predicate,
+                RelationPredicate::Calls | RelationPredicate::RefersTo
+            )),
+            "{source}"
+        );
+        assert!(
+            output
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail
+                    == "coq-name-resolution-and-implicit-argument-elaboration-unavailable"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn callable_original_required_artifact_exact_and_one_less_preserve_current_generation_and_source() {
+    let fixture = Fixture::new(COQ, WRITTEN_CALLABLE_ORIGINAL);
+    let native = Arc::new(provider());
+    let frontend = analyzer(&native, COQ);
+    let wide = limits();
+    let input = request(&fixture.snapshot, &fixture.source, COQ, &wide);
+    let required = native
+        .required_syntax_fact_count(&input.to_parse_request(), &deadline())
+        .unwrap();
+    assert!(required > 4);
+    let exact = limits_with_syntax_records(required);
+    let input = request(&fixture.snapshot, &fixture.source, COQ, &exact);
+    let (output, artifact) = frontend
+        .analyze_and_capture(
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    assert!(matches!(
+        written_callable_reference(output.document(), 1656, 1659).target,
+        OccurrenceTarget::Resolved { .. }
+    ));
+    let next = fixture.next_generation();
+    let input = request(&next.snapshot, &next.source, COQ, &exact);
+    let reused = frontend
+        .analyze_from_artifact(
+            &input,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let fresh = analyze(&frontend, &input, &ExtensionSupport::default());
+    assert_eq!(reused.document(), fresh.document());
+    assert!(
+        reused
+            .document()
+            .occurrences
+            .iter()
+            .all(|site| site.source.generation() == next.source.generation())
+    );
+    let below = limits_with_syntax_records(required - 1);
+    let input = request(&fixture.snapshot, &fixture.source, COQ, &below);
+    for error in [
+        frontend.prepare_artifact(&input, &deadline()).unwrap_err(),
+        rootlight_adapter_sdk::execute_parse(
+            native.as_ref(),
+            &input.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, AdapterError::Sink(SinkError::StreamLimit { resource: ResourceKind::RequiredSyntaxFacts, observed, limit }) if observed == required && limit == required - 1),
+            "{error:?}"
+        );
+    }
+    let changed = fixture.rewrite(&[WRITTEN_CALLABLE_ORIGINAL, b" "].concat());
+    let mismatch = frontend
+        .analyze_from_artifact(
+            &request(&changed.snapshot, &changed.source, COQ, &wide),
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(mismatch, AdapterError::ProviderFailed { code } if code.as_str() == "treesitter-structural-artifact-mismatch")
+    );
+}
+
+fn validate_written_callable_original(
+    result: &AnalysisOutput,
+    source: &[u8],
+    encoding: &str,
+    coordinate: impl Fn(usize) -> u64,
+) {
+    let document = result.document();
+    validate_ir_document(document, limits().ir(), &ExtensionSupport::default()).unwrap();
+    assert_ne!(
+        result.report().coverage().status(),
+        CoverageStatus::Complete
+    );
+    let mut certified_references = Vec::new();
+    for (owner_name, owner_start, owner_end, target_name, target_start, target_end, start, end) in [
+        ("v0", 1622, 1624, "var", 1226, 1229, 1656, 1659),
+        ("v1", 1678, 1680, "var", 1226, 1229, 1723, 1726),
+        ("v2", 1750, 1752, "var", 1226, 1229, 1806, 1809),
+        ("v3", 1838, 1840, "var", 1226, 1229, 1905, 1908),
+        ("v4", 1942, 1944, "var", 1226, 1229, 2020, 2023),
+        ("test", 2062, 2066, "lam", 1319, 1322, 2113, 2116),
+    ] {
+        assert_eq!(
+            &WRITTEN_CALLABLE_ORIGINAL[owner_start..owner_end],
+            owner_name.as_bytes()
+        );
+        assert_eq!(
+            &WRITTEN_CALLABLE_ORIGINAL[target_start..target_end],
+            target_name.as_bytes()
+        );
+        assert_eq!(
+            &WRITTEN_CALLABLE_ORIGINAL[start..end],
+            target_name.as_bytes()
+        );
+        let owner = named_definition(document, owner_name, EntityKind::Function);
+        let target = named_definition(document, target_name, EntityKind::Function);
+        assert_eq!(
+            (
+                owner.source.span().start_byte(),
+                owner.source.span().end_byte()
+            ),
+            (coordinate(owner_start), coordinate(owner_end))
+        );
+        assert_eq!(
+            (
+                target.source.span().start_byte(),
+                target.source.span().end_byte()
+            ),
+            (coordinate(target_start), coordinate(target_end))
+        );
+        let OccurrenceTarget::Resolved { symbol: owner_id } = owner.target else {
+            panic!("written callable owner");
+        };
+        let OccurrenceTarget::Resolved { symbol: target_id } = target.target else {
+            panic!("written callable target");
+        };
+        let site = written_callable_reference(document, coordinate(start), coordinate(end));
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target_id }
+        );
+        assert_eq!(site.enclosing, Some(owner_id));
+        assert_eq!(site.provenance, owner.provenance);
+        assert_eq!(site.provenance, target.provenance);
+        let edges: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+            })
+            .collect();
+        assert_eq!(edges.len(), 1);
+        let edge = edges[0];
+        assert_eq!(edge.object, RelationEndpoint::Entity(target_id));
+        assert_eq!(edge.repository, document.repository);
+        assert_eq!(edge.generation, document.generation);
+        assert_eq!(edge.provenance, site.provenance);
+        assert_eq!(edge.confidence, site.confidence);
+        assert_eq!(edge.evidence_kind, rootlight_ir::EvidenceKind::Derived);
+        assert_eq!(edge.evidence.source.as_ref(), Some(&site.source));
+        certified_references.push(site.id);
+    }
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| edge.predicate == RelationPredicate::RefersTo)
+            .count(),
+        certified_references.len()
+    );
+    assert!(document.relations.iter().all(|edge| {
+        edge.predicate == RelationPredicate::Contains
+            || (edge.predicate == RelationPredicate::RefersTo
+                && matches!(edge.subject, RelationEndpoint::Occurrence(id)
+                    if certified_references.contains(&id)))
+    }));
+    assert!(document.skipped_regions.iter().any(|gap| gap.detail
+        == "coq-elaboration-typechecking-proofchecking-and-term-binding-unavailable"));
+    for occurrence in &document.occurrences {
+        let span = occurrence.source.span();
+        let bytes = &source[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        let spelling = if encoding == "utf-8" {
+            std::str::from_utf8(bytes).unwrap().to_owned()
+        } else {
+            assert_eq!(bytes.len() % 2, 0);
+            String::from_utf16(
+                &bytes
+                    .chunks_exact(2)
+                    .map(|unit| {
+                        let unit = [unit[0], unit[1]];
+                        if encoding == "utf-16le" {
+                            u16::from_le_bytes(unit)
+                        } else {
+                            u16::from_be_bytes(unit)
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            occurrence.syntactic_text_hash,
+            content_hash(spelling.as_bytes()),
+            "{encoding}: {}",
+            occurrence.syntax_kind
+        );
+        assert_eq!(occurrence.source.content_hash(), content_hash(source));
+        assert_eq!(occurrence.source.generation(), document.generation);
+        assert_eq!(occurrence.source.repository(), document.repository);
+        assert_ne!(occurrence.role, OccurrenceRole::CallSite);
+        if occurrence.role == OccurrenceRole::Declaration {
+            assert!(matches!(
+                occurrence.syntax_kind.as_str(),
+                "coq.declared_instance_name.definition"
+                    | "coq.record_field_name.definition"
+                    | "coq.class_field_name.definition"
+            ));
+            assert!(matches!(
+                occurrence.target,
+                OccurrenceTarget::Resolved { .. }
+            ));
+        } else if occurrence.role != OccurrenceRole::Definition {
+            if certified_references.contains(&occurrence.id) {
+                assert_eq!(occurrence.role, OccurrenceRole::Reference);
+                assert!(matches!(
+                    occurrence.target,
+                    OccurrenceTarget::Resolved { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    occurrence.target,
+                    OccurrenceTarget::Unresolved { .. }
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn written_callable_original_bom_and_utf16_retain_physical_reference_and_definition_coordinates() {
+    let plain = std::str::from_utf8(WRITTEN_CALLABLE_ORIGINAL).unwrap();
+    for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+        let encode = |text: &str| -> Vec<u8> {
+            let text = format!("\u{feff}{text}");
+            if encoding == "utf-8" {
+                return text.into_bytes();
+            }
+            text.encode_utf16()
+                .flat_map(|unit| {
+                    if encoding == "utf-16le" {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect()
+        };
+        let bytes = encode(plain);
+        let fixture = Fixture::new(COQ, &bytes);
+        let native = Arc::new(provider());
+        let budget = limits();
+        let input = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            language(COQ),
+            EncodingId::new(encoding).unwrap(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            build_context(),
+            &budget,
+        )
+        .unwrap()
+        .with_generated_status(false);
+        let output = analyze(
+            &analyzer(&native, COQ),
+            &input,
+            &ExtensionSupport::default(),
+        );
+        validate_written_callable_original(&output, &bytes, encoding, |at| {
+            u64::try_from(encode(&plain[..at]).len()).unwrap()
+        });
+        let target = named_definition(output.document(), "var", EntityKind::Function);
+        let expected_definition = (
+            u64::try_from(encode(&plain[..1226]).len()).unwrap(),
+            u64::try_from(encode(&plain[..1229]).len()).unwrap(),
+        );
+        assert_eq!(
+            (
+                target.source.span().start_byte(),
+                target.source.span().end_byte()
+            ),
+            expected_definition
+        );
+        let start = u64::try_from(encode(&plain[..1656]).len()).unwrap();
+        let end = u64::try_from(encode(&plain[..1659]).len()).unwrap();
+        let site = written_callable_reference(output.document(), start, end);
+        assert_eq!(site.target, target.target);
+        assert_eq!(site.source.content_hash(), content_hash(&bytes));
+        assert_eq!(site.source.repository(), fixture.source.repository());
+        assert_eq!(site.source.generation(), fixture.source.generation());
+    }
+}
+
+#[test]
+fn callable_binding_requires_singular_raw_root_context_header_declaration_definition_and_marker() {
+    use rootlight_adapter_sdk::{SyntaxFact, SyntaxFactKind, testkit::MockParseProvider};
+    let native = provider();
+    let fixture = Fixture::new(COQ, WRITTEN_CALLABLE_ORIGINAL);
+    let budget = limits();
+    let input = request(&fixture.snapshot, &fixture.source, COQ, &budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &native,
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let replay = |facts| {
+        let parser = MockParseProvider::new(
+            native.capabilities().clone(),
+            facts,
+            parsed.diagnostics().to_vec(),
+            parsed.report().coverage().clone(),
+        );
+        let frontend = TreeSitterAnalyzer::new(
+            Arc::new(parser),
+            ProducerIdentity::new(
+                "coq-written-replay",
+                "1",
+                content_hash(b"coq-written-replay"),
+            )
+            .unwrap(),
+            language(COQ),
+            COQ.frontend,
+            content_hash(b"coq-written-replay-binary"),
+        )
+        .unwrap();
+        execute_analysis(
+            &frontend,
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap()
+    };
+    let baseline = replay(parsed.facts().to_vec());
+    assert!(matches!(
+        written_callable_reference(baseline.document(), 1656, 1659).target,
+        OccurrenceTarget::Resolved { .. }
+    ));
+    let modules: Vec<_> = baseline
+        .document()
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Module)
+        .collect();
+    assert_eq!(modules.len(), 1);
+    for name in ["var", "v0"] {
+        let definition = named_definition(baseline.document(), name, EntityKind::Function);
+        let OccurrenceTarget::Resolved { symbol } = definition.target else {
+            panic!("written callable definition");
+        };
+        let entity = baseline
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(entity.container, Some(ContainerRef::Entity(modules[0].id)));
+    }
+    for (label, start) in [
+        ("coq.proof_checking.signature", 0),
+        ("coq.written_target.signature", 1215),
+        ("coq.written_header.signature", 1215),
+        ("coq.written_header.signature", 1611),
+        ("coq.written_callable.declaration", 1215),
+        ("coq.name.definition", 1226),
+    ] {
+        for duplicate in [false, true] {
+            let mut facts = parsed.facts().to_vec();
+            let selected: Vec<_> = facts
+                .iter()
+                .filter(|fact| {
+                    fact.syntax_kind().as_str() == label
+                        && fact.span().start_byte() == start
+                        && (label != "coq.written_target.signature"
+                            || fact.span().end_byte() == 1659)
+                })
+                .cloned()
+                .collect();
+            assert_eq!(selected.len(), 1, "baseline witness {label}:{start}");
+            let witness = &selected[0];
+            if duplicate {
+                facts.push(SyntaxFact::new(
+                    facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1,
+                    witness.parent(),
+                    witness.kind(),
+                    witness.span(),
+                    witness.depth(),
+                    witness.syntax_kind().clone(),
+                ));
+            } else {
+                facts.retain(|fact| fact.local_id() != witness.local_id());
+                if witness.kind() == SyntaxFactKind::Declaration {
+                    for fact in &mut facts {
+                        if fact.parent() == Some(witness.local_id()) {
+                            *fact = SyntaxFact::new(
+                                fact.local_id(),
+                                witness.parent(),
+                                fact.kind(),
+                                fact.span(),
+                                fact.depth(),
+                                fact.syntax_kind().clone(),
+                            );
+                        }
+                    }
+                }
+            }
+            let output = replay(facts);
+            assert!(
+                matches!(
+                    written_callable_reference(output.document(), 1656, 1659).target,
+                    OccurrenceTarget::Unresolved { .. }
+                ),
+                "{label} duplicate={duplicate}"
+            );
+            assert!(
+                output
+                    .document()
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail
+                        == "coq-name-resolution-and-implicit-argument-elaboration-unavailable")
+            );
+        }
+    }
+    let root = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.syntax_kind().as_str() == "coq.source_file.root")
+        .unwrap();
+    let module = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.syntax_kind().as_str() == "coq.file.module")
+        .unwrap();
+    let context = parsed
+        .facts()
+        .iter()
+        .find(|fact| fact.syntax_kind().as_str() == "coq.proof_checking.signature")
+        .unwrap();
+    for mutant in 0..4 {
+        let mut facts = parsed.facts().to_vec();
+        match mutant {
+            0 | 1 => facts.push(SyntaxFact::new(
+                facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1,
+                module.parent(),
+                module.kind(),
+                module.span(),
+                module.depth(),
+                if mutant == 0 {
+                    module.syntax_kind().clone()
+                } else {
+                    rootlight_adapter_sdk::SyntaxKindLabel::new("foreign.file.module").unwrap()
+                },
+            )),
+            2 | 3 => {
+                let witness = if mutant == 2 { module } else { context };
+                let selected = facts
+                    .iter_mut()
+                    .find(|fact| fact.local_id() == witness.local_id())
+                    .unwrap();
+                *selected = SyntaxFact::new(
+                    witness.local_id(),
+                    if mutant == 2 {
+                        witness.parent()
+                    } else {
+                        Some(root.local_id())
+                    },
+                    witness.kind(),
+                    witness.span(),
+                    witness.depth(),
+                    if mutant == 2 {
+                        rootlight_adapter_sdk::SyntaxKindLabel::new("foreign.file.module").unwrap()
+                    } else {
+                        witness.syntax_kind().clone()
+                    },
+                );
+            }
+            _ => unreachable!(),
+        }
+        let output = replay(facts);
+        assert!(
+            matches!(
+                written_callable_reference(output.document(), 1656, 1659).target,
+                OccurrenceTarget::Unresolved { .. }
+            ),
+            "module/context mutant {mutant}"
+        );
+        assert!(
+            output
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail
+                    == "coq-name-resolution-and-implicit-argument-elaboration-unavailable")
+        );
+    }
 }

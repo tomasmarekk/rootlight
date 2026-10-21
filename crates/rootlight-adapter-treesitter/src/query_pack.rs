@@ -26,15 +26,19 @@ pub(crate) mod c;
 mod c_calls;
 mod c_formal_reads;
 mod c_parameters;
+mod c_variables;
 mod capnp;
 #[cfg(test)]
 mod capture_step_tests;
+mod chapel;
 mod clojure;
 mod cmake;
 mod cobol;
 mod common_lisp;
 mod coq;
+mod cpp_const_formals;
 mod crystal;
+mod csharp_formals;
 mod cue;
 mod d;
 mod dart;
@@ -47,7 +51,9 @@ mod fish;
 mod fortran;
 mod fortran_calls;
 mod fsharp;
+mod gdscript;
 mod glsl;
+mod go_calls;
 mod go_formal_reads;
 mod go_parameters;
 mod graphql;
@@ -58,12 +64,24 @@ mod haxe;
 mod hcl;
 mod hdl;
 mod hlsl;
+pub(crate) mod identity_refusal;
+#[cfg(test)]
+mod identity_refusal_tests;
+mod php_this_calls;
+pub use identity_refusal::NativeIdentityRefusalDetails;
+use identity_refusal::{IdentityRefusal, RefusalOrigin};
+mod coffeescript;
+mod dockerfile;
+mod idris;
+mod java_local_receivers;
 mod java_parameters;
 mod json_schema;
 mod jsx;
 mod julia;
+mod lean;
 mod markdown;
 mod matlab;
+mod meson;
 mod modelica;
 mod mojo;
 mod nim;
@@ -75,8 +93,11 @@ mod perl;
 mod plsql;
 mod pony;
 mod powershell;
+mod powershell_formals;
 mod protobuf;
+mod pug;
 mod python_parameters;
+mod python_variables;
 mod qml;
 mod qsharp;
 mod r;
@@ -85,7 +106,9 @@ mod ring;
 mod rust;
 mod sas;
 mod scala;
+mod scala_formals;
 mod scheme;
+mod sed;
 mod sml_wat;
 mod sql;
 mod sql_admission;
@@ -96,6 +119,7 @@ pub(super) mod vba;
 mod vba_calls;
 mod vhdl;
 mod wgsl;
+mod wolfram;
 mod xml;
 mod yaml;
 mod zig;
@@ -431,6 +455,28 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Idris {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+        }
+
+        if family == GrammarFamily::Sed {
+            expected.retain(|name| {
+                matches!(
+                    *name,
+                    "root"
+                        | "module"
+                        | "declaration"
+                        | "definition"
+                        | "reference"
+                        | "signature"
+                        | "comment"
+                        | "string"
+                )
+            });
+        }
+        if matches!(family, GrammarFamily::Wolfram | GrammarFamily::Lean) {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+        }
         if native_family == GrammarFamily::JavaScript
             && matches!(
                 family,
@@ -448,6 +494,9 @@ impl QueryPack {
         }
         if family == GrammarFamily::Capnp {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+        }
+        if matches!(family, GrammarFamily::Scala | GrammarFamily::PowerShell) {
+            expected.push("expression");
         }
         if family == GrammarFamily::Coq {
             expected.retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
@@ -543,6 +592,14 @@ impl QueryPack {
         if family.is_json() || family == GrammarFamily::Toml {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
         }
+        if family == GrammarFamily::Pug {
+            expected.retain(|name| {
+                !matches!(
+                    *name,
+                    "call" | "import" | "reference" | "scope" | "documentation"
+                )
+            });
+        }
         if family == GrammarFamily::Yaml {
             expected.retain(|name| !matches!(*name, "call" | "import"));
         }
@@ -587,7 +644,10 @@ impl QueryPack {
         }
         if matches!(
             family,
-            GrammarFamily::Qsharp
+            GrammarFamily::Coffeescript
+                | GrammarFamily::Gdscript
+                | GrammarFamily::Chapel
+                | GrammarFamily::Qsharp
                 | GrammarFamily::StandardMl
                 | GrammarFamily::Wat
                 | GrammarFamily::Mojo
@@ -598,6 +658,22 @@ impl QueryPack {
         ) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
             expected.push("expression");
+        }
+        if family == GrammarFamily::Dockerfile {
+            expected.retain(|name| {
+                !matches!(
+                    *name,
+                    "call" | "import" | "documentation" | "module" | "scope" | "string"
+                )
+            });
+        }
+        if family == GrammarFamily::Meson {
+            expected.retain(|name| {
+                !matches!(
+                    *name,
+                    "call" | "import" | "documentation" | "module" | "scope"
+                )
+            });
         }
         if family == GrammarFamily::Wat {
             expected.retain(|name| *name != "module");
@@ -694,7 +770,12 @@ impl QueryPack {
                 .iter()
                 .zip(&roles_by_capture)
                 .any(|(quantifier, role)| {
-                    *quantifier != CaptureQuantifier::Zero && role.belongs_to_identity_closure()
+                    *quantifier != CaptureQuantifier::Zero
+                        && (role.belongs_to_identity_closure()
+                            // Source-certified references remain mandatory even when
+                            // their native pattern has no declaration capture.
+                            || (matches!(family, GrammarFamily::Dockerfile | GrammarFamily::Sed | GrammarFamily::Idris)
+                                && *role == StructuralRole::Reference))
                 });
             if has_identity_capture {
                 optional_query.disable_pattern(pattern);
@@ -739,6 +820,7 @@ impl QueryPack {
             max_facts,
             cancellation,
             None,
+            None,
         )
     }
 
@@ -755,6 +837,7 @@ impl QueryPack {
         max_facts: usize,
         cancellation: &Cancellation,
         identity_limit: Option<&mut Option<IntrinsicIdentityMatchLimit>>,
+        identity_refusal: Option<&mut Option<IdentityRefusal>>,
     ) -> Result<QueryExtraction, AdapterError> {
         cancellation.check()?;
         let identity_limits = identity_scan_limits(max_nodes);
@@ -765,6 +848,7 @@ impl QueryPack {
             max_nodes,
             cancellation,
             identity_limit,
+            identity_refusal,
         )?;
 
         let budgeted_matches = max_facts.saturating_mul(QUERY_MATCHES_PER_RETAINED_FACT);
@@ -845,9 +929,13 @@ impl QueryPack {
         max_nodes: usize,
         cancellation: &Cancellation,
     ) -> Result<Vec<QueryCandidate>, AdapterError> {
-        self.extract_identity_with_limit(family, tree, source, max_nodes, cancellation, None)
+        self.extract_identity_with_limit(family, tree, source, max_nodes, cancellation, None, None)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "legacy and current native refusal witnesses remain distinct"
+    )]
     fn extract_identity_with_limit(
         &self,
         family: GrammarFamily,
@@ -856,11 +944,14 @@ impl QueryPack {
         max_nodes: usize,
         cancellation: &Cancellation,
         identity_limit: Option<&mut Option<IntrinsicIdentityMatchLimit>>,
+        identity_refusal: Option<&mut Option<IdentityRefusal>>,
     ) -> Result<Vec<QueryCandidate>, AdapterError> {
         cancellation.check()?;
         let limits = identity_scan_limits(max_nodes);
         let mut candidates = Vec::new();
-        let limit = self.scan_query(
+        let mut refusal = None;
+        let mut candidate_refusal = None;
+        let scan = self.scan_query_with_refusal(
             &self.identity_query,
             QueryInput {
                 family,
@@ -871,7 +962,52 @@ impl QueryPack {
             },
             limits,
             |mut candidate| {
-                if candidate.role.belongs_to_identity_closure()
+                if (family == GrammarFamily::Dockerfile
+                    && candidate.required
+                    && candidate.role == StructuralRole::Reference
+                    && candidate.syntax == "dockerfile.copy_from")
+                    || (family == GrammarFamily::Meson
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "meson.adjacent_iterable")
+                    || (family == GrammarFamily::Lean
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "lean.formal_body")
+                    || candidate.role.belongs_to_identity_closure()
+                    || (family == GrammarFamily::Idris
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && matches!(
+                            candidate.syntax,
+                            "idris.own_body_global" | "idris.unproved_name"
+                        ))
+                    || (family == GrammarFamily::Sed
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && matches!(
+                            candidate.syntax,
+                            "sed.written_branch" | "sed.unproved_branch"
+                        ))
+                    || (family == GrammarFamily::Python
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "python.module_read")
+                    || (family == GrammarFamily::Glsl
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && matches!(
+                            candidate.syntax,
+                            "glsl.formal_value" | "glsl.direct_file_function"
+                        ))
+                    || (family == GrammarFamily::StandardMl
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "sml.own_function_call")
+                    || (family == GrammarFamily::Wolfram
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "wolfram.formal_argument")
                     || (family == GrammarFamily::Qsharp
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -886,14 +1022,55 @@ impl QueryPack {
                             candidate.syntax,
                             "mojo.self_field_read" | "mojo.self_method_call"
                         ))
+                    || (family == GrammarFamily::Php
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "php.this_method")
                     || (family == GrammarFamily::Go
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
-                        && candidate.syntax == "go.call_formal")
+                        && matches!(
+                            candidate.syntax,
+                            "go.call_formal" | "go.direct_file_function"
+                        ))
+                    || (family == GrammarFamily::Chapel
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "chapel.formal_initializer")
+                    || (family == GrammarFamily::Java
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "java.local_receiver")
+                    || (family == GrammarFamily::PowerShell
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "powershell.formal_value")
+                    || (family == GrammarFamily::CSharp
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "csharp.formal_receiver")
+                    || (family == GrammarFamily::Cpp
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "cpp.const_formal_receiver")
+                    || (family == GrammarFamily::Scala
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "scala.ordinary_formal")
+                    || (family == GrammarFamily::Ocaml
+                        && candidate.required
+                        && matches!(
+                            candidate.role,
+                            StructuralRole::Reference | StructuralRole::Call
+                        )
+                        && matches!(
+                            candidate.syntax,
+                            "ocaml.match_formal" | "ocaml.direct_file_call"
+                        ))
                     || (family == GrammarFamily::C
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
-                        && candidate.syntax == "c.formal_value")
+                        && matches!(candidate.syntax, "c.formal_value" | "c.written_variable"))
                     || (family == GrammarFamily::Hare
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -931,11 +1108,39 @@ impl QueryPack {
                                 | GrammarFamily::Yaml
                                 | GrammarFamily::FSharp
                         );
+                    if candidates.len() >= limits.captures {
+                        let event = IdentityRefusal::candidates(candidates.len(), limits.captures);
+                        candidate_refusal = Some(event);
+                        return Err(event.error());
+                    }
                     push_candidate_fallible(&mut candidates, candidate, limits.captures)?;
                 }
                 Ok(())
             },
-        )?;
+            Some(&mut refusal),
+        );
+        let limit = match scan {
+            Ok(limit) => limit,
+            Err(error) => {
+                if let Some(event) = candidate_refusal
+                    && event.matches_error(&error)
+                    && limits.captures == HARD_MAX_QUERY_CAPTURES
+                    && let Some(witness) = identity_refusal
+                {
+                    *witness = Some(event);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(event) = refusal {
+            if limits.captures == HARD_MAX_QUERY_CAPTURES
+                && limits.body_nodes == usize::MAX
+                && let Some(witness) = identity_refusal
+            {
+                *witness = Some(event);
+            }
+            return Err(event.error());
+        }
         if let Some(limit) = limit {
             if limit == QueryLimit::Match
                 && limits.matches == HARD_MAX_QUERY_MATCHES
@@ -957,10 +1162,24 @@ impl QueryPack {
         query: &Query,
         input: QueryInput<'_>,
         limits: QueryScanLimits,
+        retain: impl FnMut(QueryCandidate) -> Result<(), AdapterError>,
+    ) -> Result<Option<QueryLimit>, AdapterError> {
+        self.scan_query_with_refusal(query, input, limits, retain, None)
+    }
+
+    fn scan_query_with_refusal(
+        &self,
+        query: &Query,
+        input: QueryInput<'_>,
+        limits: QueryScanLimits,
         mut retain: impl FnMut(QueryCandidate) -> Result<(), AdapterError>,
+        witness: Option<&mut Option<IdentityRefusal>>,
     ) -> Result<Option<QueryLimit>, AdapterError> {
         let mut match_count = 0usize;
         let mut capture_count = 0usize;
+        let mut native_matches = 0usize;
+        let mut native_captures = 0usize;
+        let mut refusal = None;
         let mut vba_calls = vba_calls::Calls::default();
         if input.normalize_calls && input.family.is_classic_basic() {
             let limit = vba_calls.discover(
@@ -1007,11 +1226,26 @@ impl QueryPack {
         let c_included_ranges = c_dialect.map(|_| input.tree.included_ranges());
         let complete_file_input = matches!(input.tree.included_ranges().as_slice(), [range]
             if range.start_byte == 0 && range.end_byte >= input.source.len());
+        let mut python_variables = python_variables::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
         let mut python_parameter_reads = python_parameters::CaptureCache::new(
             input.source,
             limits.captures.min(limits.body_nodes),
             matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
+        let mut php_this_calls = php_this_calls::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
+        let mut go_calls = go_calls::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
         );
         let mut go_formal_reads = go_formal_reads::CaptureCache::new(
             input.source,
@@ -1019,7 +1253,39 @@ impl QueryPack {
             matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()),
         );
+        let mut cpp_const_formals = cpp_const_formals::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
+        let mut powershell_formals = powershell_formals::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
+        let mut csharp_formals = csharp_formals::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
+        let mut scala_formals = scala_formals::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            matches!(input.tree.included_ranges().as_slice(), [range]
+                if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
+        let mut c_variables = c_variables::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
         let mut c_formal_reads = c_formal_reads::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            matches!(input.tree.included_ranges().as_slice(), [range]
+                if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
+        let mut java_local_receivers = java_local_receivers::CaptureCache::new(
             input.source,
             limits.captures.min(limits.body_nodes),
             matches!(input.tree.included_ranges().as_slice(), [range]
@@ -1051,7 +1317,10 @@ impl QueryPack {
                 if range.start_byte == 0 && range.end_byte >= input.source.len()));
         let mut assembly_captures =
             assembly::CaptureCache::new(limits.captures.min(limits.body_nodes));
-        let mut glsl_captures = glsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut glsl_captures = glsl::CaptureCache::new_with_source_frame(
+            limits.captures.min(limits.body_nodes),
+            matches!(input.tree.included_ranges().as_slice(), [range] if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
         let mut hlsl_captures = hlsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut wgsl_captures = wgsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut xml_captures = xml::CaptureCache::new(limits.captures.min(limits.body_nodes));
@@ -1075,6 +1344,55 @@ impl QueryPack {
             limits.body_nodes,
             matches!(input.tree.included_ranges().as_slice(), [range] if range.start_byte == 0 && range.end_byte >= input.source.len()),
         );
+        let mut dockerfile_captures = dockerfile::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut wolfram_captures = wolfram::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut idris_captures = idris::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut sed_captures = sed::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut lean_captures = lean::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut pug_captures = pug::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut coffeescript_captures = coffeescript::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut meson_captures = meson::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut gdscript_captures = gdscript::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            matches!(input.tree.included_ranges().as_slice(), [range] if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
         let mut qml_captures = qml::CaptureCache::new(input.source, limits.body_nodes);
         let mut fortran_calls =
             fortran_calls::CaptureCache::new(input.source, limits.body_nodes.min(limits.captures));
@@ -1088,6 +1406,11 @@ impl QueryPack {
             limits.body_nodes.min(limits.captures),
             matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
+        let mut chapel_captures = chapel::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
         );
         let mut sml_captures = sml_wat::CaptureCache::new(
             input.source,
@@ -1128,7 +1451,9 @@ impl QueryPack {
         let mut v_captures = v::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut rust_captures = rust::CaptureCache::default();
         let mut eiffel_captures = eiffel::CaptureCache::new(limits.captures.min(limits.body_nodes));
-        let mut ocaml_captures = ocaml::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut ocaml_captures = ocaml::CaptureCache::new(limits.captures.min(limits.body_nodes))
+            .with_complete_context(matches!(input.tree.included_ranges().as_slice(), [range]
+                if range.start_byte == 0 && range.end_byte >= input.source.len()));
         // A full-extent root can still omit bytes between included ranges, while
         // standalone roots may exclude leading or trailing trivia from their span.
         let fsharp_complete_source = !input.normalize_calls
@@ -1153,14 +1478,24 @@ impl QueryPack {
             match_count = match_count
                 .checked_add(1)
                 .ok_or_else(|| query_failure("query-match-accounting"))?;
+            native_matches = native_matches
+                .checked_add(1)
+                .ok_or_else(|| query_failure("query-native-match-accounting"))?;
             for capture in query_match.captures {
                 if capture_count >= limits.captures {
+                    refusal = Some(IdentityRefusal::capture_slots(
+                        capture_count,
+                        limits.captures,
+                    ));
                     limit = Some(QueryLimit::Capture);
                     break 'query;
                 }
                 capture_count = capture_count
                     .checked_add(1)
                     .ok_or_else(|| query_failure("query-capture-accounting"))?;
+                native_captures = native_captures
+                    .checked_add(1)
+                    .ok_or_else(|| query_failure("query-native-capture-accounting"))?;
                 let role = self
                     .role_for_capture(capture.index)
                     .ok_or_else(|| query_failure("query-capture-role"))?;
@@ -1210,6 +1545,7 @@ impl QueryPack {
                         &mut clojure_captures,
                     )?;
                     if clojure_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::ClojureCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1227,6 +1563,7 @@ impl QueryPack {
                         &mut racket_captures,
                     )?;
                     if racket_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::RacketCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1240,6 +1577,7 @@ impl QueryPack {
                         )?)?;
                     }
                     if racket_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::RacketCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1287,6 +1625,24 @@ impl QueryPack {
                         &mut json_schema_captures,
                     )?;
                     if json_schema_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::JsonSchemaCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Chapel {
+                    let candidate = chapel::candidate(
+                        capture.node,
+                        role,
+                        input.cancellation,
+                        &mut chapel_captures,
+                    )?;
+                    if chapel_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::ChapelCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1304,6 +1660,7 @@ impl QueryPack {
                         &mut sml_captures,
                     )?;
                     if sml_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::SmlCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1321,6 +1678,156 @@ impl QueryPack {
                         &mut wat_captures,
                     )?;
                     if wat_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::WatCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Dockerfile {
+                    let candidate = dockerfile::candidate(
+                        capture.node,
+                        role,
+                        input.cancellation,
+                        &mut dockerfile_captures,
+                    )?;
+                    if dockerfile_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::DockerCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Idris {
+                    let candidate = idris::candidate(
+                        capture.node,
+                        role,
+                        input.cancellation,
+                        &mut idris_captures,
+                    )?;
+                    if idris_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::IdrisCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Sed {
+                    let candidate =
+                        sed::candidate(capture.node, role, input.cancellation, &mut sed_captures)?;
+                    if sed_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::SedCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Wolfram {
+                    let candidate = wolfram::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut wolfram_captures,
+                    )?;
+                    if wolfram_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::WolframCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Lean {
+                    let candidate = lean::candidate(
+                        capture.node,
+                        role,
+                        input.cancellation,
+                        &mut lean_captures,
+                    )?;
+                    if lean_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::LeanCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Pug {
+                    let candidate =
+                        pug::candidate(capture.node, role, input.cancellation, &mut pug_captures)?;
+                    if pug_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::PugCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Coffeescript {
+                    let candidate = coffeescript::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut coffeescript_captures,
+                    )?;
+                    if coffeescript_captures.exhausted() {
+                        refusal =
+                            Some(IdentityRefusal::helper(RefusalOrigin::CoffeescriptCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Meson {
+                    let candidate = meson::candidate(
+                        capture.node,
+                        role,
+                        input.cancellation,
+                        &mut meson_captures,
+                    )?;
+                    if meson_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::MesonCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Gdscript {
+                    let candidate = gdscript::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut gdscript_captures,
+                    )?;
+                    if gdscript_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::GdscriptCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1338,6 +1845,7 @@ impl QueryPack {
                         &mut qsharp_captures,
                     )?;
                     if qsharp_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::QsharpCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1355,6 +1863,7 @@ impl QueryPack {
                         &mut mojo_captures,
                     )?;
                     if mojo_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::MojoCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1372,6 +1881,7 @@ impl QueryPack {
                         &mut haxe_captures,
                     )?;
                     if haxe_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::HaxeCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1389,6 +1899,7 @@ impl QueryPack {
                         &mut qml_captures,
                     )?;
                     if qml_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::QmlCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1406,6 +1917,7 @@ impl QueryPack {
                         &mut hare_captures,
                     )?;
                     if hare_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::HareCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1423,6 +1935,7 @@ impl QueryPack {
                         &mut ring_captures,
                     )?;
                     if ring_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::RingCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1440,6 +1953,7 @@ impl QueryPack {
                         &mut modelica_captures,
                     )?;
                     if modelica_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::ModelicaCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1479,6 +1993,7 @@ impl QueryPack {
                         &mut crystal_captures,
                     )?;
                     if crystal_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CrystalCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1496,6 +2011,7 @@ impl QueryPack {
                         &mut pony_captures,
                     )?;
                     if pony_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::PonyCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1513,6 +2029,7 @@ impl QueryPack {
                         &mut fish_captures,
                     )?;
                     if fish_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::FishCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1541,6 +2058,7 @@ impl QueryPack {
                         &mut vhdl_captures,
                     )?;
                     if vhdl_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::VhdlCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1558,10 +2076,11 @@ impl QueryPack {
                         &mut coq_captures,
                     )?;
                     if coq_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CoqCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
-                    let reference = coq::notation_reference_candidate(
+                    let reference = coq::required_reference_candidate(
                         capture.node,
                         role,
                         input.cancellation,
@@ -1579,6 +2098,23 @@ impl QueryPack {
                     input.family,
                     GrammarFamily::Ocaml | GrammarFamily::OcamlInterface
                 ) {
+                    let certificates = ocaml::binding_candidates(
+                        input.family,
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                        &mut ocaml_captures,
+                    )?;
+                    let specialized = certificates.iter().any(Option::is_some);
+                    for certificate in certificates.into_iter().flatten() {
+                        retain(certificate)?;
+                    }
+                    if specialized
+                        && matches!(role, StructuralRole::Reference | StructuralRole::Call)
+                    {
+                        continue;
+                    }
                     let candidate = ocaml::candidate(
                         input.family,
                         capture.node,
@@ -1588,6 +2124,7 @@ impl QueryPack {
                         &mut ocaml_captures,
                     )?;
                     if ocaml_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::OcamlCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1609,6 +2146,7 @@ impl QueryPack {
                         &mut hdl_captures,
                     )?;
                     if hdl_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::HdlCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1626,6 +2164,7 @@ impl QueryPack {
                         &mut v_captures,
                     )?;
                     if v_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::VCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1643,6 +2182,7 @@ impl QueryPack {
                         &mut eiffel_captures,
                     )?;
                     if eiffel_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::EiffelCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1660,6 +2200,7 @@ impl QueryPack {
                         &mut julia_captures,
                     )?;
                     if julia_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::JuliaCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1677,6 +2218,7 @@ impl QueryPack {
                         &mut cmake_captures,
                     )?;
                     if cmake_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CmakeCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1695,6 +2237,7 @@ impl QueryPack {
                         &mut xml_captures,
                     )?;
                     if xml_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::XmlCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1712,6 +2255,7 @@ impl QueryPack {
                         &mut wgsl_captures,
                     )?;
                     if wgsl_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::WgslCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1728,6 +2272,7 @@ impl QueryPack {
                         &mut hlsl_captures,
                     )?;
                     if hlsl_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::HlslCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1744,6 +2289,7 @@ impl QueryPack {
                         &mut glsl_captures,
                     )?;
                     if glsl_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::GlslCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1760,6 +2306,7 @@ impl QueryPack {
                         &mut assembly_captures,
                     )?;
                     if assembly_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::AssemblyCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1776,6 +2323,7 @@ impl QueryPack {
                         &mut common_lisp_captures,
                     )?;
                     if common_lisp_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CommonLispCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1792,6 +2340,7 @@ impl QueryPack {
                         &mut scheme_captures,
                     )?;
                     if scheme_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::SchemeCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1808,6 +2357,7 @@ impl QueryPack {
                         &mut pascal_captures,
                     )?;
                     if pascal_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::PascalCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1824,6 +2374,7 @@ impl QueryPack {
                         &mut apex_captures,
                     )?;
                     if apex_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::ApexCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1840,6 +2391,7 @@ impl QueryPack {
                         &mut sas_captures,
                     )?;
                     if sas_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::SasCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1856,6 +2408,7 @@ impl QueryPack {
                         &mut plsql_captures,
                     )?;
                     if plsql_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::PlsqlCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -1932,6 +2485,7 @@ impl QueryPack {
                         &mut fsharp_captures,
                     );
                     if fsharp_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::FsharpCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -2166,6 +2720,10 @@ impl QueryPack {
                         },
                     )?;
                     if generated.exhausted {
+                        refusal = Some(IdentityRefusal::generated_slots(
+                            capture_count,
+                            limits.captures,
+                        ));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -2335,6 +2893,7 @@ impl QueryPack {
                         &mut plsql_captures,
                     )
                 };
+                let candidate = candidate?;
                 if fsharp_captures.exhausted()
                     || sas_captures.exhausted()
                     || apex_captures.exhausted()
@@ -2346,17 +2905,80 @@ impl QueryPack {
                     || hlsl_captures.exhausted()
                     || wgsl_captures.exhausted()
                 {
+                    let origin = [
+                        (fsharp_captures.exhausted(), RefusalOrigin::FsharpCaptures),
+                        (sas_captures.exhausted(), RefusalOrigin::SasCaptures),
+                        (apex_captures.exhausted(), RefusalOrigin::ApexCaptures),
+                        (pascal_captures.exhausted(), RefusalOrigin::PascalCaptures),
+                        (
+                            common_lisp_captures.exhausted(),
+                            RefusalOrigin::CommonLispCaptures,
+                        ),
+                        (scheme_captures.exhausted(), RefusalOrigin::SchemeCaptures),
+                        (
+                            assembly_captures.exhausted(),
+                            RefusalOrigin::AssemblyCaptures,
+                        ),
+                        (glsl_captures.exhausted(), RefusalOrigin::GlslCaptures),
+                        (hlsl_captures.exhausted(), RefusalOrigin::HlslCaptures),
+                        (wgsl_captures.exhausted(), RefusalOrigin::WgslCaptures),
+                    ]
+                    .into_iter()
+                    .find_map(|(exhausted, origin)| exhausted.then_some(origin))
+                    .expect("the guarded helper refusal has an origin");
+                    refusal = Some(IdentityRefusal::helper(origin));
                     limit = Some(QueryLimit::Capture);
                     break 'query;
                 }
-                let mut candidate = candidate?;
+                let mut candidate = candidate;
                 canonicalize_file_root_preamble(
                     &mut candidate,
                     capture.node,
                     input.source,
                     complete_file_input,
                 );
+                if input.family == GrammarFamily::PowerShell {
+                    let keep = powershell_formals.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if powershell_formals.exhausted() {
+                        refusal = Some(IdentityRefusal::checked_helper(
+                            RefusalOrigin::PowerShellFormals,
+                            powershell_formals.initial_work(),
+                            powershell_formals.remaining_work(),
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::C {
+                    let decision = c_variables.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if c_variables.exhausted() {
+                        refusal = Some(IdentityRefusal::checked_helper(
+                            RefusalOrigin::CVariables,
+                            limits.captures.min(limits.body_nodes),
+                            c_variables.remaining_work(),
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(keep) = decision {
+                        if keep {
+                            retain(candidate)?;
+                        }
+                        continue;
+                    }
                     let keep = c_formal_reads.refine(
                         capture.node,
                         role,
@@ -2364,6 +2986,59 @@ impl QueryPack {
                         input.cancellation,
                     )?;
                     if c_formal_reads.exhausted() {
+                        refusal = Some(IdentityRefusal::checked_helper(
+                            RefusalOrigin::CFormalReads,
+                            limits.captures.min(limits.body_nodes),
+                            c_formal_reads.remaining_work(),
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::Cpp {
+                    let keep = cpp_const_formals.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if cpp_const_formals.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CppConstFormals));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::CSharp {
+                    let keep = csharp_formals.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if csharp_formals.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CsharpFormals));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::Scala {
+                    let keep = scala_formals.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if scala_formals.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::ScalaFormals));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -2372,6 +3047,23 @@ impl QueryPack {
                     }
                 }
                 if input.family == GrammarFamily::Python {
+                    let keep = python_variables.refine(
+                        input.tree.root_node(),
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if python_variables.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(
+                            RefusalOrigin::PythonModuleVariables,
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
+                    }
                     python_parameter_reads.refine(
                         capture.node,
                         role,
@@ -2379,18 +3071,50 @@ impl QueryPack {
                         input.cancellation,
                     )?;
                     if python_parameter_reads.exhausted() {
+                        refusal =
+                            Some(IdentityRefusal::helper(RefusalOrigin::PythonParameterReads));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
                 }
-                if input.family == GrammarFamily::Go {
-                    let keep = go_formal_reads.refine(
+                if input.family == GrammarFamily::Php {
+                    let keep = php_this_calls.refine(
                         capture.node,
                         role,
                         &mut candidate,
                         input.cancellation,
                     )?;
+                    if php_this_calls.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::PhpThisCalls));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if keep == Some(false) {
+                        continue;
+                    }
+                }
+                if input.family == GrammarFamily::Go {
+                    let keep = match go_calls.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )? {
+                        Some(keep) => keep,
+                        None => go_formal_reads.refine(
+                            capture.node,
+                            role,
+                            &mut candidate,
+                            input.cancellation,
+                        )?,
+                    };
+                    if go_calls.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::GoCalls));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
                     if go_formal_reads.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::GoFormalReads));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -2406,8 +3130,25 @@ impl QueryPack {
                         input.cancellation,
                     )?;
                     if java_parameter_reads.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::JavaParameterReads));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
+                    }
+                }
+                if input.family == GrammarFamily::Java {
+                    let keep = java_local_receivers.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if java_local_receivers.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::JavaLocalReceivers));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
                     }
                 }
                 if input.family == GrammarFamily::Bash && role == StructuralRole::Reference {
@@ -2415,6 +3156,7 @@ impl QueryPack {
                         candidate.syntax = syntax;
                     }
                     if bash_reads.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::BashReads));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -2424,6 +3166,7 @@ impl QueryPack {
                         candidate.syntax = "typescript.direct_module_call";
                     }
                     if typescript_calls.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::TypescriptCalls));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -2433,6 +3176,7 @@ impl QueryPack {
                         candidate.syntax = "c.direct_file_call";
                     }
                     if c_calls.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CCalls));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -2542,7 +3286,28 @@ impl QueryPack {
             input.cancellation.check()?;
         }
         input.cancellation.check()?;
-        if cursor.did_exceed_match_limit() {
+        let cursor_exceeded = cursor.did_exceed_match_limit();
+        if cursor_exceeded && refusal.is_none() {
+            refusal = Some(if limit == Some(QueryLimit::Match) {
+                IdentityRefusal::yielded_matches(match_count, limits.matches)
+            } else {
+                IdentityRefusal::cursor()
+            });
+        }
+        if let Some(mut event) = refusal {
+            // The legacy counters also charge generated candidates. Keep raw
+            // native progress separate and never invent the cursor's peak.
+            event.progress(
+                native_matches,
+                native_captures,
+                capture_count.checked_sub(native_captures),
+                cursor_exceeded,
+            );
+            if let Some(witness) = witness {
+                *witness = Some(event);
+            }
+        }
+        if cursor_exceeded {
             Ok(Some(QueryLimit::CursorMatch))
         } else {
             Ok(limit)
@@ -2697,10 +3462,11 @@ fn canonicalize_file_root_preamble(
         && !node.is_error()
         && !node.is_missing()
         && !node.has_error()
-        && matches!(
+        && (matches!(
             candidate.role,
             StructuralRole::Root | StructuralRole::Module | StructuralRole::Scope
-        )
+        ) || candidate.role == StructuralRole::Signature
+            && candidate.syntax == "rust.proof_context")
         && source.starts_with(b"\xef\xbb\xbf")
         && node.start_byte() == 3
         && node.end_byte() == source.len()
@@ -3014,6 +3780,18 @@ fn candidate_for_capture(
                 "solidity.field"
             }
         }
+        StructuralRole::Declaration
+            if family == GrammarFamily::CSharp
+                && capture.node.kind() == "variable_declarator"
+                && capture
+                    .node
+                    .parent()
+                    .filter(|node| node.kind() == "variable_declaration")
+                    .and_then(|node| node.parent())
+                    .is_some_and(|node| node.kind() == "field_declaration") =>
+        {
+            "csharp.field"
+        }
         StructuralRole::Declaration if family == GrammarFamily::R => {
             r::declaration(capture.node, source)
                 .ok_or_else(|| query_failure("query-r-declaration-kind"))?
@@ -3188,6 +3966,24 @@ fn candidate_for_capture(
             GrammarFamily::JsonSchema => {
                 return Err(query_failure("query-json-schema-unproven-call"));
             }
+            GrammarFamily::Chapel => {
+                return Err(query_failure("query-chapel-overload-proof-required"));
+            }
+            GrammarFamily::Dockerfile => {
+                return Err(query_failure("query-dockerfile-call-unproven"));
+            }
+            GrammarFamily::Idris => {
+                return Err(query_failure("query-idris-application-call-unqualified"));
+            }
+            GrammarFamily::Sed => return Err(query_failure("query-sed-call-unimplemented")),
+            GrammarFamily::Wolfram => return Err(query_failure("query-wolfram-call-unproven")),
+            GrammarFamily::Pug => return Err(query_failure("query-pug-call-unproven")),
+            GrammarFamily::Lean => return Err(query_failure("query-lean-call-unproven")),
+            GrammarFamily::Coffeescript => {
+                return Err(query_failure("query-coffeescript-call-unproven"));
+            }
+            GrammarFamily::Meson => return Err(query_failure("query-meson-call-unproven")),
+            GrammarFamily::Gdscript => return Err(query_failure("query-gdscript-call-unproven")),
             GrammarFamily::Qsharp => {
                 return Err(query_failure("query-qsharp-native-call-required"));
             }
@@ -3666,6 +4462,14 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Idris, "idris") => Some("idris.file"),
+        (GrammarFamily::Idris, "comment") => Some("idris.comment"),
+        (GrammarFamily::Idris, "string" | "raw_string" | "triple_quote_string") => {
+            Some("idris.string")
+        }
+        (GrammarFamily::Sed, "script") => Some("sed.file"),
+        (GrammarFamily::Sed, "comment") => Some("sed.comment"),
+        (GrammarFamily::Sed, "translation_string") => Some("sed.string"),
         (GrammarFamily::Markdown, "document") => Some("markdown.file"),
         (GrammarFamily::Markdown, "section") => Some("markdown.section"),
         (GrammarFamily::Markdown, "link_reference_definition") => Some("markdown.link_definition"),
@@ -3900,6 +4704,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Rust, "block_comment") => Some("rust.block_comment"),
         (GrammarFamily::Rust, "string_literal") => Some("rust.string"),
         (GrammarFamily::Python, "module") => Some("python.module"),
+        (GrammarFamily::Python, "assignment") => Some("python.module_variable"),
+        (GrammarFamily::Python, "augmented_assignment") => Some("python.augmented_assignment"),
         (GrammarFamily::Python, "function_definition") => Some("python.function"),
         (GrammarFamily::Python, "class_definition") => Some("python.class"),
         (GrammarFamily::Python, "import_statement") => Some("python.import"),
@@ -4063,6 +4869,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::C, "preproc_include") => Some("c.include"),
         (GrammarFamily::C, "function_definition") => Some("c.function"),
         (GrammarFamily::C, "declaration") => Some("c.declaration"),
+        (GrammarFamily::C, "init_declarator") => Some("c.variable"),
+        (GrammarFamily::C, "for_statement") => Some("c.for"),
         (GrammarFamily::C, "struct_specifier") => Some("c.struct"),
         (GrammarFamily::C, "union_specifier") => Some("c.union"),
         (GrammarFamily::C, "enum_specifier") => Some("c.enum"),
@@ -4094,6 +4902,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Cpp, "preproc_function_def") => Some("cpp.function_macro"),
         (GrammarFamily::Cpp, "preproc_params") => Some("cpp.preprocessor_parameters"),
         (GrammarFamily::Cpp, "preproc_if" | "preproc_ifdef") => Some("cpp.preprocessor_condition"),
+        (GrammarFamily::Cpp, "parameter_declaration") => Some("cpp.const_reference_parameter"),
         (GrammarFamily::Cpp, "parameter_list") => Some("cpp.parameters"),
         (GrammarFamily::Cpp, "template_parameter_list") => Some("cpp.template_parameters"),
         (GrammarFamily::Cpp, "compound_statement") => Some("cpp.block"),
@@ -4122,6 +4931,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::CSharp, "property_declaration") => Some("csharp.property"),
         (GrammarFamily::CSharp, "field_declaration") => Some("csharp.field"),
         (GrammarFamily::CSharp, "using_directive") => Some("csharp.using"),
+        (GrammarFamily::CSharp, "parameter") => Some("csharp.parameter"),
         (GrammarFamily::CSharp, "parameter_list") => Some("csharp.parameters"),
         (GrammarFamily::CSharp, "type_parameter_list") => Some("csharp.type_parameters"),
         (GrammarFamily::CSharp, "block") => Some("csharp.block"),
@@ -4311,6 +5121,28 @@ impl QueryPackRegistry {
                 GrammarFamily::Wat,
                 include_str!("../queries/webassembly.scm"),
             ),
+            (
+                GrammarFamily::Dockerfile,
+                include_str!("../queries/dockerfile.scm"),
+            ),
+            (
+                GrammarFamily::Coffeescript,
+                include_str!("../queries/coffeescript.scm"),
+            ),
+            (
+                GrammarFamily::Wolfram,
+                include_str!("../queries/wolfram.scm"),
+            ),
+            (GrammarFamily::Idris, include_str!("../queries/idris.scm")),
+            (GrammarFamily::Sed, include_str!("../queries/sed.scm")),
+            (GrammarFamily::Pug, include_str!("../queries/pug.scm")),
+            (GrammarFamily::Lean, include_str!("../queries/lean.scm")),
+            (GrammarFamily::Meson, include_str!("../queries/meson.scm")),
+            (GrammarFamily::Chapel, include_str!("../queries/chapel.scm")),
+            (
+                GrammarFamily::Gdscript,
+                include_str!("../queries/gdscript.scm"),
+            ),
             (GrammarFamily::Qsharp, include_str!("../queries/qsharp.scm")),
             (GrammarFamily::Mojo, include_str!("../queries/mojo.scm")),
             (GrammarFamily::Haxe, include_str!("../queries/haxe.scm")),
@@ -4499,7 +5331,7 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 91);
+        assert_eq!(registry.len(), 101);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
@@ -4573,7 +5405,17 @@ mod tests {
             GrammarFamily::Vhdl,
             GrammarFamily::Hcl,
             GrammarFamily::Ada,
+            GrammarFamily::Dockerfile,
+            GrammarFamily::Coffeescript,
+            GrammarFamily::Idris,
+            GrammarFamily::Sed,
+            GrammarFamily::Wolfram,
+            GrammarFamily::Pug,
+            GrammarFamily::Lean,
+            GrammarFamily::Meson,
+            GrammarFamily::Gdscript,
             GrammarFamily::Qsharp,
+            GrammarFamily::Chapel,
             GrammarFamily::StandardMl,
             GrammarFamily::Wat,
             GrammarFamily::Mojo,
@@ -4595,6 +5437,27 @@ mod tests {
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Idris {
+                expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+            }
+            if family == GrammarFamily::Sed {
+                expected.retain(|name| {
+                    matches!(
+                        *name,
+                        "root"
+                            | "module"
+                            | "declaration"
+                            | "definition"
+                            | "reference"
+                            | "signature"
+                            | "comment"
+                            | "string"
+                    )
+                });
+            }
+            if matches!(family, GrammarFamily::Wolfram | GrammarFamily::Lean) {
+                expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+            }
             if family == GrammarFamily::Coq {
                 expected
                     .retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
@@ -4615,6 +5478,22 @@ mod tests {
             if family == GrammarFamily::Fortran {
                 expected.retain(|name| *name != "documentation");
                 expected.push("expression");
+            }
+            if family == GrammarFamily::Dockerfile {
+                expected.retain(|name| {
+                    !matches!(
+                        *name,
+                        "call" | "import" | "documentation" | "module" | "scope" | "string"
+                    )
+                });
+            }
+            if family == GrammarFamily::Meson {
+                expected.retain(|name| {
+                    !matches!(
+                        *name,
+                        "call" | "import" | "documentation" | "module" | "scope"
+                    )
+                });
             }
             if family == GrammarFamily::Protobuf {
                 expected.retain(|name| !matches!(*name, "call" | "documentation"));
@@ -4690,6 +5569,14 @@ mod tests {
                     )
                 });
             }
+            if family == GrammarFamily::Pug {
+                expected.retain(|name| {
+                    !matches!(
+                        *name,
+                        "call" | "import" | "reference" | "scope" | "documentation"
+                    )
+                });
+            }
             if family == GrammarFamily::Yaml {
                 expected.retain(|name| !matches!(*name, "call" | "import"));
             }
@@ -4739,7 +5626,10 @@ mod tests {
             }
             if matches!(
                 family,
-                GrammarFamily::Qsharp
+                GrammarFamily::Coffeescript
+                    | GrammarFamily::Gdscript
+                    | GrammarFamily::Chapel
+                    | GrammarFamily::Qsharp
                     | GrammarFamily::StandardMl
                     | GrammarFamily::Wat
                     | GrammarFamily::Mojo
@@ -4764,7 +5654,10 @@ mod tests {
                 });
                 expected.push("expression");
             }
-            if family == GrammarFamily::JavaScript {
+            if matches!(
+                family,
+                GrammarFamily::JavaScript | GrammarFamily::Scala | GrammarFamily::PowerShell
+            ) {
                 expected.push("expression");
             }
             if family == GrammarFamily::Nim {
@@ -4840,6 +5733,227 @@ mod tests {
             assert_eq!(names, expected, "capture contract differs for {family:?}");
             assert_eq!(pack.roles_by_capture.len(), expected.len());
         }
+    }
+
+    fn dockerfile_tree(source: &[u8], partial_end: Option<usize>) -> tree_sitter::Tree {
+        let scope = tree_sitter_dockerfile::ScannerScope::begin((), |_| false).unwrap();
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Dockerfile))
+            .unwrap();
+        if let Some(end) = partial_end {
+            parser
+                .set_included_ranges(&[tree_sitter::Range {
+                    start_byte: 0,
+                    end_byte: end,
+                    start_point: tree_sitter::Point::new(0, 0),
+                    end_point: tree_sitter::Point::new(1, 0),
+                }])
+                .unwrap();
+        }
+        let tree = parser.parse(source, None).unwrap();
+        drop(parser);
+        scope.finish().unwrap();
+        tree
+    }
+
+    #[test]
+    fn dockerfile_required_copy_reference_survives_zero_optional_credit_exactly_once() {
+        let source = b"FROM scratch AS base\nFROM scratch AS final\nCOPY --from=base /a /b\n";
+        let tree = dockerfile_tree(source, None);
+        assert!(!tree.root_node().has_error());
+        let pack = QueryPackRegistry::audited()
+            .unwrap()
+            .get(GrammarFamily::Dockerfile)
+            .unwrap();
+        let identity = pack
+            .extract_identity(
+                GrammarFamily::Dockerfile,
+                &tree,
+                source,
+                10000,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        let copies: Vec<_> = identity
+            .iter()
+            .filter(|candidate| candidate.syntax == "dockerfile.copy_from")
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].role, StructuralRole::Reference);
+        assert!(copies[0].required);
+        assert_eq!(
+            source.get(copies[0].start..copies[0].end),
+            Some(b"base".as_slice())
+        );
+        let zero = pack
+            .extract(
+                GrammarFamily::Dockerfile,
+                &tree,
+                source,
+                10000,
+                0,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        let full = pack
+            .extract(
+                GrammarFamily::Dockerfile,
+                &tree,
+                source,
+                10000,
+                10000,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            zero.candidates
+                .iter()
+                .filter(|candidate| candidate.required)
+                .count(),
+            identity.len()
+        );
+        assert_eq!(
+            full.candidates
+                .iter()
+                .filter(|candidate| candidate.syntax == "dockerfile.copy_from")
+                .count(),
+            1
+        );
+        assert!(
+            zero.candidates
+                .iter()
+                .any(|candidate| candidate.syntax == "dockerfile.copy_from" && candidate.required)
+        );
+        let mut names = pack.identity_query.capture_names().to_vec();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "comment",
+                "declaration",
+                "definition",
+                "reference",
+                "root",
+                "signature"
+            ]
+        );
+    }
+
+    #[test]
+    fn dockerfile_partial_native_input_cannot_certify_stage_or_copy_identity() {
+        let source = b"FROM scratch AS base\nFROM scratch AS final\nCOPY --from=base /a /b\n";
+        let first_line_end = source.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        let tree = dockerfile_tree(source, Some(first_line_end));
+        let pack = QueryPackRegistry::audited()
+            .unwrap()
+            .get(GrammarFamily::Dockerfile)
+            .unwrap();
+        let identity = pack
+            .extract_identity(
+                GrammarFamily::Dockerfile,
+                &tree,
+                source,
+                10000,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert!(!identity.iter().any(|candidate| matches!(
+            candidate.syntax,
+            "dockerfile.stage" | "dockerfile.stage_alias" | "dockerfile.copy_from"
+        )));
+    }
+
+    #[test]
+    fn dockerfile_native_helper_refusal_retains_real_origin_without_partial_identities() {
+        let source = b"FROM scratch AS base\nFROM scratch AS final\nCOPY --from=base /a /b\n";
+        let tree = dockerfile_tree(source, None);
+        let pack = QueryPackRegistry::audited()
+            .unwrap()
+            .get(GrammarFamily::Dockerfile)
+            .unwrap();
+        let cancellation = Cancellation::new();
+        let mut issued = None;
+        let mut emitted = Vec::new();
+        let limit = pack
+            .scan_query_with_refusal(
+                &pack.identity_query,
+                QueryInput {
+                    family: GrammarFamily::Dockerfile,
+                    tree: &tree,
+                    source,
+                    cancellation: &cancellation,
+                    normalize_calls: false,
+                },
+                QueryScanLimits {
+                    matches: 100,
+                    captures: 100,
+                    body_nodes: 0,
+                },
+                |candidate| {
+                    emitted.push(candidate);
+                    Ok(())
+                },
+                Some(&mut issued),
+            )
+            .unwrap();
+        assert_eq!(limit, Some(QueryLimit::Capture));
+        assert!(emitted.is_empty());
+        let event = issued.unwrap();
+        assert_eq!(
+            event.details().origin(),
+            "query-identity-dockerfile-captures-limit"
+        );
+        assert_eq!(
+            (event.details().observed(), event.details().limit()),
+            (None, None)
+        );
+        assert!(event.matches_error(&event.error()));
+    }
+
+    #[test]
+    fn rust_complete_proof_context_keeps_the_same_bom_extent_as_its_root() {
+        let source = "\u{feff}// λ 😀\nfn helper() {} fn run() { helper(); }\n".as_bytes();
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Rust))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        assert_eq!(tree.root_node().start_byte(), 3);
+        let registry = QueryPackRegistry::audited().unwrap();
+        let extraction = registry
+            .get(GrammarFamily::Rust)
+            .unwrap()
+            .extract(
+                GrammarFamily::Rust,
+                &tree,
+                source,
+                usize::MAX,
+                usize::MAX,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        for (role, syntax) in [
+            (StructuralRole::Root, "rust.file"),
+            (StructuralRole::Signature, "rust.proof_context"),
+        ] {
+            let candidates: Vec<_> = extraction
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.role == role && candidate.syntax == syntax)
+                .collect();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].start..candidates[0].end, 0..source.len());
+        }
+        assert!(
+            extraction.candidates.iter().any(|candidate| {
+                candidate.role == StructuralRole::Signature
+                    && candidate.syntax != "rust.proof_context"
+                    && candidate.start > 3
+            }),
+            "only the whole-file proof context owns the BOM"
+        );
     }
 
     #[test]

@@ -77,9 +77,9 @@ impl CaptureCache {
         if node.kind() != "function_definition"
             || node.has_error()
             || node.is_missing()
-            || !node
+            || node
                 .parent()
-                .is_some_and(|parent| parent.kind() == "program")
+                .is_none_or(|parent| parent.kind() != "program")
         {
             return Ok(None);
         }

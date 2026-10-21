@@ -43,9 +43,9 @@ pub(super) fn written_name<'tree>(
     }) else {
         return Ok(None);
     };
-    if !callable
+    if callable
         .child_by_field_name("declarator")
-        .is_some_and(|node| node.kind() == "identifier")
+        .is_none_or(|node| node.kind() != "identifier")
     {
         return Ok(None);
     }

@@ -34,7 +34,57 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 90] = [
+const CASES: [LanguageCase; 100] = [
+    LanguageCase {
+        name: "written.idr",
+        language: "idris",
+        source: "-- marker λ😀\r\nglobal : Type\r\nglobal = Type\r\nreader : Type\r\nreader = global\r\n",
+    },
+    LanguageCase {
+        name: "written.lean",
+        language: "lean",
+        source: "-- marker λ😀\r\ndef owned (value : Nat) := value\r\n",
+    },
+    LanguageCase {
+        name: "written.sed",
+        language: "sed",
+        source: "# marker λ😀\r\n:entry\r\nb entry\r\n",
+    },
+    LanguageCase {
+        name: "written.wl",
+        language: "wolfram",
+        source: "(* marker λ😀 *)\r\nowned[value_String] := Module[{}, external[value]];\r\n",
+    },
+    LanguageCase {
+        name: "written.pug",
+        language: "pug",
+        source: "// marker λ😀\r\ninput(type='text', disabled)\r\n",
+    },
+    LanguageCase {
+        name: "written.coffee",
+        language: "coffeescript",
+        source: "# marker λ😀\r\nclass Written\r\n  measure: ->\r\n    value = 1\r\n    value\r\n",
+    },
+    LanguageCase {
+        name: "Dockerfile",
+        language: "dockerfile",
+        source: "# marker λ😀\r\nFROM scratch AS written\r\n",
+    },
+    LanguageCase {
+        name: "meson.build",
+        language: "meson",
+        source: "# marker λ😀\r\nitems = [1]\r\nforeach item : items\r\nendforeach\r\n",
+    },
+    LanguageCase {
+        name: "written.gd",
+        language: "gdscript",
+        source: "# marker λ😀\r\nclass_name Written\r\nfunc measure():\r\n    return 1\r\n",
+    },
+    LanguageCase {
+        name: "written.chpl",
+        language: "chapel",
+        source: "// marker λ😀\r\nmodule Written { proc measure(value: int) { return value; } }\r\n",
+    },
     LanguageCase {
         name: "written.qs",
         language: "qsharp",
@@ -520,11 +570,13 @@ fn every_audited_language_preserves_projected_captures_and_original_encoded_evid
         let control_output = parse(&provider, &control, &budget, case.language, "utf-8");
         assert_raw_report(&control_output, &control, case.language);
         assert_no_encoding_or_limit_diagnostics(&control_output, case.language);
-        if matches!(case.language, "modelica" | "json-schema") {
-            let names: &[&str] = if case.language == "modelica" {
-                &["measure", "value"]
-            } else {
-                &["Measurement", "value", "result"]
+        if matches!(case.language, "modelica" | "json-schema" | "pug" | "idris") {
+            let names: &[&str] = match case.language {
+                "modelica" => &["measure", "value"],
+                "json-schema" => &["Measurement", "value", "result"],
+                "pug" => &["input", "type", "disabled"],
+                "idris" => &["global", "reader"],
+                _ => unreachable!("closed written-definition fixture roster"),
             };
             for name in names {
                 assert!(

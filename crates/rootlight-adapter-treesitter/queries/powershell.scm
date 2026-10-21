@@ -21,6 +21,9 @@
 (command command_name: (command_name) @call_name @reference)
 (invokation_expression (member_name (simple_name) @call_name))
 [(variable) (type_name)] @reference
+; Separate required carriers preserve the broad optional reference pattern.
+(variable) @signature
+(function_statement) @expression @signature
 (class_statement (simple_name) @reference)
 (member_name (simple_name) @reference)
 (comment) @comment @documentation

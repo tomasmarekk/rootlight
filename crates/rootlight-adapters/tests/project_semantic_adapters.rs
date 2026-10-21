@@ -39,6 +39,8 @@ use rootlight_ir::{
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
 
+#[path = "project_semantic_adapters/cpp_const_formals.rs"]
+mod cpp_const_formals;
 #[path = "project_semantic_adapters/dart.rs"]
 mod dart;
 #[path = "project_semantic_adapters/declaration_boundaries.rs"]
@@ -4541,4 +4543,82 @@ fn python_function_context_gap_does_not_relabel_other_native_languages() {
             .any(|gap| gap.detail
                 == "python-function-binding-proof-is-limited-to-the-ordinary-formal-read-subset")
     );
+}
+
+#[test]
+fn python_written_module_variables_do_not_license_name_only_project_use_or_call_targets() {
+    let source = "value = 1\nvalue()\n";
+    let fixture = ProjectFixture::new(["written.py"], [source], SemanticProjectLanguage::Python);
+    let output = analyze_with_real_parser(&fixture);
+    let document = output.document();
+    let variable = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "value")
+        .unwrap();
+    let start = u64::try_from(source.rfind("value").unwrap()).unwrap();
+    for role in [OccurrenceRole::Reference, OccurrenceRole::CallSite] {
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == role
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 5
+            })
+            .collect();
+        assert!(!sites.is_empty());
+        assert!(
+            sites
+                .iter()
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+    }
+    assert!(
+        !document
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls
+                && edge.object == rootlight_ir::RelationEndpoint::Entity(variable.id))
+    );
+    assert_eq!(
+        document.files[0].content_hash,
+        content_hash(source.as_bytes())
+    );
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.domain == domain
+                    && gap.detail.starts_with("python-written-assignment-")
+                    && gap.detail.ends_with("unavailable"))
+        );
+    }
+}
+
+#[test]
+fn python_project_reassigned_module_name_is_an_explicit_gap_instead_of_per_write_entities() {
+    let source = "value = 1\nvalue = 2\n";
+    let fixture = ProjectFixture::new(["written.py"], [source], SemanticProjectLanguage::Python);
+    let output = analyze_with_real_parser(&fixture);
+    let document = output.document();
+    assert!(
+        !document
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "value")
+    );
+    for domain in [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ] {
+        assert!(document.skipped_regions.iter().any(|gap| gap.domain == domain
+            && gap.detail == "python-written-module-assignment-name-uniqueness-syntax-or-complete-native-proof-unavailable"));
+    }
 }

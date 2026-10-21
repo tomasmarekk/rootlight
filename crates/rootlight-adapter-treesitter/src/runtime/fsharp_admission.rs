@@ -113,6 +113,7 @@ impl TreeSitterProvider {
             request.limits().max_syntax_nodes(),
             request.limits().max_syntax_depth(),
             None,
+            None,
             cancellation,
         )?;
         if traversal.limited_nodes {

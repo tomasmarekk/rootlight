@@ -148,9 +148,11 @@ dependencies = [
  "tree-sitter-ada",
  "tree-sitter-astro-next",
  "tree-sitter-bash",
+ "tree-sitter-chapel",
  "tree-sitter-clojure",
  "tree-sitter-cmake",
  "tree-sitter-cobol",
+ "tree-sitter-coffeescript",
  "tree-sitter-commonlisp",
  "tree-sitter-crystal",
  "tree-sitter-cue",
@@ -161,17 +163,21 @@ dependencies = [
  "tree-sitter-fish",
  "tree-sitter-fortran",
  "tree-sitter-fsharp",
+ "tree-sitter-gdscript",
  "tree-sitter-graphql",
+ "tree-sitter-gsed",
  "tree-sitter-hare",
  "tree-sitter-haskell",
  "tree-sitter-haxe",
  "tree-sitter-hcl",
  "tree-sitter-html",
+ "tree-sitter-idris",
  "tree-sitter-json",
  "tree-sitter-julia",
  "tree-sitter-kotlin-ng",
  "tree-sitter-matlab",
  "tree-sitter-md",
+ "tree-sitter-meson",
  "tree-sitter-modelica",
  "tree-sitter-mojo",
  "tree-sitter-nim",
@@ -180,6 +186,7 @@ dependencies = [
  "tree-sitter-pascal",
  "tree-sitter-pony",
  "tree-sitter-powershell",
+ "tree-sitter-pug",
  "tree-sitter-qmljs",
  "tree-sitter-qsharp",
  "tree-sitter-r",
@@ -201,6 +208,7 @@ dependencies = [
  "tree-sitter-vba",
  "tree-sitter-vhdl",
  "tree-sitter-wat",
+ "tree-sitter-wolfram",
  "tree-sitter-yaml",
  "tree-sitter-zig",
  "ts-parser-perl",
@@ -335,6 +343,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-chapel"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-clojure"
 version = "0.0.8"
 dependencies = [
@@ -353,6 +369,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-cobol"
 version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-coffeescript"
+version = "1.0.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -441,8 +465,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-gdscript"
+version = "6.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-graphql"
 version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-gsed"
+version = "0.4.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -489,6 +529,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-idris"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-json"
 version = "0.24.8"
 dependencies = [
@@ -529,6 +577,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-md"
 version = "0.5.3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-meson"
+version = "1.0.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -593,6 +649,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-powershell"
 version = "0.26.4"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-pug"
+version = "0.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -763,6 +827,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-wat"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-wolfram"
+version = "0.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",

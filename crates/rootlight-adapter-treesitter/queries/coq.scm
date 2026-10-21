@@ -16,3 +16,6 @@
 
 [(record_command) (class_command)] @signature
 [(record_field) (class_singleton_field) (record_constructor)] @declaration @definition @signature
+
+; Only a certified direct body application can publish a written target window.
+(application) @signature

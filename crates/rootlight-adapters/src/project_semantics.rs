@@ -1465,10 +1465,13 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
             || is_definition_fact(fact)
             || is_symbol_signature_fact(fact)
             || formal_binding_context_metadata(fact).is_some()
+            || is_ocaml_written_binding_metadata(fact)
             || (fact.kind() == SyntaxFactKind::Signature
                 && matches!(
                     fact.syntax_kind().as_str(),
-                    "scss.mixin_target.signature"
+                    "glsl.formal_target.signature"
+                        | "glsl.call_target.signature"
+                        | "scss.mixin_target.signature"
                         | "scss.parameter_list_unavailable.signature"
                         | "prolog.goal_context.signature"
                         | "prolog.goal_target.signature"
@@ -2700,7 +2703,21 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 if let Some((language, detail)) = formal_binding_context_metadata(fact)
                     && self.analyzer.language == language
                 {
-                    self.push_source_gap(input, fact.span(), FactDomain::Relations, detail)?;
+                    if matches!(
+                        fact.syntax_kind().as_str(),
+                        "python.assignment_binding_unavailable.signature"
+                            | "python.module_assignment_unavailable.signature"
+                    ) {
+                        for domain in [
+                            FactDomain::Entities,
+                            FactDomain::Occurrences,
+                            FactDomain::Relations,
+                        ] {
+                            self.push_source_gap(input, fact.span(), domain, detail)?;
+                        }
+                    } else {
+                        self.push_source_gap(input, fact.span(), FactDomain::Relations, detail)?;
+                    }
                 }
                 match fact.kind() {
                     SyntaxFactKind::Import => {
@@ -2783,7 +2800,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 .copied()
                                 .flatten()
                                 .filter(|span| contains_span(*span, fact.span()))
-                                .and_then(&text_for)
+                                .and_then(text_for)
                                 .map(|text| {
                                     ecmascript::references::parse_member_path(
                                         text,
@@ -3278,6 +3295,20 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     input,
                     draft.source.span(),
                     "ecmascript-type-only-value-use",
+                )?;
+            }
+            if candidates.is_empty()
+                && self.analyzer.language == SemanticProjectLanguage::Java
+                && matches!(
+                    draft.syntax_kind.as_str(),
+                    "java.local_receiver.reference" | "java.unproven_local_receiver.reference"
+                )
+            {
+                let input = self.input_for_file(draft.file)?;
+                self.push_relation_gap(
+                    input,
+                    draft.source.span(),
+                    "java-native-local-receiver-project-owner-join-unavailable",
                 )?;
             }
             if candidates.is_empty() && ecmascript::references::is_member_name(&draft.syntax_kind) {
@@ -4344,13 +4375,59 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 kind: ResolutionKind::Binding,
             };
         }
-        // The Structural native formal certificate has no project-layer owner join.
-        // Retained metadata reports that limit instead of name-only adoption.
-        if self.analyzer.language == SemanticProjectLanguage::Go
+        if self.analyzer.language == SemanticProjectLanguage::Python
+            && python_module_target_unavailable(&occurrence.syntax_kind)
+        {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Java
             && matches!(
                 occurrence.syntax_kind.as_str(),
-                "go.call_formal.reference" | "go.unproven_call_formal.reference"
+                "java.local_receiver.reference" | "java.unproven_local_receiver.reference"
             )
+        {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        // The Structural native formal certificate has no project-layer owner join.
+        // Retained metadata reports that limit instead of name-only adoption.
+        if self.analyzer.language == SemanticProjectLanguage::Cpp
+            && matches!(
+                occurrence.syntax_kind.as_str(),
+                "cpp.const_formal_receiver.reference" | "cpp.unproven_const_formal.reference"
+            )
+        {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Php
+            && (occurrence.syntax_kind.starts_with("php.this_method.")
+                || occurrence
+                    .syntax_kind
+                    .starts_with("php.unproven_this_method."))
+        {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Go
+            && (matches!(
+                occurrence.syntax_kind.as_str(),
+                "go.call_formal.reference" | "go.unproven_call_formal.reference"
+            ) || occurrence
+                .syntax_kind
+                .starts_with("go.direct_file_function.")
+                || occurrence
+                    .syntax_kind
+                    .starts_with("go.unproven_direct_function."))
         {
             return ResolutionCandidates {
                 symbols: Vec::new(),
@@ -5967,6 +6044,13 @@ fn select_unique_syntax_fact<'a>(facts: &[&'a SyntaxFact]) -> Option<&'a SyntaxF
         .then_some(selected)
 }
 
+fn python_module_target_unavailable(label: &str) -> bool {
+    matches!(
+        label,
+        "python.module_binding_unavailable.reference" | "python.module_call_unavailable.call"
+    )
+}
+
 fn formal_binding_context_metadata(
     fact: &SyntaxFact,
 ) -> Option<(SemanticProjectLanguage, &'static str)> {
@@ -5978,13 +6062,37 @@ fn formal_binding_context_metadata(
             SemanticProjectLanguage::C,
             "c-formal-proof-is-limited-to-direct-arguments-in-a-single-clean-call-statement",
         )),
+        "python.assignment_binding_unavailable.signature" => Some((
+            SemanticProjectLanguage::Python,
+            "python-written-assignment-general-binding-nonmodule-and-complex-target-identity-unavailable",
+        )),
+        "python.module_assignment_unavailable.signature" => Some((
+            SemanticProjectLanguage::Python,
+            "python-written-module-assignment-name-uniqueness-syntax-or-complete-native-proof-unavailable",
+        )),
         "python.parameter_binding_context.signature" => Some((
             SemanticProjectLanguage::Python,
             "python-function-binding-proof-is-limited-to-the-ordinary-formal-read-subset",
         )),
+        "cpp.const_formal_context.signature" => Some((
+            SemanticProjectLanguage::Cpp,
+            "cpp-const-reference-formal-proof-is-limited-to-subscript-receivers-in-a-clean-function-body",
+        )),
+        "csharp.formal_context.signature" => Some((
+            SemanticProjectLanguage::CSharp,
+            "csharp-formal-proof-is-limited-to-ordinary-member-and-element-receivers-in-a-clean-method-body",
+        )),
+        "java.local_receiver_context.signature" => Some((
+            SemanticProjectLanguage::Java,
+            "java-local-receiver-proof-does-not-evaluate-types-initializers-or-method-dispatch",
+        )),
         "java.setter_binding_context.signature" => Some((
             SemanticProjectLanguage::Java,
             "java-formal-binding-proof-is-limited-to-single-assignment-setters",
+        )),
+        "php.this_class_context.signature" | "php.this_method_context.signature" => Some((
+            SemanticProjectLanguage::Php,
+            "php-written-method-proof-does-not-select-a-runtime-implementation",
         )),
         "go.call_formal_context.signature" => Some((
             SemanticProjectLanguage::Go,
@@ -5998,14 +6106,41 @@ fn formal_binding_context_metadata(
     }
 }
 
+fn is_ocaml_written_binding_metadata(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Signature
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "ocaml.written_bindings_file.signature"
+                | "ocaml.match_formal_target.signature"
+                | "ocaml.direct_file_target.signature"
+        )
+}
+
 fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("lean.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str() == "lean.header.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("wolfram.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str() == "wolfram.header.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("meson.") {
+        return false;
+    }
+    if fact.syntax_kind().as_str() == "scala.formal_context.signature" {
+        return false;
+    }
     fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str().ends_with(".signature")
         && !structural_signature_is_preprocessor_context(fact)
         && formal_binding_context_metadata(fact).is_none()
+        && !is_ocaml_written_binding_metadata(fact)
         && !matches!(
             fact.syntax_kind().as_str(),
-            "scss.mixin_target.signature"
+            "glsl.formal_target.signature"
+                | "glsl.call_target.signature"
+                | "scss.mixin_target.signature"
                 | "scss.parameter_list_unavailable.signature"
                 | "prolog.goal_context.signature"
                 | "prolog.goal_target.signature"
@@ -7326,3 +7461,231 @@ mod python_required_context_qualification_tests {
 
 #[cfg(test)]
 mod formal_context_tests;
+
+#[cfg(test)]
+mod scala_formal_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn exact_formal_context_does_not_become_a_symbol_signature() {
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let fact = |label| {
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                0,
+                rootlight_adapter_sdk::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        assert!(!is_symbol_signature_fact(&fact(
+            "scala.formal_context.signature"
+        )));
+        assert!(is_symbol_signature_fact(&fact("scala.function.signature")));
+        assert!(is_symbol_signature_fact(&fact(
+            "scala.formal_context_extra.signature"
+        )));
+    }
+}
+
+#[cfg(test)]
+mod ocaml_written_binding_metadata_tests {
+    use super::*;
+    use rootlight_adapter_sdk::SyntaxKindLabel;
+
+    #[test]
+    fn required_ocaml_certificate_metadata_is_not_a_written_symbol_signature() {
+        let source = include_bytes!(
+            "../../rootlight-adapter-treesitter/tests/fixtures/ocaml_written/caml_bytestring.ml"
+        );
+        assert_eq!(source.len(), 899);
+        let file = FileId::from_bytes([8; 20]);
+        let fact = |id, start, end, label| {
+            SyntaxFact::new(
+                id,
+                None,
+                SyntaxFactKind::Signature,
+                SourceSpan::new(file, start, end).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let metadata = [
+            fact(1, 0, 899, "ocaml.written_bindings_file.signature"),
+            fact(2, 64, 82, "ocaml.match_formal_target.signature"),
+            fact(3, 37, 270, "ocaml.direct_file_target.signature"),
+        ];
+        let mut facts = metadata.to_vec();
+        facts.push(fact(4, 37, 71, "ocaml.function.signature"));
+        let required = mandatory_project_syntax_fact_ids(&facts);
+        for witness in metadata {
+            assert!(required.contains(&witness.local_id()));
+            assert!(!is_symbol_signature_fact(&witness));
+        }
+        assert!(required.contains(&4));
+        assert!(is_symbol_signature_fact(&facts[3]));
+        assert_eq!(&source[37..71], b"caml_bytestring_length_aux s acc =");
+    }
+}
+
+#[cfg(test)]
+mod csharp_formal_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn exact_formal_context_does_not_become_a_method_signature() {
+        let span = SourceSpan::new(rootlight_ids::FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let fact = |label| {
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                0,
+                rootlight_adapter_sdk::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        assert!(!is_symbol_signature_fact(&fact(
+            "csharp.formal_context.signature"
+        )));
+        assert_eq!(
+            formal_binding_context_metadata(&fact("csharp.formal_context.signature"))
+                .unwrap()
+                .0,
+            SemanticProjectLanguage::CSharp
+        );
+        assert!(is_symbol_signature_fact(&fact(
+            "csharp.parameters.signature"
+        )));
+        assert!(is_symbol_signature_fact(&fact(
+            "csharp.formal_context_extra.signature"
+        )));
+    }
+}
+
+#[cfg(test)]
+mod cpp_formal_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn exact_formal_context_does_not_become_a_function_signature() {
+        let span = SourceSpan::new(rootlight_ids::FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let fact = |label| {
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                0,
+                rootlight_adapter_sdk::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        assert!(!is_symbol_signature_fact(&fact(
+            "cpp.const_formal_context.signature"
+        )));
+        assert_eq!(
+            formal_binding_context_metadata(&fact("cpp.const_formal_context.signature"))
+                .unwrap()
+                .0,
+            SemanticProjectLanguage::Cpp
+        );
+        assert!(is_symbol_signature_fact(&fact("cpp.parameters.signature")));
+        assert!(is_symbol_signature_fact(&fact(
+            "cpp.const_formal_context_extra.signature"
+        )));
+    }
+}
+
+#[cfg(test)]
+mod php_written_method_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn complete_owner_context_does_not_enter_project_symbol_identity() {
+        let span = SourceSpan::new(rootlight_ids::FileId::from_bytes([3; 20]), 0, 1).unwrap();
+        let fact = |label| {
+            SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                0,
+                rootlight_adapter_sdk::SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for label in [
+            "php.this_class_context.signature",
+            "php.this_method_context.signature",
+        ] {
+            let context = fact(label);
+            assert!(!is_symbol_signature_fact(&context));
+            assert_eq!(
+                formal_binding_context_metadata(&context).unwrap().0,
+                SemanticProjectLanguage::Php
+            );
+            assert!(mandatory_project_syntax_fact_ids(&[context]).contains(&1));
+        }
+        assert!(is_symbol_signature_fact(&fact("php.parameters.signature")));
+        assert!(formal_binding_context_metadata(&fact("php.this_method_context.extra")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod python_module_assignment_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn module_assignment_limits_are_required_context_and_never_symbol_headers() {
+        let file = FileId::from_bytes([3; 20]);
+        let source = b"value = 1\n";
+        let facts: Vec<_> = [
+            "python.assignment_binding_unavailable.signature",
+            "python.module_assignment_unavailable.signature",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| {
+            SyntaxFact::new(
+                u64::try_from(index).unwrap() + 1,
+                None,
+                SyntaxFactKind::Signature,
+                SourceSpan::new(file, 0, u64::try_from(source.len()).unwrap()).unwrap(),
+                0,
+                rootlight_adapter_sdk::SyntaxKindLabel::new(label).unwrap(),
+            )
+        })
+        .collect();
+        let required = mandatory_project_syntax_fact_ids(&facts);
+        for fact in &facts {
+            assert!(required.contains(&fact.local_id()));
+            assert!(!is_symbol_signature_fact(fact));
+            assert_eq!(
+                formal_binding_context_metadata(fact).unwrap().0,
+                SemanticProjectLanguage::Python
+            );
+        }
+        let mut retained = facts.clone();
+        retain_project_syntax_facts(
+            SemanticProjectLanguage::Python,
+            &mut retained,
+            source,
+            0,
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(retained, facts);
+        assert!(python_module_target_unavailable(
+            "python.module_binding_unavailable.reference"
+        ));
+        assert!(python_module_target_unavailable(
+            "python.module_call_unavailable.call"
+        ));
+        assert!(!python_module_target_unavailable(
+            "python.identifier.reference"
+        ));
+        assert!(!python_module_target_unavailable(
+            "python.parameter_body.reference"
+        ));
+    }
+}

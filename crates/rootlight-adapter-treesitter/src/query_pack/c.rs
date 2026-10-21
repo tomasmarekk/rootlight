@@ -223,7 +223,7 @@ fn header_parameters(scan: &mut Scanner<'_>) -> Result<bool, AdapterError> {
 fn parameter_space(scan: &mut Scanner<'_>) -> Result<bool, AdapterError> {
     loop {
         header_space(scan)?;
-        if !scan.peek()?.is_some_and(|(_, byte)| byte == b'/') {
+        if scan.peek()?.is_none_or(|(_, byte)| byte != b'/') {
             return Ok(true);
         }
         scan.next()?;

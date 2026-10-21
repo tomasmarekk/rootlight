@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/korygill/technical-analysis",
+  "snapshot_revision": "63c2df0044419649f951b8edb4ad99a955f39b72",
+  "source_path": "VIX_FGMR/VIX_FGMR.txt",
+  "source_bytes": 2565,
+  "source_sha256": "d1972da78698df267a1429d9b9c997fb4b0b5caba55d8bbcd9e213322a67de62",
+  "license_path": "LICENSE",
+  "license_sha256": "daa6c6c74c8c4fba26091a22af8c9a2767b335bf318da7d4fd597f4ed3e976af",
+  "scope": "Complete original with original CRLF; written script/input ownership and value Read only, no study evaluation."
+}

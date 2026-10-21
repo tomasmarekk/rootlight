@@ -1344,3 +1344,321 @@ fn astro_utf16le_file_root_preserves_full_source_and_exact_template_binding() {
 fn astro_utf16be_file_root_preserves_full_source_and_exact_template_binding() {
     assert_astro_bom_file_root_and_binding("utf-16be");
 }
+
+#[test]
+fn original_astro_template_value_use_keeps_typed_read_and_existing_reference() {
+    let raw = include_bytes!("../fixtures/astro_source_fields/Grid.astro");
+    assert_eq!(raw.len(), 319);
+    assert_eq!(&raw[161..166], b"posts");
+    assert_eq!(&raw[267..272], b"posts");
+    let original = std::str::from_utf8(raw).unwrap();
+    for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+        let bytes = if encoding == "utf-8" {
+            raw.to_vec()
+        } else {
+            let little = encoding == "utf-16le";
+            let mut bytes = if little {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in original.encode_utf16() {
+                bytes.extend_from_slice(&if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            bytes
+        };
+        let physical = |offset: usize| {
+            if encoding == "utf-8" {
+                u64::try_from(offset).unwrap()
+            } else {
+                2 + u64::try_from(original[..offset].encode_utf16().count() * 2).unwrap()
+            }
+        };
+        let provider = Arc::new(provider());
+        let fixture = Fixture::new(ASTRO, &bytes);
+        let budget = limits();
+        let request = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            language(ASTRO),
+            EncodingId::new(encoding).unwrap(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            build_context(),
+            &budget,
+        )
+        .unwrap()
+        .with_generated_status(false);
+        let result = analyze(
+            &analyzer(&provider, ASTRO),
+            &request,
+            &ExtensionSupport::default(),
+        );
+        let document = result.document();
+        let target = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == physical(161)
+                    && site.source.span().end_byte() == physical(166)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target.len(),
+            1,
+            "actual own Variable Definition prerequisite"
+        );
+        let OccurrenceTarget::Resolved { symbol } = target[0].target else {
+            panic!("resolved Definition prerequisite")
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(entity.kind, EntityKind::Variable);
+        assert_eq!(entity.language, "typescript");
+        assert_eq!(entity.canonical_name, "posts");
+        let field = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == physical(127)
+                    && site.source.span().end_byte() == physical(132)
+            })
+            .unwrap();
+        assert_ne!(field.target, target[0].target);
+        let reference = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == physical(267)
+                    && site.source.span().end_byte() == physical(272)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reference.len(),
+            1,
+            "preserved exact ordinary Reference prerequisite"
+        );
+        assert_eq!(reference[0].target, OccurrenceTarget::Resolved { symbol });
+        assert_eq!(
+            reference[0].syntax_kind,
+            "astro.template_binding_read.reference"
+        );
+        let reads = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Read
+                    && site.source.span().start_byte() == physical(267)
+                    && site.source.span().end_byte() == physical(272)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reads.len(),
+            1,
+            "original value use must retain its independently requested Read role"
+        );
+        let read = reads[0];
+        assert_eq!(read.syntax_kind, "astro.template_value_read.read");
+        assert_ne!(read.syntax_kind, reference[0].syntax_kind);
+        assert_eq!(read.target, OccurrenceTarget::Resolved { symbol });
+        assert_eq!(read.source, reference[0].source);
+        assert_eq!(
+            read.source,
+            SourceRef::new(
+                document.repository,
+                document.generation,
+                SourceSpan::new(document.files[0].id, physical(267), physical(272)).unwrap(),
+                content_hash(&bytes),
+                None
+            )
+        );
+        assert_eq!(read.provenance, reference[0].provenance);
+        assert_eq!(read.syntactic_text_hash, content_hash(b"posts"));
+        assert_ne!(read.id, reference[0].id);
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.syntax_kind == "astro.template_binding_read.reference"
+                        && site.source.span() == read.source.span()
+                })
+                .count(),
+            1,
+            "old Reference label keeps its exact cardinality"
+        );
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(read.id)
+                    && edge.object == RelationEndpoint::Entity(symbol)
+                    && edge.evidence.source.as_ref() == Some(&read.source))
+                .count(),
+            1
+        );
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Definition
+                    && site.source.span() == read.source.span())
+        );
+    }
+}
+
+#[test]
+fn astro_template_write_and_assignment_positions_cannot_acquire_read_facets() {
+    for expression in [
+        "posts = other",
+        "posts += other",
+        "posts ??= other",
+        "posts++",
+        "++posts",
+        "posts.value = other",
+        "posts.value++",
+        "delete posts.value",
+        "({posts} = other)",
+    ] {
+        let text = format!("---\nconst {{posts}} = Astro.props;\n---\n{{{expression}}}");
+        let provider = provider();
+        let fixture = Fixture::new(ASTRO, text.as_bytes());
+        let budget = limits();
+        let request = request(&fixture.snapshot, &fixture.source, ASTRO, &budget);
+        let native = rootlight_adapter_sdk::execute_parse(
+            &provider,
+            &request.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+        assert_ne!(
+            native.report().coverage().status(),
+            CoverageStatus::Unknown,
+            "native source prerequisite: {expression}"
+        );
+        assert!(
+            !native
+                .facts()
+                .iter()
+                .any(|fact| fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::ErrorRecovery),
+            "clean native write-position prerequisite: {expression}"
+        );
+        assert!(
+            !native
+                .facts()
+                .iter()
+                .any(|fact| fact.syntax_kind().as_str() == "astro.template_binding_read.reference"),
+            "no native value-read certificate: {expression}"
+        );
+        let result = output(&text);
+        assert!(
+            !result
+                .document()
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Read),
+            "no derived Read from a write position: {expression}"
+        );
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls)
+        );
+        assert_eq!(
+            result.document().files[0].content_hash,
+            content_hash(text.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn astro_template_dual_facets_obey_exact_occurrence_relation_and_total_record_limits() {
+    let raw = include_bytes!("../fixtures/astro_source_fields/Grid.astro");
+    let provider = Arc::new(provider());
+    let frontend = analyzer(&provider, ASTRO);
+    let fixture = Fixture::new(ASTRO, raw);
+    let base = limits();
+    let run = |ir| {
+        let budget = AnalysisLimits::new(
+            base.max_source_bytes(),
+            base.max_syntax_nodes(),
+            base.max_syntax_depth(),
+            base.max_embedded_ranges(),
+            base.max_reported_memory_bytes(),
+            base.syntax_stream().clone(),
+            base.ir_stream().clone(),
+            ir,
+        )
+        .unwrap();
+        execute_analysis(
+            &frontend,
+            &request(&fixture.snapshot, &fixture.source, ASTRO, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+    };
+    let baseline = run(IrLimits::default()).unwrap();
+    for role in [OccurrenceRole::Reference, OccurrenceRole::Read] {
+        assert_eq!(
+            baseline
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| site.role == role
+                    && site.source.span().start_byte() == 267
+                    && site.source.span().end_byte() == 272
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. }))
+                .count(),
+            1
+        );
+    }
+    for dimension in 0..3 {
+        let make = |bound| {
+            let mut ir = IrLimits::default();
+            match dimension {
+                0 => ir.max_occurrences = bound,
+                1 => ir.max_relations = bound,
+                _ => ir.max_total_records = bound,
+            };
+            ir
+        };
+        let mut low = 0;
+        let mut high = 65_536;
+        assert_eq!(run(make(high)).unwrap().document(), baseline.document());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match run(make(middle)) {
+                Ok(result) => {
+                    assert_eq!(result.document(), baseline.document());
+                    high = middle;
+                }
+                Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::Records,
+                    ..
+                })) => low = middle + 1,
+                Err(error) => panic!("unexpected capacity prerequisite: {error:?}"),
+            }
+        }
+        assert!(low > 0);
+        assert_eq!(run(make(low)).unwrap().document(), baseline.document());
+        assert!(
+            matches!(run(make(low - 1)), Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records, observed, limit
+        })) if observed > limit && limit == low - 1)
+        );
+    }
+}

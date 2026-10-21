@@ -1,0 +1,19 @@
+{
+  "source_repository": "https://github.com/AndrasKovacs/smalltt",
+  "source_path": "bench/stlc_small.idr",
+  "source_revision_from_authenticated_input_receipt": "ea99b0f478e50dcb81ea19e40bfb4262339b22aa",
+  "complete_original": true,
+  "encoding": "utf-8",
+  "line_endings": "CRLF",
+  "source": {
+    "bytes": 2167,
+    "sha256": "f082b6a696e52edd8ec1c7bc767c4484c6fb3927542f86ccf993d4e70682df89"
+  },
+  "license": {
+    "path": "LICENSE.txt",
+    "bytes": 1075,
+    "sha256": "f78f0165d1499c5ea5774eb17a8edcb7593e9bce7909428b4b4356b6d99f66b4"
+  },
+  "dialect": "Idris2, as declared by the source repository benchmark README",
+  "qualification": "Static syntax and finite lexical bindings; elaboration, runtime behavior and application Calls remain unqualified."
+}

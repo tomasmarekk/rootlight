@@ -13,6 +13,26 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// Idris written source; evaluation and dependent-type resolution are separate.
+    Idris,
+    /// GNU BRE static file-text syntax; written labels/branch bindings remain separate.
+    Sed,
+    /// Written Wolfram delayed heads, String patterns and finite Module reads.
+    Wolfram,
+    /// Pug native written syntax without template or embedded JavaScript evaluation.
+    Pug,
+    /// Lean written direct definitions and explicit typed formals.
+    Lean,
+    /// Dockerfile written stages and clean literal prior-stage references.
+    Dockerfile,
+    /// Chapel written modules, ordinary procedure overloads and formal headers.
+    Chapel,
+    /// GDScript written file class owners and direct callable declarations.
+    Gdscript,
+    /// Meson physical source; project evaluation and dynamic names remain separate.
+    Meson,
+    /// CoffeeScript written owners; runtime targets and inferred types remain unknown.
+    Coffeescript,
     /// Q# written headers and finite native same-owner argument reads.
     Qsharp,
     /// Standard ML written function heads without inferred pattern bindings.
@@ -289,9 +309,19 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(90);
+        let mut descriptors = Vec::with_capacity(100);
         for family in [
+            GrammarFamily::Idris,
+            GrammarFamily::Sed,
+            GrammarFamily::Wolfram,
+            GrammarFamily::Pug,
+            GrammarFamily::Lean,
+            GrammarFamily::Dockerfile,
+            GrammarFamily::Coffeescript,
+            GrammarFamily::Meson,
+            GrammarFamily::Gdscript,
             GrammarFamily::Qsharp,
+            GrammarFamily::Chapel,
             GrammarFamily::StandardMl,
             GrammarFamily::Wat,
             GrammarFamily::Mojo,
@@ -480,7 +510,17 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Haxe => tree_sitter_haxe::LANGUAGE.into(),
         GrammarFamily::Qml => tree_sitter_qmljs::LANGUAGE.into(),
         GrammarFamily::Ring => tree_sitter_ring::LANGUAGE.into(),
+        GrammarFamily::Gdscript => tree_sitter_gdscript::LANGUAGE.into(),
+        GrammarFamily::Idris => tree_sitter_idris::LANGUAGE.into(),
+        GrammarFamily::Sed => tree_sitter_gsed::LANGUAGE_BRE.into(),
+        GrammarFamily::Wolfram => tree_sitter_wolfram::LANGUAGE.into(),
+        GrammarFamily::Pug => tree_sitter_pug::LANGUAGE.into(),
+        GrammarFamily::Lean => tree_sitter_lean::LANGUAGE.into(),
+        GrammarFamily::Coffeescript => tree_sitter_coffeescript::LANGUAGE.into(),
+        GrammarFamily::Meson => tree_sitter_meson::LANGUAGE.into(),
+        GrammarFamily::Dockerfile => tree_sitter_dockerfile::LANGUAGE.into(),
         GrammarFamily::Qsharp => tree_sitter_qsharp::LANGUAGE.into(),
+        GrammarFamily::Chapel => tree_sitter_chapel::LANGUAGE.into(),
         GrammarFamily::StandardMl => tree_sitter_sml::LANGUAGE.into(),
         GrammarFamily::Wat => tree_sitter_wat::LANGUAGE.into(),
         GrammarFamily::Mojo => tree_sitter_mojo::LANGUAGE.into(),
@@ -615,13 +655,101 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
                 "bfb77d967596144bd1b69b8c418b671ed0885d4fb78ca648c4feb93ff80ef558",
             ),
         },
+        GrammarFamily::Dockerfile => GrammarIdentity {
+            language_id: "dockerfile",
+            grammar_version: "0.2.0",
+            source_package_sha256: "81e6c2333328b268c9ef7406cda0fee6808268c0907144a223932d5c33c773ed",
+            parser_sha256: "95a06be957b58f1121ddf523cc8361d8a8c9f256ce0953c62c67bebbe1727612",
+            scanner_sha256: Some(
+                "76f04e79df9e21d82fbb0b98460dbe549db44ffbcf10373827e3175255d70595",
+            ),
+        },
+        GrammarFamily::Idris => GrammarIdentity {
+            language_id: "idris",
+            grammar_version: "0.0.1",
+            source_package_sha256: "ce59fa39fa7752a2fefb3a05c2e476903e6742e86c66af6b1660d58d3b055d45",
+            parser_sha256: "f7b1b33a679d91a69187c2847d691e7b168a1d4349e9d0fc546a2d1c64dc3a10",
+            scanner_sha256: Some(
+                "b10b7218839b510dd7ef427ae2802bb500177b82731c14156e8bef135c6b0f8d",
+            ),
+        },
+        GrammarFamily::Sed => GrammarIdentity {
+            language_id: "sed",
+            grammar_version: "0.4.0",
+            source_package_sha256: "3b0834a5358ff23ea1273a178942f6286c2cc1e6c5919b0b49f1fe7837651b2f",
+            parser_sha256: "f580c8ee7ae31e7ef805fa16ac6f9fc574ccac5ed8b9db56e8249491b3713377",
+            scanner_sha256: Some(
+                "fe32615ad4d49c6491e3232d2fa7a338c299eba8787fc3c8d9190cf2a116bd35",
+            ),
+        },
+        GrammarFamily::Wolfram => GrammarIdentity {
+            language_id: "wolfram",
+            grammar_version: "0.0.1",
+            source_package_sha256: "f0e5044cbd4c5273901c8c3ec7c16bf4397faf99d2157157f4636603722ae2c0",
+            parser_sha256: "da8f47dd9dc2863e60148aea5e80d6965dc773d190c19cae723a92826c097cb0",
+            scanner_sha256: Some(
+                "478c2dbc815305e331d3b39ac29dcf787ffcff90cc68869742ac8cdfff30b75e",
+            ),
+        },
+        GrammarFamily::Lean => GrammarIdentity {
+            language_id: "lean",
+            grammar_version: "0.2.0",
+            source_package_sha256: "299ae7ac23237967277f048215d38b03e214278b042192563e1988ad0ebaa66b",
+            parser_sha256: "b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268",
+            scanner_sha256: Some(
+                "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
+            ),
+        },
+        GrammarFamily::Pug => GrammarIdentity {
+            language_id: "pug",
+            grammar_version: "0.0.1",
+            source_package_sha256: "c89ce3460a16aad511fa6cba2c011fe30e2e39cb7771e7aa09c7caf5d7ce3904",
+            parser_sha256: "ab3b9becbe2de196a439a3bf41b0b930cde145c32b12046b980669c30564b976",
+            scanner_sha256: Some(
+                "3e0c6962da141bac0b0c3a564c73941a7a4e8c1501d74405e647e2d32f35166b",
+            ),
+        },
+        GrammarFamily::Coffeescript => GrammarIdentity {
+            language_id: "coffeescript",
+            grammar_version: "1.0.0",
+            source_package_sha256: "645180057fe7e0aa5d2437c2cc43cb80544fc41d5dc6130d641d87fb9288f392",
+            parser_sha256: "599ac2851c774ff389b0bd808ccef69f86ba1c0485f15c80088ff1484791a666",
+            scanner_sha256: Some(
+                "ce059ce315c3644f832d672ae3903702eec89f8070eac36b603398eb3c8beb9e",
+            ),
+        },
+        GrammarFamily::Meson => GrammarIdentity {
+            language_id: "meson",
+            grammar_version: "1.0.0",
+            source_package_sha256: "fae5f812e4faad95f49efc30ea1be08e694642405f5ee3eb7bcd4a4f10ee8b9b",
+            parser_sha256: "b943376d83dcb78f1ca2f6060d00234d61009e446f505f0a125574f492b3577d",
+            scanner_sha256: None,
+        },
+        GrammarFamily::Gdscript => GrammarIdentity {
+            language_id: "gdscript",
+            grammar_version: "6.1.0",
+            source_package_sha256: "488c04d2d0bc745d905cf35ea60ec35ce2c9c024f97f2550238f3cbb4f10e463",
+            parser_sha256: "cc18c78720d6dfc8951e3132e1d3abeeb241b1c16c3ecdd54ff8551ad2017f04",
+            scanner_sha256: Some(
+                "9cd19de7e118dee560deb187c4114440da8ab9285121a96dd5c6f22f19b4fee1",
+            ),
+        },
         GrammarFamily::Qsharp => GrammarIdentity {
             language_id: "qsharp",
             grammar_version: "0.2.0",
-            source_package_sha256: "39a0f7ecf9d38c7dd87446b04468f57d4b140d3b95a2c59c5226f1bf99f19b65",
+            source_package_sha256: "e3d9b65ff4c70ff8ac3e624d6be881187867b7715e87318932894e43fe67f045",
             parser_sha256: "49cf44132fc6b46826321dabd90c97e6aa5b1788469fcd34af73796d88010c3a",
             scanner_sha256: Some(
                 "5b64d24f020111fe67eccfdb2588fa7b932a48731488935386233e39a04213bf",
+            ),
+        },
+        GrammarFamily::Chapel => GrammarIdentity {
+            language_id: "chapel",
+            grammar_version: "0.0.1",
+            source_package_sha256: "a322530e264cea30fc5cb693ffd04ed66860cf262ad38c4dfa3bde03decb9bb3",
+            parser_sha256: "49efe1ae40f8f004d7b5084a2b482004507305913f23c32bb2cc17a5df6cbbd6",
+            scanner_sha256: Some(
+                "b5c9fd72e07326fa4ed99759156823fd6bdd0fdb34a2f4c0c38fa77186ebb72e",
             ),
         },
         GrammarFamily::StandardMl => GrammarIdentity {
@@ -645,8 +773,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Mojo => GrammarIdentity {
             language_id: "mojo",
             grammar_version: "0.25.0",
-            source_package_sha256: "af419002d318cf1981d7ff09511a4b7e45b77574ad463207f040f6aede7e8bd9",
-            parser_sha256: "0a42ee50e3d60b705c0ba955fc2c3e92b96cfea7b09a3fd0fc86e9bc259aa488",
+            source_package_sha256: "4b55cfd6df9be7f5c2213c6e065bd311b17d5de12f266937af9f5b4fb25fe5fe",
+            parser_sha256: "26d160ce6111cbc0e2677a781b7aaa5a60a0c83a1b2a8ca6f89fd6b1f0d4d85d",
             scanner_sha256: Some(
                 "bc2ce107fe0e25874a526ea639f7ff26f9a101dee512f48d0dc7effd5c92d22a",
             ),
@@ -1168,7 +1296,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             source_package_sha256: "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062",
             parser_sha256: "87352349129188bcc98c5c18b805e3acc45bdcec936adaf1bd33cb034a5c767f",
             scanner_sha256: Some(
-                "9b41de73f7a17f06a70c6d0414b3a007752efb9871c94f237fd5b47fb499d5f9",
+                "351c6947f6c58451e4d6c0e10ad7548cf92f0fefd05ef85afb3faf24c276fa87",
             ),
         },
         GrammarFamily::Json => GrammarIdentity {
@@ -1363,9 +1491,19 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 90);
+        assert_eq!(registry.descriptors().len(), 100);
         for family in [
+            GrammarFamily::Idris,
+            GrammarFamily::Sed,
+            GrammarFamily::Wolfram,
+            GrammarFamily::Pug,
+            GrammarFamily::Lean,
+            GrammarFamily::Dockerfile,
+            GrammarFamily::Coffeescript,
+            GrammarFamily::Meson,
+            GrammarFamily::Gdscript,
             GrammarFamily::Qsharp,
+            GrammarFamily::Chapel,
             GrammarFamily::StandardMl,
             GrammarFamily::Wat,
             GrammarFamily::Mojo,
@@ -1716,7 +1854,25 @@ mod tests {
             (GrammarFamily::Haxe, "haxe", "tree-sitter-haxe"),
             (GrammarFamily::Qml, "qml", "tree-sitter-qmljs"),
             (GrammarFamily::Ring, "ring", "tree-sitter-ring"),
+            (
+                GrammarFamily::Dockerfile,
+                "dockerfile",
+                "tree-sitter-dockerfile",
+            ),
+            (
+                GrammarFamily::Coffeescript,
+                "coffeescript",
+                "tree-sitter-coffeescript",
+            ),
+            (GrammarFamily::Idris, "idris", "tree-sitter-idris"),
+            (GrammarFamily::Sed, "sed", "tree-sitter-gsed"),
+            (GrammarFamily::Wolfram, "wolfram", "tree-sitter-wolfram"),
+            (GrammarFamily::Pug, "pug", "tree-sitter-pug"),
+            (GrammarFamily::Lean, "lean", "tree-sitter-lean"),
+            (GrammarFamily::Meson, "meson", "tree-sitter-meson"),
+            (GrammarFamily::Gdscript, "gdscript", "tree-sitter-gdscript"),
             (GrammarFamily::Qsharp, "qsharp", "tree-sitter-qsharp"),
+            (GrammarFamily::Chapel, "chapel", "tree-sitter-chapel"),
             (GrammarFamily::StandardMl, "standard-ml", "tree-sitter-sml"),
             (GrammarFamily::Wat, "webassembly", "tree-sitter-wat"),
             (GrammarFamily::Mojo, "mojo", "tree-sitter-mojo"),
@@ -1866,7 +2022,17 @@ mod tests {
                             GrammarFamily::Haxe
                                 | GrammarFamily::Qml
                                 | GrammarFamily::Ring
+                                | GrammarFamily::Dockerfile
+                                | GrammarFamily::Coffeescript
+                                | GrammarFamily::Pug
+                                | GrammarFamily::Wolfram
+                                | GrammarFamily::Lean
+                                | GrammarFamily::Idris
+                                | GrammarFamily::Sed
+                                | GrammarFamily::Meson
+                                | GrammarFamily::Gdscript
                                 | GrammarFamily::Qsharp
+                                | GrammarFamily::Chapel
                                 | GrammarFamily::StandardMl
                                 | GrammarFamily::Wat
                                 | GrammarFamily::Mojo

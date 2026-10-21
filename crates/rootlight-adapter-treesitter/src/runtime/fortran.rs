@@ -470,6 +470,18 @@ mod tests {
             cmake_patch_projection_policy: crate::runtime::CMAKE_PATCH_PROJECTION_POLICY,
             cmake_command_template_projection_policy:
                 crate::runtime::CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
+            gdscript_scanner_contract: crate::runtime::gdscript_scope::CACHE_CONTRACT_IDENTITY,
+            dockerfile_scanner_contract:
+                crate::runtime::dockerfile_scope::SCANNER_CONTRACT_IDENTITY,
+            pug_scanner_contract: crate::runtime::pug_scope::SCANNER_CONTRACT_IDENTITY,
+            lean_scanner_contract: crate::runtime::lean_scope::SCANNER_CONTRACT_IDENTITY,
+            wolfram_scanner_contract: crate::runtime::wolfram_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_scanner_contract: crate::runtime::idris_scope::SCANNER_CONTRACT_IDENTITY,
+            idris_frontend_policy: crate::runtime::idris_scope::FRONTEND_POLICY,
+            sed_scanner_contract: crate::runtime::sed_scope::SCANNER_CONTRACT_IDENTITY,
+            sed_frontend_policy: crate::runtime::sed_scope::FRONTEND_POLICY,
+            coffeescript_scanner_contract:
+                crate::runtime::coffeescript_scope::SCANNER_CONTRACT_IDENTITY,
             identity,
             source: Arc::new(source.to_vec()),
             tree: Some(native_tree(input.as_bytes())),

@@ -924,6 +924,72 @@ fn all_analysis_tiers_share_the_checked_ir_transaction_contract() {
 }
 
 #[test]
+fn consuming_analysis_output_preserves_allocations_report_and_memory_status() {
+    let (_temporary, snapshot, source) = source_fixture();
+    let limits = limits(2, IrLimits::default());
+    let request = analysis_request(&snapshot, &source, &limits);
+
+    for (enforcement, policy, expected_status) in [
+        (
+            MemoryEnforcement::HardProcess,
+            MemoryAdmissionPolicy::RequireHardOrAccounted,
+            MemoryAdmissionStatus::HardProcess,
+        ),
+        (
+            MemoryEnforcement::AccountedInProcess,
+            MemoryAdmissionPolicy::RequireHardOrAccounted,
+            MemoryAdmissionStatus::AccountedInProcess,
+        ),
+        (
+            MemoryEnforcement::Unavailable,
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            MemoryAdmissionStatus::UnavailableEnforcementFallback,
+        ),
+    ] {
+        let (file, provenance, descriptor) = minimal_ir_records(&source);
+        let descriptor = ProducerDescriptor::new(
+            descriptor.identity().clone(),
+            descriptor.kind(),
+            descriptor.language().clone(),
+            descriptor.tier(),
+            enforcement,
+            descriptor.supports_noncritical_extensions(),
+        );
+        let analyzer = MockLanguageAnalyzer::new(
+            descriptor,
+            vec![IrRecord::File(file), IrRecord::Provenance(provenance)],
+            analysis_coverage(AnalysisTier::TierC, source_len(&source)),
+            0,
+        );
+        let output = execute_analysis(
+            &analyzer,
+            &request,
+            ExtensionSupport::default(),
+            policy,
+            &deadline(),
+        )
+        .expect("checked analyzer output commits before ownership transfer");
+        let expected_document = output.document().clone();
+        let expected_report = output.report().clone();
+        assert_eq!(output.memory_admission(), expected_status);
+        assert!(!output.document().files.is_empty());
+        assert!(!output.document().provenance.is_empty());
+        let files = output.document().files.as_ptr();
+        let provenance = output.document().provenance.as_ptr();
+        let path = output.document().files[0].path.as_ptr();
+
+        let (document, report, status) = output.into_parts();
+
+        assert_eq!(document, expected_document);
+        assert_eq!(report, expected_report);
+        assert_eq!(status, expected_status);
+        assert_eq!(document.files.as_ptr(), files);
+        assert_eq!(document.provenance.as_ptr(), provenance);
+        assert_eq!(document.files[0].path.as_ptr(), path);
+    }
+}
+
+#[test]
 fn analyzer_report_cannot_claim_a_different_tier() {
     let (_temporary, snapshot, source) = source_fixture();
     let limits = limits(2, IrLimits::default());

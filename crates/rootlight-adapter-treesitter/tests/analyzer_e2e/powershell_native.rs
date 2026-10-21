@@ -1270,3 +1270,664 @@ fn powershell_computed_keys_preserve_entry_ownership_without_invented_definition
             .any(|entry| owner.container == Some(rootlight_ir::ContainerRef::Entity(entry.id)))
     );
 }
+const ORIGINAL_FORMAL_SOURCE: &[u8] =
+    include_bytes!("../fixtures/powershell_formal/Get-StrategyReportCsvStatistics.ps1");
+
+fn native_description(node: tree_sitter::Node<'_>) -> String {
+    let field = node.parent().and_then(|parent| {
+        (0..parent.child_count()).find_map(|index| {
+            let index = u32::try_from(index).unwrap();
+            (parent.child(index) == Some(node))
+                .then(|| parent.field_name_for_child(index))
+                .flatten()
+        })
+    });
+    format!(
+        "id={} kind={} field={field:?} bytes={}..{} error={} missing={}",
+        node.id(),
+        node.kind(),
+        node.start_byte(),
+        node.end_byte(),
+        node.is_error(),
+        node.is_missing()
+    )
+}
+
+#[test]
+fn original_formal_native_and_normalized_owner_observation() {
+    let original = ORIGINAL_FORMAL_SOURCE;
+    assert_eq!(original.len(), 8690);
+    assert_eq!(&original[677..690], b"Add-Statistic");
+    assert_eq!(&original[700..710], b"$statistic");
+    assert_eq!(&original[927..937], b"$statistic");
+    println!("source-sha256=1f5875f916e8418b330ea3080f26bea5359162154ddaaf9ced5cf1ef5ffa6bb2");
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_powershell::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(original, None).unwrap();
+    println!("root {}", native_description(tree.root_node()));
+    let mut owner = tree
+        .root_node()
+        .descendant_for_byte_range(677, 690)
+        .unwrap();
+    while owner.kind() != "function_statement" {
+        owner = owner.parent().unwrap();
+    }
+    assert!(
+        !owner.has_error(),
+        "selected original function must be clean"
+    );
+    println!(
+        "owner {} sexp={}",
+        native_description(owner),
+        owner.to_sexp()
+    );
+    for (start, end) in [(677, 690), (700, 710), (927, 937)] {
+        let mut current = Some(
+            tree.root_node()
+                .descendant_for_byte_range(start, end)
+                .unwrap(),
+        );
+        for _ in 0..128 {
+            let Some(node) = current else { break };
+            println!("anchor={start}..{end} {}", native_description(node));
+            current = node.parent();
+        }
+        assert!(current.is_none(), "finite original ancestry observation");
+    }
+    let native = Arc::new(provider());
+    let fixture = Fixture::new(POWERSHELL, original);
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, POWERSHELL, &bounds);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        native.as_ref(),
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    for fact in parsed.facts() {
+        if (fact.span().start_byte() >= u64::try_from(owner.start_byte()).unwrap()
+            && fact.span().end_byte() <= u64::try_from(owner.end_byte()).unwrap())
+            || fact.span().start_byte() == 0
+        {
+            println!("raw-fact {fact:?}");
+        }
+    }
+    let result = output(std::str::from_utf8(original).unwrap());
+    let document = result.document();
+    for entity in &document.entities {
+        if entity.evidence.source.as_ref().is_some_and(|source| {
+            source.span().start_byte() >= u64::try_from(owner.start_byte()).unwrap()
+                && source.span().end_byte() <= u64::try_from(owner.end_byte()).unwrap()
+        }) {
+            println!("normalized-entity {entity:?}");
+        }
+    }
+    for occurrence in &document.occurrences {
+        if [(677, 690), (700, 710), (927, 937)].contains(&(
+            occurrence.source.span().start_byte(),
+            occurrence.source.span().end_byte(),
+        )) {
+            println!("normalized-occurrence {occurrence:?}");
+        }
+    }
+    for relation in &document.relations {
+        if relation.evidence.source.as_ref().is_some_and(|source| {
+            source.span().start_byte() >= u64::try_from(owner.start_byte()).unwrap()
+                && source.span().end_byte() <= u64::try_from(owner.end_byte()).unwrap()
+        }) {
+            println!("normalized-relation {relation:?}");
+        }
+    }
+}
+
+#[test]
+fn original_hashtable_value_reference_targets_its_written_function_formal() {
+    let result = output(std::str::from_utf8(ORIGINAL_FORMAL_SOURCE).unwrap());
+    let document = result.document();
+    let owners: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Function && entity.canonical_name == "Add-Statistic"
+        })
+        .collect();
+    assert_eq!(owners.len(), 1);
+    let parameters: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "$statistic"
+                && entity.container == Some(rootlight_ir::ContainerRef::Entity(owners[0].id))
+        })
+        .collect();
+    assert_eq!(parameters.len(), 1);
+    let symbol = parameters[0].id;
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == 700
+                    && site.source.span().end_byte() == 710
+                    && site.target == (OccurrenceTarget::Resolved { symbol })
+            })
+            .count(),
+        1
+    );
+    assert!(document.relations.iter().any(|edge| {
+        edge.predicate == RelationPredicate::Contains
+            && edge.subject == RelationEndpoint::Entity(owners[0].id)
+            && edge.object == RelationEndpoint::Entity(symbol)
+    }));
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == 927
+                && site.source.span().end_byte() == 937
+        })
+        .collect();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(
+        sites[0].source.content_hash(),
+        content_hash(ORIGINAL_FORMAL_SOURCE)
+    );
+    assert_eq!(sites[0].target, OccurrenceTarget::Resolved { symbol });
+}
+
+// A literal key owns a property; its value may reference a function formal.
+// These controls keep those identities separate from runtime command dispatch.
+
+fn formal_case_output(raw: &[u8], encoding: &str) -> AnalysisOutput {
+    let native = Arc::new(provider());
+    let fixture = Fixture::new(POWERSHELL, raw);
+    let bounds = limits();
+    let input = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(POWERSHELL),
+        EncodingId::new(encoding).unwrap(),
+        Vec::new(),
+        AnalysisTier::TierD,
+        build_context(),
+        &bounds,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    analyze(
+        &analyzer(&native, POWERSHELL),
+        &input,
+        &ExtensionSupport::default(),
+    )
+}
+
+fn assert_formal_value(
+    result: &AnalysisOutput,
+    raw: &[u8],
+    name: &str,
+    declaration: (u64, u64),
+    usage: (u64, u64),
+) -> SymbolId {
+    let doc = result.document();
+    validate_ir_document(doc, limits().ir(), &ExtensionSupport::default()).unwrap();
+    let parameters: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == name)
+        .collect();
+    assert_eq!(parameters.len(), 1);
+    let parameter = parameters[0];
+    let definitions: Vec<_> = doc
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.target
+                    == (OccurrenceTarget::Resolved {
+                        symbol: parameter.id,
+                    })
+                && (
+                    site.source.span().start_byte(),
+                    site.source.span().end_byte(),
+                ) == declaration
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1);
+    let references: Vec<_> = doc
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && (
+                    site.source.span().start_byte(),
+                    site.source.span().end_byte(),
+                ) == usage
+        })
+        .collect();
+    assert_eq!(references.len(), 1);
+    assert_eq!(
+        references[0].target,
+        OccurrenceTarget::Resolved {
+            symbol: parameter.id
+        }
+    );
+    for site in [definitions[0], references[0]] {
+        assert_eq!(site.source.content_hash(), content_hash(raw));
+        assert_eq!(site.source.repository(), doc.repository);
+        assert_eq!(site.source.generation(), doc.generation);
+        assert!(site.source.span().end_byte() <= u64::try_from(raw.len()).unwrap());
+    }
+    assert!(!doc.occurrences.iter().any(|site| {
+        site.role == OccurrenceRole::Definition
+            && (
+                site.source.span().start_byte(),
+                site.source.span().end_byte(),
+            ) == usage
+    }));
+    parameter.id
+}
+
+#[test]
+fn renamed_case_insensitive_formals_retain_written_target_inside_literal_values() {
+    for (name, used) in [
+        ("$value", "$value"),
+        ("$Entry", "$ENTRY"),
+        ("$other2", "$OTHER2"),
+    ] {
+        let source = format!("function Owned([string]{name}) {{ return @{{ Key = {used} }} }}\n");
+        let declaration = source.find(name).unwrap();
+        let usage = source.rfind(used).unwrap();
+        let result = formal_case_output(source.as_bytes(), "utf-8");
+        let target = assert_formal_value(
+            &result,
+            source.as_bytes(),
+            name,
+            (
+                u64::try_from(declaration).unwrap(),
+                u64::try_from(declaration + name.len()).unwrap(),
+            ),
+            (
+                u64::try_from(usage).unwrap(),
+                u64::try_from(usage + used.len()).unwrap(),
+            ),
+        );
+        let keys: Vec<_> = result
+            .document()
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Property && entity.canonical_name == "Key")
+            .collect();
+        assert_eq!(keys.len(), 1);
+        assert_ne!(target, keys[0].id);
+        assert!(result.document().skipped_regions.iter().any(|gap| {
+            gap.detail == "powershell-hashtable-runtime-key-comparison-unavailable"
+        }));
+    }
+}
+
+#[test]
+fn formal_mutation_dynamic_commands_and_nested_scopes_cannot_donate_a_target() {
+    for source in [
+        "function Owned($value) { $VALUE = 0; return @{ Key = $value } }\n",
+        "function Owned($value) { ++$value; return @{ Key = $value } }\n",
+        "function Owned($value) { Set-Variable value 0; return @{ Key = $value } }\n",
+        "function Owned($value) { . ./other.ps1; return @{ Key = $value } }\n",
+        "function Owned($value) { return { param($other) @{ Key = $value } } }\n",
+        "function Owned($value = 1) { return @{ Key = $value } }\n",
+        "function Owned($value,$VALUE) { return @{ Key = $value } }\n",
+        "function Owned($value) { return @{ Key = $script:value } }\n",
+    ] {
+        let usage = source.rfind('$').unwrap();
+        let end = source[usage..]
+            .find(' ')
+            .map(|offset| usage + offset)
+            .unwrap();
+        let result = formal_case_output(source.as_bytes(), "utf-8");
+        validate_ir_document(
+            result.document(),
+            limits().ir(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let references: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == u64::try_from(usage).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(end).unwrap()
+            })
+            .collect();
+        assert_eq!(references.len(), 1, "{source}");
+        assert!(
+            !matches!(references[0].target, OccurrenceTarget::Resolved { .. }),
+            "{source}"
+        );
+        assert_eq!(
+            references[0].source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn formal_value_coordinates_bind_current_bom_and_utf16_source() {
+    let text = "# lambda \u{03bb}\u{1f642}\nfunction Owned($value) { return @{ Key = $value } }\n";
+    let declaration = text.find("$value").unwrap();
+    let usage = text.rfind("$value").unwrap();
+    for little in [true, false] {
+        let mut raw = if little {
+            vec![0xff, 0xfe]
+        } else {
+            vec![0xfe, 0xff]
+        };
+        for unit in text.encode_utf16() {
+            raw.extend(if little {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        let result = formal_case_output(&raw, if little { "utf-16le" } else { "utf-16be" });
+        let physical =
+            |offset| u64::try_from(2 + 2 * text[..offset].encode_utf16().count()).unwrap();
+        assert_formal_value(
+            &result,
+            &raw,
+            "$value",
+            (physical(declaration), physical(declaration + 6)),
+            (physical(usage), physical(usage + 6)),
+        );
+    }
+    let raw = format!("\u{feff}{text}").into_bytes();
+    let result = formal_case_output(&raw, "utf-8");
+    assert_formal_value(
+        &result,
+        &raw,
+        "$value",
+        (
+            u64::try_from(3 + declaration).unwrap(),
+            u64::try_from(3 + declaration + 6).unwrap(),
+        ),
+        (
+            u64::try_from(3 + usage).unwrap(),
+            u64::try_from(3 + usage + 6).unwrap(),
+        ),
+    );
+}
+
+#[test]
+fn original_required_provider_artifact_counts_and_generation_replay_keep_the_reference() {
+    let native = Arc::new(provider());
+    let frontend = analyzer(&native, POWERSHELL);
+    let fixture = Fixture::new(POWERSHELL, ORIGINAL_FORMAL_SOURCE);
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, POWERSHELL, &bounds);
+    let artifact = frontend.prepare_artifact(&input, &deadline()).unwrap();
+    let required = artifact.required_syntax_fact_count(&deadline()).unwrap();
+    assert!(required > 1);
+    assert_eq!(
+        native
+            .required_syntax_fact_count(&input.to_parse_request(), &deadline())
+            .unwrap(),
+        required
+    );
+    let exact = limits_with_syntax_records(required);
+    let input = request(&fixture.snapshot, &fixture.source, POWERSHELL, &exact);
+    let (result, retained) = frontend
+        .analyze_and_capture(
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_formal_value(
+        &result,
+        ORIGINAL_FORMAL_SOURCE,
+        "$statistic",
+        (700, 710),
+        (927, 937),
+    );
+    assert_eq!(
+        retained.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    let next = fixture.next_generation();
+    let current = request(&next.snapshot, &next.source, POWERSHELL, &exact);
+    let reused = frontend
+        .analyze_from_artifact(
+            &current,
+            &retained,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_formal_value(
+        &reused,
+        ORIGINAL_FORMAL_SOURCE,
+        "$statistic",
+        (700, 710),
+        (927, 937),
+    );
+    let fresh = analyze(&frontend, &current, &ExtensionSupport::default());
+    assert_eq!(reused.document(), fresh.document());
+    let below = limits_with_syntax_records(required - 1);
+    let error = frontend
+        .prepare_artifact(
+            &request(&fixture.snapshot, &fixture.source, POWERSHELL, &below),
+            &deadline(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, AdapterError::Sink(SinkError::StreamLimit {
+        resource: ResourceKind::RequiredSyntaxFacts, observed, limit,
+    }) if observed == required && limit == required - 1),
+        "{error:?}"
+    );
+    let changed = fixture.rewrite(&[ORIGINAL_FORMAL_SOURCE, b"\n"].concat());
+    let stale = frontend
+        .analyze_from_artifact(
+            &request(&changed.snapshot, &changed.source, POWERSHELL, &exact),
+            &retained,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap_err();
+    assert!(matches!(stale, AdapterError::ProviderFailed { code }
+        if code.as_str() == "treesitter-structural-artifact-mismatch"));
+}
+
+#[test]
+fn missing_context_and_distinct_id_raw_witness_duplicates_keep_reference_unresolved() {
+    use rootlight_adapter_sdk::{
+        SyntaxFact, SyntaxFactKind, SyntaxKindLabel, testkit::MockParseProvider,
+    };
+    let native = provider();
+    let fixture = Fixture::new(POWERSHELL, ORIGINAL_FORMAL_SOURCE);
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, POWERSHELL, &bounds);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &native,
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let replay = |facts: Vec<SyntaxFact>| {
+        let parser = MockParseProvider::new(
+            native.capabilities().clone(),
+            facts,
+            parsed.diagnostics().to_vec(),
+            parsed.report().coverage().clone(),
+        );
+        let frontend = TreeSitterAnalyzer::new(
+            Arc::new(parser),
+            ProducerIdentity::new(
+                "powershell-formal-replay",
+                "1.0",
+                content_hash(b"powershell-formal-replay"),
+            )
+            .unwrap(),
+            language(POWERSHELL),
+            POWERSHELL.frontend,
+            content_hash(b"powershell-formal-replay-binary"),
+        )
+        .unwrap();
+        execute_analysis(
+            &frontend,
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap()
+    };
+    let baseline = replay(parsed.facts().to_vec());
+    assert_formal_value(
+        &baseline,
+        ORIGINAL_FORMAL_SOURCE,
+        "$statistic",
+        (700, 710),
+        (927, 937),
+    );
+    let contexts: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| {
+            fact.kind() == SyntaxFactKind::Signature
+                && fact.syntax_kind().as_str() == "powershell.formal_context.signature"
+                && fact.span().start_byte() == 668
+                && fact.span().end_byte() == 1022
+        })
+        .collect();
+    assert_eq!(contexts.len(), 1);
+    for mode in 0..9 {
+        let mut facts = parsed.facts().to_vec();
+        let context = contexts[0];
+        if mode == 0 {
+            facts.retain(|fact| fact.local_id() != context.local_id());
+        } else if mode == 1 {
+            let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+            facts.push(SyntaxFact::new(
+                next,
+                context.parent(),
+                context.kind(),
+                context.span(),
+                context.depth(),
+                context.syntax_kind().clone(),
+            ));
+        } else if mode >= 6 {
+            let (kind, start, end, label) = if mode == 7 {
+                (SyntaxFactKind::Scope, 915, 937, "powershell.property.scope")
+            } else {
+                (
+                    SyntaxFactKind::Occurrence,
+                    927,
+                    937,
+                    "powershell.formal_value.reference",
+                )
+            };
+            let parent_label = if mode == 8 {
+                "powershell.hashtable.declaration"
+            } else {
+                "powershell.function.declaration"
+            };
+            let parent = facts
+                .iter()
+                .find(|fact| {
+                    fact.kind() == SyntaxFactKind::Declaration
+                        && fact.syntax_kind().as_str() == parent_label
+                        && fact.span().start_byte() == if mode == 8 { 899 } else { 668 }
+                })
+                .unwrap()
+                .local_id();
+            let selected = facts
+                .iter_mut()
+                .find(|fact| {
+                    fact.kind() == kind
+                        && fact.span().start_byte() == start
+                        && fact.span().end_byte() == end
+                        && fact.syntax_kind().as_str() == label
+                })
+                .unwrap();
+            *selected = SyntaxFact::new(
+                selected.local_id(),
+                Some(parent),
+                selected.kind(),
+                selected.span(),
+                selected.depth(),
+                selected.syntax_kind().clone(),
+            );
+        } else {
+            let (kind, start, end) = match mode {
+                2 | 3 => (SyntaxFactKind::Occurrence, 700, 710),
+                4 => (SyntaxFactKind::Occurrence, 677, 690),
+                _ => (SyntaxFactKind::Declaration, 915, 937),
+            };
+            let original = facts
+                .iter()
+                .find(|fact| {
+                    fact.kind() == kind
+                        && fact.span().start_byte() == start
+                        && fact.span().end_byte() == end
+                        && (kind != SyntaxFactKind::Occurrence
+                            || fact.syntax_kind().as_str().ends_with(".definition"))
+                })
+                .unwrap()
+                .clone();
+            let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+            let label = if mode == 3 {
+                SyntaxKindLabel::new("powershell.foreign.definition").unwrap()
+            } else {
+                original.syntax_kind().clone()
+            };
+            facts.push(SyntaxFact::new(
+                next,
+                original.parent(),
+                original.kind(),
+                original.span(),
+                original.depth(),
+                label,
+            ));
+        }
+        let result = replay(facts);
+        let sites: Vec<_> = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == 927
+                    && site.source.span().end_byte() == 937
+            })
+            .collect();
+        assert_eq!(sites.len(), 1, "mode={mode}");
+        assert!(
+            matches!(sites[0].target, OccurrenceTarget::Unresolved { .. }),
+            "mode={mode}"
+        );
+        assert!(
+            result.document().skipped_regions.iter().any(|gap| {
+                gap.detail == "powershell-written-formal-binding-unavailable"
+                    && gap.source == sites[0].source
+            }),
+            "mode={mode}"
+        );
+        assert!(
+            !result.document().relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(sites[0].id)
+            }),
+            "mode={mode}"
+        );
+    }
+}

@@ -16,3 +16,7 @@
  (open_module) (include_module) (include_module_type)] @expression
 (comment) @comment @documentation
 [(string) (quoted_string) (character)] @string
+; Complete native binding metadata and paired identity captures stay separate from optional uses.
+(compilation_unit) @signature
+(value_path) @signature
+(application_expression) @signature

@@ -44,6 +44,7 @@ members = [
     "crates/rootlight-source",
     "crates/rootlight-storage",
     "crates/rootlight-unicode",
+    "crates/rootlight-thinkscript",
     "crates/rootlight-vba",
     "crates/rootlight-vfs",
     "crates/rootlight-workspace",
@@ -72,7 +73,17 @@ exclude = [
     "third_party/tree-sitter-ada-0.9.1",
     "third_party/tree-sitter-d-0.8.2",
     "third_party/tree-sitter-haxe-0.13.0",
+    "third_party/tree-sitter-gdscript-6.1.0",
+    "third_party/tree-sitter-idris-0.0.1",
+    "third_party/tree-sitter-gsed-0.4.0",
+    "third_party/tree-sitter-wolfram-0.0.1",
+    "third_party/tree-sitter-pug-0.0.1",
+    "third_party/tree-sitter-lean-0.2.0",
+    "third_party/tree-sitter-coffeescript-1.0.0",
+    "third_party/tree-sitter-meson-1.0.0",
+    "third_party/tree-sitter-dockerfile-0.2.0",
     "third_party/tree-sitter-qsharp-0.2.0",
+    "third_party/tree-sitter-chapel-0.0.1",
     "third_party/tree-sitter-sml-0.25.0",
     "third_party/tree-sitter-wat-0.1.0",
     "third_party/tree-sitter-mojo-0.25.0",
@@ -188,7 +199,17 @@ tree-sitter-d = { path = "third_party/tree-sitter-d-0.8.2", version = "=0.8.2", 
 tree-sitter-haxe = { path = "third_party/tree-sitter-haxe-0.13.0", version = "=0.13.0", default-features = false }
 tree-sitter-qmljs = { path = "third_party/tree-sitter-qmljs-0.3.1", version = "=0.3.1", default-features = false }
 tree-sitter-modelica = { path = "third_party/tree-sitter-modelica-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-idris = { path = "third_party/tree-sitter-idris-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-gsed = { path = "third_party/tree-sitter-gsed-0.4.0", version = "=0.4.0", default-features = false }
+tree-sitter-wolfram = { path = "third_party/tree-sitter-wolfram-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-pug = { path = "third_party/tree-sitter-pug-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-lean = { path = "third_party/tree-sitter-lean-0.2.0", version = "=0.2.0", default-features = false }
+tree-sitter-coffeescript = { path = "third_party/tree-sitter-coffeescript-1.0.0", version = "=1.0.0", default-features = false }
+tree-sitter-meson = { path = "third_party/tree-sitter-meson-1.0.0", version = "=1.0.0", default-features = false }
+tree-sitter-dockerfile = { path = "third_party/tree-sitter-dockerfile-0.2.0", version = "=0.2.0", default-features = false }
+tree-sitter-gdscript = { path = "third_party/tree-sitter-gdscript-6.1.0", version = "=6.1.0", default-features = false }
 tree-sitter-qsharp = { path = "third_party/tree-sitter-qsharp-0.2.0", version = "=0.2.0", default-features = false }
+tree-sitter-chapel = { path = "third_party/tree-sitter-chapel-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-sml = { path = "third_party/tree-sitter-sml-0.25.0", version = "=0.25.0", default-features = false }
 tree-sitter-wat = { path = "third_party/tree-sitter-wat-0.1.0", version = "=0.1.0", default-features = false }
 tree-sitter-mojo = { path = "third_party/tree-sitter-mojo-0.25.0", version = "=0.25.0", default-features = false }

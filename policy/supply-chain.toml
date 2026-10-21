@@ -5,6 +5,16 @@ schema_version = "1.0"
 allowed_registries = ["registry+https://github.com/rust-lang/crates.io-index"]
 allowed_git_sources = []
 allowed_path_dependencies = [
+  "tree-sitter-lean@0.2.0:third_party/tree-sitter-lean-0.2.0/Cargo.toml",
+  "tree-sitter-idris@0.0.1:third_party/tree-sitter-idris-0.0.1/Cargo.toml",
+  "tree-sitter-gsed@0.4.0:third_party/tree-sitter-gsed-0.4.0/Cargo.toml",
+  "tree-sitter-wolfram@0.0.1:third_party/tree-sitter-wolfram-0.0.1/Cargo.toml",
+  "tree-sitter-pug@0.0.1:third_party/tree-sitter-pug-0.0.1/Cargo.toml",
+  "tree-sitter-dockerfile@0.2.0:third_party/tree-sitter-dockerfile-0.2.0/Cargo.toml",
+  "tree-sitter-coffeescript@1.0.0:third_party/tree-sitter-coffeescript-1.0.0/Cargo.toml",
+  "tree-sitter-meson@1.0.0:third_party/tree-sitter-meson-1.0.0/Cargo.toml",
+  "tree-sitter-gdscript@6.1.0:third_party/tree-sitter-gdscript-6.1.0/Cargo.toml",
+  "tree-sitter-chapel@0.0.1:third_party/tree-sitter-chapel-0.0.1/Cargo.toml",
   "tree-sitter-qsharp@0.2.0:third_party/tree-sitter-qsharp-0.2.0/Cargo.toml",
   "tree-sitter-sml@0.25.0:third_party/tree-sitter-sml-0.25.0/Cargo.toml",
   "tree-sitter-wat@0.1.0:third_party/tree-sitter-wat-0.1.0/Cargo.toml",
@@ -80,7 +90,17 @@ allowed_path_dependencies = [
 ]
 
 allowed_build_scripts = [
+  "tree-sitter-lean@0.2.0",
+  "tree-sitter-idris@0.0.1",
+  "tree-sitter-gsed@0.4.0",
+  "tree-sitter-wolfram@0.0.1",
+  "tree-sitter-pug@0.0.1",
+  "tree-sitter-dockerfile@0.2.0",
+  "tree-sitter-coffeescript@1.0.0",
+  "tree-sitter-meson@1.0.0",
+  "tree-sitter-gdscript@6.1.0",
   "tree-sitter-qsharp@0.2.0",
+  "tree-sitter-chapel@0.0.1",
   "tree-sitter-sml@0.25.0",
   "tree-sitter-wat@0.1.0",
   "tree-sitter-mojo@0.25.0",

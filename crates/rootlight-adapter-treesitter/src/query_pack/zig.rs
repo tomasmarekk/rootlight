@@ -71,9 +71,9 @@ fn declaration<'tree>(
         return Ok(None);
     }
     if node.kind() == "function_declaration" {
-        if !node
+        if node
             .parent()
-            .is_some_and(|parent| parent.kind() == "source_file")
+            .is_none_or(|parent| parent.kind() != "source_file")
         {
             return Ok(None);
         }

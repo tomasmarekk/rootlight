@@ -275,7 +275,7 @@ impl CaptureCache<'_> {
         {
             return Ok(None);
         }
-        if !node.parent().is_some_and(|n| n.kind() == "argument_list") {
+        if node.parent().is_none_or(|n| n.kind() != "argument_list") {
             return Ok((role == StructuralRole::Signature).then_some(false));
         }
         let mut current = node;

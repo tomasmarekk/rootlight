@@ -165,9 +165,9 @@ impl<'s> CaptureCache<'s> {
         }
         // The anonymous MODULE keyword shares the named construct's kind string.
         if node.is_named() && node.kind() == "module" {
-            if !node
+            if node
                 .parent()
-                .is_some_and(|parent| parent.kind() == "translation_unit")
+                .is_none_or(|parent| parent.kind() != "translation_unit")
             {
                 return Ok(false);
             }
@@ -395,9 +395,9 @@ impl<'s> CaptureCache<'s> {
             }
         }
         if node.kind() == "variable_declaration" {
-            if !node
+            if node
                 .child_by_field_name("type")
-                .is_some_and(|kind| kind.kind() == "intrinsic_type")
+                .is_none_or(|kind| kind.kind() != "intrinsic_type")
             {
                 self.procedures
                     .get_mut(&owner)

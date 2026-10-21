@@ -338,7 +338,14 @@ static bool scan_heredoc_end_identifier(Heredoc *heredoc, TSLexer *lexer) {
         size += count;
         advance(lexer);
     }
-    return size == delimiter_size && (lexer->lookahead == '\n' || lexer->eof(lexer));
+    if (size != delimiter_size) {
+        return false;
+    }
+    if (lexer->lookahead == '\r') {
+        advance(lexer);
+        return lexer->lookahead == '\n';
+    }
+    return lexer->lookahead == '\n' || lexer->eof(lexer);
 }
 
 static bool scan_heredoc_content(Scanner *scanner, TSLexer *lexer, enum TokenType middle_type,

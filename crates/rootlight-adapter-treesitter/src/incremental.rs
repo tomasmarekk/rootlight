@@ -164,6 +164,7 @@ pub struct ParseReuseKey {
     pub(crate) family: GrammarFamily,
     pub(crate) native_family: GrammarFamily,
     pub(crate) cmake_header_path: bool,
+    pub(crate) line_endings: crate::source_view::LineEndingPolicy,
     pub(crate) grammar_version: &'static str,
     pub(crate) encoding: String,
     pub(crate) included_ranges: Arc<Vec<IncludedRange>>,
@@ -330,4 +331,5 @@ pub(crate) struct ParseIdentity {
     pub(crate) settings: ParserSettings,
     pub(crate) virtual_line_ending: bool,
     pub(crate) cmake_header_path: bool,
+    pub(crate) line_endings: crate::source_view::LineEndingPolicy,
 }

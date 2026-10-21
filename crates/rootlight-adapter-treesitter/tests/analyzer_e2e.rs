@@ -50,6 +50,10 @@ mod assembly_native;
 mod astro_native;
 #[path = "analyzer_e2e/bash_bindings.rs"]
 mod bash_bindings;
+#[path = "analyzer_e2e/bash_module_references.rs"]
+mod bash_module_references;
+#[path = "analyzer_e2e/broad_residuals.rs"]
+mod broad_residuals;
 #[path = "analyzer_e2e/capnp_native.rs"]
 mod capnp_native;
 #[path = "analyzer_e2e/cmake_native.rs"]
@@ -60,8 +64,12 @@ mod cmake_patch;
 mod common_lisp_native;
 #[path = "analyzer_e2e/coq_native.rs"]
 mod coq_native;
+#[path = "analyzer_e2e/cpp_const_formals.rs"]
+mod cpp_const_formals;
 #[path = "analyzer_e2e/cpp_preprocessor.rs"]
 mod cpp_preprocessor;
+#[path = "analyzer_e2e/csharp_formals.rs"]
+mod csharp_formals;
 #[path = "analyzer_e2e/css_fields.rs"]
 mod css_fields;
 #[path = "analyzer_e2e/dart_native.rs"]
@@ -112,6 +120,10 @@ mod pascal_native;
 mod perl_native;
 #[path = "analyzer_e2e/powershell_native.rs"]
 mod powershell_native;
+#[path = "analyzer_e2e/pug_native.rs"]
+mod pug_native;
+#[path = "analyzer_e2e/python_module_updates.rs"]
+mod python_module_updates;
 #[path = "analyzer_e2e/r_native.rs"]
 mod r_native;
 #[path = "analyzer_e2e/rust_bindings.rs"]
@@ -3987,12 +3999,18 @@ fn assert_contract(
 
     let coverage = output.report().coverage();
     assert_eq!(coverage.tier(), AnalysisTier::TierD);
-    let expected_status = if matches!(case.name, "ruby" | "bash") {
+    let expected_status = if case.name == "ruby" {
         CoverageStatus::Complete
     } else {
         CoverageStatus::Bounded
     };
-    assert_eq!(coverage.status(), expected_status);
+    assert_eq!(
+        coverage.status(),
+        expected_status,
+        "{} coverage gaps: {:?}",
+        case.name,
+        document.skipped_regions
+    );
     assert_eq!(
         coverage.total_source_bytes(),
         fixture.snapshot.content().len()
@@ -4081,7 +4099,6 @@ fn assert_contract(
         if relation.predicate == RelationPredicate::Contains {
             continue;
         }
-        assert!(matches!(case.name, "lua" | "rust"));
         assert_eq!(relation.predicate, RelationPredicate::RefersTo);
         let RelationEndpoint::Occurrence(id) = relation.subject else {
             panic!("lexical relationship retains an occurrence endpoint");
@@ -4094,6 +4111,23 @@ fn assert_contract(
         let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
             panic!("lexical relationship has an exact binding target");
         };
+        assert!(document.entities.iter().any(|entity| entity.id == symbol));
+        assert_eq!(
+            document
+                .occurrences
+                .iter()
+                .filter(|definition| {
+                    definition.role == OccurrenceRole::Definition
+                        && definition.target == OccurrenceTarget::Resolved { symbol }
+                        && definition.source.span().file() == occurrence.source.span().file()
+                        && definition.source.repository() == occurrence.source.repository()
+                        && definition.source.generation() == occurrence.source.generation()
+                        && definition.source.content_hash() == occurrence.source.content_hash()
+                })
+                .count(),
+            1,
+            "a lexical relationship requires one exact current-file definition"
+        );
         assert_eq!(occurrence.role, OccurrenceRole::Reference);
         assert_eq!(relation.object, RelationEndpoint::Entity(symbol));
         assert_eq!(relation.evidence.source.as_ref(), Some(&occurrence.source));
@@ -4471,7 +4505,44 @@ mod jsx_markup;
 #[path = "analyzer_e2e/c_formal_reads.rs"]
 mod c_formal_reads;
 
+#[path = "analyzer_e2e/c_written_bindings.rs"]
+mod c_written_bindings;
+
 #[path = "analyzer_e2e/qsharp_native.rs"]
 mod qsharp_native;
 #[path = "analyzer_e2e/sml_wat_native.rs"]
 mod sml_wat_native;
+
+#[path = "analyzer_e2e/scala_formals.rs"]
+mod scala_formals;
+
+#[path = "analyzer_e2e/glsl_written_bindings.rs"]
+mod glsl_written_bindings;
+
+#[path = "analyzer_e2e/chapel_native.rs"]
+mod chapel_native;
+
+#[path = "analyzer_e2e/java_local_receivers.rs"]
+mod java_local_receivers;
+
+#[path = "analyzer_e2e/gdscript_native.rs"]
+mod gdscript_native;
+#[path = "analyzer_e2e/meson_native.rs"]
+mod meson_native;
+
+#[path = "analyzer_e2e/dockerfile_native.rs"]
+mod dockerfile_native;
+
+#[path = "analyzer_e2e/coffeescript_native.rs"]
+mod coffeescript_native;
+
+#[path = "analyzer_e2e/sed_written.rs"]
+mod sed_written;
+#[path = "analyzer_e2e/wolfram_native.rs"]
+mod wolfram_native;
+
+#[path = "analyzer_e2e/lean_native.rs"]
+mod lean_native;
+
+#[path = "analyzer_e2e/idris_native.rs"]
+mod idris_native;

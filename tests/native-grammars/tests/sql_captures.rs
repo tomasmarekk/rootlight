@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
-#[path = "../../../crates/rootlight-adapter-treesitter/src/query_pack/sql.rs"]
+#[path = "../../../crates/rootlight-adapter-treesitter/src/query_pack/sql/native_selector.rs"]
 mod sql;
 
 const QUERY: &str = include_str!("../../../crates/rootlight-adapter-treesitter/queries/sql.scm");

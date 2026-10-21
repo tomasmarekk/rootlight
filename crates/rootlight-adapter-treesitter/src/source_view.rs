@@ -8,7 +8,29 @@ use rootlight_adapter_sdk::{AdapterError, DiagnosticCode, RequestError, Resource
 use rootlight_cancel::Cancellation;
 use rootlight_ir::{SourceSpan, SourceTextEncoding};
 
+mod crlf;
+
 const CANCELLATION_SCALAR_INTERVAL: usize = 256;
+
+/// Explicit static file-text interpretation, separate from physical encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineEndingPolicy {
+    /// Preserve every source scalar, including paired carriage returns.
+    Preserve,
+    /// Project paired CRLF to LF while preserving lone carriage returns.
+    CrlfFileText,
+}
+
+impl LineEndingPolicy {
+    /// Select the declared static interpretation without inspecting source or paths.
+    pub(crate) fn for_language(language: &str) -> Self {
+        if language == "sed" {
+            Self::CrlfFileText
+        } else {
+            Self::Preserve
+        }
+    }
+}
 
 /// Binds retained/native parse identity to the exact coordinate projection.
 pub(crate) const NATIVE_SOURCE_PROJECTION_POLICY: &str = "rootlight.treesitter.source-projection/1";
@@ -20,6 +42,7 @@ pub(crate) struct NativeSourceView<'a> {
     physical_bytes: usize,
     runs: Vec<ScalarWidthRun>,
     owned_bytes: usize,
+    line_endings: LineEndingPolicy,
 }
 
 #[derive(Debug)]
@@ -27,12 +50,17 @@ struct ScalarWidthRun {
     physical_start: usize,
     projected_start: usize,
     scalar_count: usize,
-    projected_width: usize,
+    projected_width: u8,
+    physical_width: u8,
 }
 
 impl ScalarWidthRun {
-    const fn physical_width(&self) -> usize {
-        if self.projected_width == 4 { 4 } else { 2 }
+    fn physical_width(&self) -> usize {
+        usize::from(self.physical_width)
+    }
+
+    fn projected_width(&self) -> usize {
+        usize::from(self.projected_width)
     }
 }
 
@@ -58,11 +86,45 @@ impl<'a> NativeSourceView<'a> {
         max_owned_bytes: usize,
         cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
+        Self::bounded_prefix_with_policy(
+            raw,
+            encoding,
+            LineEndingPolicy::Preserve,
+            maximum,
+            max_owned_bytes,
+            cancellation,
+        )
+    }
+
+    /// Samples a prefix without cutting a scalar or a declared CRLF pair.
+    ///
+    /// # Errors
+    /// Preserves strict encoding, memory and cancellation errors at true EOF.
+    pub(crate) fn bounded_prefix_with_policy(
+        raw: &'a [u8],
+        encoding: &str,
+        line_endings: LineEndingPolicy,
+        maximum: usize,
+        max_owned_bytes: usize,
+        cancellation: &Cancellation,
+    ) -> Result<Self, AdapterError> {
         let end = bounded_prefix_end(raw, encoding, maximum, cancellation)?;
+        let end = if line_endings == LineEndingPolicy::CrlfFileText {
+            crlf::complete_pair_prefix(raw, encoding, end)?
+        } else {
+            end
+        };
         let prefix = raw
             .get(..end)
             .ok_or_else(|| source_failure("native-source-boundary"))?;
-        Self::new(prefix, encoding, maximum, max_owned_bytes, cancellation)
+        Self::new_with_policy(
+            prefix,
+            encoding,
+            line_endings,
+            maximum,
+            max_owned_bytes,
+            cancellation,
+        )
     }
 
     pub(crate) const fn physical_bytes(&self) -> usize {
@@ -85,6 +147,52 @@ impl<'a> NativeSourceView<'a> {
         max_owned_bytes: usize,
         cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
+        Self::preserve(
+            raw,
+            encoding,
+            max_projected_bytes,
+            max_owned_bytes,
+            cancellation,
+        )
+    }
+
+    /// Constructs a view under an explicit interpretation without selecting a language.
+    ///
+    /// # Errors
+    /// Rejects malformed encoding, limits, allocation or cancellation before publication.
+    pub(crate) fn new_with_policy(
+        raw: &'a [u8],
+        encoding: &str,
+        line_endings: LineEndingPolicy,
+        max_projected_bytes: usize,
+        max_owned_bytes: usize,
+        cancellation: &Cancellation,
+    ) -> Result<Self, AdapterError> {
+        match line_endings {
+            LineEndingPolicy::Preserve => Self::new(
+                raw,
+                encoding,
+                max_projected_bytes,
+                max_owned_bytes,
+                cancellation,
+            ),
+            LineEndingPolicy::CrlfFileText => crlf::new(
+                raw,
+                encoding,
+                max_projected_bytes,
+                max_owned_bytes,
+                cancellation,
+            ),
+        }
+    }
+
+    fn preserve(
+        raw: &'a [u8],
+        encoding: &str,
+        max_projected_bytes: usize,
+        max_owned_bytes: usize,
+        cancellation: &Cancellation,
+    ) -> Result<Self, AdapterError> {
         cancellation.check()?;
         if encoding == "utf-8" {
             require_limit(ResourceKind::SourceBytes, raw.len(), max_projected_bytes)?;
@@ -96,6 +204,7 @@ impl<'a> NativeSourceView<'a> {
                 physical_bytes: raw.len(),
                 runs: Vec::new(),
                 owned_bytes: 0,
+                line_endings: LineEndingPolicy::Preserve,
             });
         }
         let encoding = match encoding {
@@ -151,7 +260,7 @@ impl<'a> NativeSourceView<'a> {
             if next_projected > plan.projected_bytes {
                 return Err(source_failure("native-source-projection-invariant"));
             }
-            if let Some(run) = runs.last_mut().filter(|run| run.projected_width == width) {
+            if let Some(run) = runs.last_mut().filter(|run| run.projected_width() == width) {
                 run.scalar_count = run
                     .scalar_count
                     .checked_add(1)
@@ -164,7 +273,10 @@ impl<'a> NativeSourceView<'a> {
                     physical_start: physical_cursor,
                     projected_start: text.len(),
                     scalar_count: 1,
-                    projected_width: width,
+                    projected_width: u8::try_from(width)
+                        .map_err(|_| SinkError::AccountingOverflow)?,
+                    physical_width: u8::try_from(scalar.len_utf16() * 2)
+                        .map_err(|_| SinkError::AccountingOverflow)?,
                 });
             }
             text.push(scalar);
@@ -185,6 +297,7 @@ impl<'a> NativeSourceView<'a> {
             physical_bytes: raw.len(),
             runs,
             owned_bytes,
+            line_endings: LineEndingPolicy::Preserve,
         })
     }
 
@@ -206,7 +319,7 @@ impl<'a> NativeSourceView<'a> {
         if !self.text.is_char_boundary(projected) {
             return Err(source_failure("native-source-boundary"));
         }
-        if self.encoding.is_none() {
+        if self.is_identity() {
             return Ok(projected);
         }
         if projected == self.text.len() {
@@ -224,7 +337,7 @@ impl<'a> NativeSourceView<'a> {
         map_run_offset(
             projected,
             run.projected_start,
-            run.projected_width,
+            run.projected_width(),
             run.physical_start,
             run.physical_width(),
             run.scalar_count,
@@ -236,7 +349,7 @@ impl<'a> NativeSourceView<'a> {
     /// # Errors
     /// Rejects out-of-range, odd UTF-16 and split-surrogate offsets.
     pub(crate) fn to_projected_offset(&self, physical: usize) -> Result<usize, AdapterError> {
-        if self.encoding.is_none() {
+        if self.is_identity() {
             return self
                 .text
                 .is_char_boundary(physical)
@@ -263,7 +376,7 @@ impl<'a> NativeSourceView<'a> {
             run.physical_start,
             run.physical_width(),
             run.projected_start,
-            run.projected_width,
+            run.projected_width(),
             run.scalar_count,
         )
     }
@@ -296,9 +409,20 @@ impl<'a> NativeSourceView<'a> {
         )
     }
 
-    /// Identifies the physical encoded path; `None` denotes borrowed UTF-8.
+    /// Identifies physical encoding; `None` also permits a mapped UTF-8 view.
     pub(crate) const fn encoding(&self) -> Option<SourceTextEncoding> {
         self.encoding
+    }
+
+    /// Returns whether physical and parser bytes have identical coordinates.
+    /// Interpretation policy remains distinct even when this map is an identity.
+    pub(crate) fn is_identity(&self) -> bool {
+        matches!(self.text, Cow::Borrowed(_))
+    }
+
+    /// Returns the declared interpretation for cache and parser/lowering agreement.
+    pub(crate) const fn line_ending_policy(&self) -> LineEndingPolicy {
+        self.line_endings
     }
 
     /// Returns the admitted string/map capacity charge, excluding borrowed input.

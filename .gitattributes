@@ -369,3 +369,7 @@ third_party/tree-sitter-idris-0.0.1/** -text
 # Preserve complete licensed Nix source and its physical CRLF bytes.
 /crates/rootlight-adapter-treesitter/tests/fixtures/nix_captured_formal/** -text
 /crates/rootlight-adapter-treesitter/tests/fixtures/nix_captured_formal/flake.nix whitespace=-blank-at-eof,cr-at-eol
+
+# Preserve physical bytes in the retained GLSL and Python module originals.
+/crates/rootlight-adapter-treesitter/tests/fixtures/glsl_written_binding/** -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/python_module_updates/** -text

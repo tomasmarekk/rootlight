@@ -333,3 +333,103 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod original_observation {
+    use super::*;
+
+    #[test]
+    fn observe_complete_module_reference_originals_and_ancestor_geometry() {
+        for (label, source, spans) in [
+            (
+                "version",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/bash_module_references/tag_version.sh"
+                ))
+                .as_slice(),
+                &[(147, 150), (168, 171), (273, 276), (330, 333), (337, 340)][..],
+            ),
+            (
+                "build",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/bash_module_references/build.sh"
+                ))
+                .as_slice(),
+                &[(14, 29), (73, 80), (101, 108), (193, 208)][..],
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_bash::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            let root = tree.root_node();
+            assert_eq!(root.kind(), "program");
+            assert_eq!(root.byte_range(), 0..source.len());
+            assert!(!root.has_error());
+            eprintln!(
+                "ORIGINAL {label} bytes={} CST={}",
+                source.len(),
+                root.to_sexp()
+            );
+            let mut cache = CaptureCache::new(source, 16_384);
+            for &(start, end) in spans {
+                let mut matches = Vec::new();
+                let mut cursor = root.walk();
+                loop {
+                    let node = cursor.node();
+                    if node.kind() == "variable_name" && node.byte_range() == (start..end) {
+                        matches.push(node);
+                    }
+                    if cursor.goto_first_child() {
+                        continue;
+                    }
+                    loop {
+                        if cursor.goto_next_sibling() {
+                            break;
+                        }
+                        if !cursor.goto_parent() {
+                            break;
+                        }
+                    }
+                    if cursor.node() == root {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    matches.len(),
+                    1,
+                    "{label} exact native variable_name {start}..{end}"
+                );
+                let node = matches[0];
+                eprintln!(
+                    "ANCHOR {label} {start}..{end} text={:?} classification={:?}",
+                    std::str::from_utf8(&source[start..end]).unwrap(),
+                    cache.syntax(node, &Cancellation::new()).unwrap()
+                );
+                let mut next = Some(node);
+                while let Some(owner) = next {
+                    let field = owner.parent().and_then(|parent| {
+                        (0..parent.child_count()).find_map(|index| {
+                            let index = u32::try_from(index).ok()?;
+                            (parent.child(index) == Some(owner))
+                                .then(|| parent.field_name_for_child(index))
+                                .flatten()
+                        })
+                    });
+                    eprintln!(
+                        "ANCESTOR kind={} range={}..{} field={field:?} error={} missing={}",
+                        owner.kind(),
+                        owner.start_byte(),
+                        owner.end_byte(),
+                        owner.is_error(),
+                        owner.is_missing()
+                    );
+                    next = owner.parent();
+                }
+            }
+        }
+    }
+}

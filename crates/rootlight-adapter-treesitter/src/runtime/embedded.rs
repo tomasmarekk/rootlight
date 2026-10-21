@@ -275,6 +275,7 @@ impl TreeSitterProvider {
                     self.config.default_settings(),
                     source,
                     cancellation,
+                    None,
                 )?;
                 (
                     child.family,

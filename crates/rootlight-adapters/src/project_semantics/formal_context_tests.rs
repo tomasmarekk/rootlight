@@ -98,6 +98,15 @@ fn zero_optional_native_contexts_keep_project_signature_arity_and_exact_relation
         ),
         (
             SemanticProjectLanguage::Java,
+            "Local.java",
+            "class Local { void owned(Object input) { Object receiver = input; receiver.run(); } }\n",
+            EntityKind::Method,
+            "java.local_receiver_context.signature",
+            "(Objectinput)",
+            "java-local-receiver-proof-does-not-evaluate-types-initializers-or-method-dispatch",
+        ),
+        (
+            SemanticProjectLanguage::Java,
             "Written.java",
             "class Written { Object field; void owned(Object value) { this.field = value; } }\n",
             EntityKind::Method,
@@ -303,7 +312,9 @@ fn zero_optional_native_contexts_keep_project_signature_arity_and_exact_relation
         assert_eq!(relation_coverage.len(), 1);
         assert_ne!(relation_coverage[0].status, CoverageStatus::Complete);
         assert!(relation_coverage[0].skipped > 0);
-        if language == SemanticProjectLanguage::C {
+        if language == SemanticProjectLanguage::C
+            || label == "java.local_receiver_context.signature"
+        {
             let full_native = vec![ParsedInput {
                 input: &request.inputs()[0],
                 facts: native.facts().to_vec(),
@@ -323,7 +334,10 @@ fn zero_optional_native_contexts_keep_project_signature_arity_and_exact_relation
                     IrRecord::Occurrence(site)
                         if matches!(
                             site.syntax_kind.as_str(),
-                            "c.formal_value.reference" | "c.unproven_formal_value.reference"
+                            "c.formal_value.reference"
+                                | "c.unproven_formal_value.reference"
+                                | "java.local_receiver.reference"
+                                | "java.unproven_local_receiver.reference"
                         ) =>
                     {
                         Some(site)

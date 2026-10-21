@@ -656,6 +656,14 @@ impl AnalysisOutput {
     pub const fn memory_admission(&self) -> MemoryAdmissionStatus {
         self.memory_admission
     }
+    /// Consumes committed output and moves its document, report, and memory status.
+    ///
+    /// No value is cloned or revalidated. Borrowed accessors remain available
+    /// until the caller transfers ownership through this method.
+    #[must_use]
+    pub fn into_parts(self) -> (NormalizedIrDocument, AnalysisReport, MemoryAdmissionStatus) {
+        (self.document, self.report, self.memory_admission)
+    }
 }
 
 /// Committed canonical normalized IR for one project transaction.

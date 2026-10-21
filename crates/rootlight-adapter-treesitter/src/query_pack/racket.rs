@@ -548,7 +548,7 @@ pub(super) fn retain_capture(
     }
     if !reader_allowed {
         return Ok(role == StructuralRole::Expression
-            && !cache.header.is_some_and(|header| !header.base_reader)
+            && cache.header.is_none_or(|header| header.base_reader)
             && (node.kind() == "extension" || case_directive(node, source)));
     }
     if node.has_error() || node.is_missing() {

@@ -10,6 +10,8 @@ use tree_sitter::Node;
 
 use super::{QueryCandidate, StructuralRole, native_depth, query_failure};
 
+mod bindings;
+
 #[derive(Clone)]
 struct OwnerProof {
     extent: Range<usize>,
@@ -26,6 +28,7 @@ pub(super) struct CaptureCache {
     owners: HashMap<usize, Option<OwnerProof>>,
     maximum_entries: usize,
     exhausted: bool,
+    bindings: bindings::CaptureCache,
 }
 
 impl CaptureCache {
@@ -35,12 +38,19 @@ impl CaptureCache {
             owners: HashMap::new(),
             maximum_entries,
             exhausted: false,
+            bindings: bindings::CaptureCache::new(maximum_entries, false),
         }
+    }
+
+    pub(super) fn new_with_source_frame(maximum_entries: usize, complete: bool) -> Self {
+        let mut cache = Self::new(maximum_entries);
+        cache.bindings = bindings::CaptureCache::new(maximum_entries, complete);
+        cache
     }
 
     /// Reports a bound that the caller must propagate as a capture limit.
     pub(super) const fn exhausted(&self) -> bool {
-        self.exhausted
+        self.exhausted || self.bindings.exhausted()
     }
 
     fn owner(
@@ -785,6 +795,12 @@ pub(super) fn retain_capture(
     ) {
         return Ok(clean(node, source) && text(node, source).is_some());
     }
+    if node.kind() == "identifier" && role == StructuralRole::Signature {
+        return Ok(cache
+            .bindings
+            .candidate(node, role, source, cancellation)?
+            .is_some());
+    }
     if !valid_owner_chain(node, source, cancellation, cache)? {
         return Ok(false);
     }
@@ -882,6 +898,12 @@ pub(super) fn candidate(
     cache: &mut CaptureCache,
 ) -> Result<QueryCandidate, AdapterError> {
     cancellation.check()?;
+    if node.kind() == "identifier"
+        && matches!(role, StructuralRole::Reference | StructuralRole::Signature)
+        && let Some(candidate) = cache.bindings.candidate(node, role, source, cancellation)?
+    {
+        return Ok(candidate);
+    }
     let mut range = node.byte_range();
     let mut depth_node = node;
     let syntax = if node.kind() == "translation_unit" {
@@ -1351,5 +1373,141 @@ mod tests {
                 .iter()
                 .any(|capture| capture.role == StructuralRole::Reference)
         );
+    }
+}
+
+#[cfg(test)]
+mod original_written_binding_observation {
+    use super::*;
+
+    #[test]
+    fn inspect_original_common_shader_cst_and_capture_frames() {
+        let source = include_str!("../../tests/fixtures/glsl_written_binding/common.glsl");
+        assert_eq!(source.len(), 5169);
+        eprintln!(
+            "GLSL_ORIGINAL_SOURCE content_hash={:?} bytes={}",
+            rootlight_ids::content_hash(source.as_bytes()),
+            source.len()
+        );
+        let anchors = [
+            (2434, 2443, "luminance"),
+            (2449, 2454, "color"),
+            (2473, 2478, "color"),
+            (2722, 2736, "contrast_ratio"),
+            (2788, 2797, "luminance"),
+        ];
+        for (start, end, written) in anchors {
+            assert_eq!(&source[start..end], written);
+        }
+        let family = crate::GrammarFamily::Glsl;
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::registry::language_for(family))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        eprintln!(
+            "GLSL_ORIGINAL_ROOT kind={} range={:?} error={} missing={} has_error={}",
+            root.kind(),
+            root.byte_range(),
+            root.is_error(),
+            root.is_missing(),
+            root.has_error()
+        );
+        eprintln!("GLSL_ORIGINAL_SEXPR {}", root.to_sexp());
+        let mut cursor = root.walk();
+        let mut count = 0_usize;
+        loop {
+            let node = cursor.node();
+            count += 1;
+            assert!(
+                count <= 16_384,
+                "observation prerequisite exceeds existing small syntax budget"
+            );
+            if anchors
+                .iter()
+                .any(|(start, end, _)| node.start_byte() <= *start && *end <= node.end_byte())
+            {
+                let field = node.parent().and_then(|parent| {
+                    (0..parent.child_count()).find_map(|index| {
+                        let index = u32::try_from(index).unwrap();
+                        (parent.child(index) == Some(node))
+                            .then(|| parent.field_name_for_child(index))
+                            .flatten()
+                    })
+                });
+                eprintln!(
+                    "GLSL_ORIGINAL_NODE kind={} range={:?} named={} field={field:?} parent={:?} error={} missing={} has_error={}",
+                    node.kind(),
+                    node.byte_range(),
+                    node.is_named(),
+                    node.parent()
+                        .map(|parent| (parent.kind(), parent.byte_range())),
+                    node.is_error(),
+                    node.is_missing(),
+                    node.has_error()
+                );
+            }
+            if node.kind() == "function_definition" {
+                let mut fields = node.walk();
+                for (index, child) in node.children(&mut fields).enumerate() {
+                    eprintln!(
+                        "GLSL_ORIGINAL_FUNCTION_CHILD owner={:?} field={:?} kind={} range={:?} error={} missing={}",
+                        node.byte_range(),
+                        node.field_name_for_child(u32::try_from(index).unwrap()),
+                        child.kind(),
+                        child.byte_range(),
+                        child.has_error(),
+                        child.is_missing()
+                    );
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    break;
+                }
+            }
+            if cursor.node() == root {
+                break;
+            }
+        }
+        let pack = super::super::QueryPack::compile(family, include_str!("../../queries/glsl.scm"))
+            .unwrap();
+        let extracted = pack
+            .extract(
+                family,
+                &tree,
+                source.as_bytes(),
+                16_384,
+                16_384,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        eprintln!(
+            "GLSL_ORIGINAL_QUERY candidates={} limit={:?} nodes={count}",
+            extracted.candidates.len(),
+            extracted.limit
+        );
+        for capture in &extracted.candidates {
+            if anchors
+                .iter()
+                .any(|(start, end, _)| capture.start <= *start && *end <= capture.end)
+            {
+                eprintln!(
+                    "GLSL_ORIGINAL_CAPTURE role={:?} syntax={} range={:?} required={} native_depth={}",
+                    capture.role,
+                    capture.syntax,
+                    capture.start..capture.end,
+                    capture.required,
+                    capture.native_depth
+                );
+            }
+        }
     }
 }

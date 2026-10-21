@@ -1,0 +1,9 @@
+{
+  "repository": "metarocq",
+  "path": "template-rocq/src/caml_bytestring.ml",
+  "source_bytes": 899,
+  "source_sha256": "371b66d6a2036dccd58bf2032b6df775f8cce0e350dd3c1aa37564e8b5274636",
+  "license_bytes": 1312,
+  "license_sha256": "9dd44f91710f01d44cef393c7aca6371ae784326a1a7e566a4ad0b9968568390",
+  "purpose": "Complete unchanged original physical source for native observation and written lexical binding regressions."
+}

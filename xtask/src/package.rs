@@ -61,7 +61,11 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 63] = [
+const DISTRIBUTION_LICENSES: [&str; 67] = [
+    "tree-sitter-coffeescript-1.0.0-LICENSE",
+    "tree-sitter-meson-1.0.0-LICENSE",
+    "tree-sitter-dockerfile-0.2.0-LICENSE",
+    "tree-sitter-gdscript-6.1.0-LICENSE",
     "tree-sitter-hare-1.0.0-LICENSE",
     "tree-sitter-ring-1.1.1-LICENSE",
     "flux-source-parser-0.1.0-LICENSE",
@@ -620,6 +624,18 @@ struct ArchiveBuild<'a> {
 fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
     // Read retained vendor notices directly instead of maintaining a second copy.
     match filename {
+        "tree-sitter-dockerfile-0.2.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-dockerfile-0.2.0/LICENSE")
+        }
+        "tree-sitter-coffeescript-1.0.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-coffeescript-1.0.0/LICENSE")
+        }
+        "tree-sitter-meson-1.0.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-meson-1.0.0/LICENSE")
+        }
+        "tree-sitter-gdscript-6.1.0-LICENSE" => {
+            workspace.join("third_party/tree-sitter-gdscript-6.1.0/LICENSE")
+        }
         "tree-sitter-hare-1.0.0-LICENSE" => {
             workspace.join("third_party/tree-sitter-hare-1.0.0/LICENSE")
         }
@@ -2457,6 +2473,30 @@ mod tests {
     fn local_grammar_distribution_notices_match_retained_sources() {
         let workspace = workspace_root().expect("workspace root");
         for (filename, source, expected_bytes, expected_sha256) in [
+            (
+                "tree-sitter-coffeescript-1.0.0-LICENSE",
+                "third_party/tree-sitter-coffeescript-1.0.0/LICENSE",
+                1081,
+                "9b5fc74dde5f394732d0386eca2dd41c3aff4843c85d441260538633bcf7382f",
+            ),
+            (
+                "tree-sitter-dockerfile-0.2.0-LICENSE",
+                "third_party/tree-sitter-dockerfile-0.2.0/LICENSE",
+                1080,
+                "806b8fcd19c1cdf23e178eb25942acc844a38669e36b2c896c7baf5f8bcecbb4",
+            ),
+            (
+                "tree-sitter-meson-1.0.0-LICENSE",
+                "third_party/tree-sitter-meson-1.0.0/LICENSE",
+                1040,
+                "ecf206b1a27e8e4ea07f1e1529cb111b4be5ce8420bd27b8269981d9c0c389f8",
+            ),
+            (
+                "tree-sitter-gdscript-6.1.0-LICENSE",
+                "third_party/tree-sitter-gdscript-6.1.0/LICENSE",
+                1080,
+                "d724405ce238a22c0d35769c5a36b386ad5958192efe8bbb304fb2896254575f",
+            ),
             (
                 "tree-sitter-graphql-0.0.1-LICENSE",
                 "third_party/tree-sitter-graphql-0.0.1/LICENSE",

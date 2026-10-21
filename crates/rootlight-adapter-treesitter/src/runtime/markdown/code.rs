@@ -131,6 +131,7 @@ impl TreeSitterProvider {
                 None,
                 0,
                 cancellation,
+                None,
             ) {
                 Ok(parsed) => parsed,
                 Err(AdapterError::ProviderFailed { code })
@@ -780,7 +781,7 @@ mod tests {
             .native_source_view(&request, &cancellation)
             .unwrap();
         let host = provider
-            .prepare_tree(&request, None, &[], settings, &view, &cancellation)
+            .prepare_tree(&request, None, &[], settings, &view, &cancellation, None)
             .unwrap();
         assert!(host.traversal.fully_traversed);
         for credit in [0, 1] {

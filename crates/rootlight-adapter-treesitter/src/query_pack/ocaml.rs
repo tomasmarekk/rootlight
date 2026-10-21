@@ -2,6 +2,8 @@
 //! Implementation and interface profiles share native shapes, not executable facts.
 //! Concrete types use written native bodies; abstract and extension forms stay gaps.
 
+mod bindings;
+
 use std::{collections::HashMap, ops::Range};
 
 use rootlight_adapter_sdk::{AdapterError, SinkError, structural_captured_name_for_language};
@@ -30,6 +32,8 @@ pub(super) struct CaptureCache {
     maximum_entries: usize,
     remaining_work: usize,
     exhausted: bool,
+    complete_context: bool,
+    bindings: Option<bindings::Proofs>,
 }
 
 impl CaptureCache {
@@ -40,7 +44,15 @@ impl CaptureCache {
             maximum_entries,
             remaining_work: maximum_entries,
             exhausted: false,
+            complete_context: false,
+            bindings: None,
         }
+    }
+
+    /// Admits source certificates only for the actual complete native input.
+    pub(super) fn with_complete_context(mut self, complete: bool) -> Self {
+        self.complete_context = complete;
+        self
     }
 
     /// Reports exhaustion that the caller must expose as a capture limit.
@@ -435,6 +447,33 @@ fn syntax(interface: bool, kind: &str) -> Result<&'static str, AdapterError> {
     })
 }
 
+/// Produces separately retained native binding witnesses for implementation files.
+pub(super) fn binding_candidates(
+    family: GrammarFamily,
+    node: Node<'_>,
+    role: StructuralRole,
+    source: &[u8],
+    cancellation: &Cancellation,
+    cache: &mut CaptureCache,
+) -> Result<[Option<QueryCandidate>; 2], AdapterError> {
+    if family != GrammarFamily::Ocaml {
+        return Ok([None, None]);
+    }
+    if cache.bindings.is_none() {
+        cache.bindings = Some(bindings::Proofs::prepare(
+            node,
+            source,
+            cache,
+            cancellation,
+        )?);
+    }
+    cache
+        .bindings
+        .as_ref()
+        .expect("initialized native cache")
+        .candidates(node, role, source, cancellation)
+}
+
 /// Selects exact written captures without resolving types, modules or extensions.
 ///
 /// The caller must surface cache exhaustion; returned identity captures retain the
@@ -827,10 +866,34 @@ mod tests {
             texts(before, &first, StructuralRole::Definition),
             texts(after, &second, StructuralRole::Definition)
         );
+        let lexical_headers = |source: &str, facts: &[QueryCandidate]| {
+            let headers: Vec<_> = facts
+                .iter()
+                .filter(|fact| {
+                    fact.role == StructuralRole::Signature
+                        && matches!(fact.syntax, "ocaml.function" | "ocaml.parameter")
+                })
+                .map(|fact| source[fact.start..fact.end].to_owned())
+                .collect();
+            assert_eq!(headers, ["increment x =", "x"]);
+            headers
+        };
         assert_eq!(
-            texts(before, &first, StructuralRole::Signature),
-            texts(after, &second, StructuralRole::Signature)
+            lexical_headers(before, &first),
+            lexical_headers(after, &second)
         );
+        for (source, facts) in [(before, &first), (after, &second)] {
+            let metadata: Vec<_> = facts
+                .iter()
+                .filter(|fact| {
+                    fact.role == StructuralRole::Signature
+                        && fact.syntax == "ocaml.written_bindings_file"
+                })
+                .collect();
+            assert_eq!(metadata.len(), 1);
+            assert_eq!((metadata[0].start, metadata[0].end), (0, source.len()));
+            assert!(metadata[0].required);
+        }
         let tree = parse(GrammarFamily::Ocaml, before);
         let node = tree
             .root_node()
@@ -873,6 +936,160 @@ mod tests {
                 before.as_bytes(),
                 &cancellation,
                 &mut cache
+            ),
+            Err(AdapterError::Cancelled { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod written_binding_tests {
+    use super::*;
+    use tree_sitter::Parser;
+
+    const ORIGINAL: &[u8] = include_bytes!("../../tests/fixtures/ocaml_written/caml_bytestring.ml");
+
+    fn tree() -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&crate::registry::language_for(GrammarFamily::Ocaml))
+            .unwrap();
+        let tree = parser.parse(ORIGINAL, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        assert_eq!(tree.root_node().end_byte(), ORIGINAL.len());
+        tree
+    }
+
+    #[test]
+    fn complete_original_native_census_certifies_only_own_scrutinee_and_adjacent_call() {
+        let tree = tree();
+        let extraction = super::super::QueryPackRegistry::audited()
+            .unwrap()
+            .get(GrammarFamily::Ocaml)
+            .unwrap()
+            .extract(
+                GrammarFamily::Ocaml,
+                &tree,
+                ORIGINAL,
+                16_384,
+                16_384,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert!(extraction.limit.is_none());
+        let facts = &extraction.candidates;
+        let identity = super::super::QueryPackRegistry::audited()
+            .unwrap()
+            .get(GrammarFamily::Ocaml)
+            .unwrap()
+            .extract_identity(
+                GrammarFamily::Ocaml,
+                &tree,
+                ORIGINAL,
+                16_384,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        for (syntax, role, start, end) in [
+            ("ocaml.match_formal", StructuralRole::Reference, 81, 82),
+            (
+                "ocaml.match_formal_target",
+                StructuralRole::Signature,
+                64,
+                82,
+            ),
+            ("ocaml.direct_file_call", StructuralRole::Call, 244, 270),
+            (
+                "ocaml.direct_file_target",
+                StructuralRole::Signature,
+                37,
+                270,
+            ),
+            (
+                "ocaml.written_bindings_file",
+                StructuralRole::Signature,
+                0,
+                899,
+            ),
+        ] {
+            let matches = facts
+                .iter()
+                .filter(|f| f.syntax == syntax && f.role == role)
+                .collect::<Vec<_>>();
+            // The identity carrier and optional use are distinct raw query
+            // captures. Runtime normalization deduplicates their exact fact.
+            let raw_count = if matches!(role, StructuralRole::Reference | StructuralRole::Call) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(matches.len(), raw_count, "raw {syntax}");
+            for fact in matches {
+                assert_eq!((fact.start, fact.end), (start, end));
+                assert!(fact.required);
+            }
+            let mandatory: Vec<_> = identity
+                .iter()
+                .filter(|fact| fact.syntax == syntax && fact.role == role)
+                .collect();
+            assert_eq!(mandatory.len(), 1, "mandatory native {syntax}");
+            assert_eq!((mandatory[0].start, mandatory[0].end), (start, end));
+            assert!(mandatory[0].required);
+        }
+    }
+
+    #[test]
+    fn binding_census_declines_included_context_and_cancellation() {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&crate::registry::language_for(GrammarFamily::Ocaml))
+            .unwrap();
+        let point = |offset: usize| {
+            let prefix = &ORIGINAL[..offset];
+            tree_sitter::Point {
+                row: prefix.iter().filter(|b| **b == b'\n').count(),
+                column: prefix
+                    .iter()
+                    .rposition(|b| *b == b'\n')
+                    .map_or(offset, |p| offset - p - 1),
+            }
+        };
+        parser
+            .set_included_ranges(&[tree_sitter::Range {
+                start_byte: 29,
+                end_byte: ORIGINAL.len(),
+                start_point: point(29),
+                end_point: point(ORIGINAL.len()),
+            }])
+            .unwrap();
+        let partial = parser.parse(ORIGINAL, None).unwrap();
+        assert!(!partial.root_node().has_error());
+        let registry = super::super::QueryPackRegistry::audited().unwrap();
+        let query = registry.get(GrammarFamily::Ocaml).unwrap();
+        let extracted = query
+            .extract(
+                GrammarFamily::Ocaml,
+                &partial,
+                ORIGINAL,
+                16_384,
+                16_384,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert!(extracted.candidates.iter().all(|f| !matches!(
+            f.syntax,
+            "ocaml.match_formal" | "ocaml.direct_file_call" | "ocaml.written_bindings_file"
+        )));
+        let cancel = Cancellation::new();
+        cancel.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            query.extract(
+                GrammarFamily::Ocaml,
+                &tree(),
+                ORIGINAL,
+                16_384,
+                16_384,
+                &cancel
             ),
             Err(AdapterError::Cancelled { .. })
         ));

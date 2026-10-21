@@ -23,3 +23,9 @@ reviewed workspace 1.13.0 input. The original upstream tree and native capsule
 remain unchanged historical evidence. The actual standalone lock is refreshed
 offline; the changed dependency frame requires a new native20 execution and
 Rootlight integration tests. No source acquisition is introduced by this change.
+
+The selected package also aligns ordered-float from 3.9.2 to the already reviewed
+workspace 5.3.0 source. Its checked NotNan construction and serialization APIs
+remain the parser boundary. Both workspace and standalone locks use the same
+version; pristine upstream sources and historical native evidence stay unchanged.
+No duplicate-version policy exception or source acquisition is introduced.

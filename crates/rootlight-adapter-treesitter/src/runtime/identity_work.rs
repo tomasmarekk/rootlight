@@ -133,6 +133,8 @@ impl TreeSitterProvider {
                     sink,
                     cancellation,
                     Some(&mut native),
+                    None,
+                    None,
                 )
                 .map(RawParseWithPrevious::into_transaction_parts)
             },

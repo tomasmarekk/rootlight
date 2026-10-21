@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "ad5de3ad5f23feec32379f909417b06f57ace16a5cbbbe824641266ff3ea6efc";
+    "06a39e71aebcb64f78f7086eb067b3030f63ee63d0fe02bcf52ab4c0155730a1";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,67 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 47] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 57] = [
+    (
+        "tree-sitter-idris",
+        "0.0.1",
+        "third_party/tree-sitter-idris-0.0.1",
+        "ce59fa39fa7752a2fefb3a05c2e476903e6742e86c66af6b1660d58d3b055d45",
+    ),
+    (
+        "tree-sitter-lean",
+        "0.2.0",
+        "third_party/tree-sitter-lean-0.2.0",
+        "299ae7ac23237967277f048215d38b03e214278b042192563e1988ad0ebaa66b",
+    ),
+    (
+        "tree-sitter-gsed",
+        "0.4.0",
+        "third_party/tree-sitter-gsed-0.4.0",
+        "3b0834a5358ff23ea1273a178942f6286c2cc1e6c5919b0b49f1fe7837651b2f",
+    ),
+    (
+        "tree-sitter-wolfram",
+        "0.0.1",
+        "third_party/tree-sitter-wolfram-0.0.1",
+        "f0e5044cbd4c5273901c8c3ec7c16bf4397faf99d2157157f4636603722ae2c0",
+    ),
+    (
+        "tree-sitter-pug",
+        "0.0.1",
+        "third_party/tree-sitter-pug-0.0.1",
+        "c89ce3460a16aad511fa6cba2c011fe30e2e39cb7771e7aa09c7caf5d7ce3904",
+    ),
+    (
+        "tree-sitter-coffeescript",
+        "1.0.0",
+        "third_party/tree-sitter-coffeescript-1.0.0",
+        "645180057fe7e0aa5d2437c2cc43cb80544fc41d5dc6130d641d87fb9288f392",
+    ),
+    (
+        "tree-sitter-dockerfile",
+        "0.2.0",
+        "third_party/tree-sitter-dockerfile-0.2.0",
+        "81e6c2333328b268c9ef7406cda0fee6808268c0907144a223932d5c33c773ed",
+    ),
+    (
+        "tree-sitter-meson",
+        "1.0.0",
+        "third_party/tree-sitter-meson-1.0.0",
+        "fae5f812e4faad95f49efc30ea1be08e694642405f5ee3eb7bcd4a4f10ee8b9b",
+    ),
+    (
+        "tree-sitter-gdscript",
+        "6.1.0",
+        "third_party/tree-sitter-gdscript-6.1.0",
+        "488c04d2d0bc745d905cf35ea60ec35ce2c9c024f97f2550238f3cbb4f10e463",
+    ),
+    (
+        "tree-sitter-chapel",
+        "0.0.1",
+        "third_party/tree-sitter-chapel-0.0.1",
+        "a322530e264cea30fc5cb693ffd04ed66860cf262ad38c4dfa3bde03decb9bb3",
+    ),
     (
         "tree-sitter-qsharp",
         "0.2.0",
@@ -732,7 +792,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 87 {
+    if manifest.grammars.len() != 97 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -757,6 +817,16 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "idris",
+        "lean",
+        "sed",
+        "wolfram",
+        "pug",
+        "dockerfile",
+        "coffeescript",
+        "meson",
+        "gdscript",
+        "chapel",
         "qsharp",
         "standard-ml",
         "webassembly",
@@ -1554,7 +1624,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 79")]
+    #[error("grammar lock contains {0} grammars instead of 96")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -1834,7 +1904,7 @@ mod tests {
         assert_eq!(acquisition["archive_modes_applied"], false);
         assert_eq!(acquisition["upstream_code_executed"], false);
         let members = acquisition["authored_inventory"].as_array().unwrap();
-        assert_eq!(members.len(), 71);
+        assert_eq!(members.len(), 69);
         let mut originals = BTreeSet::new();
         for member in members {
             let original = member["path"].as_str().unwrap();
@@ -4109,7 +4179,7 @@ mod tests {
 
     #[test]
     fn source_manifest_digest_binds_paths_and_content_with_portable_framing() {
-        let files = BTreeMap::from([("src/Î».bas".into(), sha256_hex(b"source"))]);
+        let files = BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"source"))]);
         // Independently computed from the documented UTF-8/NUL format, not TOML
         // serialization or host-native path separators.
         assert_eq!(
@@ -4120,7 +4190,7 @@ mod tests {
         for changed in [
             BTreeMap::new(),
             BTreeMap::from([("src/other.bas".into(), sha256_hex(b"source"))]),
-            BTreeMap::from([("src/Î».bas".into(), sha256_hex(b"changed"))]),
+            BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"changed"))]),
         ] {
             assert_ne!(vendored_source_digest(&changed).unwrap(), digest);
         }

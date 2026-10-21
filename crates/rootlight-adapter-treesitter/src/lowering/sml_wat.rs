@@ -30,6 +30,7 @@ pub(super) fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         return None;
     }
     match fact.syntax_kind().as_str() {
+        "sml.own_function_call.reference" => Some(OccurrenceRole::CallSite),
         "sml.unresolved_name.reference" | "wat.unresolved_name.reference" => {
             Some(OccurrenceRole::Reference)
         }
@@ -41,6 +42,9 @@ pub(super) fn source_gap(fact: &SyntaxFact) -> Option<&'static str> {
         return None;
     }
     match fact.syntax_kind().as_str() {
+        "sml.own_function_call.reference" => {
+            Some("sml-native-own-function-recursion-binding-unavailable")
+        }
         "sml.unresolved_name.reference" => {
             Some("sml-incoming-basis-pattern-identifier-status-and-binding-unavailable")
         }

@@ -60,7 +60,9 @@ pub(super) fn captured_name_for_fact<'a>(
         "glsl.name.definition"
         | "glsl.identifier.reference"
         | "glsl.member.reference"
-        | "glsl.unproven_call.reference" => captured_name(text, maximum_bytes),
+        | "glsl.unproven_call.reference"
+        | "glsl.formal_value.reference"
+        | "glsl.direct_file_function.reference" => captured_name(text, maximum_bytes),
         _ => None,
     }
 }
@@ -354,5 +356,50 @@ mod tests {
             Some(Cow::Borrowed(name))
         );
         assert!(structural_captured_name_for_language("glsl", " Written ", 64).is_none());
+    }
+}
+
+#[cfg(test)]
+mod written_binding_label_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn native_binding_labels_admit_only_exact_occurrences_and_borrow_whole_names() {
+        for label in [
+            "glsl.formal_value.reference",
+            "glsl.direct_file_function.reference",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                SourceSpan::new(FileId::from_bytes([1; 20]), 0, 5).unwrap(),
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(captured_name_for_fact(&fact, "value", 5), Some("value"));
+            assert_eq!(captured_name_for_fact(&fact, "value", 4), None);
+            let foreign = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                fact.span(),
+                1,
+                SyntaxKindLabel::new(&format!("{label}.extra")).unwrap(),
+            );
+            assert_eq!(captured_name_for_fact(&foreign, "value", 5), None);
+            let wrong_role = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                fact.span(),
+                1,
+                fact.syntax_kind().clone(),
+            );
+            assert_eq!(captured_name_for_fact(&wrong_role, "value", 5), None);
+        }
     }
 }

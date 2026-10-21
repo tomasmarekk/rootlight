@@ -1,0 +1,10 @@
+{
+  "upstream_repository": "https://github.com/Misterio77/Modpack",
+  "revision": "564a479f941491fd982e2b31a4e29c3b92822517",
+  "upstream_path": "flake.nix",
+  "license": "MIT",
+  "source_bytes": 586,
+  "source_sha256": "6c7dfb71bcdbed829c90b3be621f52f6dd573d13d847f100ea85fc86f01cd597",
+  "preservation": "Complete original physical UTF8 source,24 CRLF; no Nix/import execution or text substitution.",
+  "semantic_scope": "Static lexical captured formal use; imported package/runtime callable/attribute evaluation remains pending."
+}

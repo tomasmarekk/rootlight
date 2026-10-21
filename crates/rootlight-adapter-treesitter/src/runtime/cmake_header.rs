@@ -1078,6 +1078,7 @@ impl TreeSitterProvider {
             Some(&bytes),
             plan.staged_owned_bytes(bytes.capacity())?,
             cancellation,
+            None,
         ) {
             Ok(parsed) => parsed,
             Err(AdapterError::ProviderFailed { code })
@@ -1704,6 +1705,18 @@ mod tests {
                 cmake_patch_projection_policy: super::super::CMAKE_PATCH_PROJECTION_POLICY,
                 cmake_command_template_projection_policy:
                     super::super::CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
+                gdscript_scanner_contract: crate::runtime::gdscript_scope::CACHE_CONTRACT_IDENTITY,
+                dockerfile_scanner_contract:
+                    crate::runtime::dockerfile_scope::SCANNER_CONTRACT_IDENTITY,
+                pug_scanner_contract: crate::runtime::pug_scope::SCANNER_CONTRACT_IDENTITY,
+                lean_scanner_contract: crate::runtime::lean_scope::SCANNER_CONTRACT_IDENTITY,
+                wolfram_scanner_contract: crate::runtime::wolfram_scope::SCANNER_CONTRACT_IDENTITY,
+                idris_scanner_contract: crate::runtime::idris_scope::SCANNER_CONTRACT_IDENTITY,
+                idris_frontend_policy: crate::runtime::idris_scope::FRONTEND_POLICY,
+                sed_scanner_contract: crate::runtime::sed_scope::SCANNER_CONTRACT_IDENTITY,
+                sed_frontend_policy: crate::runtime::sed_scope::FRONTEND_POLICY,
+                coffeescript_scanner_contract:
+                    crate::runtime::coffeescript_scope::SCANNER_CONTRACT_IDENTITY,
                 identity: identity.clone(),
                 source: Arc::new(source.as_bytes().to_vec()),
                 tree: Some(tree),

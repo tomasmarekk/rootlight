@@ -38,6 +38,10 @@ impl<'source> CaptureCache<'source> {
         self.exhausted
     }
 
+    pub(super) const fn remaining_work(&self) -> usize {
+        self.remaining
+    }
+
     fn visit(&mut self, cancel: &Cancellation) -> Result<bool, AdapterError> {
         cancel.check()?;
         let Some(left) = self.remaining.checked_sub(1) else {
@@ -129,9 +133,9 @@ impl<'source> CaptureCache<'source> {
                 || node.is_missing()
                 || (node.kind().starts_with("preproc_")
                     && node.kind() != "preproc_include"
-                    && !node
+                    && node
                         .parent()
-                        .is_some_and(|parent| parent.kind() == "preproc_include"))
+                        .is_none_or(|parent| parent.kind() != "preproc_include"))
             {
                 return Ok(false);
             }
@@ -311,6 +315,14 @@ impl<'source> CaptureCache<'source> {
         {
             return Ok(true);
         }
+        // Only direct argument identifiers can receive this certificate. Global
+        // initializers and other names keep ordinary syntax without walking owners.
+        if !node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "argument_list")
+        {
+            return Ok(role != StructuralRole::Signature);
+        }
         let mut ancestor = node.parent();
         let mut function = None;
         while let Some(parent) = ancestor {
@@ -390,6 +402,74 @@ mod tests {
             native_depth: 0,
         }
     }
+    #[test]
+    fn impossible_global_identifier_positions_preserve_references_without_formal_work() {
+        let source = b"int original; int table[] = { original };\n";
+        let tree = parse(source);
+        assert!(!tree.root_node().has_error());
+        let at = source
+            .windows(8)
+            .rposition(|part| part == b"original")
+            .unwrap();
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(at, at + 8)
+            .unwrap();
+        assert_eq!(node.kind(), "identifier");
+        let mut cache = CaptureCache::new(source, 1, true);
+        for role in [StructuralRole::Signature, StructuralRole::Reference] {
+            let mut output = capture(node, role);
+            let retained = cache
+                .refine(node, role, &mut output, &Cancellation::new())
+                .unwrap();
+            assert_eq!(retained, role == StructuralRole::Reference);
+            assert!(
+                !cache.exhausted(),
+                "a global initializer cannot need a formal proof"
+            );
+            assert!(!output.required);
+            assert_eq!(output.syntax, "c.identifier");
+        }
+    }
+
+    #[test]
+    fn bypassed_global_names_do_not_bypass_the_complete_formal_census() {
+        let source = b"int ignored; int table[] = { ignored };\n#define value other\nvoid owned(int value) { external(value); }\n";
+        let tree = parse(source);
+        assert!(!tree.root_node().has_error());
+        let at = source
+            .windows(7)
+            .position(|part| part == b"ignored")
+            .unwrap();
+        let global = tree
+            .root_node()
+            .descendant_for_byte_range(at, at + 7)
+            .unwrap();
+        let mut cache = CaptureCache::new(source, 4096, true);
+        for role in [StructuralRole::Signature, StructuralRole::Reference] {
+            let mut output = capture(global, role);
+            assert_eq!(
+                cache
+                    .refine(global, role, &mut output, &Cancellation::new())
+                    .unwrap(),
+                role == StructuralRole::Reference
+            );
+        }
+        let node = argument(&tree, source);
+        for role in [StructuralRole::Signature, StructuralRole::Reference] {
+            let mut output = capture(node, role);
+            cache
+                .refine(node, role, &mut output, &Cancellation::new())
+                .unwrap();
+            assert!(!output.required);
+            assert_ne!(output.syntax, "c.formal_value");
+            if role == StructuralRole::Reference {
+                assert_eq!(output.syntax, "c.unproven_formal_value");
+            }
+        }
+        assert!(!cache.exhausted());
+    }
+
     #[test]
     fn full_census_certifies_only_written_direct_formal_arguments() {
         let source = b"#include \"external.h\"\nvoid owned(int value) { external(value); }\n";

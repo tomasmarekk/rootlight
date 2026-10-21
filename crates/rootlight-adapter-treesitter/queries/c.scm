@@ -32,6 +32,7 @@
 [(preproc_if) (preproc_ifdef)] @signature
 [(preproc_def) (preproc_function_def)] @string
 (compound_statement) @scope
+(for_statement) @scope
 (call_expression) @call
 [
   (call_expression
@@ -54,4 +55,10 @@
 
 ; Keep the native proof reference mandatory without adding identity material.
 (function_definition) @signature
-(identifier) @reference @signature
+(identifier) @signature
+
+; Exact native declarator and target-coordinate proof carriers.
+(init_declarator declarator: (identifier)) @declaration
+(init_declarator declarator: (identifier) @definition)
+(translation_unit) @signature
+(identifier) @scope

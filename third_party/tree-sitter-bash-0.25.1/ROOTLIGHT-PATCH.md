@@ -66,3 +66,11 @@ differs from strict whole-line matching: Bash itself emits an unterminated-hered
 warning for that form. Both the previous and grouped candidates disagree with that
 one upstream golden tree; it is not silently counted as a passing case.
 No shell fixture is executed by the native tests.
+
+Exact heredoc end matching accepts LF or CRLF after the complete delimiter.
+The start-word scanner already excludes carriage return as whitespace; requiring
+LF immediately after a matched trailing CR keeps both sides consistent. A lone
+CR, a second CR, spaces or any suffix after the delimiter do not close the body.
+This changes no serialized state, delimiter storage, allocation or scan quota.
+Native line-ending, false-terminator and incremental/reset controls preserve
+written source ownership; they do not establish shell execution semantics.

@@ -109,6 +109,7 @@ pub(super) fn captured_name_for_fact<'a>(
             fact.syntax_kind().as_str(),
             "sml.name.definition"
                 | "sml.unresolved_name.reference"
+                | "sml.own_function_call.reference"
                 | "wat.name.definition"
                 | "wat.unresolved_name.reference"
         )

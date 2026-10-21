@@ -1,7 +1,7 @@
 ; Reviewed Tier C/D structural evidence for the pinned Python grammar.
 ; Captures are deliberately syntax-only and never imply resolved semantics.
 
-(module) @root @module
+(module) @root @module @signature
 
 [
   (function_definition)
@@ -50,6 +50,13 @@
     (typed_parameter
       (dictionary_splat_pattern (identifier) @definition)) @declaration))
 
+; Assignment capture is only a candidate; native whole-file proof admits
+; a unique simple module binder and records all other binding gaps explicitly.
+(module (expression_statement (assignment) @declaration))
+(module (expression_statement (assignment left: (identifier) @definition)))
+(assignment) @signature
+(augmented_assignment) @signature
+
 [(import_statement) (import_from_statement)] @import
 ; The required context witness records the limits of this lexical subset.
 (function_definition) @signature
@@ -61,6 +68,9 @@
     (attribute
       attribute: (identifier))
   ] @call)
+; Pairing keeps certified references in identity extraction. The separate
+; reference pattern preserves every unproved optional source use.
+(identifier) @scope @reference
 (identifier) @reference
 (comment) @comment
 

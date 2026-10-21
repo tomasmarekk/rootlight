@@ -106,8 +106,7 @@ fn tokens(source: &[u8], truncated: bool, syntax: StringSyntax) -> Vec<Lexeme<'_
             && rest[1..]
                 .iter()
                 .take_while(|&&value| value != b'\n')
-                .position(|&value| value == b'\'')
-                .is_some()
+                .any(|&value| value == b'\'')
         {
             cursor += 1;
             while let Some(&next) = source.get(cursor) {

@@ -43,8 +43,9 @@ pub use rootlight_adapter_sdk::{
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
 pub use runtime::{
-    CacheStats, FSharpAdmissionKind, FSharpAdmissionWitness, NativeIdentityWorkLimit, RuntimeStats,
-    TreeSitterProvider,
+    CacheStats, FSharpAdmissionKind, FSharpAdmissionWitness, NativeIdentityRefusal,
+    NativeIdentityRefusalDetails, NativeIdentityWorkLimit, NativeScannerRefusal,
+    NativeScannerRefusalDetails, RuntimeStats, TreeSitterProvider,
 };
 
 /// Exact adapter crate version compiled into this runtime.

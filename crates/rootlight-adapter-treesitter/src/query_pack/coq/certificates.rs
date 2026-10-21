@@ -137,10 +137,7 @@ fn ordinary_names<'tree>(
             _ => return Ok(None),
         }
     }
-    Ok(
-        (!names.is_empty() && (implicit || (colon && ty)) && (!colon || ty))
-            .then_some((names, implicit)),
-    )
+    Ok((!(names.is_empty() || !implicit && !colon || colon && !ty)).then_some((names, implicit)))
 }
 
 fn header<'tree>(
@@ -1083,7 +1080,7 @@ mod tests {
         assert!(cache.exhausted());
         assert!(candidate.is_none_or(|candidate| candidate.syntax != "coq.notation_target"));
         assert!(
-            super::super::notation_reference_candidate(
+            super::super::required_reference_candidate(
                 notation,
                 StructuralRole::Signature,
                 &Cancellation::new(),

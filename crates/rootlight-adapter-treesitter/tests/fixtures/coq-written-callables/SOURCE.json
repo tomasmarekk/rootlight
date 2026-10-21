@@ -1,0 +1,17 @@
+{
+  "schema": "rootlight.coq-written-callable-original/1",
+  "repository": "https://github.com/AndrasKovacs/smalltt",
+  "revision": "ea99b0f478e50dcb81ea19e40bfb4262339b22aa",
+  "original_path": "bench/stlc_small.v",
+  "complete_original": true,
+  "bytes": 2182,
+  "sha256": "a8b32fce2d84355b050fded6d794f313ca068080816a46620d1df69f2af16ffd",
+  "original_line_endings": "76 CRLF physical line endings, retained unchanged",
+  "license": {
+    "path": "LICENSE.txt",
+    "original_path": "LICENSE.txt",
+    "bytes": 1075,
+    "sha256": "f78f0165d1499c5ea5774eb17a8edcb7593e9bce7909428b4b4356b6d99f66b4"
+  },
+  "scope": "Original source witnesses for written callable classification and same-file reference; no kernel/proof evaluation or Calls binding qualification."
+}

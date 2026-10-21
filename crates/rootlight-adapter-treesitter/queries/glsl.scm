@@ -52,3 +52,6 @@
 [(identifier) (field_identifier)] @reference
 (comment) @comment
 (string_literal) @string
+
+; Mandatory binding carriers are separate from ordinary optional uses.
+(identifier) @reference @signature

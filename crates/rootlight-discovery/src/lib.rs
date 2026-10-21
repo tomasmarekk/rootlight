@@ -50,6 +50,9 @@ mod modelica;
 mod modelica_tests;
 mod objective_c;
 mod office;
+mod opaque_unicode;
+#[cfg(test)]
+mod opaque_unicode_tests;
 mod prolog;
 #[cfg(test)]
 mod qml_tests;
@@ -60,8 +63,13 @@ mod rust_hint_contract_tests;
 mod scheme;
 mod shebang;
 mod streamed;
+#[cfg(test)]
+mod thinkscript_tests;
 mod v_language;
 mod vba;
+mod wolfram;
+#[cfg(test)]
+mod wolfram_tests;
 
 pub use fsproj::{OrderedFSharpCompileMembers, ordered_fsharp_compile_members};
 pub use streamed::{
@@ -76,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.64";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.75";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1507,19 +1515,29 @@ impl<'a> DiscoveryState<'a> {
                 bytes_examined: self.bytes_examined,
             });
         }
-        let Some(classification) = encoding::classify_streamed(
+        let classification = encoding::classify_streamed(
             &source.prefix,
             observed.length,
             source.encoding,
             source.contains_nul,
             self.cancellation,
         )?
-        else {
+        .or_else(|| {
+            opaque_unicode::preserve(
+                &path,
+                &source.prefix,
+                self.config
+                    .source_language_for_path(path.as_str())
+                    .is_some(),
+            )
+        });
+        self.cancellation.check()?;
+        let Some(classification) = classification else {
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
         };
         let content = classification.decoded_prefix.as_ref().map_or(
-            if source.encoding.is_some() {
+            if source.encoding.is_some() && classification.encoding != "bytes" {
                 source.prefix.as_slice()
             } else {
                 b""
@@ -1604,8 +1622,17 @@ impl<'a> DiscoveryState<'a> {
                 prefix_truncated: false,
             })
         } else {
-            encoding::classify(snapshot.content(), self.cancellation)?
+            encoding::classify(snapshot.content(), self.cancellation)?.or_else(|| {
+                opaque_unicode::preserve(
+                    &path,
+                    snapshot.content(),
+                    self.config
+                        .source_language_for_path(path.as_str())
+                        .is_some(),
+                )
+            })
         };
+        self.cancellation.check()?;
         let Some(classification) = classification else {
             let bytes = snapshot.metadata().length;
             drop(snapshot);
@@ -1616,10 +1643,18 @@ impl<'a> DiscoveryState<'a> {
             self.exclude(&path, ExclusionReason::Binary, decisive_rule);
             return Ok(());
         };
-        let classification_content = classification
-            .decoded_prefix
-            .as_ref()
-            .map_or(snapshot.content(), |prefix| prefix.as_bytes());
+        let classification_content = if classification.encoding == "bytes"
+            && opaque_unicode::bom_length(snapshot.content()).is_some()
+        {
+            // Opaque retention cannot provide content, generated-marker or
+            // shebang evidence, even when some payload bytes resemble text.
+            &[]
+        } else {
+            classification
+                .decoded_prefix
+                .as_ref()
+                .map_or(snapshot.content(), |prefix| prefix.as_bytes())
+        };
         let (class, mut language_signals) = classify_validated_prefix(
             &path,
             if container_format.is_some() {
@@ -2121,6 +2156,21 @@ fn classify_validated_prefix(
             ))
     {
         Some("v")
+    } else if validated_text
+        && !prefix_truncated
+        && normalized
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("txt"))
+        && rootlight_thinkscript::has_content_hint(
+            &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
+        )
+    {
+        Some("thinkscript")
+    } else if normalized.ends_with(".m")
+        && validated_text
+        && wolfram::has_content_hint(&content[..content.len().min(MAX_CLASSIFICATION_BYTES)])
+    {
+        Some("wolfram")
     } else if is_ambiguous_basic_source(&normalized) {
         let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
         // A class export shares its suffix with Apex. Retain both independent
@@ -2179,6 +2229,7 @@ fn infer_shared_m_suffix_context(inputs: &mut [ManifestInput]) {
             let language = match signal.language.as_str() {
                 "matlab" => "matlab",
                 "objective-c" => "objective-c",
+                "wolfram" => "wolfram",
                 _ => return,
             };
             if explicit.is_some_and(|previous| previous != language) {
@@ -2278,6 +2329,46 @@ pub const fn language_capabilities() -> &'static [LanguageCapability] {
 }
 
 const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
+    LanguageCapability {
+        language: "thinkscript",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["content", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["thinkscript-source"],
+    },
+    LanguageCapability {
+        language: "pug",
+        suffixes: &[".pug"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "coffeescript",
+        suffixes: &[".coffee"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "dockerfile",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["filename", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "meson",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["filename", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
     LanguageCapability {
         language: "modelica",
         suffixes: &[".mo"],
@@ -2487,8 +2578,24 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "gdscript",
+        suffixes: &[".gd"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "qsharp",
         suffixes: &[".qs"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "chapel",
+        suffixes: &[".chpl"],
         aliases: &[],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
@@ -2773,7 +2880,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "ini",
@@ -2837,7 +2944,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "less",
@@ -3064,6 +3171,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["native"],
     },
     LanguageCapability {
+        language: "sed",
+        suffixes: &[".sed"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "solidity",
         suffixes: &[".sol"],
         aliases: &[],
@@ -3136,6 +3251,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "wolfram",
+        suffixes: &[".wl", ".wls"],
+        aliases: &["wolfram-language", "mathematica"],
+        detectors: &["extension", "content", "context"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "yaml",
         suffixes: &[".yaml", ".yml"],
         aliases: &["yml"],
@@ -3169,7 +3292,11 @@ pub fn extension_language(path: &str) -> Option<&'static str> {
 #[must_use]
 pub fn filename_language(path: &str) -> Option<&'static str> {
     let name = path.rsplit(['/', '\\']).next()?;
-    if name.eq_ignore_ascii_case("Jenkinsfile") {
+    if name.eq_ignore_ascii_case("Dockerfile") {
+        Some("dockerfile")
+    } else if name == "meson.build" {
+        Some("meson")
+    } else if name.eq_ignore_ascii_case("Jenkinsfile") {
         Some("groovy")
     } else if name.eq_ignore_ascii_case("CMakeLists.txt")
         || name.eq_ignore_ascii_case("CMakeLists.txt.in")
@@ -4604,8 +4731,13 @@ max_source_file_bytes = 2097152
             &Cancellation::new(),
         )
         .unwrap();
-        assert_eq!(result.manifest.inputs.len(), 1);
-        let input = &result.manifest.inputs[0];
+        assert_eq!(result.manifest.inputs.len(), 2);
+        let input = result
+            .manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "module.bas")
+            .unwrap();
         assert_eq!(input.path, "module.bas");
         assert_eq!(input.encoding, "utf-16le");
         assert_eq!(input.class, InputClass::Generated);
@@ -4619,10 +4751,24 @@ max_source_file_bytes = 2097152
         assert_eq!(input.content_hash, content_hash(&bytes));
         assert_eq!(input.bytes, u64::try_from(bytes.len()).unwrap());
         assert_eq!(result.snapshots.get(&input.file).unwrap().content(), bytes);
-        assert_eq!(result.manifest.exclusions.len(), 1);
+        assert!(result.manifest.exclusions.is_empty());
+        let opaque = result
+            .manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "malformed.bas")
+            .unwrap();
+        assert_eq!(opaque.encoding, "bytes");
+        assert_eq!(opaque.content_hash, content_hash(&[0xff, 0xfe, 0, 0xd8]));
         assert_eq!(
-            result.manifest.exclusions[0].reason,
-            ExclusionReason::Binary
+            result.snapshots[&opaque.file].content(),
+            [0xff, 0xfe, 0, 0xd8]
+        );
+        assert!(
+            opaque
+                .language_signals
+                .iter()
+                .all(|signal| signal.evidence != LanguageEvidence::Content)
         );
         let encoded = serde_json::to_value(input).unwrap();
         let roundtrip: ManifestInput = serde_json::from_value(encoded.clone()).unwrap();
@@ -6950,13 +7096,20 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn lean_written_source_advertises_native_structure_without_claiming_olean() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|value| value.language == "lean")
+            .unwrap();
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(extension_language("Algebra.lean"), Some("lean"));
+        assert_eq!(extension_language("Algebra.olean"), None);
+    }
+
+    #[test]
     fn unparsed_language_suffixes_advertise_only_file_retrieval() {
-        for (path, language) in [
-            ("Shape.impl.carbon", "carbon"),
-            ("Main.idr", "idris"),
-            ("Main.lidr", "idris"),
-            ("Algebra.lean", "lean"),
-        ] {
+        {
+            let (path, language) = ("Shape.impl.carbon", "carbon");
             assert_eq!(extension_language(path), Some(language), "{path}");
             let (_, signals) = classify(
                 &RelativePath::parse(Path::new(path)).expect("fixture path is valid"),
@@ -10332,3 +10485,30 @@ mod sml_wat_tests;
 
 #[cfg(test)]
 mod qsharp_tests;
+
+#[cfg(test)]
+#[path = "gdscript_tests.rs"]
+mod gdscript_tests;
+
+#[cfg(test)]
+mod chapel_tests;
+
+#[cfg(test)]
+#[path = "meson_tests.rs"]
+mod meson_tests;
+
+#[cfg(test)]
+#[path = "dockerfile_tests.rs"]
+mod dockerfile_tests;
+
+#[cfg(test)]
+#[path = "coffeescript_tests.rs"]
+mod coffeescript_tests;
+#[cfg(test)]
+mod pug_tests;
+
+#[cfg(test)]
+mod sed_tests;
+
+#[cfg(test)]
+mod idris_tests;

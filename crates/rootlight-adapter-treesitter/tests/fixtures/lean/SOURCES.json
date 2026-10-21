@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/AndrasKovacs/smalltt",
+  "revision": "ea99b0f478e50dcb81ea19e40bfb4262339b22aa",
+  "source_path": "bench/conv_eval.lean",
+  "source": {
+    "bytes": 4386,
+    "sha256": "42106301124fc9fd2a6ec850c77b5bb656d96a377b80a64c1863b2d80dae954a"
+  },
+  "license_path": "LICENSE",
+  "license": "MIT",
+  "license_file": {
+    "bytes": 1075,
+    "sha256": "f78f0165d1499c5ea5774eb17a8edcb7593e9bce7909428b4b4356b6d99f66b4"
+  }
+}

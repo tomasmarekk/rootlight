@@ -132,9 +132,9 @@ impl<'source> CaptureCache<'source> {
             || function
                 .child_by_field_name("result")
                 .is_some_and(|result| result.kind() == "parameter_list")
-            || !function
+            || function
                 .parent()
-                .is_some_and(|parent| parent.kind() == "source_file")
+                .is_none_or(|parent| parent.kind() != "source_file")
         {
             return Ok(None);
         }

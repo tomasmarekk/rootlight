@@ -77,9 +77,9 @@ impl CaptureCache {
             return Ok(None);
         }
         let syntax = if let Some(syntax) = type_syntax(node.kind()) {
-            if !node
+            if node
                 .parent()
-                .is_some_and(|parent| parent.kind() == "source_file")
+                .is_none_or(|parent| parent.kind() != "source_file")
             {
                 return Ok(None);
             }

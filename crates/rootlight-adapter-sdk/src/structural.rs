@@ -65,12 +65,28 @@ mod nim;
 #[path = "structural_pony.rs"]
 mod pony;
 
+#[path = "structural_chapel.rs"]
+mod chapel;
+#[path = "structural_coffeescript.rs"]
+mod coffeescript;
+#[path = "structural_dockerfile.rs"]
+mod dockerfile;
 #[path = "structural_flux.rs"]
 mod flux;
+#[path = "structural_gdscript.rs"]
+mod gdscript;
 #[path = "structural_hare.rs"]
 mod hare;
+#[path = "structural_idris.rs"]
+mod idris;
+#[path = "structural_lean.rs"]
+mod lean;
 #[path = "structural_less.rs"]
 mod less;
+#[path = "structural_meson.rs"]
+mod meson;
+#[path = "structural_pug.rs"]
+mod pug;
 #[path = "structural_qml.rs"]
 mod qml;
 #[path = "structural_qsharp.rs"]
@@ -81,8 +97,12 @@ mod racket;
 mod ring;
 #[path = "structural_sass.rs"]
 mod sass;
+#[path = "structural_sed.rs"]
+mod sed;
 #[path = "structural_sml_wat.rs"]
 mod sml_wat;
+#[path = "structural_wolfram.rs"]
+mod wolfram;
 #[path = "structural_zig.rs"]
 mod zig;
 
@@ -257,8 +277,38 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     if label.starts_with("sass.") {
         return sass::entity_kind(fact);
     }
+    if label.starts_with("dockerfile.") {
+        return dockerfile::entity_kind(fact);
+    }
+    if label.starts_with("wolfram.") {
+        return wolfram::entity_kind(fact);
+    }
+    if label.starts_with("sed.") {
+        return sed::entity_kind(fact);
+    }
+    if label.starts_with("idris.") {
+        return idris::entity_kind(fact);
+    }
+    if label.starts_with("lean.") {
+        return lean::entity_kind(fact);
+    }
+    if label.starts_with("pug.") {
+        return pug::entity_kind(fact);
+    }
+    if label.starts_with("coffeescript.") {
+        return coffeescript::entity_kind(fact);
+    }
+    if label.starts_with("meson.") {
+        return meson::entity_kind(fact);
+    }
+    if label.starts_with("gdscript.") {
+        return gdscript::entity_kind(fact);
+    }
     if label.starts_with("qsharp.") {
         return qsharp::entity_kind(fact);
+    }
+    if label.starts_with("chapel.") {
+        return chapel::entity_kind(fact);
     }
     if label.starts_with("sml.") || label.starts_with("wat.") {
         return sml_wat::entity_kind(fact);
@@ -389,6 +439,17 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
                 SyntaxFactKind::Declaration,
                 "patch.file_section.declaration" | "patch.hunk.declaration",
             ) => Some(EntityKind::DocumentSection),
+            _ => None,
+        };
+    }
+    if label.starts_with("thinkscript.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Declaration, "thinkscript.script.declaration") => {
+                Some(EntityKind::Function)
+            }
+            (SyntaxFactKind::Declaration, "thinkscript.input.declaration") => {
+                Some(EntityKind::Parameter)
+            }
             _ => None,
         };
     }
@@ -724,6 +785,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
                 label,
                 "json.property.declaration"
                     | "jsonc.property.declaration"
+                    | "csharp.property.declaration"
                     | "groovy.property.declaration"
                     | "matlab.property.declaration"
                     | "objective_c.property.declaration"
@@ -1012,8 +1074,38 @@ pub fn structural_captured_name_for_language<'a>(
     if language == "json-schema" {
         return json_schema::captured_body(text, maximum_bytes);
     }
+    if language == "dockerfile" {
+        return dockerfile::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "wolfram" {
+        return wolfram::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "sed" {
+        return sed::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "idris" {
+        return idris::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "lean" {
+        return lean::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "pug" {
+        return pug::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "coffeescript" {
+        return coffeescript::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "meson" {
+        return meson::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "gdscript" {
+        return gdscript::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
     if language == "qsharp" {
         return qsharp::captured_name(text, maximum_bytes).map(Cow::Borrowed);
+    }
+    if language == "chapel" {
+        return chapel::captured_name(text, maximum_bytes).map(Cow::Borrowed);
     }
     if matches!(language, "standard-ml" | "webassembly") {
         return sml_wat::captured_name(language, text, maximum_bytes).map(Cow::Borrowed);
@@ -1335,12 +1427,181 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("python.module_read") {
+        return (language == "python"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "python.module_read.reference"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("thinkscript.") {
+        if language != "thinkscript"
+            || fact.kind() != SyntaxFactKind::Occurrence
+            || !matches!(
+                label,
+                "thinkscript.script.definition"
+                    | "thinkscript.input.definition"
+                    | "thinkscript.input_value.read"
+            )
+            || text.is_empty()
+            || text.len() > maximum_bytes
+            || !(text.as_bytes()[0].is_ascii_alphabetic() || text.as_bytes()[0] == b'_')
+        {
+            return None;
+        }
+        return text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("agda.rhs") {
+        if language != "agda"
+            || fact.kind() != SyntaxFactKind::Occurrence
+            || label != "agda.rhs.reference"
+            || text.is_empty()
+            || text.len() > maximum_bytes
+            || !text.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return None;
+        }
+        return text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'%' | b'\''))
+            .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("powershell.formal_") || label.starts_with("powershell.unproven_formal") {
+        if language != "powershell"
+            || fact.kind() != SyntaxFactKind::Occurrence
+            || !matches!(
+                label,
+                "powershell.formal_value.reference" | "powershell.unproven_formal.reference"
+            )
+            || text.is_empty()
+            || text.len() > maximum_bytes
+        {
+            return None;
+        }
+        if text.contains('\0') {
+            return None;
+        }
+        let ordinary = text.strip_prefix('$').is_some_and(|name| {
+            name.as_bytes()
+                .first()
+                .is_some_and(|first| *first == b'_' || first.is_ascii_alphabetic())
+                && name
+                    .bytes()
+                    .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+        });
+        return (label == "powershell.unproven_formal.reference" || ordinary)
+            .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("java.local_receiver") || label.starts_with("java.unproven_local_receiver")
+    {
+        return (language == "java"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "java.local_receiver.reference" | "java.unproven_local_receiver.reference"
+            )
+            && text != "_"
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("cpp.const_formal_") || label.starts_with("cpp.unproven_const_formal") {
+        return (language == "cpp"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "cpp.const_formal_receiver.reference" | "cpp.unproven_const_formal.reference"
+            )
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("php.this_method") || label.starts_with("php.unproven_this_method") {
+        return (language == "php"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "php.this_method.reference"
+                    | "php.unproven_this_method.reference"
+                    | "php.unproven_this_method.call_name"
+            )
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("go.direct_file_function")
+        || label.starts_with("go.unproven_direct_function")
+    {
+        return (language == "go"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "go.direct_file_function.reference"
+                    | "go.unproven_direct_function.reference"
+                    | "go.unproven_direct_function.call_name"
+            )
+            && text.len() <= maximum_bytes
+            && text != "_"
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
     if label.starts_with("go.call_formal") || label.starts_with("go.unproven_call_formal") {
         return (language == "go"
             && fact.kind() == SyntaxFactKind::Occurrence
             && matches!(
                 label,
                 "go.call_formal.reference" | "go.unproven_call_formal.reference"
+            )
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("c.written_variable")
+        || label.starts_with("c.unproven_variable")
+        || label.starts_with("c.variable_name")
+    {
+        return (language == "c"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "c.written_variable.reference"
+                    | "c.unproven_variable.reference"
+                    | "c.variable_name.definition"
             )
             && text.len() <= maximum_bytes
             && text
@@ -1414,11 +1675,71 @@ pub fn structural_captured_name_for_fact<'a>(
             .flatten()
             .map(Cow::Borrowed);
     }
+    if language == "chapel" || label.starts_with("chapel.") {
+        return (language == "chapel")
+            .then(|| chapel::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
     if matches!(language, "standard-ml" | "webassembly")
         || label.starts_with("sml.")
         || label.starts_with("wat.")
     {
         return sml_wat::captured_name_for_fact(language, fact, text, maximum_bytes)
+            .map(Cow::Borrowed);
+    }
+    if language == "dockerfile" || label.starts_with("dockerfile.") {
+        return (language == "dockerfile")
+            .then(|| dockerfile::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "wolfram" || label.starts_with("wolfram.") {
+        return (language == "wolfram")
+            .then(|| wolfram::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "idris" || label.starts_with("idris.") {
+        return (language == "idris")
+            .then(|| idris::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "sed" || label.starts_with("sed.") {
+        return (language == "sed")
+            .then(|| sed::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "lean" || label.starts_with("lean.") {
+        return (language == "lean")
+            .then(|| lean::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "pug" || label.starts_with("pug.") {
+        return (language == "pug")
+            .then(|| pug::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "coffeescript" || label.starts_with("coffeescript.") {
+        return (language == "coffeescript")
+            .then(|| coffeescript::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "meson" || label.starts_with("meson.") {
+        return (language == "meson")
+            .then(|| meson::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
+            .map(Cow::Borrowed);
+    }
+    if language == "gdscript" || label.starts_with("gdscript.") {
+        return (language == "gdscript")
+            .then(|| gdscript::captured_name_for_fact(fact, text, maximum_bytes))
+            .flatten()
             .map(Cow::Borrowed);
     }
     if language == "qsharp" || label.starts_with("qsharp.") {
@@ -3310,5 +3631,457 @@ mod go_call_formal_contract_tests {
             SyntaxKindLabel::new("go.call_formal.extra").unwrap(),
         );
         assert!(structural_captured_name_for_fact("go", &fact, "value", 5).is_none());
+    }
+}
+
+#[cfg(test)]
+mod cpp_const_formal_label_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn exact_const_formal_labels_borrow_only_complete_ascii_names_in_cpp() {
+        let name = String::from("Value");
+        for label in [
+            "cpp.const_formal_receiver.reference",
+            "cpp.unproven_const_formal.reference",
+        ] {
+            for kind in [
+                SyntaxFactKind::Occurrence,
+                SyntaxFactKind::Declaration,
+                SyntaxFactKind::Signature,
+            ] {
+                let fact = SyntaxFact::new(
+                    1,
+                    None,
+                    kind,
+                    SourceSpan::new(FileId::from_bytes([1; 20]), 0, 5).unwrap(),
+                    0,
+                    SyntaxKindLabel::new(label).unwrap(),
+                );
+                let result = structural_captured_name_for_fact("cpp", &fact, &name, 5);
+                assert_eq!(
+                    result.as_deref(),
+                    (kind == SyntaxFactKind::Occurrence).then_some("Value")
+                );
+                if let Some(Cow::Borrowed(text)) = result {
+                    assert!(std::ptr::eq(text.as_ptr(), name.as_ptr()));
+                }
+                for language in ["c", "csharp", "rust", "CPP"] {
+                    assert!(
+                        structural_captured_name_for_fact(language, &fact, "Value", 5).is_none()
+                    );
+                }
+                for text in [
+                    " Value",
+                    "Value ",
+                    "Value[0]",
+                    "Value::Name",
+                    "two names",
+                    "λ",
+                    "",
+                    "9Value",
+                ] {
+                    assert!(
+                        structural_captured_name_for_fact("cpp", &fact, text, usize::MAX).is_none()
+                    );
+                }
+                assert!(structural_captured_name_for_fact("cpp", &fact, "Value", 4).is_none());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod java_local_receiver_label_tests {
+    use super::*;
+    #[test]
+    fn exact_local_receiver_labels_borrow_whole_plain_names_only() {
+        let span = rootlight_ir::SourceSpan::new(rootlight_ids::FileId::from_bytes([7; 20]), 0, 6)
+            .unwrap();
+        for label in [
+            "java.local_receiver.reference",
+            "java.unproven_local_receiver.reference",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                0,
+                crate::SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("java", &fact, "script", 6),
+                Some(Cow::Borrowed("script"))
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("java", &fact, "script", 5),
+                None
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("rust", &fact, "script", 6),
+                None
+            );
+            for text in ["_", "script.member", "script()", "\\u0073cript", "λ"] {
+                assert_eq!(
+                    structural_captured_name_for_fact("java", &fact, text, 128),
+                    None
+                );
+            }
+        }
+        for (kind, label) in [
+            (SyntaxFactKind::Declaration, "java.local_receiver.reference"),
+            (SyntaxFactKind::Signature, "java.local_receiver.reference"),
+            (
+                SyntaxFactKind::Occurrence,
+                "java.local_receiver_context.signature",
+            ),
+            (
+                SyntaxFactKind::Occurrence,
+                "java.local_receiver_extra.reference",
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                span,
+                0,
+                crate::SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("java", &fact, "script", 6),
+                None
+            );
+        }
+    }
+}
+#[cfg(test)]
+mod go_written_call_label_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn only_exact_written_go_callee_labels_admit_complete_literal_names() {
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 6).unwrap();
+        for label in [
+            "go.direct_file_function.reference",
+            "go.unproven_direct_function.reference",
+            "go.unproven_direct_function.call_name",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("go", &fact, "target", 6).as_deref(),
+                Some("target")
+            );
+            assert!(structural_captured_name_for_fact("php", &fact, "target", 6).is_none());
+            assert!(structural_captured_name_for_fact("go", &fact, "target", 5).is_none());
+            for invalid in ["_", "target()", "target.extra", "ta\\rget", "λ"] {
+                assert!(structural_captured_name_for_fact("go", &fact, invalid, 64).is_none());
+            }
+            let wrong_kind = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                1,
+                fact.syntax_kind().clone(),
+            );
+            assert!(structural_captured_name_for_fact("go", &wrong_kind, "target", 6).is_none());
+        }
+        for label in [
+            "go.direct_file_function.extra",
+            "go.unproven_direct_function.extra",
+            "go.direct_file_function.call",
+            "go.unproven_direct_function.call",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert!(structural_captured_name_for_fact("go", &fact, "target", 6).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod php_written_call_label_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn only_exact_written_php_callee_labels_admit_complete_literal_names() {
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 6).unwrap();
+        for label in [
+            "php.this_method.reference",
+            "php.unproven_this_method.reference",
+            "php.unproven_this_method.call_name",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact("php", &fact, "target", 6).as_deref(),
+                Some("target")
+            );
+            assert!(structural_captured_name_for_fact("java", &fact, "target", 6).is_none());
+            assert!(structural_captured_name_for_fact("php", &fact, "target", 5).is_none());
+            for invalid in ["target()", "target.extra", "ta\\rget", "λ"] {
+                assert!(structural_captured_name_for_fact("php", &fact, invalid, 64).is_none());
+            }
+            let wrong_kind = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Signature,
+                span,
+                1,
+                fact.syntax_kind().clone(),
+            );
+            assert!(structural_captured_name_for_fact("php", &wrong_kind, "target", 6).is_none());
+        }
+        for label in [
+            "php.this_method.extra",
+            "php.unproven_this_method.extra",
+            "php.this_method.call",
+            "php.unproven_this_method.call",
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Occurrence,
+                span,
+                1,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert!(structural_captured_name_for_fact("php", &fact, "target", 6).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod powershell_formal_label_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn written_formal_names_require_exact_roles_language_and_complete_source_text() {
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 6).unwrap();
+        let fact = |kind, label| {
+            SyntaxFact::new(1, None, kind, span, 0, SyntaxKindLabel::new(label).unwrap())
+        };
+        for label in [
+            "powershell.formal_value.reference",
+            "powershell.unproven_formal.reference",
+        ] {
+            let source = "$Value";
+            let native = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(
+                structural_captured_name_for_fact("powershell", &native, source, source.len())
+                    .as_deref(),
+                Some(source)
+            );
+            assert!(
+                structural_captured_name_for_fact("powershell", &native, source, source.len() - 1)
+                    .is_none()
+            );
+            assert!(
+                structural_captured_name_for_fact("csharp", &native, source, source.len())
+                    .is_none()
+            );
+            assert!(
+                structural_captured_name_for_fact(
+                    "powershell",
+                    &fact(SyntaxFactKind::Signature, label),
+                    source,
+                    source.len()
+                )
+                .is_none()
+            );
+        }
+        for label in [
+            "powershell.formal_value.reference.extra",
+            "powershell.formal_unknown.reference",
+            "powershell.formal_context.signature",
+        ] {
+            assert!(
+                structural_captured_name_for_fact(
+                    "powershell",
+                    &fact(SyntaxFactKind::Occurrence, label),
+                    "$value",
+                    6
+                )
+                .is_none()
+            );
+        }
+        let certified = fact(
+            SyntaxFactKind::Occurrence,
+            "powershell.formal_value.reference",
+        );
+        for source in [
+            "value",
+            "$script:value",
+            "${value}",
+            "$value\0",
+            "$value member",
+        ] {
+            assert!(
+                structural_captured_name_for_fact("powershell", &certified, source, source.len())
+                    .is_none()
+            );
+        }
+        let unproven = fact(
+            SyntaxFactKind::Occurrence,
+            "powershell.unproven_formal.reference",
+        );
+        assert_eq!(
+            structural_captured_name_for_fact("powershell", &unproven, "$script:value", 32)
+                .as_deref(),
+            Some("$script:value")
+        );
+    }
+}
+
+#[cfg(test)]
+mod agda_rhs_label_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn written_rhs_names_require_exact_language_occurrence_label_and_complete_spelling() {
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([1; 20]), 0, 4).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let reference = fact(SyntaxFactKind::Occurrence, "agda.rhs.reference");
+        for text in ["var%", "chosen", "pick%", "value2"] {
+            assert_eq!(
+                structural_captured_name_for_fact("agda", &reference, text, text.len()).as_deref(),
+                Some(text)
+            );
+            assert!(
+                structural_captured_name_for_fact("agda", &reference, text, text.len() - 1)
+                    .is_none()
+            );
+            assert!(
+                structural_captured_name_for_fact("coq", &reference, text, text.len()).is_none()
+            );
+        }
+        for text in [
+            "",
+            "Other.var%",
+            "var% arg",
+            "_hole",
+            "λ",
+            "var%\0",
+            "(var%)",
+        ] {
+            assert!(structural_captured_name_for_fact("agda", &reference, text, 128).is_none());
+        }
+        for (kind, label) in [
+            (SyntaxFactKind::Signature, "agda.rhs.reference"),
+            (SyntaxFactKind::Occurrence, "agda.rhs.reference.extra"),
+            (SyntaxFactKind::Occurrence, "agda.rhs.target.signature"),
+        ] {
+            assert!(
+                structural_captured_name_for_fact("agda", &fact(kind, label), "var%", 4).is_none()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod thinkscript_tests;
+
+#[cfg(test)]
+mod python_module_read_name_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn certified_module_names_require_closed_language_role_label_and_complete_ascii_spelling() {
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([1; 20]), 0, 5).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let read = fact(SyntaxFactKind::Occurrence, "python.module_read.reference");
+        for name in ["total", "amount2", "_written"] {
+            assert_eq!(
+                structural_captured_name_for_fact("python", &read, name, name.len()).as_deref(),
+                Some(name)
+            );
+            assert!(
+                structural_captured_name_for_fact("python", &read, name, name.len() - 1).is_none()
+            );
+            assert!(structural_captured_name_for_fact("ruby", &read, name, name.len()).is_none());
+        }
+        for name in [
+            "",
+            "total\0",
+            "total extra",
+            "holder.total",
+            "λ",
+            "1total",
+            "(total)",
+        ] {
+            assert!(structural_captured_name_for_fact("python", &read, name, 128).is_none());
+        }
+        for (kind, label) in [
+            (SyntaxFactKind::Signature, "python.module_read.reference"),
+            (
+                SyntaxFactKind::Occurrence,
+                "python.module_read.reference.extra",
+            ),
+            (SyntaxFactKind::Occurrence, "python.module_read.call"),
+            (
+                SyntaxFactKind::Occurrence,
+                "python.module_reading.reference",
+            ),
+        ] {
+            assert!(
+                structural_captured_name_for_fact("python", &fact(kind, label), "total", 5)
+                    .is_none()
+            );
+        }
     }
 }

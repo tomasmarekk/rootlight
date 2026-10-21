@@ -7,13 +7,13 @@
     {
       "path": "parser/Cargo.lock",
       "bytes": 5295,
-      "sha256": "242a4e3f9ad272adcbc9afc3b5948037b0bd165b25fa05085d7bb25cc3d6e1c2",
+      "sha256": "1f39b32f108a67a23266204a91fca10b5c6870766f7772533710f10bdd277951",
       "native_seal_byte_identical": false
     },
     {
       "path": "parser/Cargo.toml",
       "bytes": 572,
-      "sha256": "14c6a85d9abf611854eca0e888716121a7f825ec96db601cdfea1f9cd2a00f0a",
+      "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700",
       "native_seal_byte_identical": false
     },
     {

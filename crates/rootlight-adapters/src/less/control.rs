@@ -26,6 +26,19 @@ pub(super) struct Control {
     maximum_depth: usize,
 }
 
+fn update_counter(counter: &AtomicUsize, update: impl Fn(usize) -> Option<usize>) -> bool {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = update(current) else {
+            return false;
+        };
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 impl Control {
     pub(super) fn new(
         nodes: usize,
@@ -60,12 +73,9 @@ impl Control {
     }
 
     fn charge(&self, counter: &AtomicUsize, maximum: usize, reason: u8) -> bool {
-        if counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1).filter(|next| *next <= maximum)
-            })
-            .is_err()
-        {
+        if !update_counter(counter, |value| {
+            value.checked_add(1).filter(|next| *next <= maximum)
+        }) {
             return self.stop(reason);
         }
         true
@@ -91,12 +101,7 @@ impl Control {
                 self.charge(&self.constructions, self.maximum_constructions, 4)
                     && self.charge(&self.depth, self.maximum_depth, 5)
             }
-            ParseCheckpoint::Leave => self
-                .depth
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    value.checked_sub(1)
-                })
-                .is_ok(),
+            ParseCheckpoint::Leave => update_counter(&self.depth, |value| value.checked_sub(1)),
         }
     }
 
@@ -123,6 +128,39 @@ mod tests {
     use super::*;
     use raffia::{ParserBuilder, Syntax, ast::Stylesheet, error::ErrorKind};
     use rootlight_cancel::CancellationReason;
+
+    #[test]
+    fn atomic_counter_limits_remain_exact_under_contention() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    (0..128)
+                        .filter(|_| {
+                            update_counter(&counter, |value| {
+                                value.checked_add(1).filter(|next| *next <= 512)
+                            })
+                        })
+                        .count()
+                })
+            })
+            .collect();
+        assert_eq!(
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .sum::<usize>(),
+            512
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 512);
+        counter.store(usize::MAX, Ordering::Relaxed);
+        assert!(!update_counter(&counter, |value| value.checked_add(1)));
+        assert_eq!(counter.load(Ordering::Relaxed), usize::MAX);
+        counter.store(0, Ordering::Relaxed);
+        assert!(!update_counter(&counter, |value| value.checked_sub(1)));
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn cancellation_inside_long_native_tokens_is_a_typed_abort() {

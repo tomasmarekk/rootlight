@@ -4329,3 +4329,121 @@ fn c_formal_certificates_cannot_be_repaired_by_generic_resolution() {
         }
     }
 }
+
+#[test]
+fn csharp_parameters_cannot_donate_spelling_candidates_without_native_owner_proof() {
+    let mut fixture = Fixture::new();
+    let file = fixture.primary_file;
+    let owner = fixture.add_entity(10, "Owned", file, EntityKind::Method, None);
+    let parameter = fixture.add_entity(11, "value", file, EntityKind::Parameter, Some(owner));
+    let other = fixture.add_entity(12, "Other", file, EntityKind::Method, None);
+    fixture.add_occurrence(20, "value", file, OccurrenceRole::Reference, Some(other));
+    fixture.document.files[0].language = "csharp".to_owned();
+    fixture.document.provenance[0].language = "csharp".to_owned();
+    fixture.document.provenance[0].tier = AnalysisTier::TierD;
+    for entity in &mut fixture.document.entities {
+        entity.language = "csharp".to_owned();
+        entity.tier = AnalysisTier::TierD;
+    }
+    fixture.document.occurrences[0].syntax_kind = "csharp.identifier.reference".to_owned();
+    fixture.validate();
+    let batch = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert_eq!(batch.decisions.len(), 1);
+    assert!(matches!(
+        batch.decisions[0].outcome,
+        ResolutionOutcome::Unresolved { .. }
+    ));
+    assert_eq!(
+        batch.decisions[0].explanation.rejected_candidates[0].reason,
+        RejectionReason::MissingLexicalEvidence
+    );
+    fixture.document.occurrences[0].target = OccurrenceTarget::Resolved { symbol: parameter };
+    let exact = fixture.document.occurrences[0].clone();
+    let applied = ResolutionEngine::default()
+        .apply_document(
+            fixture.document.clone(),
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        applied.occurrences[0], exact,
+        "the native target is preserved"
+    );
+    fixture.document.occurrences[0].target = OccurrenceTarget::Unresolved {
+        text_hash: fixture.document.occurrences[0].syntactic_text_hash,
+    };
+    fixture
+        .document
+        .entities
+        .iter_mut()
+        .find(|entity| entity.id == parameter)
+        .unwrap()
+        .kind = EntityKind::Variable;
+    let ordinary = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert!(matches!(&ordinary.decisions[0].outcome,
+        ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter]));
+}
+
+#[test]
+fn cpp_parameters_cannot_donate_spelling_candidates_without_native_owner_proof() {
+    let mut fixture = Fixture::new();
+    let file = fixture.primary_file;
+    let owner = fixture.add_entity(10, "Owned", file, EntityKind::Function, None);
+    let parameter = fixture.add_entity(11, "value", file, EntityKind::Parameter, Some(owner));
+    let other = fixture.add_entity(12, "Other", file, EntityKind::Function, None);
+    fixture.add_occurrence(20, "value", file, OccurrenceRole::Reference, Some(other));
+    fixture.document.files[0].language = "cpp".to_owned();
+    fixture.document.provenance[0].language = "cpp".to_owned();
+    fixture.document.provenance[0].tier = AnalysisTier::TierD;
+    for entity in &mut fixture.document.entities {
+        entity.language = "cpp".to_owned();
+        entity.tier = AnalysisTier::TierD;
+    }
+    fixture.document.occurrences[0].syntax_kind = "cpp.identifier.reference".to_owned();
+    fixture.validate();
+    let batch = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert_eq!(batch.decisions.len(), 1);
+    assert!(matches!(
+        batch.decisions[0].outcome,
+        ResolutionOutcome::Unresolved { .. }
+    ));
+    assert_eq!(
+        batch.decisions[0].explanation.rejected_candidates[0].reason,
+        RejectionReason::MissingLexicalEvidence
+    );
+    fixture.document.occurrences[0].target = OccurrenceTarget::Resolved { symbol: parameter };
+    let exact = fixture.document.occurrences[0].clone();
+    let applied = ResolutionEngine::default()
+        .apply_document(
+            fixture.document.clone(),
+            ResolverFactContext::new(fixture.content_hash),
+            &Cancellation::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        applied.occurrences[0], exact,
+        "the native target is preserved"
+    );
+    fixture.document.occurrences[0].target = OccurrenceTarget::Unresolved {
+        text_hash: fixture.document.occurrences[0].syntactic_text_hash,
+    };
+    fixture
+        .document
+        .entities
+        .iter_mut()
+        .find(|entity| entity.id == parameter)
+        .unwrap()
+        .kind = EntityKind::Variable;
+    let ordinary = ResolutionEngine::default()
+        .resolve(&fixture.document, &Cancellation::new())
+        .unwrap();
+    assert!(matches!(&ordinary.decisions[0].outcome,
+        ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter]));
+}

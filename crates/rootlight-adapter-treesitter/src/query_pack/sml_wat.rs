@@ -236,6 +236,143 @@ impl<'s> CaptureCache<'s> {
         }
         Ok(Some(name))
     }
+    fn recursive_call(
+        &mut self,
+        node: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<Option<Range<usize>>, AdapterError> {
+        if self.wat || !self.complete || !self.clean(node) || node.kind() != "vid" {
+            return Ok(None);
+        }
+        let Some(path) = node.parent().filter(|p| p.kind() == "longvid") else {
+            return Ok(None);
+        };
+        if self.only(path, "vid", cancel)? != Some(node) {
+            return Ok(None);
+        }
+        let Some(value) = path.parent().filter(|p| p.kind() == "vid_exp") else {
+            return Ok(None);
+        };
+        let Some(application) = value.parent().filter(|p| p.kind() == "app_exp") else {
+            return Ok(None);
+        };
+        let mut cursor = application.walk();
+        let mut children = application.named_children(&mut cursor);
+        let mut significant = [None, None];
+        let mut count = 0_usize;
+        for child in &mut children {
+            if !self.visit(cancel)? {
+                return Ok(None);
+            }
+            if matches!(child.kind(), "block_comment" | "line_comment") {
+                continue;
+            }
+            if count == significant.len() {
+                return Ok(None);
+            }
+            significant[count] = Some(child);
+            count += 1;
+        }
+        if count != 2 || significant[0] != Some(value) {
+            return Ok(None);
+        }
+        let mut child = application;
+        let mut parent = child.parent();
+        let rule = loop {
+            if !self.visit(cancel)? {
+                return Ok(None);
+            }
+            let Some(current) = parent else {
+                return Ok(None);
+            };
+            if !self.clean(current) {
+                return Ok(None);
+            }
+            if current.kind() == "fmrule" {
+                if self.field(current, "def", cancel)? != Some(child) {
+                    return Ok(None);
+                }
+                break current;
+            }
+            match current.kind() {
+                "app_exp" | "paren_exp" | "cond_exp" | "raise_exp" => {}
+                "handle_exp" => {
+                    let mut cursor = current.walk();
+                    let mut first = None;
+                    for candidate in current.named_children(&mut cursor) {
+                        if !self.visit(cancel)? {
+                            return Ok(None);
+                        }
+                        if !matches!(candidate.kind(), "block_comment" | "line_comment") {
+                            first = Some(candidate);
+                            break;
+                        }
+                    }
+                    if first != Some(child) {
+                        return Ok(None);
+                    }
+                }
+                _ => return Ok(None),
+            }
+            child = current;
+            parent = current.parent();
+        };
+        let Some((name, _)) = self.sml_header(rule, cancel)? else {
+            return Ok(None);
+        };
+        let Some(spelling) = self.name(name, cancel)? else {
+            return Ok(None);
+        };
+        if self.name(node, cancel)? != Some(spelling) {
+            return Ok(None);
+        }
+        let Some(argument) = self.field(rule, "arg", cancel)? else {
+            return Ok(None);
+        };
+        if argument.kind() != "vid_pat" {
+            return Ok(None);
+        }
+        let Some(argument_path) = self.only(argument, "longvid", cancel)? else {
+            return Ok(None);
+        };
+        let Some(argument_name) = self.only(argument_path, "vid", cancel)? else {
+            return Ok(None);
+        };
+        // Pattern status needs the incoming basis. Only exclude a possible shadow here.
+        // This proof never promotes an argument pattern to a Parameter or a Read.
+        if self
+            .name(argument_name, cancel)?
+            .is_none_or(|arg| arg == spelling)
+        {
+            return Ok(None);
+        }
+        let Some(root) = rule
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        else {
+            return Ok(None);
+        };
+        if root.kind() != "source_file"
+            || root.parent().is_some()
+            || !self.clean(root)
+            || !(root.start_byte() == 0
+                || (root.start_byte() == 3 && self.source.starts_with(b"\xef\xbb\xbf")))
+            || root.end_byte() != self.source.len()
+        {
+            return Ok(None);
+        }
+        let mut cursor = root.walk();
+        for declaration in root.named_children(&mut cursor) {
+            if !self.visit(cancel)? {
+                return Ok(None);
+            }
+            if declaration.kind().ends_with("_dec") && declaration.kind() != "fun_dec" {
+                return Ok(None);
+            }
+        }
+        Ok(Some(rule.start_byte()..node.end_byte()))
+    }
     fn declaration(
         &mut self,
         node: Node<'_>,
@@ -312,7 +449,7 @@ pub(super) fn candidate(
     }
     let mut range = node.byte_range();
     let actual_role = role;
-    let required = role.belongs_to_identity_closure();
+    let mut required = role.belongs_to_identity_closure();
     let root_kind = if cache.wat { "root" } else { "source_file" };
     let syntax = if node.parent().is_none()
         && (node.kind() == root_kind || node.is_error())
@@ -334,13 +471,28 @@ pub(super) fn candidate(
         } else {
             "sml.file"
         }
-    } else if !cache.wat && node.kind() == "vid" && role == StructuralRole::Reference {
+    } else if !cache.wat
+        && node.kind() == "vid"
+        && matches!(role, StructuralRole::Reference | StructuralRole::Signature)
+    {
         if !node.parent().is_some_and(|p| {
             p.kind() == "longvid" && p.parent().is_some_and(|v| v.kind() == "vid_exp")
         }) {
             return Ok(None);
         }
-        "sml.unresolved_name"
+        if let Some(proof) = cache.recursive_call(node, cancel)? {
+            required = true;
+            if role == StructuralRole::Signature {
+                range = proof;
+                "sml.own_function_target"
+            } else {
+                "sml.own_function_call"
+            }
+        } else if role == StructuralRole::Reference {
+            "sml.unresolved_name"
+        } else {
+            return Ok(None);
+        }
     } else if matches!(
         role,
         StructuralRole::Declaration
@@ -613,5 +765,100 @@ mod tests {
                 reason: CancellationReason::ClientRequest
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod recursive_call_tests {
+    use super::*;
+
+    #[test]
+    fn original_sml_recursion_uses_actual_native_callee_and_owner_ranges() {
+        let source = include_str!("../../tests/fixtures/standard_ml/deephandle.sml");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_sml::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let mut pending = vec![tree.root_node()];
+        let mut call = None;
+        while let Some(node) = pending.pop() {
+            if node.kind() == "vid" && node.byte_range() == (65..66) {
+                call = Some(node);
+            }
+            let mut cursor = node.walk();
+            pending.extend(node.named_children(&mut cursor));
+        }
+        let call = call.unwrap();
+        for (role, syntax, range) in [
+            (StructuralRole::Reference, "sml.own_function_call", 65..66),
+            (StructuralRole::Signature, "sml.own_function_target", 4..66),
+        ] {
+            let mut cache = CaptureCache::new(source.as_bytes(), 16384, true, false);
+            let proof = candidate(
+                call,
+                role,
+                source.as_bytes(),
+                &Cancellation::new(),
+                &mut cache,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(proof.syntax, syntax);
+            assert_eq!(proof.start..proof.end, range);
+            assert!(proof.required);
+            assert!(!cache.exhausted());
+        }
+        let mut incomplete = CaptureCache::new(source.as_bytes(), 16384, false, false);
+        let usage = candidate(
+            call,
+            StructuralRole::Reference,
+            source.as_bytes(),
+            &Cancellation::new(),
+            &mut incomplete,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(usage.syntax, "sml.unresolved_name");
+        assert!(!usage.required);
+    }
+
+    #[test]
+    fn actual_sml_pattern_cst_does_not_supply_incoming_constructor_status() {
+        for source in [
+            "fun measure value = value;",
+            "datatype status = value; fun measure value = value;",
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_sml::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            assert!(!tree.root_node().has_error());
+            let mut pending = vec![tree.root_node()];
+            let mut argument = None;
+            while let Some(node) = pending.pop() {
+                if node.kind() == "fmrule" {
+                    argument = node.child_by_field_name("arg");
+                }
+                let mut cursor = node.walk();
+                pending.extend(node.named_children(&mut cursor));
+            }
+            let pattern = argument.unwrap();
+            assert_eq!(pattern.kind(), "vid_pat");
+            let path = pattern.named_child(0).unwrap();
+            assert_eq!(path.kind(), "longvid");
+            let name = path.named_child(0).unwrap();
+            assert_eq!(name.kind(), "vid");
+            assert_eq!(&source[name.byte_range()], "value");
+            let mut cache = CaptureCache::new(source.as_bytes(), 16384, true, false);
+            assert!(
+                cache
+                    .declaration(name, &Cancellation::new())
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 }

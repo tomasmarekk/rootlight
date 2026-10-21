@@ -4,19 +4,30 @@
 //! types, so extraction can evolve independently from stable IR construction.
 
 mod ada;
+mod agda;
+mod agda_rhs;
 mod apex;
 mod apex_calls;
 mod astro_reads;
 mod bash;
 mod c_calls;
 mod c_formal_reads;
+mod c_variables;
 mod capnp;
+mod chapel;
+mod chapel_formals;
 mod clojure;
 mod cmake;
+mod coffeescript;
 mod coq;
+mod coq_written;
+mod cpp_const_formals;
 mod crystal;
+mod csharp_formals;
 mod cue;
 mod d;
+mod dockerfile;
+mod dockerfile_env;
 mod eiffel;
 mod elixir;
 mod embedded;
@@ -24,7 +35,10 @@ mod embedded_rust;
 mod fish;
 mod flux;
 mod fortran_calls;
+mod gdscript;
+mod glsl_bindings;
 mod go_call_formals;
+mod go_calls;
 mod go_formal_reads;
 mod graphql;
 mod hare;
@@ -33,41 +47,59 @@ mod haskell_record_fields;
 mod haxe;
 mod hcl;
 mod hdl;
+mod idris;
+mod java_local_receivers;
 mod java_parameters;
 mod json_schema;
 mod julia;
+mod lean;
+mod lean_formals;
 mod less;
+mod make_dependencies;
 mod matlab;
+mod meson_bindings;
 mod modelica;
 mod mojo;
 mod mojo_members;
 mod nim;
 mod nix_paths;
+mod ocaml_bindings;
 mod perl;
+mod php_this_calls;
 mod pony;
+mod powershell_formals;
 mod prolog_calls;
 mod protobuf;
+mod pug;
+mod python_module_reads;
 mod python_parameters;
+mod python_variables;
 mod qml;
 mod qsharp;
 mod qsharp_formals;
 mod racket;
 mod ring;
 mod sass;
+mod scala_formals;
 mod scheme_calls;
 mod scss;
+mod sed;
+mod sml_calls;
 mod sml_wat;
 mod source_coordinates;
+mod thinkscript;
 mod thrift;
 mod toml;
 mod typescript_calls;
 mod v;
 mod vhdl;
+mod wolfram;
+mod wolfram_formals;
 mod yaml;
 mod zig;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     sync::Arc,
 };
@@ -637,9 +669,10 @@ impl TreeSitterAnalyzer {
         sink: &mut dyn IrBatchSink,
         cancellation: &Cancellation,
     ) -> Result<AnalysisReport, AdapterError> {
-        let source_view = NativeSourceView::new(
+        let source_view = NativeSourceView::new_with_policy(
             request.source().bytes(),
             request.encoding().as_str(),
+            crate::source_view::LineEndingPolicy::for_language(request.language().as_str()),
             request.limits().max_source_bytes(),
             request.limits().max_reported_memory_bytes(),
             cancellation,
@@ -778,7 +811,10 @@ fn required_syntax_fact_count_from_output(
             flux_read_ends.insert((fact.span().file(), fact.span().end_byte()), ());
         }
         if fact.kind() == SyntaxFactKind::Signature
-            && fact.syntax_kind().as_str() == "coq.notation_target.signature"
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "coq.notation_target.signature" | "coq.written_target.signature"
+            )
         {
             coq_notation_ends
                 .try_reserve(1)
@@ -839,6 +875,7 @@ fn required_syntax_fact_count_from_output(
             && !fact.syntax_kind().as_str().ends_with(".expression"))
             || (fact.kind() == SyntaxFactKind::Scope
                 && (contains_declaration
+                    || matches!(fact.syntax_kind().as_str(), "c.block.scope" | "c.for.scope")
                     || fact.syntax_kind().as_str().starts_with("json.")
                     || fact.syntax_kind().as_str().starts_with("jsonc.")
                     || fact.syntax_kind().as_str().starts_with("toml.")
@@ -853,11 +890,35 @@ fn required_syntax_fact_count_from_output(
                 && fact.syntax_kind().as_str() == "flux.parameter_read.reference"
                 && flux_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte())))
             || (fact.kind() == SyntaxFactKind::Occurrence
-                && fact.syntax_kind().as_str() == "scheme.direct_file_call.reference")
+                && matches!(
+                    fact.syntax_kind().as_str(),
+                    "scheme.direct_file_call.reference" | "sml.own_function_call.reference"
+                ))
+            || agda::signature_name(fact)
+            || agda_rhs::reference(fact)
+            || thinkscript::required(fact)
             || qsharp_formals::certified_reference(fact)
+            || wolfram_formals::certified_reference(fact)
+            || lean_formals::certified_reference(fact)
+            || scala_formals::required(fact)
+            || csharp_formals::required(fact)
+            || powershell_formals::required(fact)
+            || sed::required(fact)
+            || idris::required(fact)
+            || chapel_formals::required(fact)
+            || meson_bindings::required(fact)
+            || dockerfile::required(fact)
+            || java_local_receivers::required(fact)
+            || cpp_const_formals::required(fact)
             || c_formal_reads::certified_reference(fact)
+            || c_variables::required(fact)
+            || python_module_reads::required(fact)
             || mojo_members::required(fact)
+            || glsl_bindings::required(fact)
+            || go_calls::required(fact)
+            || php_this_calls::required(fact)
             || go_call_formals::certified_reference(fact)
+            || ocaml_bindings::required(fact)
             || astro_reads::required(fact)
             || less::required(fact)
             || prolog_calls::required(fact)
@@ -1103,6 +1164,13 @@ fn structural_parse_context_hash(
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rootlight.treesitter.structural-artifact-context/1\0");
     hash_sized_bytes(&mut hasher, NATIVE_SOURCE_PROJECTION_POLICY.as_bytes())?;
+    if request.language().as_str() == "sed" {
+        hash_sized_bytes(&mut hasher, crate::runtime::SED_FRONTEND_POLICY.as_bytes())?;
+        hash_sized_bytes(
+            &mut hasher,
+            crate::runtime::SED_SCANNER_CONTRACT_IDENTITY.as_bytes(),
+        )?;
+    }
     hash_sized_bytes(
         &mut hasher,
         crate::runtime::FORTRAN_TEMPLATE_PROJECTION_POLICY.as_bytes(),
@@ -1276,6 +1344,20 @@ fn preflight_lowering_limits(
         request.included_ranges(),
     )?;
     let mut string_bytes = 0_usize;
+    if request.language().as_str() == "thinkscript" {
+        skipped_candidates = checked_add(skipped_candidates, 3)?;
+        for _ in 0..3 {
+            account_string(&mut string_bytes, thinkscript::GAP.len(), limits)?;
+        }
+    }
+    if request.language().as_str() == "sed" {
+        skipped_candidates = checked_add(skipped_candidates, 1)?;
+        account_string(
+            &mut string_bytes,
+            "sed-bre-static-file-text-raw-cr-and-runtime-interpretation-unqualified".len(),
+            limits,
+        )?;
+    }
     for _ in classic_dialect_spans(request) {
         cancellation.check()?;
         skipped_candidates = checked_add(skipped_candidates, 1)?;
@@ -1467,6 +1549,20 @@ fn preflight_lowering_limits(
         if occurrence_role(fact).is_some() {
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
+            if request.language().as_str() == "astro"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && astro_reads::required(fact)
+            {
+                // A checked native value use retains Reference plus a Read facet.
+                occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                account_string(
+                    &mut string_bytes,
+                    "astro.template_value_read.read".len(),
+                    limits,
+                )?;
+            }
             if language_for_fact_with_profile_fences(request, fact, profile_fences) == "lua"
                 && parse_output.report().coverage().status() == CoverageStatus::Complete
                 && fact.syntax_kind().as_str() == "lua.identifier.reference"
@@ -1502,7 +1598,37 @@ fn preflight_lowering_limits(
                 && fact.syntax_kind().as_str() == "prolog.direct_goal.reference"
                 && prolog_call_ends.contains_key(&(fact.span().file(), fact.span().end_byte()));
             let mojo_call = request.language().as_str() == "mojo" && mojo_members::call(fact);
-            if scss_call || prolog_call || mojo_call {
+            let glsl_proof = request.language().as_str() == "glsl"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && glsl_bindings::required(fact);
+            let glsl_call = glsl_proof && glsl_bindings::call(fact);
+            let php_call = request.language().as_str() == "php"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && php_this_calls::required(fact);
+            let go_call = request.language().as_str() == "go"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && go_calls::required(fact);
+            let sml_call = request.language().as_str() == "standard-ml"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && fact.syntax_kind().as_str() == "sml.own_function_call.reference"
+                && fact.kind() == SyntaxFactKind::Occurrence;
+            let ocaml_certificate = request.language().as_str() == "ocaml"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && ocaml_bindings::required(fact);
+            if scss_call
+                || prolog_call
+                || mojo_call
+                || sml_call
+                || glsl_call
+                || go_call
+                || php_call
+                || (ocaml_certificate && ocaml_bindings::call(fact))
+            {
                 require_resource_limit(
                     ResourceKind::NestedItems,
                     3,
@@ -1510,8 +1636,53 @@ fn preflight_lowering_limits(
                 )?;
                 field_relation_derivations = checked_add(field_relation_derivations, 3)?;
             }
+            if request.language().as_str() == "dockerfile"
+                && request.included_ranges().is_empty()
+                && dockerfile::required(fact)
+            {
+                // The reserved lexical candidate becomes one stage dependency;
+                // both endpoints and its exact COPY occurrence are proof parents.
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+            }
+            if request.language().as_str() == "make"
+                && fact.kind() == SyntaxFactKind::Occurrence
+                && fact.syntax_kind().as_str() == "make.target.reference"
+            {
+                // Keep the occurrence reference beside a possible written rule
+                // dependency; its owner, occurrence and target are proof parents.
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 2)?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+            }
+            if request.language().as_str() == "sed"
+                && fact.syntax_kind().as_str() == "sed.written_branch.reference"
+            {
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+            }
             if let Some(detail) = source_reference_gap(fact) {
                 if parse_output.report().coverage().status() == CoverageStatus::Complete
+                    || (request.language().as_str() == "python"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() == CoverageStatus::Bounded
+                        && request.source().source_ref().span().start_byte() == 0
+                        && u64::try_from(request.source().bytes().len()).ok()
+                            == Some(request.source().source_ref().span().end_byte())
+                        && python_module_reads::required(fact))
                     || (request.language().as_str() == "mojo"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -1524,14 +1695,62 @@ fn preflight_lowering_limits(
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && astro_reads::required(fact))
+                    || (request.language().as_str() == "scala"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && scala_formals::required(fact))
                     || (request.language().as_str() == "c"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
-                        && c_formal_reads::certified_reference(fact))
+                        && (c_formal_reads::certified_reference(fact)
+                            || c_variables::required(fact)))
+                    || (request.language().as_str() == "wolfram"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && wolfram_formals::certified_reference(fact))
+                    || (request.language().as_str() == "lean"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && lean_formals::certified_reference(fact))
                     || (request.language().as_str() == "qsharp"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && qsharp_formals::certified_reference(fact))
+                    || (request.language().as_str() == "chapel"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && chapel_formals::required(fact))
+                    || (request.language().as_str() == "java"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && java_local_receivers::required(fact))
+                    || (request.language().as_str() == "powershell"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && powershell_formals::required(fact))
+                    || (request.language().as_str() == "thinkscript"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && thinkscript::required(fact))
+                    || (request.language().as_str() == "agda"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && agda_rhs::reference(fact))
+                    || (request.language().as_str() == "csharp" && csharp_formals::required(fact))
+                    || (request.language().as_str() == "cpp" && cpp_const_formals::required(fact))
+                    || (request.language().as_str() == "sed" && sed::required(fact))
+                    || (request.language().as_str() == "idris" && idris::required(fact))
+                    || (request.language().as_str() == "dockerfile"
+                        && request.included_ranges().is_empty()
+                        && dockerfile::required(fact))
+                    || (request.language().as_str() == "meson"
+                        && request.included_ranges().is_empty()
+                        && meson_bindings::required(fact))
+                    || sml_call
+                    || ocaml_certificate
+                    || glsl_proof
+                    || go_call
+                    || php_call
                     || scss_call
                     || prolog_call
                     || (fact.syntax_kind().as_str() == "flux.parameter_read.reference"
@@ -1940,16 +2159,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
         if self.request.language().as_str() == "markdown" {
             self.profile_fences = profile_fence_spans(self.coordinates.facts(), cancellation)?;
         }
-        let physical_profile_fences = if self.source_view.encoding().is_some()
-            && self.request.language().as_str() == "markdown"
-        {
-            Some(profile_fence_spans(
-                self.parse_output.facts(),
-                cancellation,
-            )?)
-        } else {
-            None
-        };
+        let physical_profile_fences =
+            if !self.source_view.is_identity() && self.request.language().as_str() == "markdown" {
+                Some(profile_fence_spans(
+                    self.parse_output.facts(),
+                    cancellation,
+                )?)
+            } else {
+                None
+            };
         let mut budget = preflight_lowering_limits(
             self.request,
             self.parse_output,
@@ -2022,7 +2240,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         }
 
         let protobuf_bindings = if self.request.language().as_str() == "protobuf"
-            && self.source_view.encoding().is_none()
+            && self.source_view.is_identity()
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
         {
@@ -2037,7 +2255,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
         let thrift_bindings = if self.request.language().as_str() == "thrift"
-            && self.source_view.encoding().is_none()
+            && self.source_view.is_identity()
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
         {
@@ -2108,9 +2326,54 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
             }
         }
+        let mut make_prerequisite_headers = make_dependencies::HeaderCache::default();
+        let mut make_written_targets = HashSet::new();
+        let mut make_target_definitions = HashMap::<SymbolId, usize>::new();
+        let mut make_prerequisite_context = false;
         let mut make_targets = HashMap::<String, Option<SymbolId>>::new();
         let mut make_variables = HashMap::<String, Option<SymbolId>>::new();
         if self.request.language().as_str() == "make" {
+            let mut roots = 0;
+            let mut whole_root = false;
+            for fact in self.coordinates.facts() {
+                cancellation.check()?;
+                if fact.kind() == SyntaxFactKind::Root {
+                    roots += 1;
+                    whole_root = fact.syntax_kind().as_str() == "make.source_file"
+                        && fact.parent().is_none()
+                        && self.coordinates.physical(fact.span())? == self.full_source.span();
+                }
+            }
+            make_prerequisite_context = roots == 1
+                && whole_root
+                && self.request.included_ranges().is_empty()
+                && self.parse_output.report().coverage().status() != CoverageStatus::Unknown;
+            if make_prerequisite_context {
+                make_written_targets = make_dependencies::written_targets(
+                    self.coordinates.facts(),
+                    &materialized,
+                    self.full_source,
+                    |span| self.text_for_span(span),
+                    |span| self.coordinates.physical(span),
+                    cancellation,
+                )?;
+            }
+            for entity in materialized.values() {
+                cancellation.check()?;
+                if entity.record.language == "make"
+                    && entity.record.kind == EntityKind::BuildTarget
+                    && entity.definition_local_id.is_some()
+                {
+                    if let Some(count) = make_target_definitions.get_mut(&entity.record.id) {
+                        *count = 2;
+                    } else {
+                        make_target_definitions
+                            .try_reserve(1)
+                            .map_err(|_| SinkError::AllocationFailed)?;
+                        make_target_definitions.insert(entity.record.id, 1);
+                    }
+                }
+            }
             let mut variable_definitions = HashMap::<String, usize>::new();
             for entity in materialized.values().filter(|entity| {
                 entity.record.kind == EntityKind::Variable
@@ -2208,6 +2471,43 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 haskell_record_fields::Plan::default()
             };
         let terminal_call_names = terminal_call_names(self.coordinates.facts(), cancellation)?;
+        let agda_signature_names = if self.request.language().as_str() == "agda" {
+            agda::SignatureNames::new(self.coordinates.facts(), self.source_text, cancellation)?
+        } else {
+            agda::SignatureNames::default()
+        };
+        let thinkscript_targets = if self.request.language().as_str() == "thinkscript"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(thinkscript::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_text.as_bytes(),
+                self.request.limits().max_syntax_nodes(),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let agda_rhs_targets = if self.request.language().as_str() == "agda"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+            && self.full_source.span().start_byte() == 0
+            && self.full_source.span().end_byte() == self.request.source().bytes().len() as u64
+        {
+            Some(agda_rhs::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                &agda_signature_names,
+                self.full_source,
+                |span| self.text_for_span(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let ada_bindings = if self.request.language().as_str() == "ada"
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
         {
@@ -2513,7 +2813,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         };
         // Borrow type names only after every shared entity mutation is complete.
         let capnp_types = if self.request.language().as_str() == "capnp"
-            && self.source_view.encoding().is_none()
+            && self.source_view.is_identity()
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
         {
@@ -2528,7 +2828,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
         // Borrow type names only after every shared entity mutation is complete.
         let graphql_types = if self.request.language().as_str() == "graphql"
-            && self.source_view.encoding().is_none()
+            && self.source_view.is_identity()
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
         {
@@ -2624,8 +2924,44 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let idris_targets = if self.request.language().as_str() == "idris"
+            && self.request.included_ranges().is_empty()
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(idris::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.coordinates.physical(span),
+                |span| self.text_for_span(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let sed_targets = if self.request.language().as_str() == "sed"
+            && self.request.included_ranges().is_empty()
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(sed::BranchTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.coordinates.physical(span),
+                |span| self.text_for_span(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let coq_notations = if self.request.language().as_str() == "coq"
-            && self.source_view.encoding().is_none()
+            && self.source_view.is_identity()
             && self.request.included_ranges().is_empty()
             && self.full_source.span().start_byte() == 0
             && u64::try_from(self.request.source().bytes().len()).ok()
@@ -2636,6 +2972,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 &materialized,
                 self.full_source,
                 |span| self.text_for_span(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let coq_written = if self.request.language().as_str() == "coq"
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+            && self.request.included_ranges().is_empty()
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+        {
+            Some(coq_written::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
                 cancellation,
             )?)
         } else {
@@ -2659,7 +3013,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
         let haxe_reads = if self.request.language().as_str() == "haxe"
-            && self.source_view.encoding().is_none()
+            && self.source_view.is_identity()
             && self.request.included_ranges().is_empty()
             && self.full_source.span().start_byte() == 0
             && u64::try_from(self.request.source().bytes().len()).ok()
@@ -2670,6 +3024,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 &materialized,
                 self.full_source,
                 |span| self.text_for_span(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let python_module_reads = if self.request.language().as_str() == "python"
+            && self.request.included_ranges().is_empty()
+            // Required native witnesses survive bounded optional extraction.
+            // Sampled or unknown coverage supplies no such admission authority.
+            && matches!(self.parse_output.report().coverage().status(),
+                CoverageStatus::Complete | CoverageStatus::Bounded)
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+        {
+            Some(python_module_reads::ModuleTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
                 cancellation,
             )?)
         } else {
@@ -2709,11 +3084,183 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let wolfram_formals = if self.request.language().as_str() == "wolfram"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(wolfram_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let lean_formals = if self.request.language().as_str() == "lean"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(lean_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let qsharp_formals = if self.request.language().as_str() == "qsharp"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
         {
             Some(qsharp_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        // A certified clean function remains usable when unrelated file recovery
+        // leaves global coverage unknown; the strict context join proves only it.
+        let cpp_const_formals = if self.request.language().as_str() == "cpp"
+            && self.request.included_ranges().is_empty()
+        {
+            Some(cpp_const_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let powershell_formals = if self.request.language().as_str() == "powershell"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(powershell_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let csharp_formals = if self.request.language().as_str() == "csharp"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(csharp_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let chapel_formals = if self.request.language().as_str() == "chapel"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(chapel_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let dockerfile_stages = if self.request.language().as_str() == "dockerfile"
+            && self.request.included_ranges().is_empty()
+        {
+            Some(dockerfile::StageTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let meson_bindings = if self.request.language().as_str() == "meson"
+            && self.request.included_ranges().is_empty()
+        {
+            Some(meson_bindings::VariableTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let java_local_receivers = if self.request.language().as_str() == "java"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(java_local_receivers::LocalTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let scala_formals = if self.request.language().as_str() == "scala"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(scala_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes().len(),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let c_variables = if self.request.language().as_str() == "c"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(c_variables::VariableTargets::new(
                 self.coordinates.facts(),
                 &materialized,
                 self.full_source,
@@ -2754,6 +3301,51 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let glsl_bindings = if self.request.language().as_str() == "glsl"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(glsl_bindings::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let php_this_calls = if self.request.language().as_str() == "php"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(php_this_calls::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let go_calls = if self.request.language().as_str() == "go"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(go_calls::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let go_call_formals = if self.request.language().as_str() == "go"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -2779,6 +3371,36 @@ impl<'context, 'source> Lowering<'context, 'source> {
             Some(go_formal_reads::ParameterTargets::new(
                 &materialized,
                 self.full_source,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let ocaml_bindings = if self.request.language().as_str() == "ocaml"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(ocaml_bindings::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let sml_calls = if self.request.language().as_str() == "standard-ml"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(sml_calls::CallTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
                 cancellation,
             )?)
         } else {
@@ -3196,7 +3818,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let span = annotation
                         .signature
                         .ok_or_else(|| provider_failure("treesitter-lowering-signature"))?;
-                    let lexical = if self.source_view.encoding().is_some() {
+                    let lexical = if !self.source_view.is_identity() {
                         let signature_range = 0..self.text_for_span(span)?.len();
                         self.encoded_signature_lexical(
                             span,
@@ -3297,6 +3919,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     continue;
                 }
                 let reason = match fact.syntax_kind().as_str() {
+                    "meson.recovered_region.signature"
+                    | "dockerfile.recovered_region.signature" => SkippedRegionReason::ParseError,
                     "html.embedded_limit.signature"
                     | "astro.embedded_limit.signature"
                     | "markdown.code_limit.signature"
@@ -3543,6 +4167,35 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 continue;
             }
 
+            if agda::signature_name(fact) {
+                let target = agda_signature_names.target(fact, &facts_by_id, &materialized);
+                let text = self.text_for_span(fact.span())?;
+                if let Some(entity) = target.filter(|entity| entity.record.canonical_name == text) {
+                    let mut occurrence = declaration_occurrence(
+                        fact,
+                        entity,
+                        provenance_id,
+                        syntax_confidence,
+                        &self.source_for_span(fact.span())?,
+                        content_hash(text.as_bytes()),
+                    )?;
+                    occurrence.role = OccurrenceRole::Declaration;
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    occurrences.insert(occurrence.id, occurrence);
+                } else {
+                    let gap = self.skipped_region(
+                        fact.span(),
+                        FactDomain::Occurrences,
+                        SkippedRegionReason::UnsupportedConstruct,
+                        agda::PAIR_UNAVAILABLE,
+                        provenance_id,
+                    )?;
+                    insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
+                }
+                continue;
+            }
+
             if let Some(role) = occurrence_role(fact) {
                 let call_context = if fact.syntax_kind().as_str() == "groovy.implicit_call.call" {
                     groovy_calls
@@ -3679,12 +4332,30 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         self.request.limits().ir().max_string_bytes,
                     )
                 };
-                let enclosing_entity = entity_plan
-                    .nearest_entity_ancestor
-                    .get(&fact.local_id())
-                    .copied()
-                    .flatten()
-                    .and_then(|local_id| materialized.get(&local_id));
+                let glsl_owner = glsl_bindings
+                    .as_ref()
+                    .map(|bindings| bindings.owner(fact, &materialized, cancellation))
+                    .transpose()?
+                    .flatten();
+                let go_call_owner = go_calls
+                    .as_ref()
+                    .map(|bindings| bindings.owner(fact, &materialized, cancellation))
+                    .transpose()?
+                    .flatten();
+                let php_call_owner = php_this_calls
+                    .as_ref()
+                    .map(|bindings| bindings.owner(fact, &materialized, cancellation))
+                    .transpose()?
+                    .flatten();
+                let enclosing_entity =
+                    php_call_owner.or(go_call_owner).or(glsl_owner).or_else(|| {
+                        entity_plan
+                            .nearest_entity_ancestor
+                            .get(&fact.local_id())
+                            .copied()
+                            .flatten()
+                            .and_then(|local_id| materialized.get(&local_id))
+                    });
                 let enclosing = enclosing_entity.map(|entity| entity.record.id);
                 let mut occurrence = unresolved_occurrence(
                     fact,
@@ -3734,6 +4405,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     )?;
                     insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
                 }
+                if let Some(targets) = &thinkscript_targets
+                    && let Some(symbol) = targets.resolve(fact, &occurrence, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("thinkscript-read-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &agda_rhs_targets
+                    && let Some(symbol) = targets.resolve(fact, &occurrence, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("agda-rhs-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
                 if let Some(reads) = &astro_reads
                     && let Some(symbol) = reads.resolve(
                         fact,
@@ -3745,6 +4434,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("astro-template-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                    // Only the native ordinary-value-use certificate reaches this
+                    // branch; an arbitrary resolved Reference supplies no Read proof.
+                    let mut read = occurrence.clone();
+                    read.role = OccurrenceRole::Read;
+                    read.syntax_kind.clear();
+                    read.syntax_kind.push_str("astro.template_value_read.read");
+                    read.id = derive_occurrence_record_id(&read)
+                        .map_err(|_| provider_failure("astro-template-read-identity"))?;
+                    let relation = lexical_reference_relation(&read, symbol)?;
+                    relations.insert(relation.id, relation);
+                    occurrences.insert(read.id, read);
+                }
+                if let Some(bindings) = &python_module_reads
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("python-module-read-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -3764,6 +4478,38 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
+                if let Some(parameters) = &wolfram_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("wolfram-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &lean_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("lean-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
                 if let Some(parameters) = &qsharp_formals
                     && let Some(symbol) = parameters.resolve(
                         fact,
@@ -3777,6 +4523,163 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("qsharp-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &cpp_const_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("cpp-const-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &powershell_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("powershell-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &csharp_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("csharp-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(stages) = &dockerfile_stages
+                    && let Some((owner, target)) = stages.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol: target };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("dockerfile-copy-occurrence-identity"))?;
+                    let mut relation = lexical_reference_relation(&occurrence, target)?;
+                    relation.subject = RelationEndpoint::Entity(owner);
+                    relation.predicate = RelationPredicate::DependsOn;
+                    relation
+                        .evidence
+                        .derivation
+                        .try_reserve_exact(3)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    relation.evidence.derivation.extend([
+                        FactRef::Entity(owner),
+                        FactRef::Fact(occurrence.id),
+                        FactRef::Entity(target),
+                    ]);
+                    relation.evidence.derivation.sort_unstable();
+                    relation.id = derive_relation_record_id(&relation)
+                        .map_err(|_| provider_failure("dockerfile-stage-dependency-identity"))?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &meson_bindings
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence).map_err(|_| {
+                        provider_failure("meson-adjacent-iterable-occurrence-identity")
+                    })?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &java_local_receivers
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("java-local-receiver-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &chapel_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("chapel-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &scala_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("scala-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(variables) = &c_variables
+                    && let Some(symbol) = variables.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("c-variable-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -3811,6 +4714,59 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         provider_failure("java-setter-parameter-occurrence-identity")
                     })?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &glsl_bindings
+                    && let Some(owner) = enclosing_entity
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        Some(owner),
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("glsl-written-occurrence-identity"))?;
+                    let relation =
+                        glsl_bindings::relation(&occurrence, owner, symbol, cancellation)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &php_this_calls
+                    && let Some(owner) = enclosing_entity
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        Some(owner),
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("php-written-call-occurrence-identity"))?;
+                    let relation =
+                        php_this_calls::relation(&occurrence, owner, symbol, cancellation)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &go_calls
+                    && let Some(owner) = enclosing_entity
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        Some(owner),
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("go-written-call-occurrence-identity"))?;
+                    let relation = go_calls::relation(&occurrence, owner, symbol, cancellation)?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(parameters) = &go_call_formals
@@ -3949,6 +4905,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, *symbol)?;
                     relations.insert(relation.id, relation);
+                    if make_prerequisite_context
+                        && let Some(owner) = enclosing_entity
+                        && make_target_definitions.get(&owner.record.id) == Some(&1)
+                        && make_target_definitions.get(symbol) == Some(&1)
+                        && make_written_targets.contains(&owner.record.id)
+                        && make_written_targets.contains(symbol)
+                        && let Some(target) = entities.get(symbol)
+                        && let Some(owner_source) = owner.record.evidence.source.as_ref()
+                    {
+                        let owner_span = self.source_view.projected_span(owner_source.span())?;
+                        if let Some(relation) = make_prerequisite_headers.relation(
+                            owner,
+                            target,
+                            &occurrence,
+                            (owner_span, fact.span()),
+                            self.text_for_span(owner_span)?,
+                            cancellation,
+                        )? {
+                            relations.insert(relation.id, relation);
+                        }
+                    }
                 }
                 if fact.syntax_kind().as_str() == "make.variable.reference"
                     && let Some(owner) = enclosing_entity.filter(|owner| {
@@ -4269,12 +5246,44 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
                     }
                 }
+                if let Some(targets) = &idris_targets
+                    && let Some(symbol) = targets.resolve(fact, &occurrence, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("idris-written-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &sed_targets
+                    && let Some(symbol) = targets.resolve(fact, &occurrence, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("sed-branch-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                    if let Some(relation) =
+                        targets.section_dependency(fact, &occurrence, cancellation)?
+                    {
+                        relations.insert(relation.id, relation);
+                    }
+                }
                 if let Some(targets) = &coq_notations
                     && let Some(symbol) = targets.resolve(fact, &occurrence, cancellation)?
                 {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("coq-notation-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &coq_written
+                    && let Some(symbol) = targets.resolve(fact, &occurrence, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("coq-written-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -4551,6 +5560,47 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         relations.insert(relation.id, relation);
                     }
                 }
+                if let Some(targets) = &ocaml_bindings
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        &occurrence,
+                        self.coordinates.physical(fact.span())?,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("ocaml-written-occurrence-identity"))?;
+                    if let Some(relation) = ocaml_bindings::relation(
+                        &occurrence,
+                        enclosing_entity,
+                        symbol,
+                        cancellation,
+                    )? {
+                        relations.insert(relation.id, relation);
+                    }
+                }
+                if fact.syntax_kind().as_str() == "sml.own_function_call.reference"
+                    && let Some(targets) = &sml_calls
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        &occurrence,
+                        self.coordinates.physical(fact.span())?,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("sml-call-occurrence-identity"))?;
+                    if let Some(relation) = sml_calls::call_relation(
+                        &occurrence,
+                        enclosing_entity,
+                        symbol,
+                        cancellation,
+                    )? {
+                        relations.insert(relation.id, relation);
+                    }
+                }
                 if fact.syntax_kind().as_str() == "hare.direct_file_function.reference"
                     && let Some(targets) = &hare_calls
                     && let Some(symbol) = targets.resolve(
@@ -4732,6 +5782,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 }
                 if let Some(detail) = source_reference_gap(fact)
                     && (matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                        || go_calls::required(fact)
+                        || php_this_calls::required(fact)
                         || fact.syntax_kind().as_str() == "apex.virtual_instance_call.call"
                         || (matches!(
                             fact.syntax_kind().as_str(),
@@ -5261,7 +6313,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .is_some_and(|bytes| bytes <= limits.max_total_string_bytes);
                 let envelope = if fits {
                     let subject = FactRef::Entity(entity.record.id);
-                    let lexical = if self.source_view.encoding().is_some() {
+                    let lexical = if !self.source_view.is_identity() {
                         let fragment = 0..text.len();
                         self.encoded_signature_lexical(
                             span,
@@ -5321,6 +6373,36 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     FactDomain::Extensions,
                     reason,
                     detail,
+                    provenance_id,
+                )?;
+                insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
+            }
+        }
+        if self.request.language().as_str() == "sed" {
+            cancellation.check()?;
+            let gap = skipped_region(
+                self.full_source,
+                self.full_source.span(),
+                FactDomain::Extensions,
+                SkippedRegionReason::UnsupportedConstruct,
+                "sed-bre-static-file-text-raw-cr-and-runtime-interpretation-unqualified",
+                provenance_id,
+            )?;
+            insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
+        }
+        if self.request.language().as_str() == "thinkscript" {
+            for domain in [
+                FactDomain::Entities,
+                FactDomain::Occurrences,
+                FactDomain::Relations,
+            ] {
+                cancellation.check()?;
+                let gap = skipped_region(
+                    self.full_source,
+                    self.full_source.span(),
+                    domain,
+                    SkippedRegionReason::UnsupportedConstruct,
+                    thinkscript::GAP,
                     provenance_id,
                 )?;
                 insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
@@ -5606,6 +6688,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
         cancellation: &Cancellation,
         total_string_bytes: &mut usize,
     ) -> Result<EntityPlan, AdapterError> {
+        let thinkscript_source_admitted = self.request.language().as_str() != "thinkscript"
+            || (self.request.included_ranges().is_empty()
+                && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && thinkscript::admits_raw(
+                    self.coordinates.facts(),
+                    self.full_source,
+                    self.source_text.as_bytes(),
+                    self.request.limits().max_syntax_nodes(),
+                    cancellation,
+                )?);
+        let dockerfile_env = if self.request.language().as_str() == "dockerfile"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            dockerfile_env::Definitions::new(
+                self.coordinates.facts(),
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.limits().max_syntax_nodes(),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?
+        } else {
+            dockerfile_env::Definitions::default()
+        };
         let mut ordered_facts: Vec<_> = self.coordinates.facts().iter().collect();
         ordered_facts.sort_by(|left, right| structural_syntax_fact_order(left, right));
         let json_schema = if self.request.language().as_str() == "json-schema" {
@@ -6113,7 +7220,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // contents or byte offsets; this is source identity, not dispatch.
                 let anonymous_scope_identity = if matches!(
                     fact.syntax_kind().as_str(),
-                    "solidity.block.scope"
+                    "c.block.scope"
+                        | "c.for.scope"
+                        | "solidity.block.scope"
                         | "solidity.for.scope"
                         | "scala.block.scope"
                         | "scala.for.scope"
@@ -6150,7 +7259,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                     Some(source_occurrence_identity(
-                        if self.language_for_fact(fact) == "dart" {
+                        if self.language_for_fact(fact) == "c" {
+                            "rootlight.c-written-lexical-scope/1"
+                        } else if self.language_for_fact(fact) == "dart" {
                             "rootlight.dart-lexical-scope/1"
                         } else if self.language_for_fact(fact) == "scala" {
                             "rootlight.scala-lexical-scope/1"
@@ -6295,6 +7406,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     span: fact.span(),
                     direct_class_member: is_haskell_signature_member_name(fact),
                 });
+                nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
+                continue;
+            }
+            if !thinkscript_source_admitted
+                || (fact.syntax_kind().as_str().starts_with("thinkscript.")
+                    && self.request.language().as_str() != "thinkscript")
+            {
+                nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
+                continue;
+            }
+            if fact.syntax_kind().as_str() == "dockerfile.env.declaration"
+                && !dockerfile_env.contains(fact)
+            {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                 continue;
@@ -7050,7 +8176,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         span: SourceSpan,
         subject: FactRef,
     ) -> Result<Option<LexicalEvidenceV1>, AdapterError> {
-        if self.source_view.encoding().is_none() {
+        if self.source_view.is_identity() {
             return Ok(signature.lexical(subject));
         }
         let mut ranges: [std::ops::Range<usize>; rootlight_ir::MAX_SIGNATURE_SOURCE_PARTS] =
@@ -8486,7 +9612,18 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(bindings)
         .chain(ada::gaps(fact))
         .chain(haxe::gaps(fact))
+        .chain(coffeescript::gaps(fact))
+        .chain(pug::gaps(fact))
+        .chain(sed::gaps(fact))
+        .chain(idris::gaps(fact))
+        .chain(wolfram::gaps(fact))
+        .chain(lean::gaps(fact))
+        .chain(python_variables::gaps(fact))
+        .chain(gdscript::gaps(fact))
+        .chain(meson_bindings::gaps(fact))
+        .chain(dockerfile::gaps(fact))
         .chain(qsharp::gaps(fact))
+        .chain(chapel::gaps(fact))
         .chain(sml_wat::gaps(fact))
         .chain(mojo::gaps(fact))
         .chain(qml::gaps(fact))
@@ -8789,6 +9926,33 @@ fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if matches!(
+        fact.syntax_kind().as_str(),
+        "powershell.formal_context.signature" | "powershell.unproven_formal.reference"
+    ) {
+        return Some((
+            FactDomain::Relations,
+            "powershell-formal-proof-is-limited-to-literal-hashtable-values-in-a-clean-function",
+        ));
+    }
+    if matches!(
+        fact.syntax_kind().as_str(),
+        "cpp.const_formal_context.signature" | "cpp.unproven_const_formal.reference"
+    ) {
+        return Some((
+            FactDomain::Relations,
+            "cpp-const-reference-formal-proof-is-limited-to-subscript-receivers-in-a-clean-function-body",
+        ));
+    }
+    if matches!(
+        fact.syntax_kind().as_str(),
+        "csharp.formal_context.signature" | "csharp.unproven_formal.reference"
+    ) {
+        return Some((
+            FactDomain::Relations,
+            "csharp-formal-proof-is-limited-to-ordinary-member-and-element-receivers-in-a-clean-method-body",
+        ));
+    }
     if fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str() == "qsharp.formal_binding_context.signature"
     {
@@ -8797,12 +9961,34 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             "qsharp-native-argument-proof-does-not-establish-callee-binding-or-quantum-execution",
         ));
     }
+    if fact.kind() == SyntaxFactKind::Declaration
+        && fact.syntax_kind().as_str() == "c.unproven_declarator.declaration"
+    {
+        return Some((
+            FactDomain::Entities,
+            "c-native-ordinary-variable-declarator-not-certified",
+        ));
+    }
+    if fact.kind() == SyntaxFactKind::Signature
+        && fact.syntax_kind().as_str() == "c.variable_file_context.signature"
+    {
+        return Some((
+            FactDomain::Relations,
+            "c-written-variable-proof-excludes-preprocessor-evaluation-imports-and-runtime-effects",
+        ));
+    }
     if fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str() == "c.formal_binding_context.signature"
     {
         return Some((
             FactDomain::Relations,
             "c-formal-proof-is-limited-to-direct-arguments-in-a-single-clean-call-statement",
+        ));
+    }
+    if php_this_calls::metadata(fact) {
+        return Some((
+            FactDomain::Relations,
+            "php-written-method-proof-does-not-select-a-runtime-implementation",
         ));
     }
     if fact.kind() == SyntaxFactKind::Signature
@@ -8819,6 +10005,14 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         return Some((
             FactDomain::Relations,
             "go-formal-proof-is-limited-to-ascii-free-functions-and-direct-single-return-literal-values",
+        ));
+    }
+    if fact.kind() == SyntaxFactKind::Signature
+        && fact.syntax_kind().as_str() == "java.local_receiver_context.signature"
+    {
+        return Some((
+            FactDomain::Relations,
+            "java-local-receiver-proof-does-not-evaluate-types-initializers-or-method-dispatch",
         ));
     }
     if fact.kind() == SyntaxFactKind::Signature
@@ -9356,6 +10550,40 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "thinkscript" {
+        return matches!(
+            (kind, label),
+            (EntityKind::Function, "thinkscript.script.declaration")
+                | (EntityKind::Parameter, "thinkscript.input.declaration")
+        );
+    }
+    if language == "dockerfile" {
+        return dockerfile::written_identity(kind, label);
+    }
+    if language == "meson" {
+        return meson_bindings::written_identity(kind, label);
+    }
+    if language == "wolfram" {
+        return wolfram::written_identity(kind, label);
+    }
+    if language == "lean" {
+        return lean::written_identity(kind, label);
+    }
+    if language == "sed" {
+        return sed::written_identity(kind, label);
+    }
+    if language == "idris" {
+        return idris::written_identity(kind, label);
+    }
+    if language == "pug" {
+        return pug::written_identity(kind, label);
+    }
+    if language == "coffeescript" {
+        return coffeescript::written_identity(kind, label);
+    }
+    if language == "gdscript" {
+        return gdscript::written_identity(kind, label);
+    }
     if language == "qsharp" {
         return qsharp::written_identity(kind, label);
     }
@@ -9379,6 +10607,9 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
     }
     if language == "sass" {
         return sass::written_identity(kind, label);
+    }
+    if language == "chapel" {
+        return chapel::written_identity(kind, label);
     }
     if matches!(language, "standard-ml" | "webassembly") {
         return sml_wat::written_identity(kind, label);
@@ -9653,6 +10884,12 @@ fn written_source_identity(
 ) -> [u8; 32] {
     let context = if language == "coq" {
         "rootlight.coq-source-occurrence/1"
+    } else if language == "lean" {
+        "rootlight.lean-written-source-occurrence/1"
+    } else if language == "wolfram" {
+        "rootlight.wolfram-written-source-occurrence/1"
+    } else if language == "pug" {
+        "rootlight.pug-written-source-occurrence/1"
     } else if language == "xml" {
         "rootlight.xml-source-occurrence/1"
     } else if language == "julia" {
@@ -9797,7 +11034,9 @@ fn declaration_occurrence(
             role
         } else if matches!(
             fact.syntax_kind().as_str(),
-            "objective_c.forward_class.definition" | "objective_c.forward_protocol.definition"
+            "objective_c.forward_class.definition"
+                | "objective_c.forward_protocol.definition"
+                | "agda.function.type_name.definition"
         ) {
             OccurrenceRole::Declaration
         } else {
@@ -10721,6 +11960,16 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "idris" || fact.syntax_kind().as_str().starts_with("idris.") {
+        return language == "idris"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "idris.file.module";
+    }
+    if language == "sed" || fact.syntax_kind().as_str().starts_with("sed.") {
+        return language == "sed"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "sed.file.module";
+    }
     if fact.syntax_kind().as_str() == "json_schema.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "json-schema";
     }
@@ -10982,22 +12231,63 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("thinkscript.") {
+        return fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str() == "thinkscript.script.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("pug.") {
+        return false;
+    }
+    if fact.syntax_kind().as_str().starts_with("dockerfile.") {
+        return false;
+    }
+    if fact.syntax_kind().as_str().starts_with("meson.") {
+        return false;
+    }
+    if fact.syntax_kind().as_str().starts_with("coffeescript.") {
+        return coffeescript::signature(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("gdscript.") {
+        return gdscript::signature(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("wolfram.") {
+        return wolfram::signature(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("lean.") {
+        return lean::signature(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("qsharp.") {
         return qsharp::signature(fact);
     }
-    if scss::metadata(fact) || prolog_calls::metadata(fact) {
+    if sed::metadata(fact) || idris::metadata(fact) {
+        return false;
+    }
+    if python_variables::metadata(fact)
+        || scss::metadata(fact)
+        || prolog_calls::metadata(fact)
+        || glsl_bindings::metadata(fact)
+        || ocaml_bindings::metadata(fact)
+        || php_this_calls::metadata(fact)
+    {
         return false;
     }
     if matches!(
         fact.syntax_kind().as_str(),
-        "python.parameter_binding_context.signature"
+        "powershell.formal_context.signature"
+            | "scala.formal_context.signature"
+            | "csharp.formal_context.signature"
+            | "cpp.const_formal_context.signature"
+            | "python.parameter_binding_context.signature"
             | "astro.template_clean_host.signature"
             | "astro.template_clean_server.signature"
             | "astro.template_read_target.signature"
             | "java.setter_binding_context.signature"
+            | "java.local_receiver_context.signature"
             | "go.composite_formal_context.signature"
             | "go.call_formal_context.signature"
             | "c.formal_binding_context.signature"
+            | "c.variable_file_context.signature"
+            | "c.variable_target.signature"
     ) {
         return false;
     }
@@ -11012,6 +12302,9 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
     }
     if fact.syntax_kind().as_str().starts_with("less.") {
         return less::signature(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("chapel.") {
+        return chapel::signature(fact);
     }
     if fact.syntax_kind().as_str().starts_with("sml.")
         || fact.syntax_kind().as_str().starts_with("wat.")
@@ -11546,11 +12839,85 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if thinkscript::required(fact) {
+        return Some(thinkscript::GAP);
+    }
+    if agda_rhs::reference(fact) {
+        return Some(agda_rhs::GAP);
+    }
+    if agda::signature_name(fact) {
+        return Some(agda::PAIR_UNAVAILABLE);
+    }
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "powershell.formal_value.reference" | "powershell.unproven_formal.reference"
+        )
+    {
+        return Some("powershell-written-formal-binding-unavailable");
+    }
+    if fact.syntax_kind().as_str().starts_with("php.this_method.")
+        || fact
+            .syntax_kind()
+            .as_str()
+            .starts_with("php.unproven_this_method.")
+    {
+        return Some("php-method-runtime-implementation-and-external-semantics-unavailable");
+    }
+    if fact
+        .syntax_kind()
+        .as_str()
+        .starts_with("go.direct_file_function.")
+        || fact
+            .syntax_kind()
+            .as_str()
+            .starts_with("go.unproven_direct_function.")
+    {
+        return Some("go-call-complete-semantic-validation-unavailable");
+    }
+    if cpp_const_formals::required(fact) {
+        return Some("cpp-native-const-reference-formal-receiver-binding-unavailable");
+    }
+    if csharp_formals::required(fact) {
+        return Some("csharp-native-method-formal-receiver-binding-unavailable");
+    }
+    if glsl_bindings::required(fact) && !glsl_bindings::metadata(fact) {
+        return Some("glsl-native-written-binding-unavailable");
+    }
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "scala.ordinary_formal.reference" | "scala.unproven_formal.reference"
+        )
+    {
+        return Some("scala-native-ordinary-formal-binding-unavailable");
+    }
+    if fact.syntax_kind().as_str().starts_with("dockerfile.") {
+        return dockerfile::source_gap(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("meson.") {
+        return meson_bindings::source_gap(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("coffeescript.") {
+        return coffeescript::source_gap(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("gdscript.") {
+        return gdscript::source_gap(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("wolfram.") {
+        return wolfram::source_gap(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("lean.") {
+        return lean::source_gap(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("qsharp.") {
         return qsharp::source_gap(fact);
     }
     if mojo_members::required(fact) {
         return Some("mojo-native-own-struct-self-member-binding-unavailable");
+    }
+    if fact.syntax_kind().as_str().starts_with("chapel.") {
+        return chapel::source_gap(fact);
     }
     if fact.syntax_kind().as_str().starts_with("sml.")
         || fact.syntax_kind().as_str().starts_with("wat.")
@@ -11559,6 +12926,14 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     }
     if astro_reads::required(fact) {
         return Some("astro-frontmatter-template-binding-unavailable");
+    }
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "c.written_variable.reference" | "c.unproven_variable.reference"
+        )
+    {
+        return Some("c-native-written-variable-binding-unavailable");
     }
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
@@ -11585,6 +12960,14 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         && fact.syntax_kind().as_str() == "go.composite_formal_value.reference"
     {
         return Some("go-native-composite-formal-binding-unavailable");
+    }
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "java.local_receiver.reference" | "java.unproven_local_receiver.reference"
+        )
+    {
+        return Some("java-native-same-method-immutable-local-receiver-binding-unavailable");
     }
     if fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str() == "java.setter_parameter.reference"
@@ -11623,6 +13006,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     {
         return Some("ring-native-formal-binding-unavailable");
     }
+    if python_module_reads::required(fact) {
+        return Some("python-native-module-rhs-binding-unavailable");
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str() == "python.parameter_body.reference"
     {
@@ -11639,6 +13025,12 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         "sass.plain_read.reference" | "sass.unresolved_read.reference"
     ) {
         return Some("sass-lexical-variable-binding-unavailable");
+    }
+    if let Some(reason) = idris::reference_gap(fact) {
+        return Some(reason);
+    }
+    if let Some(reason) = sed::reference_gap(fact) {
+        return Some(reason);
     }
     if let Some(reason) = json_schema::reference_gap(fact) {
         return Some(reason);
@@ -11735,7 +13127,10 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
-            "ocaml.application.call" | "ocaml.value.reference"
+            "ocaml.application.call"
+                | "ocaml.value.reference"
+                | "ocaml.match_formal.reference"
+                | "ocaml.direct_file_call.call"
         )
     {
         return Some("ocaml-module-and-application-target-unavailable");
@@ -11956,8 +13351,66 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if thinkscript::required(fact) {
+        return Some(OccurrenceRole::Read);
+    }
+    if agda::signature_name(fact) {
+        return Some(OccurrenceRole::Declaration);
+    }
+    if c_variables::required(fact) {
+        return Some(OccurrenceRole::Read);
+    }
+    if php_this_calls::required(fact) {
+        return Some(OccurrenceRole::CallSite);
+    }
+    if go_calls::required(fact) {
+        return Some(OccurrenceRole::CallSite);
+    }
+    if glsl_bindings::required(fact) && !glsl_bindings::metadata(fact) {
+        return Some(if glsl_bindings::call(fact) {
+            OccurrenceRole::CallSite
+        } else {
+            OccurrenceRole::Reference
+        });
+    }
+
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "scala.ordinary_formal.reference" | "scala.unproven_formal.reference"
+        )
+    {
+        return Some(OccurrenceRole::Reference);
+    }
+    if fact.syntax_kind().as_str().starts_with("dockerfile.") {
+        return dockerfile::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("meson.") {
+        return meson_bindings::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("coffeescript.") {
+        return coffeescript::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("gdscript.") {
+        return gdscript::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("sed.") {
+        return sed::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("idris.") {
+        return idris::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("wolfram.") {
+        return wolfram::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("lean.") {
+        return lean::occurrence_role(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("qsharp.") {
         return qsharp::occurrence_role(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("chapel.") {
+        return chapel::occurrence_role(fact);
     }
     if fact.syntax_kind().as_str().starts_with("sml.")
         || fact.syntax_kind().as_str().starts_with("wat.")
@@ -12101,12 +13554,14 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         || fact.syntax_kind().as_str().starts_with("ocaml_interface.")
     {
         return match (fact.kind(), fact.syntax_kind().as_str()) {
-            (SyntaxFactKind::Occurrence, "ocaml.application.call") => {
-                Some(OccurrenceRole::CallSite)
-            }
-            (SyntaxFactKind::Occurrence, "ocaml.value.reference") => {
-                Some(OccurrenceRole::Reference)
-            }
+            (
+                SyntaxFactKind::Occurrence,
+                "ocaml.application.call" | "ocaml.direct_file_call.call",
+            ) => Some(OccurrenceRole::CallSite),
+            (
+                SyntaxFactKind::Occurrence,
+                "ocaml.value.reference" | "ocaml.match_formal.reference",
+            ) => Some(OccurrenceRole::Reference),
             (
                 SyntaxFactKind::Comment,
                 "ocaml.comment.comment"
@@ -15605,6 +17060,127 @@ mod python_parameter_qualification_tests {
             assert_eq!(edges[0].object, RelationEndpoint::Entity(formals[0].id));
             assert_eq!(edges[0].confidence, read.confidence);
             assert_eq!(edges[0].evidence.source.as_ref(), Some(&read.source));
+        }
+    }
+
+    #[test]
+    fn bounded_python_module_read_reserves_exact_relation_capacity() {
+        const ORIGINAL: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/python_module_updates/summarize_eval.py"
+        ));
+        assert_eq!(ORIGINAL.len(), 1106);
+        assert_eq!(&ORIGINAL[535..540], b"total");
+        assert_eq!(&ORIGINAL[1020..1025], b"total");
+        let fixture = Fixture::new(ORIGINAL, 1);
+        let (provider, analyzer) = analyzer();
+        let defaults = limits(IrLimits::default(), 4096, 16_384);
+        let request = fixture.request(&defaults);
+        let required = provider
+            .required_syntax_fact_count(&request.to_parse_request(), &Cancellation::new())
+            .unwrap();
+        let selected = limits(IrLimits::default(), required, 16_384);
+        let request = fixture.request(&selected);
+        let artifact = analyzer
+            .prepare_artifact(&request, &Cancellation::new())
+            .unwrap();
+        let parse_output = &artifact.parse_output;
+        assert_eq!(
+            parse_output.report().coverage().status(),
+            CoverageStatus::Bounded
+        );
+        assert_eq!(
+            parse_output.report().coverage().covered_source_bytes(),
+            1106
+        );
+        let facts = parse_output.facts();
+        let reads: Vec<_> = facts
+            .iter()
+            .filter(|fact| python_module_reads::required(fact))
+            .collect();
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].span().start_byte(), 1020);
+        assert_eq!(reads[0].span().end_byte(), 1025);
+        let relations = facts
+            .iter()
+            .filter(|fact| structural_entity_kind(fact).is_some())
+            .count()
+            + reads.len();
+        assert!(relations > 1);
+
+        for exact in [false, true] {
+            let maximum = relations - usize::from(!exact);
+            let mut ir = IrLimits::default();
+            ir.max_relations = maximum;
+            let selected = limits(ir, required, 16_384);
+            let request = fixture.request(&selected);
+            let admission = preflight_lowering_limits(
+                &request,
+                parse_output,
+                analyzer.descriptor.identity(),
+                &analyzer.frontend_version,
+                &[],
+                &Cancellation::new(),
+            );
+            if !exact {
+                let error = match admission {
+                    Ok(_) => panic!("preflight must reserve the retained module-read relation"),
+                    Err(error) => error,
+                };
+                assert_eq!(
+                    error,
+                    AdapterError::Sink(SinkError::StreamLimit {
+                        resource: ResourceKind::Records,
+                        observed: relations,
+                        limit: maximum,
+                    })
+                );
+                continue;
+            }
+            admission.unwrap();
+            let output = lower(&analyzer, &request, parse_output, &Cancellation::new()).unwrap();
+            let document = output.document();
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == 535
+                        && site.source.span().end_byte() == 540
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+                panic!("the original initial assignment owns its Definition")
+            };
+            let reads: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| site.syntax_kind == "python.module_read.reference")
+                .collect();
+            assert_eq!(reads.len(), 1);
+            let read = reads[0];
+            assert_eq!(read.role, OccurrenceRole::Reference);
+            assert_eq!(read.source.span().start_byte(), 1020);
+            assert_eq!(read.source.span().end_byte(), 1025);
+            assert_eq!(read.target, OccurrenceTarget::Resolved { symbol });
+            assert_eq!(
+                read.source,
+                source_for_span(&fixture.source, read.source.span())
+            );
+            let edges: Vec<_> = document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::RefersTo
+                        && edge.subject == RelationEndpoint::Occurrence(read.id)
+                })
+                .collect();
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].object, RelationEndpoint::Entity(symbol));
+            assert_eq!(edges[0].evidence.source.as_ref(), Some(&read.source));
+            assert_eq!(edges[0].provenance, read.provenance);
+            assert!(document.relations.len() <= maximum);
         }
     }
 

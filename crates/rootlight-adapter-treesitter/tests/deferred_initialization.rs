@@ -34,7 +34,17 @@ const MAX_DEPTH: usize = 128;
 const MEMORY_POLICY: MemoryAdmissionPolicy =
     MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
 
-const CASES: [(&str, &str, &[u8]); 90] = [
+const CASES: [(&str, &str, &[u8]); 100] = [
+    ("written.idr", "idris", b"global : Type\nglobal = Type\nreader : Type\nreader = global\n"),
+    ("written.sed", "sed", b":entry\r\nb entry\r\n"),
+    ("written.wl", "wolfram", b"owned[value_String] := Module[{}, external[value]];\n"),
+    ("written.pug", "pug", include_bytes!("fixtures/pug/hash.pug")),
+    ("written.lean", "lean", b"def owned (value : Nat) := value\n"),
+    ("written.coffee", "coffeescript", b"class Written\n  measure: ->\n    value = 1\n    value\n"),
+    ("Dockerfile", "dockerfile", b"FROM scratch AS written\n"),
+    ("meson.build", "meson", b"items = [1]\nforeach item : items\nendforeach\n"),
+    ("written.gd", "gdscript", b"class_name Written\nfunc measure():\n    return 1\n"),
+    ("written.chpl", "chapel", include_bytes!("fixtures/chapel/genhashkey32.chpl")),
     ("written.qs","qsharp",include_bytes!("fixtures/qsharp/Shorthand.qs")),
     ("written.sml", "standard-ml", include_bytes!("fixtures/standard_ml/deephandle.sml")),
     ("written.wat", "webassembly", include_bytes!("fixtures/webassembly/sieve.wat")),
@@ -260,7 +270,17 @@ fn deferred_queries_preserve_every_audited_language_and_normalized_ir() {
     );
     for (name, language, source) in CASES {
         let (parsed, analyzed) = assert_parity(&eager, &deferred, name, language, source);
-        if language == "modelica" {
+        if language == "idris" {
+            for name in ["global", "reader"] {
+                assert_entity(&analyzed, language, name);
+                assert_written_definition(&parsed, source, name.as_bytes());
+            }
+        } else if language == "pug" {
+            for name in ["input", "type", "disabled"] {
+                assert_entity(&analyzed, language, name);
+                assert_written_definition(&parsed, source, name.as_bytes());
+            }
+        } else if language == "modelica" {
             assert_entity(&analyzed, language, "measure");
             assert_entity(&analyzed, language, "value");
             assert!(

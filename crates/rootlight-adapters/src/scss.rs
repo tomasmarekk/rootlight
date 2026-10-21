@@ -1731,7 +1731,7 @@ fn simple_parameters(
                 dots += usize::from(byte == b'.');
                 number &= byte.is_ascii_digit() || byte == b'.';
             }
-            if !matches!(value, b"true" | b"false" | b"null") && !(number && dots <= 1) {
+            if !(matches!(value, b"true" | b"false" | b"null") || number && dots <= 1) {
                 return Ok(None);
             }
         }

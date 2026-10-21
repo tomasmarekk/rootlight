@@ -8,6 +8,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rootlight-thinkscript = { path = "../rootlight-thinkscript" }
+blake3.workspace = true
 flux-source-parser = { path = "../../source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser", version = "=0.1.0" }
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }

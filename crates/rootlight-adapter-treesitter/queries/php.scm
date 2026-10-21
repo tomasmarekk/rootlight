@@ -32,6 +32,10 @@
   (require_once_expression)
 ] @import
 
+(class_declaration) @signature
+(method_declaration) @signature
+(member_call_expression name: (name) @reference @signature)
+
 (formal_parameters) @signature
 [(compound_statement) (declaration_list)] @scope
 [

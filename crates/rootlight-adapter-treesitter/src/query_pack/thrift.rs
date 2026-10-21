@@ -116,7 +116,9 @@ fn name_range(
         cancellation.check()?;
         next = comment.next_sibling();
     }
-    Ok((!next.is_some_and(|next| next.kind() == ".")).then(|| name.byte_range()))
+    Ok(next
+        .is_none_or(|next| next.kind() != ".")
+        .then(|| name.byte_range()))
 }
 
 fn complete(

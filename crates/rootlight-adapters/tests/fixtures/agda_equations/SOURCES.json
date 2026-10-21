@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/AndrasKovacs/smalltt",
+  "revision": "ea99b0f478e50dcb81ea19e40bfb4262339b22aa",
+  "license": "MIT",
+  "files": {
+    "bench/stlc_small.agda": {
+      "bytes": 2275,
+      "sha256": "5aaefeb89412e39fb1877237ed87bda8a212fab63af05d76200125c33437e002"
+    },
+    "LICENSE.txt": {
+      "bytes": 1075,
+      "sha256": "f78f0165d1499c5ea5774eb17a8edcb7593e9bce7909428b4b4356b6d99f66b4"
+    }
+  },
+  "scope": "Complete original source; written declaration and equation locations only. Application semantics remain unqualified."
+}

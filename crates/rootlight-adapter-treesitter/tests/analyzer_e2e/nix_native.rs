@@ -1186,3 +1186,141 @@ fn nix_static_quoted_keys_and_inherited_names_retain_exact_written_definitions()
         );
     }
 }
+
+const CAPTURED_FORMAL_ORIGINAL: &[u8] = include_bytes!("../fixtures/nix_captured_formal/flake.nix");
+
+fn captured_original(role: OccurrenceRole) {
+    assert_eq!(CAPTURED_FORMAL_ORIGINAL.len(), 586);
+    assert_eq!(
+        CAPTURED_FORMAL_ORIGINAL
+            .windows(2)
+            .filter(|bytes| *bytes == b"\r\n")
+            .count(),
+        24
+    );
+    assert_eq!(&CAPTURED_FORMAL_ORIGINAL[194..201], b"nixpkgs");
+    assert_eq!(&CAPTURED_FORMAL_ORIGINAL[317..324], b"nixpkgs");
+    let source = std::str::from_utf8(CAPTURED_FORMAL_ORIGINAL).unwrap();
+    let output = output(source);
+    let document = output.document();
+    let definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.source.span().start_byte() == 194
+                && site.source.span().end_byte() == 201
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1);
+    let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+        panic!("written formal resolves")
+    };
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == symbol)
+        .unwrap();
+    assert_eq!(target.language, "nix");
+    assert_eq!(target.kind, EntityKind::Parameter);
+    assert_eq!(target.canonical_name, "nixpkgs");
+    assert!(document.occurrences.iter().any(|site| site.role == OccurrenceRole::Definition && site.source.span().start_byte() == 176 && site.source.span().end_byte() == 183 && matches!(site.target, OccurrenceTarget::Resolved { symbol } if document.entities.iter().any(|entity| entity.id==symbol&&entity.kind==EntityKind::Function&&entity.canonical_name=="outputs"))));
+    let references: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == 317
+                && site.source.span().end_byte() == 324
+                && site.target == (OccurrenceTarget::Resolved { symbol })
+        })
+        .collect();
+    assert_eq!(
+        references.len(),
+        1,
+        "baseline current lexical Reference must resolve before adding a Read facet"
+    );
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == role
+                && site.source.span().start_byte() == 317
+                && site.source.span().end_byte() == 324
+                && site.target == (OccurrenceTarget::Resolved { symbol })
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "captured formal {role:?}");
+    assert_eq!(sites[0].source, references[0].source);
+    assert_eq!(sites[0].provenance, references[0].provenance);
+    assert_eq!(
+        sites[0].source.content_hash(),
+        content_hash(CAPTURED_FORMAL_ORIGINAL)
+    );
+    assert_eq!(sites[0].evidence.source.as_ref(), Some(&sites[0].source));
+    assert!(document.relations.iter().any(|edge| edge.predicate
+        == rootlight_ir::RelationPredicate::RefersTo
+        && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(sites[0].id)
+        && edge.object == rootlight_ir::RelationEndpoint::Entity(symbol)
+        && edge.evidence.source.as_ref() == Some(&sites[0].source)));
+    assert!(!document.relations.iter().any(|edge| edge.predicate
+        == rootlight_ir::RelationPredicate::Calls
+        && edge.object == rootlight_ir::RelationEndpoint::Entity(symbol)));
+    if role == OccurrenceRole::Read {
+        assert_ne!(sites[0].id, references[0].id);
+    }
+    assert_nix_artifact_replay(source);
+}
+
+#[test]
+fn nix_complete_original_retains_outer_formal_reference_through_anonymous_capture() {
+    captured_original(OccurrenceRole::Reference);
+}
+
+#[test]
+fn nix_complete_original_native_capture_ancestry_is_reported() {
+    let native = provider();
+    let fixture = Fixture::new(NIX, CAPTURED_FORMAL_ORIGINAL);
+    let budget = limits();
+    let input = request(&fixture.snapshot, &fixture.source, NIX, &budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &native,
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let mut selected = std::collections::BTreeSet::new();
+    for (start, end) in [(194, 201), (317, 324)] {
+        let facts: Vec<_> = parsed
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.span().start_byte() == start
+                    && fact.span().end_byte() == end
+                    && fact.kind() == rootlight_adapter_sdk::SyntaxFactKind::Occurrence
+            })
+            .collect();
+        assert!(!facts.is_empty(), "native source {start}..{end}");
+        for fact in facts {
+            let mut current = Some(fact.local_id());
+            for _ in 0..parsed.facts().len() {
+                let Some(id) = current else { break };
+                if !selected.insert(id) {
+                    break;
+                }
+                current = parsed
+                    .facts()
+                    .iter()
+                    .find(|fact| fact.local_id() == id)
+                    .unwrap()
+                    .parent();
+            }
+        }
+    }
+    let rows: Vec<_> = parsed.facts().iter().filter(|fact| selected.contains(&fact.local_id())).map(|fact| serde_json::json!({"local_id":fact.local_id(),"parent":fact.parent(),"kind":format!("{:?}",fact.kind()),"syntax":fact.syntax_kind().as_str(),"depth":fact.depth(),"start":fact.span().start_byte(),"end":fact.span().end_byte(),"text":std::str::from_utf8(&CAPTURED_FORMAL_ORIGINAL[usize::try_from(fact.span().start_byte()).unwrap()..usize::try_from(fact.span().end_byte()).unwrap()]).unwrap()})).collect();
+    println!(
+        "{}",
+        serde_json::json!({"schema":"nix-original-captured-formal-context/1","bytes":586,"coverage":format!("{:?}",parsed.report().coverage().status()),"facts":rows})
+    );
+}
