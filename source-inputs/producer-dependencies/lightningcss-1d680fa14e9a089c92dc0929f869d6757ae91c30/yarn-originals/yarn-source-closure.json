@@ -252788,11 +252788,11 @@
   "preferred_source_closure_complete": false,
   "producer": {
     "association": {
-      "canonical_lock_sha256": "f3b49129508a2d4da4c135e6c2e32d7698f3c4cc9a65a1c43870287a8337a0b4",
+      "canonical_lock_sha256": "5bfae4adb95e93bd635970c73980e405379ee73a411fa30d7f0c5da82a4d2976",
       "expected_metadata_url": "https://registry.npmjs.org/lightningcss/1.33.0",
       "git_head": "1d680fa14e9a089c92dc0929f869d6757ae91c30",
       "kind": "caller-supplied publisher metadata matching authenticated local npm pins",
-      "npm_report_sha256": "52503e54c99892b30020b02a9cdc56c9faeba0bcc5b3beea3058e986d4e2c702",
+      "npm_report_sha256": "95f4930bb8a7bc16207736a4602d87ee87ecd1607541d6acb3e05a31ed4a3357",
       "published_main_distribution": {
         "archive": {
           "bytes": 87655,
@@ -253249,13 +253249,13 @@
       ],
       "related_platform_producer_association_verified": false,
       "source_to_binary_association_attested": false,
-      "upstream_lock_sha256": "320758559a23bfd0863724bd4e5b0db685e5749ce7ed147249ae0d6aa3a84660"
+      "upstream_lock_sha256": "fc43220b2212fc53fb566083fe836971ed8bbc72b79c8c30fcd2a1709a673dee"
     },
     "git_head": "1d680fa14e9a089c92dc0929f869d6757ae91c30",
     "path": "source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30",
     "source_tree_report": {
       "bytes": 235462,
-      "sha256": "87f384ba1c152d0a817f0b37adf2957d54fbffbd93b34243ee2e6791af595683"
+      "sha256": "480e71fb6a5c708755b5ad274183e547b57962c9dfae107f20efc12eb562be5b"
     }
   },
   "producer_transitive_sources_complete": false,

@@ -32,6 +32,7 @@
     "source-inputs/npm/archives/196757ee5bcda0ae690c47f8ce53e9e7548aff6a41948212caa67775ad60a23d.tgz",
     "source-inputs/npm/archives/19bc03d66df7d3584c8618ed6040a9911827f1a55442e7a08772b7491dea50f1.tgz",
     "source-inputs/npm/archives/1aabc8b6282461d4c675a1125b1cde2768dc18a73d02534310b5d242df53c9fa.tgz",
+    "source-inputs/npm/archives/1bb580469c4163d39f8b3f60c9048b1912caa645472caf4e01ada62146ed0181.tgz",
     "source-inputs/npm/archives/1c9fcda3b5504a2abd5a35c12b5ee93ed00accb81cd78a13cee37c74f070ec07.tgz",
     "source-inputs/npm/archives/1d745da6bea7dfc755b751dc63c0c73fa793f19cfd5a9fae256d307816cbc345.tgz",
     "source-inputs/npm/archives/1eb542dc704518d0b80554a73ccaae449e547ca6a484b4950542edd169806f73.tgz",
@@ -41,15 +42,14 @@
     "source-inputs/npm/archives/2143934a3a9cec8412d23a12d7e598d1988c36dba8f1afbb8a4099fc15e3602c.tgz",
     "source-inputs/npm/archives/22939c645f52775caf425375d89500010e2608f34deb6859038f50d7d240eced.tgz",
     "source-inputs/npm/archives/229fee93871aced23e0ed82b6a152a60126ae44ddd2b4c4a2cfe5ec6aa6bdaf7.tgz",
-    "source-inputs/npm/archives/24b5ed1a406c668d9ab6e2b5d491ce00fcef71466bde46cf681b066bd1e9cbe3.tgz",
     "source-inputs/npm/archives/24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
     "source-inputs/npm/archives/2536b933056970d21b3bec7e9bd3920b472c07e3b5dd5099a3f2dcfd840007f5.tgz",
     "source-inputs/npm/archives/27993fd7bc5b03d473e4edbb4d34d87de30af10bba552c33453c591dc414432f.tgz",
     "source-inputs/npm/archives/2922078a0690ba31aa84840e69255fb376692119fc04088a145e2084cfa183b4.tgz",
     "source-inputs/npm/archives/2ca62ad7a973402352b03a5a6751370376ba66f653909aecd44f3df9b04e5016.tgz",
     "source-inputs/npm/archives/2cd9f4d14c8e1db76ce18987cd7da34231d022f595c41770585bd295b8fa678d.tgz",
+    "source-inputs/npm/archives/2da5ec6c5b3eef5a4f2d3359b15a1386dc9331b707b6647087ce64e3c1439315.tgz",
     "source-inputs/npm/archives/2eeaf5d8f0ca55f9bd5dd7baf9b1c945df7382003bac01a663783c20b042958f.tgz",
-    "source-inputs/npm/archives/2f8fbf34e34a86aed01f5c9070bd85b44d12fc5a3fe466f95a6bb5d696a1f4d1.tgz",
     "source-inputs/npm/archives/2f90723beaf14bbb9d5c5616530b920ceda159ff3260542b576bc49197719c33.tgz",
     "source-inputs/npm/archives/30f2d942cf7edd9a36dc662245be05f126c0452297d2944cb86cfea975ae30fc.tgz",
     "source-inputs/npm/archives/31521ce4d89f41b8568e6aac25d04552d4c578da871f12a58081e88de2575f3f.tgz",
@@ -67,6 +67,7 @@
     "source-inputs/npm/archives/405712d30991a9f041739b038ecdd59aae4e8f92f1a4c59028b13b07cf360e17.tgz",
     "source-inputs/npm/archives/407f24fe54263cd895f8965736d86ee5e6b9a829aab4b82076d50ba159da00f4.tgz",
     "source-inputs/npm/archives/41d28777f840088fe7728d9eff069b4065c8c1bbc23ed7f713c5489751cdca90.tgz",
+    "source-inputs/npm/archives/44503230c89fa3b2fa2f4a7e604a525e009fd29750cdd1aff92b6ea1aa7abca8.tgz",
     "source-inputs/npm/archives/44e44264da728cf6fd36c1945446a707d832986d48715925f6bbe0955d0d300b.tgz",
     "source-inputs/npm/archives/453cc3f9773ff7d281d55f5e0cb047928d50b9158114b777aa815a8371ffc300.tgz",
     "source-inputs/npm/archives/46104a81dd2a4030b0fb21e150027a8c9054aa72412be0f11e613f320e2d93de.tgz",
@@ -76,7 +77,6 @@
     "source-inputs/npm/archives/486eb6391417af52777d25f684ec79b733a11b2c9299091b43b423f3ba77e95a.tgz",
     "source-inputs/npm/archives/48d0e1d7133c6f047a6f5ed4d84e05413462f645b73b26fabf2e97883339e491.tgz",
     "source-inputs/npm/archives/490f9eb1f114a1cadfe7d6763411c1d965e1d4e1e19475d1ba2d187a6866be76.tgz",
-    "source-inputs/npm/archives/49e66aab1a1cbd208b3c38d76d4055cad41f67b5b9ee95b087e56655584ea8fa.tgz",
     "source-inputs/npm/archives/4b2534dd23a6ad06946765ac3fa0afa877fb48fca2ca6eb23cca009e6c807e32.tgz",
     "source-inputs/npm/archives/4e87bc8f7e821e6b87700db95d6d594754c753da6e6ee455c5a45bf204ab09c9.tgz",
     "source-inputs/npm/archives/4f6169695b25027c7bff2b72124fc9ca112456b686b99988956af0adcb4d24aa.tgz",
@@ -102,7 +102,6 @@
     "source-inputs/npm/archives/5fb076de103c316e2b7d0eccaab93da64032af2e44af373183f8d18dc44adbf1.tgz",
     "source-inputs/npm/archives/606bf7532831691d44dc98da8a4ea9967f48131db11ef3469e230ec4ca485af0.tgz",
     "source-inputs/npm/archives/606efe4ff6b0eb64141ee2c50270d663e6631dbb6b32a158162bd77f7abb017f.tgz",
-    "source-inputs/npm/archives/637a841e79da5d34e8a14da1c132707dff1c3cc527091ccca168f06675f86541.tgz",
     "source-inputs/npm/archives/637d82a3c0422afad03ff377c63c33a7071d9e0d308eb4c5a8bede150164f5fc.tgz",
     "source-inputs/npm/archives/63b97e3d137e47b61ab3398c5b4393d51f8c895643c12078931405d91b4de2cc.tgz",
     "source-inputs/npm/archives/6427b469e012969e5fed47c32ff0e4d369d2794155490b4ca02f1b7a06258cc0.tgz",
@@ -110,7 +109,6 @@
     "source-inputs/npm/archives/6635f55af076fd08e210e155d12013274a098fa9e169a0aef14cb4638909a61b.tgz",
     "source-inputs/npm/archives/667a4f557d3454b4dffceeaca4107b998ece1d1c62485b4605b749ffc1d70c9b.tgz",
     "source-inputs/npm/archives/68c362525bfa6bb05b768bab2c4cda6c85754bc1491ac4ede4a337fe8f3b2a74.tgz",
-    "source-inputs/npm/archives/6a0186cf2a09afeeb5f7583cb2e5cacf1a3eaa319cf6a88073edb8423c7676d6.tgz",
     "source-inputs/npm/archives/6aade581bf027ed9da06c03b2ec36c3b55ce86792f18e92dd3804fefc43eb337.tgz",
     "source-inputs/npm/archives/6c5170ee9a7342d1d3ca4ca17e0d85d92bc1628908bf989513ec084af2138221.tgz",
     "source-inputs/npm/archives/6cdd3f94fa7182bb606bd728c4a58f6c5ca41473d20b7ad9b3bfdd270580873c.tgz",
@@ -118,9 +116,11 @@
     "source-inputs/npm/archives/6f0cd18441903ac429bdaafa702d6d7aa57e85b5d9cf669e382a597312f1e5ea.tgz",
     "source-inputs/npm/archives/6f2cf8cc128928a450abbdd47171ccb3d7e8431159bf3f7b6e2ab8e4d80ec5d0.tgz",
     "source-inputs/npm/archives/6f6073f962dd52fe880aea002c40a9a7b6b11063829e1349dc94c10c1107c297.tgz",
+    "source-inputs/npm/archives/6fdf6fa0427c999229066c4e057b8069842595ea2eb9bb7fc2d5d71352f8096d.tgz",
     "source-inputs/npm/archives/7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
     "source-inputs/npm/archives/70b8eabed4d0c41f84ad0c9d43f70e6180f19c9555e06fbc53e741b8e25acfb0.tgz",
     "source-inputs/npm/archives/719714ea585dd083d74aea75a14a43ebf48e97ab5f9cd5555a96da009f486d14.tgz",
+    "source-inputs/npm/archives/722d236daa3924dd0e07cbd6605867a89fabc45984c2da1d8654327767ffb683.tgz",
     "source-inputs/npm/archives/72690a7e810df1fec58b7f0b148125b9fcd93e3776926745dcdedf3a186d4b9e.tgz",
     "source-inputs/npm/archives/76ca6aee25baad7357cb50bfbd05c78908dc6196044586e43c5dc3db3f45e3ab.tgz",
     "source-inputs/npm/archives/7a49a238b50bb55246f56253de3619496826a329adc7f0418d87531e1f1d7dde.tgz",
@@ -169,7 +169,6 @@
     "source-inputs/npm/archives/a23537d3489ae15ad5dd167ea83c96e7edbd4daf2bbaef21c43d6b4339fe6609.tgz",
     "source-inputs/npm/archives/a2ff2723fcada37da19a302b1220478ca6d4b2be718bf5f9b52ae4205d3e2f7b.tgz",
     "source-inputs/npm/archives/a3c2c3a94294fe1764a26d299abdff1a2b5ed606247e2b7f9c7aa8de902c97f7.tgz",
-    "source-inputs/npm/archives/a3f76f7c93ac886e11554b7903ffa1e1310464e67cebbde3f1d63dcb4dd047b0.tgz",
     "source-inputs/npm/archives/a496f3b0767ecca1f666510ec4f7a35de206f734be75465e3215772722c5ad7b.tgz",
     "source-inputs/npm/archives/a4fb0aea126214d34c7a6bd7b89dd58e62f6f3d907c09cc09973db7739ec9e0a.tgz",
     "source-inputs/npm/archives/a65925664798d61c1d29a37d8793ce92de02b53762dbea75e627086def23652e.tgz",
@@ -199,6 +198,7 @@
     "source-inputs/npm/archives/bef9468d5763896ae6f356def7cc821cfca3310540bab910225af0308cfd0365.tgz",
     "source-inputs/npm/archives/bf5d7ced6d856d96b10471784340b7f4fc665c269fb78616f742f63c8501430a.tgz",
     "source-inputs/npm/archives/bff2768441a1dcf9c7db54e42fc19aa7d04f5cc21c961ae892e7ff1b48e5a28e.tgz",
+    "source-inputs/npm/archives/c02c221e97cb9c656c805ca37c5700b1b31ee056f2b6445a70b8b60a92f77ac7.tgz",
     "source-inputs/npm/archives/c031722b962ec9c5fa040290437def2ff69a0fc58e9a2f91a984b23265211776.tgz",
     "source-inputs/npm/archives/c11f472dbb89a47a242029dc2aa5ada8515a74cb8fa4d871094d98ed38a67101.tgz",
     "source-inputs/npm/archives/c26a5b0c28c8aa7385891c803a42e5ad72ca2f311b8cd3ef2e962385e065bb09.tgz",
@@ -219,12 +219,12 @@
     "source-inputs/npm/archives/d5f9be10c3dc2855c09aed6ed3d839301cd4b78f7f5996d7edfef2c24322f300.tgz",
     "source-inputs/npm/archives/d61c1f7d4250623cd7fcb687290c43168bfc6e13485c0e4e4dd3e415b07ed90b.tgz",
     "source-inputs/npm/archives/d73b161381dc69d5aab994ac1595ec859e81258ef121170df683e784854ad772.tgz",
+    "source-inputs/npm/archives/d7e7d5408d9fd857be3b771427c86f1b051888e7a775bde73c7c47c335ca1edf.tgz",
     "source-inputs/npm/archives/d7fefcec2f79eb28cd72ca317d911fecc2864b4b0c3ceb27c1f842764356bd27.tgz",
     "source-inputs/npm/archives/d8158b3bf53fde735727d1c6279772edfe43c2b51cd2b03a11710cc0cef14544.tgz",
     "source-inputs/npm/archives/d82a457ca5cc88a3a1d816e63ce202eee7837a1158195979685bc5eeba39543b.tgz",
     "source-inputs/npm/archives/db35a3702fb3dd13ef29fc76fa71dcb2bd32927f90e4f67f8ce276178fc11c44.tgz",
     "source-inputs/npm/archives/dbf2c419b3bdf746a011cab00396ee548f54249ef55345395469e162f080fe30.tgz",
-    "source-inputs/npm/archives/dcbf050e376bea5f363c2db264309e119509bf87179c6f0abfa87a6eba68b5ff.tgz",
     "source-inputs/npm/archives/dcc3cd8b1bcd546d3fce10f98c83fb7c0f6a3f042c6bf7de9fff9e8f28c57826.tgz",
     "source-inputs/npm/archives/dcfa53f63690b4125325081cc1ff239ec22ca4775a4c10bc582e0e22dfae9d15.tgz",
     "source-inputs/npm/archives/dd0c8b4f0269fad000d7ea7d6d4729feb836df543c5d5642b19742b8509c2ec8.tgz",
@@ -243,12 +243,13 @@
     "source-inputs/npm/archives/e5857dcd5d4c2769554d7ffe971f86e2faecae15a5a5cf15d9e5325c672e9db0.tgz",
     "source-inputs/npm/archives/e59a236538be85bfdc2e762e312b3526efa284541ce0f875a18a27c7ef4f4562.tgz",
     "source-inputs/npm/archives/e5c3e0ea92c6d94d74e080fef4808dcad6869d9295f96a5c41a082100da1e3ee.tgz",
+    "source-inputs/npm/archives/e82e3ec022a8c15491a2728d1c0fa50af33a5eb5f3078d8f534f0e1010b984cf.tgz",
     "source-inputs/npm/archives/e8b1c750cb5a5480b75b368541fdefda7dfda0bd2ccafe554b4e48f6324c8e02.tgz",
     "source-inputs/npm/archives/e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
+    "source-inputs/npm/archives/e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
     "source-inputs/npm/archives/eaa5b7e7300c7bb1400c429db86571eaac1ae640ee1cc5f0022d3885d082ae0e.tgz",
     "source-inputs/npm/archives/eaa88cdb2bb487257123313615ea7b69462c5ef8eed5ca5c8d08ea3c09195d8a.tgz",
     "source-inputs/npm/archives/ead74f681a5c07c9c324fe2b62b82a26143f8097b0a1b3bd368f1a7f8ebee0f6.tgz",
-    "source-inputs/npm/archives/eb5db547fd8928bd20558c4695c4f29ed212e6ce70fcb399346217b6e8659cd6.tgz",
     "source-inputs/npm/archives/ec142c7bc942b358276e1ab857731a1c105a3946b2b80e54cea845600984efb8.tgz",
     "source-inputs/npm/archives/ec3dfa42c42c037dc5f10e6d8f0b375a3961be180398bfcc03748ff9ca0bbc1a.tgz",
     "source-inputs/npm/archives/ec4de4b41ad2a8c76a1b71f3e5f2831b7f51d45b7d12917c9b111105c4d671ae.tgz",
@@ -257,7 +258,6 @@
     "source-inputs/npm/archives/ec99933a21e954b1b63ea6662370a92330aa212ba3a87ab0f6ae53ae3ebada75.tgz",
     "source-inputs/npm/archives/ecfdc0f17bdcdb2d20381f4044fba6e4b7b2b4ffd4e09c87dfcf25a48d0a5644.tgz",
     "source-inputs/npm/archives/edd84de219e1902ee2822d6a8acb04bf41c5b0f63d5efd4d60e14a262cc7df49.tgz",
-    "source-inputs/npm/archives/ef7155f83dd31f545746e4bb078a499b18f1940b82783468af971d0d16c461b1.tgz",
     "source-inputs/npm/archives/ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
     "source-inputs/npm/archives/efacea37cad6e2ad6946796c55953f1e5803935d02d1295622f3455f1bc442f0.tgz",
     "source-inputs/npm/archives/f0dcc6df5e137f093bb756021e6874f75fd99b3cef6a352313531d340f5afdf3.tgz",
@@ -290,7 +290,7 @@
   "input_files": [
     {
       "path": "apps/rootlight-web/frontend/package-lock.json",
-      "sha256": "f3b49129508a2d4da4c135e6c2e32d7698f3c4cc9a65a1c43870287a8337a0b4"
+      "sha256": "5bfae4adb95e93bd635970c73980e405379ee73a411fa30d7f0c5da82a4d2976"
     },
     {
       "path": "source-inputs/npm/archives/000ec49ac4651c68bd8a06a317da9869e7cd1cc37a3a3bfbe2f67e674381bb9c.tgz",
@@ -417,6 +417,10 @@
       "sha256": "d3aedb2807967b7eb37fd11b03b7e3701e725af79c650d0812ff7213f8f882d9"
     },
     {
+      "path": "source-inputs/npm/archives/1bb580469c4163d39f8b3f60c9048b1912caa645472caf4e01ada62146ed0181.tgz",
+      "sha256": "8c932064dafe90dca40312b44c5b63623c8c7e03bb9b38c4bd9af2f5701f7bb6"
+    },
+    {
       "path": "source-inputs/npm/archives/1c9fcda3b5504a2abd5a35c12b5ee93ed00accb81cd78a13cee37c74f070ec07.tgz",
       "sha256": "257b51498dfd90fc99b87afd28408ff9b53162e521db4e06a493e356b8536711"
     },
@@ -453,10 +457,6 @@
       "sha256": "d8d324d73d21b0847b7b22936e23685a1b27e25ca1c1566861be00134f5f2896"
     },
     {
-      "path": "source-inputs/npm/archives/24b5ed1a406c668d9ab6e2b5d491ce00fcef71466bde46cf681b066bd1e9cbe3.tgz",
-      "sha256": "503d668851ce760fb60bb2b4681452089d8658a5fbd2b1f626dece4c1fbcc57f"
-    },
-    {
       "path": "source-inputs/npm/archives/24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
       "sha256": "9ea29f58a51822c17bc7eb198d4f0fb2cd66fa02feb193efb6ece17ce011a882"
     },
@@ -481,12 +481,12 @@
       "sha256": "94c6b9e0785854d2e5d9628cec05c33ed017b6a9002af5e8778d4134e9ada611"
     },
     {
-      "path": "source-inputs/npm/archives/2eeaf5d8f0ca55f9bd5dd7baf9b1c945df7382003bac01a663783c20b042958f.tgz",
-      "sha256": "c8f0cb1eebe990143fec0b2788addc67808eb00126154e6fd7502dfbd0c737ec"
+      "path": "source-inputs/npm/archives/2da5ec6c5b3eef5a4f2d3359b15a1386dc9331b707b6647087ce64e3c1439315.tgz",
+      "sha256": "929beb93dafed9e676e55f07919839643231679384020a5ef9c2d02022a5dd80"
     },
     {
-      "path": "source-inputs/npm/archives/2f8fbf34e34a86aed01f5c9070bd85b44d12fc5a3fe466f95a6bb5d696a1f4d1.tgz",
-      "sha256": "ac1150697c2b1b5b14322f3ac85de74a405228291de1265f2e453c6db9544ee6"
+      "path": "source-inputs/npm/archives/2eeaf5d8f0ca55f9bd5dd7baf9b1c945df7382003bac01a663783c20b042958f.tgz",
+      "sha256": "c8f0cb1eebe990143fec0b2788addc67808eb00126154e6fd7502dfbd0c737ec"
     },
     {
       "path": "source-inputs/npm/archives/2f90723beaf14bbb9d5c5616530b920ceda159ff3260542b576bc49197719c33.tgz",
@@ -557,6 +557,10 @@
       "sha256": "f52192ad895dee468f1d1d5bf8972f7114e2459ff126632a1963e7bd2a38ed0a"
     },
     {
+      "path": "source-inputs/npm/archives/44503230c89fa3b2fa2f4a7e604a525e009fd29750cdd1aff92b6ea1aa7abca8.tgz",
+      "sha256": "eb9a67720d1082f33bfc5cf3a41ee6d297e994cf26013dae0ad807a474fa44a3"
+    },
+    {
       "path": "source-inputs/npm/archives/44e44264da728cf6fd36c1945446a707d832986d48715925f6bbe0955d0d300b.tgz",
       "sha256": "b6e425bb136422af133754814046a640c1573349755c63130c424abcee398621"
     },
@@ -591,10 +595,6 @@
     {
       "path": "source-inputs/npm/archives/490f9eb1f114a1cadfe7d6763411c1d965e1d4e1e19475d1ba2d187a6866be76.tgz",
       "sha256": "f90be2c91dc52176e383b2fbf706f9c938bb6022f823ec7a45bdff3347a34103"
-    },
-    {
-      "path": "source-inputs/npm/archives/49e66aab1a1cbd208b3c38d76d4055cad41f67b5b9ee95b087e56655584ea8fa.tgz",
-      "sha256": "bf0d8071f48375c40d358148c56de3c7a88a92b04b58c806362684940d55b0a1"
     },
     {
       "path": "source-inputs/npm/archives/4b2534dd23a6ad06946765ac3fa0afa877fb48fca2ca6eb23cca009e6c807e32.tgz",
@@ -697,10 +697,6 @@
       "sha256": "cdb1b980964665438e90dd184d7cfbe2c1544a73b6cc949c92c2592cb8791744"
     },
     {
-      "path": "source-inputs/npm/archives/637a841e79da5d34e8a14da1c132707dff1c3cc527091ccca168f06675f86541.tgz",
-      "sha256": "4eff485284e6338a567b63be5f6a74c0b42b9e30e0164a8006d832c26130e51b"
-    },
-    {
       "path": "source-inputs/npm/archives/637d82a3c0422afad03ff377c63c33a7071d9e0d308eb4c5a8bede150164f5fc.tgz",
       "sha256": "e32d8ff2cc0455c5210f92f0844d2cb6e1d61b83ee17d7b328fe410f9021e4cd"
     },
@@ -727,10 +723,6 @@
     {
       "path": "source-inputs/npm/archives/68c362525bfa6bb05b768bab2c4cda6c85754bc1491ac4ede4a337fe8f3b2a74.tgz",
       "sha256": "a7cc59b071f40782b660352e57da68863510c842d93c0f42efe40c1394658cd2"
-    },
-    {
-      "path": "source-inputs/npm/archives/6a0186cf2a09afeeb5f7583cb2e5cacf1a3eaa319cf6a88073edb8423c7676d6.tgz",
-      "sha256": "6893221f95ccea0c56dfbcc6e95ae2198fd086e6de5e11caf12baf1cf2b0c605"
     },
     {
       "path": "source-inputs/npm/archives/6aade581bf027ed9da06c03b2ec36c3b55ce86792f18e92dd3804fefc43eb337.tgz",
@@ -761,6 +753,10 @@
       "sha256": "418c99189a7b46265f08ae064f6ac2b29da551ef2d243510c8848e1cea659e68"
     },
     {
+      "path": "source-inputs/npm/archives/6fdf6fa0427c999229066c4e057b8069842595ea2eb9bb7fc2d5d71352f8096d.tgz",
+      "sha256": "10b57fb1cb37d110309dd64e22a154bf26bd98526cc1ea5307b2f2478cbdddf5"
+    },
+    {
       "path": "source-inputs/npm/archives/7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
       "sha256": "2091448e30f6221cca29fea5f7a54205613766d935a157261c88390e5b361a76"
     },
@@ -771,6 +767,10 @@
     {
       "path": "source-inputs/npm/archives/719714ea585dd083d74aea75a14a43ebf48e97ab5f9cd5555a96da009f486d14.tgz",
       "sha256": "2fd52a5706bfaadbc2aba4b7665bde17ee86a13126592589af17019406b91f0c"
+    },
+    {
+      "path": "source-inputs/npm/archives/722d236daa3924dd0e07cbd6605867a89fabc45984c2da1d8654327767ffb683.tgz",
+      "sha256": "0d3c3ee5c934ec4601eb5a032f07e6ff0a21350f761685c21d60f1be9b080241"
     },
     {
       "path": "source-inputs/npm/archives/72690a7e810df1fec58b7f0b148125b9fcd93e3776926745dcdedf3a186d4b9e.tgz",
@@ -965,10 +965,6 @@
       "sha256": "e65c27021c84ff3339ce6fa82c29f0a972801ac23d60ad39a4fc5e3ac381e22e"
     },
     {
-      "path": "source-inputs/npm/archives/a3f76f7c93ac886e11554b7903ffa1e1310464e67cebbde3f1d63dcb4dd047b0.tgz",
-      "sha256": "5f42c3959636909c506885ef643f4a4e4d024bd7939934465f280c42164eb142"
-    },
-    {
       "path": "source-inputs/npm/archives/a496f3b0767ecca1f666510ec4f7a35de206f734be75465e3215772722c5ad7b.tgz",
       "sha256": "67ac5a6cea2268114a1f8935ca3ad60fe634fed04dd7914939bf24ceaa2d57b8"
     },
@@ -1085,6 +1081,10 @@
       "sha256": "997da95cf2ae81053cafc79ef122a6e8dc12e3f2c619d57eb1f2e19525fb212f"
     },
     {
+      "path": "source-inputs/npm/archives/c02c221e97cb9c656c805ca37c5700b1b31ee056f2b6445a70b8b60a92f77ac7.tgz",
+      "sha256": "ac79c9561c99eabc1cc29e0a839cbd03d1ff0e45bbecb5a2edfa6c3827c823d1"
+    },
+    {
       "path": "source-inputs/npm/archives/c031722b962ec9c5fa040290437def2ff69a0fc58e9a2f91a984b23265211776.tgz",
       "sha256": "10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3"
     },
@@ -1165,6 +1165,10 @@
       "sha256": "e4ce59f9fbac44349abab87279ab658f6b4614916bec5e088ae3be9323e193bb"
     },
     {
+      "path": "source-inputs/npm/archives/d7e7d5408d9fd857be3b771427c86f1b051888e7a775bde73c7c47c335ca1edf.tgz",
+      "sha256": "0c25f072d4afcb52fa48266177111ca90bc4116c66473170959aae1d57db347d"
+    },
+    {
       "path": "source-inputs/npm/archives/d7fefcec2f79eb28cd72ca317d911fecc2864b4b0c3ceb27c1f842764356bd27.tgz",
       "sha256": "270dec0fc06cff86481da8af2dd8f18dee6b602790b14ef0e1c2c18d7da39427"
     },
@@ -1183,10 +1187,6 @@
     {
       "path": "source-inputs/npm/archives/dbf2c419b3bdf746a011cab00396ee548f54249ef55345395469e162f080fe30.tgz",
       "sha256": "5f0c52e34238e17d2d9a2d6e9b85530765afae645f265e0e14263ebeecdd7f94"
-    },
-    {
-      "path": "source-inputs/npm/archives/dcbf050e376bea5f363c2db264309e119509bf87179c6f0abfa87a6eba68b5ff.tgz",
-      "sha256": "81875725211b8c43a30213579456954603d471d022587ce0e6842d44d9ed162b"
     },
     {
       "path": "source-inputs/npm/archives/dcc3cd8b1bcd546d3fce10f98c83fb7c0f6a3f042c6bf7de9fff9e8f28c57826.tgz",
@@ -1261,12 +1261,20 @@
       "sha256": "ad640cf79fc54bc8035a66edd33974f1334db9ba079c8b845f13e5d54c5e011b"
     },
     {
+      "path": "source-inputs/npm/archives/e82e3ec022a8c15491a2728d1c0fa50af33a5eb5f3078d8f534f0e1010b984cf.tgz",
+      "sha256": "8f9ac0144028329f5c649c031608b8877efea748cdbded0d7f41d60f9be49c52"
+    },
+    {
       "path": "source-inputs/npm/archives/e8b1c750cb5a5480b75b368541fdefda7dfda0bd2ccafe554b4e48f6324c8e02.tgz",
       "sha256": "49b0a9db41f743b59375e355aa9489a97c51ac9a655107de83140fc03be2f7cc"
     },
     {
       "path": "source-inputs/npm/archives/e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
       "sha256": "d3126d71994ac340c5df4016da82a72d6b5263bcf4fc36c6b37b4410585cb8cf"
+    },
+    {
+      "path": "source-inputs/npm/archives/e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
+      "sha256": "061db956dceb2b291e1a4ceb3c5b7e31c368e75b34411953402e339ef566e6cf"
     },
     {
       "path": "source-inputs/npm/archives/eaa5b7e7300c7bb1400c429db86571eaac1ae640ee1cc5f0022d3885d082ae0e.tgz",
@@ -1279,10 +1287,6 @@
     {
       "path": "source-inputs/npm/archives/ead74f681a5c07c9c324fe2b62b82a26143f8097b0a1b3bd368f1a7f8ebee0f6.tgz",
       "sha256": "77a7eb1411d927bb8a5ca7069dbe168886d63c88f446f0b81500a2cf23ddb5b1"
-    },
-    {
-      "path": "source-inputs/npm/archives/eb5db547fd8928bd20558c4695c4f29ed212e6ce70fcb399346217b6e8659cd6.tgz",
-      "sha256": "9b15875da96e769a19b3c9e2c316459528c57b9c20168c5abaa1ce050b7c8490"
     },
     {
       "path": "source-inputs/npm/archives/ec142c7bc942b358276e1ab857731a1c105a3946b2b80e54cea845600984efb8.tgz",
@@ -1315,10 +1319,6 @@
     {
       "path": "source-inputs/npm/archives/edd84de219e1902ee2822d6a8acb04bf41c5b0f63d5efd4d60e14a262cc7df49.tgz",
       "sha256": "0c93c0967461fdfc174a3ef5a35bda5853679d2d984b9109b6eeb5533640f3a2"
-    },
-    {
-      "path": "source-inputs/npm/archives/ef7155f83dd31f545746e4bb078a499b18f1940b82783468af971d0d16c461b1.tgz",
-      "sha256": "335051b85fce0ad3788c67b84b7949835b5eeeb20b785d8e3741eb396fc23d58"
     },
     {
       "path": "source-inputs/npm/archives/ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
@@ -1414,11 +1414,11 @@
     },
     {
       "path": "source-inputs/npm/local-distributions.json",
-      "sha256": "55223567e905545d42208577083072e691a101f07f30167a6454e8e7060b04f7"
+      "sha256": "06104502c13e736dbfdcd856c9b8e6145c86d93d1864a2477bbbce0cf392202a"
     },
     {
       "path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.provenance.json",
-      "sha256": "1854da1f388fe0f0d95ed70f72e94deb31aaf855ce4c181844b5491e7ff1bc33"
+      "sha256": "5f8c3105b441f84b562ae03979f421f1a085200c5f0337433abe7f882570401b"
     },
     {
       "path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.tgz",
@@ -1426,15 +1426,15 @@
     },
     {
       "path": "source-inputs/npm/upstream-package-lock.json",
-      "sha256": "320758559a23bfd0863724bd4e5b0db685e5749ce7ed147249ae0d6aa3a84660"
+      "sha256": "fc43220b2212fc53fb566083fe836971ed8bbc72b79c8c30fcd2a1709a673dee"
     }
   ],
   "installation_verified": false,
   "licensing_scope": "supplied metadata and preserved files; not legal completeness or authorship evidence",
   "local_distribution_count": 1,
-  "local_distributions_sha256": "55223567e905545d42208577083072e691a101f07f30167a6454e8e7060b04f7",
+  "local_distributions_sha256": "06104502c13e736dbfdcd856c9b8e6145c86d93d1864a2477bbbce0cf392202a",
   "lock_record_count": 282,
-  "lockfile_sha256": "f3b49129508a2d4da4c135e6c2e32d7698f3c4cc9a65a1c43870287a8337a0b4",
+  "lockfile_sha256": "5bfae4adb95e93bd635970c73980e405379ee73a411fa30d7f0c5da82a4d2976",
   "original_archive_count": 280,
   "os_denied_acceptance_verified": false,
   "packages": [
@@ -31158,16 +31158,16 @@
     },
     {
       "archive": {
-        "bytes": 7520,
-        "sha256": "bf0d8071f48375c40d358148c56de3c7a88a92b04b58c806362684940d55b0a1",
-        "sha512": "f0c5461059c921c7468dc6df2a67aaf33d296471f426556da15647f50feac14a7ac3216710950132bc3d0c26a3fab6b7bd28469a16af8da94c2213cdc5901473",
+        "bytes": 7519,
+        "sha256": "0d3c3ee5c934ec4601eb5a032f07e6ff0a21350f761685c21d60f1be9b080241",
+        "sha512": "e92eff8959272a094b031305c5018da69048d22a894b636033a141c5abe2b63eca683abfbf2c0e5867fa746bbb1762f5432d06e92dee4e9eda1ac847af32bc24",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "49e66aab1a1cbd208b3c38d76d4055cad41f67b5b9ee95b087e56655584ea8fa.tgz",
-      "archive_path": "source-inputs/npm/archives/49e66aab1a1cbd208b3c38d76d4055cad41f67b5b9ee95b087e56655584ea8fa.tgz",
+      "archive_filename": "722d236daa3924dd0e07cbd6605867a89fabc45984c2da1d8654327767ffb683.tgz",
+      "archive_path": "source-inputs/npm/archives/722d236daa3924dd0e07cbd6605867a89fabc45984c2da1d8654327767ffb683.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-8MVGEFnJIcdGjcbfKmeq8z0pZHH0JlVtoVZH9Q/qwUp6wyFnEJUBMrw9DCaj+ra3vShGmhavjalMIhPNxZAUcw==",
+      "integrity": "sha512-6S7/iVknKglLAxMFxQGNppBI0iqJS2NgM6FBxavitj7KaDq/vywOWGf6dGu7F2L1Qy0G6S3uTp7aGshHrzK8JA==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -31260,20 +31260,20 @@
           "bytes": 12314,
           "kind": "file",
           "path": "package/dist/provider.js",
-          "sha256": "e8e1c964f317bfacd48d7e24275cdc7dd29e10e6ccab064194df27bfe48065f8"
+          "sha256": "9f7848b27aabc311e867d9a034b4f569892e68533b837116ab932e05fa20558f"
         },
         {
           "archive_mode": 420,
           "bytes": 1890,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "2fda0ef9aa32bb1c64ae42c04652c9b3221d4881db6fb227d82535a6b6665c28"
+          "sha256": "1ad9c076ee135374dd0f1d28f3a5200deabb39cb2a86fb4774e3974c17bdb787"
         }
       ],
-      "members_sha256": "504b47286971bbf1dbae0a8a8a9590cfe834650f2171f517f368dcdf7805eea9",
+      "members_sha256": "74785c9034cfd99593230a9a28eb434ab50bcc6e293195230f6302798dec8973",
       "name": "@vitest/coverage-v8",
       "native_binary_files": [],
-      "package_json_sha256": "2fda0ef9aa32bb1c64ae42c04652c9b3221d4881db6fb227d82535a6b6665c28",
+      "package_json_sha256": "1ad9c076ee135374dd0f1d28f3a5200deabb39cb2a86fb4774e3974c17bdb787",
       "provenance_metadata": {
         "homepage": "https://vitest.dev/guide/coverage",
         "repository": {
@@ -31282,11 +31282,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/49e66aab1a1cbd208b3c38d76d4055cad41f67b5b9ee95b087e56655584ea8fa.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/722d236daa3924dd0e07cbd6605867a89fabc45984c2da1d8654327767ffb683.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "49e66aab1a1cbd208b3c38d76d4055cad41f67b5b9ee95b087e56655584ea8fa.tgz",
-        "integrity": "sha512-8MVGEFnJIcdGjcbfKmeq8z0pZHH0JlVtoVZH9Q/qwUp6wyFnEJUBMrw9DCaj+ra3vShGmhavjalMIhPNxZAUcw==",
+        "archive_filename": "722d236daa3924dd0e07cbd6605867a89fabc45984c2da1d8654327767ffb683.tgz",
+        "integrity": "sha512-6S7/iVknKglLAxMFxQGNppBI0iqJS2NgM6FBxavitj7KaDq/vywOWGf6dGu7F2L1Qy0G6S3uTp7aGshHrzK8JA==",
         "lock_paths": [
           "node_modules/@vitest/coverage-v8"
         ],
@@ -31298,23 +31298,23 @@
           }
         ],
         "name": "@vitest/coverage-v8",
-        "resolved": "https://registry.npmjs.org/@vitest/coverage-v8/-/coverage-v8-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/coverage-v8/-/coverage-v8-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
         "bytes": 24924,
-        "sha256": "503d668851ce760fb60bb2b4681452089d8658a5fbd2b1f626dece4c1fbcc57f",
-        "sha512": "557db1e6f3495c44f8eca005cf011123e29132d4d30925937d230ab16ec9b14b17578a6cabef9edc3bd9a6e4c33a91dcc72b620ecea9da78556f6b550e289463",
+        "sha256": "8c932064dafe90dca40312b44c5b63623c8c7e03bb9b38c4bd9af2f5701f7bb6",
+        "sha512": "bc5953b7e604bbd581a4d8dd19ac8d9a5315ceb58f8b5facbfce77ffbb76154ee1a4ee6000504a1f3426902ab95e3a6bf9ebde805dbdf782d04f7845de6465a9",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "24b5ed1a406c668d9ab6e2b5d491ce00fcef71466bde46cf681b066bd1e9cbe3.tgz",
-      "archive_path": "source-inputs/npm/archives/24b5ed1a406c668d9ab6e2b5d491ce00fcef71466bde46cf681b066bd1e9cbe3.tgz",
+      "archive_filename": "1bb580469c4163d39f8b3f60c9048b1912caa645472caf4e01ada62146ed0181.tgz",
+      "archive_path": "source-inputs/npm/archives/1bb580469c4163d39f8b3f60c9048b1912caa645472caf4e01ada62146ed0181.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-VX2x5vNJXET47KAFzwERI+KRMtTTCSWTfSMKsW7JsUsXV4psq++e3DvZpuTDOpHcxytiDs6p2nhVb2tVDiiUYw==",
+      "integrity": "sha512-vFlTt+YEu9WBpNjdGayNmlMVzrWPi1+sv853/7t2FU7hpO5gAFBKHzQmkCq5Xjpr+evegF2994LQT3hF3mRlqQ==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -31372,13 +31372,13 @@
           "bytes": 1161,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "bc566b4322c25920e82c2fcdea00c2154d8ef98dd30de6605c5f89ac0d607adc"
+          "sha256": "98a4c135fb0993d11cec19f0b48f986e8d9e02cff8a68d1306ff50dc64a9915b"
         }
       ],
-      "members_sha256": "a4cd49781db0dd61c305843c5d645d36d2370cb895671076fbd4ee5dc32d2220",
+      "members_sha256": "38f60cbc277aa645ecbacc8bf71d70e2b704e51d1f14aefe3eb4974e46548dc4",
       "name": "@vitest/expect",
       "native_binary_files": [],
-      "package_json_sha256": "bc566b4322c25920e82c2fcdea00c2154d8ef98dd30de6605c5f89ac0d607adc",
+      "package_json_sha256": "98a4c135fb0993d11cec19f0b48f986e8d9e02cff8a68d1306ff50dc64a9915b",
       "provenance_metadata": {
         "homepage": "https://vitest.dev/api/expect",
         "repository": {
@@ -31387,11 +31387,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/24b5ed1a406c668d9ab6e2b5d491ce00fcef71466bde46cf681b066bd1e9cbe3.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/1bb580469c4163d39f8b3f60c9048b1912caa645472caf4e01ada62146ed0181.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "24b5ed1a406c668d9ab6e2b5d491ce00fcef71466bde46cf681b066bd1e9cbe3.tgz",
-        "integrity": "sha512-VX2x5vNJXET47KAFzwERI+KRMtTTCSWTfSMKsW7JsUsXV4psq++e3DvZpuTDOpHcxytiDs6p2nhVb2tVDiiUYw==",
+        "archive_filename": "1bb580469c4163d39f8b3f60c9048b1912caa645472caf4e01ada62146ed0181.tgz",
+        "integrity": "sha512-vFlTt+YEu9WBpNjdGayNmlMVzrWPi1+sv853/7t2FU7hpO5gAFBKHzQmkCq5Xjpr+evegF2994LQT3hF3mRlqQ==",
         "lock_paths": [
           "node_modules/@vitest/expect"
         ],
@@ -31403,23 +31403,23 @@
           }
         ],
         "name": "@vitest/expect",
-        "resolved": "https://registry.npmjs.org/@vitest/expect/-/expect-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/expect/-/expect-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
-        "bytes": 56516,
-        "sha256": "5f42c3959636909c506885ef643f4a4e4d024bd7939934465f280c42164eb142",
-        "sha512": "d972550f9e5dd68e40668bace42086292ef883fae23a3f68744b766d0a4255979b947c8776731e165e239745e3536d6cb5fe266e35247b0d9e5d066deb983909",
+        "bytes": 56550,
+        "sha256": "8f9ac0144028329f5c649c031608b8877efea748cdbded0d7f41d60f9be49c52",
+        "sha512": "7ca4a1369299ceea5666e634cfb7a0c9dbcbd2ca96e08344641104c4c04c01aea2ce510d1151f0a1781d69309a059e5fc25af8c5fda8d705c2f379fd4693be34",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "a3f76f7c93ac886e11554b7903ffa1e1310464e67cebbde3f1d63dcb4dd047b0.tgz",
-      "archive_path": "source-inputs/npm/archives/a3f76f7c93ac886e11554b7903ffa1e1310464e67cebbde3f1d63dcb4dd047b0.tgz",
+      "archive_filename": "e82e3ec022a8c15491a2728d1c0fa50af33a5eb5f3078d8f534f0e1010b984cf.tgz",
+      "archive_path": "source-inputs/npm/archives/e82e3ec022a8c15491a2728d1c0fa50af33a5eb5f3078d8f534f0e1010b984cf.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-2XJVD55d1o5AZous5CCGKS74g/riOj9odEt2bQpCVZeblHyHdnMeFl4jl0XjU21stf4mbjUkew2eXQZt65g5CQ==",
+      "integrity": "sha512-fKShNpKZzupWZuY0z7egydvL0sqW4INEZBEExMBMAa6izlENEVHwoXgdaTCaBZ5fwlr4xf2o1wXC83n9RpO+NA==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -31509,10 +31509,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 1353,
+          "bytes": 1424,
           "kind": "file",
           "path": "package/dist/chunk-helpers.js",
-          "sha256": "1a7f8d9a582593e21aa6eca749891fdff6280ed155fc293c676862e9ebceeff9"
+          "sha256": "22a5cbfa7f72d6dd6b3bab32d5e356fba8aa6585209d9ebccc320fc0d90ad1be"
         },
         {
           "archive_mode": 420,
@@ -31551,10 +31551,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 845,
+          "bytes": 901,
           "kind": "file",
           "path": "package/dist/chunk-utils.js",
-          "sha256": "0d4c1ff70593f8829ec1f53fcb3ee2e04141aca8cb5c78b20f0cd759284c0a34"
+          "sha256": "08b4c5fc5312daa9980e1cb292509e49e51552f4714f39ff101c58efd265b753"
         },
         {
           "archive_mode": 420,
@@ -31600,10 +31600,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 12895,
+          "bytes": 12922,
           "kind": "file",
           "path": "package/dist/node.js",
-          "sha256": "32991c5528582633a8a6d5c7022a33e49ccf8faf838bfa23bfccbe7d01e5e427"
+          "sha256": "c8a9cc8b5dabe32f226e1da8b80bb80e46a6c15109ab0ccb757dc994aa8e2a43"
         },
         {
           "archive_mode": 420,
@@ -31659,13 +31659,13 @@
           "bytes": 2278,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "c3d815afb1b768b0578f1644f215a8ef5fc883dbd245659a1ac997502775ba4d"
+          "sha256": "088f9fa2fbb35aea0fd36a12dbff0cfd178b99e7efe5c1f3a863b7ac37230e6e"
         }
       ],
-      "members_sha256": "83ab3885eb27be1c47936302c72d7c3b51904b1b15034d38023bf4cf4ab9d915",
+      "members_sha256": "fca3fa0af6a593ef4f09d22293fa5a78e9f7a31ec60e27144ed9d30c5982d714",
       "name": "@vitest/mocker",
       "native_binary_files": [],
-      "package_json_sha256": "c3d815afb1b768b0578f1644f215a8ef5fc883dbd245659a1ac997502775ba4d",
+      "package_json_sha256": "088f9fa2fbb35aea0fd36a12dbff0cfd178b99e7efe5c1f3a863b7ac37230e6e",
       "provenance_metadata": {
         "homepage": "https://github.com/vitest-dev/vitest/tree/main/packages/mocker",
         "repository": {
@@ -31674,11 +31674,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/a3f76f7c93ac886e11554b7903ffa1e1310464e67cebbde3f1d63dcb4dd047b0.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/e82e3ec022a8c15491a2728d1c0fa50af33a5eb5f3078d8f534f0e1010b984cf.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "a3f76f7c93ac886e11554b7903ffa1e1310464e67cebbde3f1d63dcb4dd047b0.tgz",
-        "integrity": "sha512-2XJVD55d1o5AZous5CCGKS74g/riOj9odEt2bQpCVZeblHyHdnMeFl4jl0XjU21stf4mbjUkew2eXQZt65g5CQ==",
+        "archive_filename": "e82e3ec022a8c15491a2728d1c0fa50af33a5eb5f3078d8f534f0e1010b984cf.tgz",
+        "integrity": "sha512-fKShNpKZzupWZuY0z7egydvL0sqW4INEZBEExMBMAa6izlENEVHwoXgdaTCaBZ5fwlr4xf2o1wXC83n9RpO+NA==",
         "lock_paths": [
           "node_modules/@vitest/mocker"
         ],
@@ -31690,23 +31690,23 @@
           }
         ],
         "name": "@vitest/mocker",
-        "resolved": "https://registry.npmjs.org/@vitest/mocker/-/mocker-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/mocker/-/mocker-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
         "bytes": 12888,
-        "sha256": "4eff485284e6338a567b63be5f6a74c0b42b9e30e0164a8006d832c26130e51b",
-        "sha512": "ca26733db1934bd4abfc9a4597ccc7adc2240287cd6c557a936d6f22040dfdc63fa3165e5e126fe6c73f3012798c5296996b3ea091f0d145cb66399ff77d7e57",
+        "sha256": "929beb93dafed9e676e55f07919839643231679384020a5ef9c2d02022a5dd80",
+        "sha512": "5d6f4ef3e331c785690ad91874c24b650430b15af23fdc24edc3ca0f1b5715fc126a4eb2461e7ed9f7a9fd8d1717f12506f247abc6dc61d8ba69eb9a8b4a2964",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "637a841e79da5d34e8a14da1c132707dff1c3cc527091ccca168f06675f86541.tgz",
-      "archive_path": "source-inputs/npm/archives/637a841e79da5d34e8a14da1c132707dff1c3cc527091ccca168f06675f86541.tgz",
+      "archive_filename": "2da5ec6c5b3eef5a4f2d3359b15a1386dc9331b707b6647087ce64e3c1439315.tgz",
+      "archive_path": "source-inputs/npm/archives/2da5ec6c5b3eef5a4f2d3359b15a1386dc9331b707b6647087ce64e3c1439315.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-yiZzPbGTS9Sr/JpFl8zHrcIkAofNbFV6k21vIgQN/cY/oxZeXhJv5sc/MBJ5jFKWmWs+oJHw0UXLZjmf931+Vw==",
+      "integrity": "sha512-XW9O8+Mxx4VpCtkYdMJLZQQwsVryP9wk7cPKDxtXFfwSak6yRh5+2fep/Y0XF/ElBvJHq8bcYdi6aeuai0opZA==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -31764,13 +31764,13 @@
           "bytes": 1159,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "ab62f25e475757b0e7e167022091a39930296615a4beb1c627eb37e586344b69"
+          "sha256": "6cb0a3aed2f0251b482b74c3133c64fd8700cd804bc91921b2fd02e98d9f18b6"
         }
       ],
-      "members_sha256": "58f8e517e2297a738e7132957e8f9ab483da691047e18d9c02a37df57e74454a",
+      "members_sha256": "0da89b2c07c090552725ea11368d584f007f64a6f86a88442fd4e396fd423342",
       "name": "@vitest/pretty-format",
       "native_binary_files": [],
-      "package_json_sha256": "ab62f25e475757b0e7e167022091a39930296615a4beb1c627eb37e586344b69",
+      "package_json_sha256": "6cb0a3aed2f0251b482b74c3133c64fd8700cd804bc91921b2fd02e98d9f18b6",
       "provenance_metadata": {
         "homepage": "https://github.com/vitest-dev/vitest/tree/main/packages/pretty-format",
         "repository": {
@@ -31779,11 +31779,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/637a841e79da5d34e8a14da1c132707dff1c3cc527091ccca168f06675f86541.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/2da5ec6c5b3eef5a4f2d3359b15a1386dc9331b707b6647087ce64e3c1439315.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "637a841e79da5d34e8a14da1c132707dff1c3cc527091ccca168f06675f86541.tgz",
-        "integrity": "sha512-yiZzPbGTS9Sr/JpFl8zHrcIkAofNbFV6k21vIgQN/cY/oxZeXhJv5sc/MBJ5jFKWmWs+oJHw0UXLZjmf931+Vw==",
+        "archive_filename": "2da5ec6c5b3eef5a4f2d3359b15a1386dc9331b707b6647087ce64e3c1439315.tgz",
+        "integrity": "sha512-XW9O8+Mxx4VpCtkYdMJLZQQwsVryP9wk7cPKDxtXFfwSak6yRh5+2fep/Y0XF/ElBvJHq8bcYdi6aeuai0opZA==",
         "lock_paths": [
           "node_modules/@vitest/pretty-format"
         ],
@@ -31795,23 +31795,23 @@
           }
         ],
         "name": "@vitest/pretty-format",
-        "resolved": "https://registry.npmjs.org/@vitest/pretty-format/-/pretty-format-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/pretty-format/-/pretty-format-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
         "bytes": 48456,
-        "sha256": "335051b85fce0ad3788c67b84b7949835b5eeeb20b785d8e3741eb396fc23d58",
-        "sha512": "2f3b6f52077030d24c2248f78509e7c620b65f2d73371abddbc5bfc618c22da342cea4d93ae763c1b41feaff489ed6463f0d77da2d8bab6ae04d16470f724737",
+        "sha256": "061db956dceb2b291e1a4ceb3c5b7e31c368e75b34411953402e339ef566e6cf",
+        "sha512": "34a955282af942709ef238a374c9e69291c753e593aa22c547a1b4a478e2f6e4635caf71265d64d674f0e85de938e8f63c372c0edd86290308ef022c693e3dd7",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "ef7155f83dd31f545746e4bb078a499b18f1940b82783468af971d0d16c461b1.tgz",
-      "archive_path": "source-inputs/npm/archives/ef7155f83dd31f545746e4bb078a499b18f1940b82783468af971d0d16c461b1.tgz",
+      "archive_filename": "e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
+      "archive_path": "source-inputs/npm/archives/e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-LztvUgdwMNJMIkj3hQnnxiC2Xy1zNxq928W/xhjCLaNCzqTZOudjwbQf6v9IntZGPw132i2Lq2rgTRZHD3JHNw==",
+      "integrity": "sha512-NKlVKCr5QnCe8jijdMnmkpHHU+WTqiLFR6G0pHji9uRjXK9xJl1k1nTw6F3pOOj2PDcsDt2GKQMI7wIsaT491w==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -31911,7 +31911,7 @@
           "bytes": 1158,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "357e56773a82d3aa95bf920a54ea7f91575d02e6b156d9d7719ea485708e6837"
+          "sha256": "54a437a3811773a3dcf8d17eb89120e0ed91f820c752fc76c37b83d22e6f76bf"
         },
         {
           "archive_mode": 420,
@@ -31928,10 +31928,10 @@
           "sha256": "e666e31d323fef5642f87db0da48a83e58f0aaf9e3823e87eabd8ec7e0441a36"
         }
       ],
-      "members_sha256": "580f1efc4416e1f206de6e6933c78d410e5e76ce22edf35b3b3b67bdebdc8f32",
+      "members_sha256": "8dcce1484048954e68fd41ed3066d1c8b681b140b7e811ec68e9bc326f9d9c52",
       "name": "@vitest/runner",
       "native_binary_files": [],
-      "package_json_sha256": "357e56773a82d3aa95bf920a54ea7f91575d02e6b156d9d7719ea485708e6837",
+      "package_json_sha256": "54a437a3811773a3dcf8d17eb89120e0ed91f820c752fc76c37b83d22e6f76bf",
       "provenance_metadata": {
         "homepage": "https://vitest.dev/api/advanced/runner",
         "repository": {
@@ -31940,11 +31940,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/ef7155f83dd31f545746e4bb078a499b18f1940b82783468af971d0d16c461b1.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "ef7155f83dd31f545746e4bb078a499b18f1940b82783468af971d0d16c461b1.tgz",
-        "integrity": "sha512-LztvUgdwMNJMIkj3hQnnxiC2Xy1zNxq928W/xhjCLaNCzqTZOudjwbQf6v9IntZGPw132i2Lq2rgTRZHD3JHNw==",
+        "archive_filename": "e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
+        "integrity": "sha512-NKlVKCr5QnCe8jijdMnmkpHHU+WTqiLFR6G0pHji9uRjXK9xJl1k1nTw6F3pOOj2PDcsDt2GKQMI7wIsaT491w==",
         "lock_paths": [
           "node_modules/@vitest/runner"
         ],
@@ -31956,23 +31956,23 @@
           }
         ],
         "name": "@vitest/runner",
-        "resolved": "https://registry.npmjs.org/@vitest/runner/-/runner-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/runner/-/runner-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
         "bytes": 17411,
-        "sha256": "6893221f95ccea0c56dfbcc6e95ae2198fd086e6de5e11caf12baf1cf2b0c605",
-        "sha512": "a4dee2927d4e37b87c79ee20200a78033c8afb306d24fcd56ea3a0bb92c2121e1568955b3d072061060920c1903d755e249ab57e77dace2b3b6b9a4534f6a1a2",
+        "sha256": "10b57fb1cb37d110309dd64e22a154bf26bd98526cc1ea5307b2f2478cbdddf5",
+        "sha512": "928d72d5081bfec97343d9abf9bf3d0aeaae77c586d532adb0f0fcafb65405dbd5386b7ce407f61f00aa1ee8eb87026af7986cffd44cedf7003e0e7ba35be5cf",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "6a0186cf2a09afeeb5f7583cb2e5cacf1a3eaa319cf6a88073edb8423c7676d6.tgz",
-      "archive_path": "source-inputs/npm/archives/6a0186cf2a09afeeb5f7583cb2e5cacf1a3eaa319cf6a88073edb8423c7676d6.tgz",
+      "archive_filename": "6fdf6fa0427c999229066c4e057b8069842595ea2eb9bb7fc2d5d71352f8096d.tgz",
+      "archive_path": "source-inputs/npm/archives/6fdf6fa0427c999229066c4e057b8069842595ea2eb9bb7fc2d5d71352f8096d.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-pN7ikn1ON7h8ee4gIAp4AzyK+zBtJPzVbqOgu5LCEh4VaJVbPQcgYQYJIMGQPXVeJJq1fnfazis7a5pFNPahog==",
+      "integrity": "sha512-ko1y1Qgb/slzQ9mr+b89Cuqud8WG1TKtsPD8r7ZUBdvVOGt85Af2HwCqHujrhwJq95hs/9RM7fcAPg57o1vlzw==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -32086,13 +32086,13 @@
           "bytes": 1355,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "c41b0e3171c822fc20f38418eb5c092112e29be09ecb470aec25ef200174e09d"
+          "sha256": "299cd191debb8acdddd2ab65f5c618aeb39953f92afa4a7a2c0c5ee2cc240abf"
         }
       ],
-      "members_sha256": "f7ae61ef67f83250359d81223fb61f27fda53554c0c9a4641ddeff7870ab63c4",
+      "members_sha256": "69cbbefb8068d26b006aa6d5a4f425953dbffa04f934115ea18c1aa022a16da6",
       "name": "@vitest/snapshot",
       "native_binary_files": [],
-      "package_json_sha256": "c41b0e3171c822fc20f38418eb5c092112e29be09ecb470aec25ef200174e09d",
+      "package_json_sha256": "299cd191debb8acdddd2ab65f5c618aeb39953f92afa4a7a2c0c5ee2cc240abf",
       "provenance_metadata": {
         "homepage": "https://vitest.dev/guide/snapshot",
         "repository": {
@@ -32101,11 +32101,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/6a0186cf2a09afeeb5f7583cb2e5cacf1a3eaa319cf6a88073edb8423c7676d6.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/6fdf6fa0427c999229066c4e057b8069842595ea2eb9bb7fc2d5d71352f8096d.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "6a0186cf2a09afeeb5f7583cb2e5cacf1a3eaa319cf6a88073edb8423c7676d6.tgz",
-        "integrity": "sha512-pN7ikn1ON7h8ee4gIAp4AzyK+zBtJPzVbqOgu5LCEh4VaJVbPQcgYQYJIMGQPXVeJJq1fnfazis7a5pFNPahog==",
+        "archive_filename": "6fdf6fa0427c999229066c4e057b8069842595ea2eb9bb7fc2d5d71352f8096d.tgz",
+        "integrity": "sha512-ko1y1Qgb/slzQ9mr+b89Cuqud8WG1TKtsPD8r7ZUBdvVOGt85Af2HwCqHujrhwJq95hs/9RM7fcAPg57o1vlzw==",
         "lock_paths": [
           "node_modules/@vitest/snapshot"
         ],
@@ -32117,23 +32117,23 @@
           }
         ],
         "name": "@vitest/snapshot",
-        "resolved": "https://registry.npmjs.org/@vitest/snapshot/-/snapshot-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/snapshot/-/snapshot-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
         "bytes": 9566,
-        "sha256": "9b15875da96e769a19b3c9e2c316459528c57b9c20168c5abaa1ce050b7c8490",
-        "sha512": "6a935afe9ad0cb6a827b2c219e2c4e1cf442806361be0ed3e036a97e5d466a12e9fd1fae8419b970fc85a0d572aac35dda1d672712fa06aa9d22388004beb460",
+        "sha256": "eb9a67720d1082f33bfc5cf3a41ee6d297e994cf26013dae0ad807a474fa44a3",
+        "sha512": "446abdc7824d18d4d91c4271bcdd284a2263792084c66d27da064a28964763d717e40540e8ced52482c14f7649fed27fd09f6e593edf11357dfdbb688bffef4a",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "eb5db547fd8928bd20558c4695c4f29ed212e6ce70fcb399346217b6e8659cd6.tgz",
-      "archive_path": "source-inputs/npm/archives/eb5db547fd8928bd20558c4695c4f29ed212e6ce70fcb399346217b6e8659cd6.tgz",
+      "archive_filename": "44503230c89fa3b2fa2f4a7e604a525e009fd29750cdd1aff92b6ea1aa7abca8.tgz",
+      "archive_path": "source-inputs/npm/archives/44503230c89fa3b2fa2f4a7e604a525e009fd29750cdd1aff92b6ea1aa7abca8.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-apNa/prQy2qCeywhnixOHPRCgGNhvg7T4Dapfl1GahLp/R+uhBm5cPyFoNVyqsNd2h1nJxL6BqqdIjiABL60YA==",
+      "integrity": "sha512-RGq9x4JNGNTZHEJxvN0oSiJjeSCExm0n2gZKKJZHY9cX5AVA6M7VJILBT3ZJ/tJ/0J9uWT7fETV9/btoi//vSg==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -32198,13 +32198,13 @@
           "bytes": 1011,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "9ae07df2e84098cc2360a9e1563925e123c8740e4b7d158bab11fa20573d6516"
+          "sha256": "0476c3f564f299d7546a3d53957d9514e3490bbd6320c9edf68a1fb1ba99b849"
         }
       ],
-      "members_sha256": "41d68a38fdd53eeb5369af14863b9a5e7d1ac51d8716337830f669530c8d3637",
+      "members_sha256": "4ddefc846e370b45dfe5faf581d8f03459da180090417e396906a8830d79876e",
       "name": "@vitest/spy",
       "native_binary_files": [],
-      "package_json_sha256": "9ae07df2e84098cc2360a9e1563925e123c8740e4b7d158bab11fa20573d6516",
+      "package_json_sha256": "0476c3f564f299d7546a3d53957d9514e3490bbd6320c9edf68a1fb1ba99b849",
       "provenance_metadata": {
         "homepage": "https://vitest.dev/api/mock",
         "repository": {
@@ -32213,11 +32213,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/eb5db547fd8928bd20558c4695c4f29ed212e6ce70fcb399346217b6e8659cd6.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/44503230c89fa3b2fa2f4a7e604a525e009fd29750cdd1aff92b6ea1aa7abca8.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "eb5db547fd8928bd20558c4695c4f29ed212e6ce70fcb399346217b6e8659cd6.tgz",
-        "integrity": "sha512-apNa/prQy2qCeywhnixOHPRCgGNhvg7T4Dapfl1GahLp/R+uhBm5cPyFoNVyqsNd2h1nJxL6BqqdIjiABL60YA==",
+        "archive_filename": "44503230c89fa3b2fa2f4a7e604a525e009fd29750cdd1aff92b6ea1aa7abca8.tgz",
+        "integrity": "sha512-RGq9x4JNGNTZHEJxvN0oSiJjeSCExm0n2gZKKJZHY9cX5AVA6M7VJILBT3ZJ/tJ/0J9uWT7fETV9/btoi//vSg==",
         "lock_paths": [
           "node_modules/@vitest/spy"
         ],
@@ -32229,23 +32229,23 @@
           }
         ],
         "name": "@vitest/spy",
-        "resolved": "https://registry.npmjs.org/@vitest/spy/-/spy-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/spy/-/spy-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
-        "bytes": 45447,
-        "sha256": "ac1150697c2b1b5b14322f3ac85de74a405228291de1265f2e453c6db9544ee6",
-        "sha512": "cd30951a9c85b0658186594ec8a953c3fbe7afa0fdab1b1f483c9f6f26664f28c7c3937f56ebf31e91e84239b6649ce7e11260c79c38afb5747abebd0a62e03d",
+        "bytes": 45448,
+        "sha256": "0c25f072d4afcb52fa48266177111ca90bc4116c66473170959aae1d57db347d",
+        "sha512": "4376b05ebc0e7c457ea9cdd698ee4e372134c8eed0d6043dfe8c87c462d9fe997b37734efd9ceda90c0a2eec0c915f8203525848878ede09079d10c8a3801568",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "2f8fbf34e34a86aed01f5c9070bd85b44d12fc5a3fe466f95a6bb5d696a1f4d1.tgz",
-      "archive_path": "source-inputs/npm/archives/2f8fbf34e34a86aed01f5c9070bd85b44d12fc5a3fe466f95a6bb5d696a1f4d1.tgz",
+      "archive_filename": "d7e7d5408d9fd857be3b771427c86f1b051888e7a775bde73c7c47c335ca1edf.tgz",
+      "archive_path": "source-inputs/npm/archives/d7e7d5408d9fd857be3b771427c86f1b051888e7a775bde73c7c47c335ca1edf.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-zTCVGpyFsGWBhllOyKlTw/vnr6D9qxsfSDyfbyZmTyjHw5N/VuvzHpHoQjm2ZJzn4RJgx5w4r7V0er69CmLgPQ==",
+      "integrity": "sha512-Q3awXrwOfEV+qc3WmO5ONyE0yO7Q1gQ9/oyHxGLZ/pl7N3NO/ZztqQwKLuwMkV+CA1JYSIeO3gkHnRDIo4AVaA==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -32506,13 +32506,13 @@
           "bytes": 2502,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "60611b68702749e1da829d835b528bf5dfe6712e4d59be14d058fcb46cf7a6e8"
+          "sha256": "f7dc399df4aba16359fd4add7ed14d0c3be1bc35ffe567449f831dd2fd7b23f1"
         }
       ],
-      "members_sha256": "edf0afb514143b5648cdceb5da04570952f6ee09176db976e72e66f2d84da366",
+      "members_sha256": "18f30adf87829da2baf7ea4a5f3ad5cf103bb5e0e21cb70e69d657bac1e622df",
       "name": "@vitest/utils",
       "native_binary_files": [],
-      "package_json_sha256": "60611b68702749e1da829d835b528bf5dfe6712e4d59be14d058fcb46cf7a6e8",
+      "package_json_sha256": "f7dc399df4aba16359fd4add7ed14d0c3be1bc35ffe567449f831dd2fd7b23f1",
       "provenance_metadata": {
         "homepage": "https://github.com/vitest-dev/vitest/tree/main/packages/utils",
         "repository": {
@@ -32521,11 +32521,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/2f8fbf34e34a86aed01f5c9070bd85b44d12fc5a3fe466f95a6bb5d696a1f4d1.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/d7e7d5408d9fd857be3b771427c86f1b051888e7a775bde73c7c47c335ca1edf.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "2f8fbf34e34a86aed01f5c9070bd85b44d12fc5a3fe466f95a6bb5d696a1f4d1.tgz",
-        "integrity": "sha512-zTCVGpyFsGWBhllOyKlTw/vnr6D9qxsfSDyfbyZmTyjHw5N/VuvzHpHoQjm2ZJzn4RJgx5w4r7V0er69CmLgPQ==",
+        "archive_filename": "d7e7d5408d9fd857be3b771427c86f1b051888e7a775bde73c7c47c335ca1edf.tgz",
+        "integrity": "sha512-Q3awXrwOfEV+qc3WmO5ONyE0yO7Q1gQ9/oyHxGLZ/pl7N3NO/ZztqQwKLuwMkV+CA1JYSIeO3gkHnRDIo4AVaA==",
         "lock_paths": [
           "node_modules/@vitest/utils"
         ],
@@ -32537,10 +32537,10 @@
           }
         ],
         "name": "@vitest/utils",
-        "resolved": "https://registry.npmjs.org/@vitest/utils/-/utils-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/@vitest/utils/-/utils-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
@@ -81733,16 +81733,16 @@
     },
     {
       "archive": {
-        "bytes": 475397,
-        "sha256": "81875725211b8c43a30213579456954603d471d022587ce0e6842d44d9ed162b",
-        "sha512": "7e1002acd5d489d21b19206be4595bb8190eed5582d59c8b9740cee025360eb42800fc57f3862cc6cf877864298a2e656565754388016534eee3d985f80e8477",
+        "bytes": 475403,
+        "sha256": "ac79c9561c99eabc1cc29e0a839cbd03d1ff0e45bbecb5a2edfa6c3827c823d1",
+        "sha512": "e5e59dcf6c9bdda8f1585dc2f02e138e45e5ec51a6de7d84fd595acc02eb407ccaee760c486167099b68d1b6cf365efb03090e6552e4d189c101e8d4bb436258",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "dcbf050e376bea5f363c2db264309e119509bf87179c6f0abfa87a6eba68b5ff.tgz",
-      "archive_path": "source-inputs/npm/archives/dcbf050e376bea5f363c2db264309e119509bf87179c6f0abfa87a6eba68b5ff.tgz",
+      "archive_filename": "c02c221e97cb9c656c805ca37c5700b1b31ee056f2b6445a70b8b60a92f77ac7.tgz",
+      "archive_path": "source-inputs/npm/archives/c02c221e97cb9c656c805ca37c5700b1b31ee056f2b6445a70b8b60a92f77ac7.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-fhACrNXUidIbGSBr5FlbuBkO7VWC1ZyLl0DO4CU2DrQoAPxX84Ysxs+HeGQpii5lZWV1Q4gBZTTu49mF+A6Edw==",
+      "integrity": "sha512-5eWdz2yb3ajxWF3C8C4TjkXl7FGm3n2E/VlazALrQHzK7nYMSGFnCZto0bbPNl77AwkOZVLk0YnBAejUu0NiWA==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -81869,15 +81869,15 @@
           "archive_mode": 420,
           "bytes": 96007,
           "kind": "file",
-          "path": "package/dist/chunks/cac.uFydS1Z4.js",
-          "sha256": "27cc9365d180bee3da005fe6c4d485868caf9d8f54280759eea28842836af549"
+          "path": "package/dist/chunks/cac.DzDtg8hz.js",
+          "sha256": "82d1742c47a458460a673c3b99b6784e5c80d55ec6a5978fec5cdb6f008c27f5"
         },
         {
           "archive_mode": 420,
           "bytes": 498779,
           "kind": "file",
-          "path": "package/dist/chunks/cli-api.CnMVyzaz.js",
-          "sha256": "a236001d048380e2c67d05423fc9ea3f26b07ee019ba8d6e622082f29d49102e"
+          "path": "package/dist/chunks/cli-api.B0Pz1_R7.js",
+          "sha256": "222aa60f8555aea9311703c68edaaa8eba0888ea29bfb4a49b37f98e0811ee2d"
         },
         {
           "archive_mode": 420,
@@ -82199,7 +82199,7 @@
           "bytes": 284,
           "kind": "file",
           "path": "package/dist/cli.js",
-          "sha256": "35346c38bc8e52886ebd7d013d5de64ef5adde9ccec0435c8fac3cc9b6368f3c"
+          "sha256": "0e23ddc3b04431cd64d7313328a4138f7dfbceab139514d4c12589a258947313"
         },
         {
           "archive_mode": 420,
@@ -82290,7 +82290,7 @@
           "bytes": 4398,
           "kind": "file",
           "path": "package/dist/node.js",
-          "sha256": "34be25dbabf478136f6ea1b1f7b9a075ab833a14df3da9fc69d39b671dc19551"
+          "sha256": "ce61e2589b051900ebcf77555b40169e77275d3c8d08aaf07780458c4ae8fdc2"
         },
         {
           "archive_mode": 420,
@@ -82511,10 +82511,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 5932,
+          "bytes": 5933,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "a28126d97bcaf567da5bed69443b7f3bcd9a7a8c38c8b66e554686b6bb2c10e0"
+          "sha256": "e5a6d55e103f04929442595df0f641f128b02fd706ff01474c094863b44511d0"
         },
         {
           "archive_mode": 420,
@@ -82566,10 +82566,10 @@
           "sha256": "5744f984f4f55dfb760efb241debdf83a3caaa2e267d9b4072e280cdc715a5bd"
         }
       ],
-      "members_sha256": "02814fce79c48bca7a9783771db7207f385adf0990e237a850e9f29a57573375",
+      "members_sha256": "7f25724a42faf7979fa2dfbcaa30a3d4df2b64fa257864e881c212396ea48359",
       "name": "vitest",
       "native_binary_files": [],
-      "package_json_sha256": "a28126d97bcaf567da5bed69443b7f3bcd9a7a8c38c8b66e554686b6bb2c10e0",
+      "package_json_sha256": "e5a6d55e103f04929442595df0f641f128b02fd706ff01474c094863b44511d0",
       "provenance_metadata": {
         "homepage": "https://vitest.dev",
         "repository": {
@@ -82578,11 +82578,11 @@
           "url": "git+https://github.com/vitest-dev/vitest.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/dcbf050e376bea5f363c2db264309e119509bf87179c6f0abfa87a6eba68b5ff.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/c02c221e97cb9c656c805ca37c5700b1b31ee056f2b6445a70b8b60a92f77ac7.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "dcbf050e376bea5f363c2db264309e119509bf87179c6f0abfa87a6eba68b5ff.tgz",
-        "integrity": "sha512-fhACrNXUidIbGSBr5FlbuBkO7VWC1ZyLl0DO4CU2DrQoAPxX84Ysxs+HeGQpii5lZWV1Q4gBZTTu49mF+A6Edw==",
+        "archive_filename": "c02c221e97cb9c656c805ca37c5700b1b31ee056f2b6445a70b8b60a92f77ac7.tgz",
+        "integrity": "sha512-5eWdz2yb3ajxWF3C8C4TjkXl7FGm3n2E/VlazALrQHzK7nYMSGFnCZto0bbPNl77AwkOZVLk0YnBAejUu0NiWA==",
         "lock_paths": [
           "node_modules/vitest"
         ],
@@ -82594,10 +82594,10 @@
           }
         ],
         "name": "vitest",
-        "resolved": "https://registry.npmjs.org/vitest/-/vitest-4.1.11.tgz",
-        "version": "4.1.11"
+        "resolved": "https://registry.npmjs.org/vitest/-/vitest-4.1.12.tgz",
+        "version": "4.1.12"
       },
-      "version": "4.1.11"
+      "version": "4.1.12"
     },
     {
       "archive": {
@@ -89031,7 +89031,7 @@
         }
       },
       "provenance_path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.provenance.json",
-      "provenance_sha256": "1854da1f388fe0f0d95ed70f72e94deb31aaf855ce4c181844b5491e7ff1bc33",
+      "provenance_sha256": "5f8c3105b441f84b562ae03979f421f1a085200c5f0337433abe7f882570401b",
       "resolved": "file:../../../source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.tgz",
       "upstream_original_sri_recomputed": false,
       "upstream_pin": {
@@ -89241,7 +89241,7 @@
   "provenance_signatures_verified": false,
   "schema": "rootlight.npm-local-archive-bundle/1",
   "source_scope": "retained npm distributions only; preferred native, WASI and bundled transitive sources remain unproven",
-  "upstream_lockfile_sha256": "320758559a23bfd0863724bd4e5b0db685e5749ce7ed147249ae0d6aa3a84660",
+  "upstream_lockfile_sha256": "fc43220b2212fc53fb566083fe836971ed8bbc72b79c8c30fcd2a1709a673dee",
   "upstream_original_sri_recomputed": false,
   "verification_scope": "exact local lock projection and every retained original or declared modified distribution"
 }
