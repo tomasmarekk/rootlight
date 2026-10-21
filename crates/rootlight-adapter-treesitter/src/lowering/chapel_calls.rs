@@ -809,11 +809,9 @@ impl Targets {
                     invalid = true;
                     break;
                 };
-                if formal == Some(width) {
-                    if target.replace(index).is_some() {
-                        invalid = true;
-                        break;
-                    }
+                if formal == Some(width) && target.replace(index).is_some() {
+                    invalid = true;
+                    break;
                 }
             }
             // A module-level variable can shadow a procedure regardless of a

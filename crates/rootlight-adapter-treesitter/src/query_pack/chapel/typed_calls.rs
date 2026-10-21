@@ -249,10 +249,10 @@ impl CaptureCache<'_> {
                 if self.same_word(text, callee_text, cancel)? {
                     return Ok(None);
                 }
-                if self.same_word(text, argument_text, cancel)? {
-                    if declaration.replace(node).is_some() {
-                        return Ok(None);
-                    }
+                if self.same_word(text, argument_text, cancel)?
+                    && declaration.replace(node).is_some()
+                {
+                    return Ok(None);
                 }
             }
             if cursor.goto_first_child() {

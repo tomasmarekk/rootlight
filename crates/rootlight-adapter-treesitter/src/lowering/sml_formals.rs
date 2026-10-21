@@ -273,14 +273,13 @@ pub(super) fn embedded_parameters(
         {
             return Ok(admitted);
         }
-        if fact.kind() == SyntaxFactKind::Root {
-            if root.replace(fact).is_some()
+        if fact.kind() == SyntaxFactKind::Root
+            && (root.replace(fact).is_some()
                 || fact.syntax_kind().as_str() != "markdown.file.root"
                 || fact.parent().is_some()
-                || span != source.span()
-            {
-                return Ok(admitted);
-            }
+                || span != source.span())
+        {
+            return Ok(admitted);
         }
     }
     let Some(root) = root else {
