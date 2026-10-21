@@ -8,7 +8,9 @@ pub(super) fn entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     }
     match fact.syntax_kind().as_str() {
         "sml.function.declaration" | "wat.function.declaration" => Some(EntityKind::Function),
-        "wat.parameter.declaration" => Some(EntityKind::Parameter),
+        "wat.parameter.declaration" | "sml.standalone_parameter.declaration" => {
+            Some(EntityKind::Parameter)
+        }
         "wat.module.declaration" => Some(EntityKind::Module),
         _ => None,
     }
@@ -110,6 +112,8 @@ pub(super) fn captured_name_for_fact<'a>(
             "sml.name.definition"
                 | "sml.unresolved_name.reference"
                 | "sml.own_function_call.reference"
+                | "sml.formal_name.definition"
+                | "sml.standalone_formal_read.reference"
                 | "wat.name.definition"
                 | "wat.unresolved_name.reference"
         )
@@ -192,5 +196,33 @@ mod tests {
         assert!(
             crate::structural_captured_name_for_fact("webassembly", &fact, "$value", 5).is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod standalone_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_formal_declaration_is_closed_and_not_an_unqualified_parameter_label() {
+        for (label, expected) in [
+            (
+                "sml.standalone_parameter.declaration",
+                Some(EntityKind::Parameter),
+            ),
+            ("sml.parameter.declaration", None),
+            ("wat.standalone_parameter.declaration", None),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                SyntaxFactKind::Declaration,
+                rootlight_ir::SourceSpan::new(rootlight_ids::FileId::from_bytes([7; 20]), 0, 5)
+                    .unwrap(),
+                0,
+                crate::SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(entity_kind(&fact), expected);
+        }
     }
 }

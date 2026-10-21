@@ -1003,7 +1003,10 @@ impl QueryPack {
                     || (family == GrammarFamily::StandardMl
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
-                        && candidate.syntax == "sml.own_function_call")
+                        && matches!(
+                            candidate.syntax,
+                            "sml.own_function_call" | "sml.standalone_formal_read"
+                        ))
                     || (family == GrammarFamily::Wolfram
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1423,11 +1426,10 @@ impl QueryPack {
             limits.body_nodes.min(limits.captures),
             complete_file_input,
         );
-        let mut sml_captures = sml_wat::CaptureCache::new(
+        let mut sml_captures = sml_wat::CaptureCache::standalone_standard_basis(
             input.source,
             limits.body_nodes.min(limits.captures),
             matches!(input.tree.included_ranges().as_slice(), [range] if range.start_byte == 0 && range.end_byte >= input.source.len()),
-            false,
         );
         let mut wat_captures = sml_wat::CaptureCache::new(
             input.source,

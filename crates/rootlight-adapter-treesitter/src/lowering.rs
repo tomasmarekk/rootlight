@@ -86,6 +86,7 @@ mod scheme_calls;
 mod scss;
 mod sed;
 mod sml_calls;
+mod sml_formals;
 mod sml_wat;
 mod source_coordinates;
 mod thinkscript;
@@ -901,6 +902,7 @@ fn required_syntax_fact_count_from_output(
             || qsharp_formals::certified_reference(fact)
             || wolfram_formals::certified_reference(fact)
             || lean_formals::certified_reference(fact)
+            || sml_formals::required(fact)
             || scala_formals::required(fact)
             || csharp_formals::required(fact)
             || powershell_formals::required(fact)
@@ -1760,6 +1762,10 @@ fn preflight_lowering_limits(
                         && request.included_ranges().is_empty()
                         && meson_bindings::required(fact))
                     || sml_call
+                    || (request.language().as_str() == "standard-ml"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && sml_formals::required(fact))
                     || ocaml_certificate
                     || glsl_proof
                     || go_proof
@@ -3420,6 +3426,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let sml_formals = if self.request.language().as_str() == "standard-ml"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(sml_formals::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let sml_calls = if self.request.language().as_str() == "standard-ml"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -4520,6 +4541,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("wolfram-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &sml_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("sml-formal-read-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -6739,6 +6776,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     self.request.limits().max_syntax_nodes(),
                     cancellation,
                 )?);
+        let sml_profile_admitted = self.request.language().as_str() == "standard-ml"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+            && sml_formals::profile_admitted(
+                self.coordinates.facts(),
+                self.full_source,
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?;
+        let sml_embedded_parameters = if self.request.language().as_str() == "markdown"
+            && self.request.included_ranges().is_empty()
+        {
+            sml_formals::embedded_parameters(
+                self.coordinates.facts(),
+                self.parse_output.diagnostics(),
+                self.full_source,
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?
+        } else {
+            std::collections::HashSet::new()
+        };
         let dockerfile_env = if self.request.language().as_str() == "dockerfile"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -7461,6 +7520,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
             }
             if fact.syntax_kind().as_str() == "dockerfile.env.declaration"
                 && !dockerfile_env.contains(fact)
+            {
+                nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
+                continue;
+            }
+            if fact.syntax_kind().as_str() == "sml.standalone_parameter.declaration"
+                && !sml_profile_admitted
+                && !sml_embedded_parameters.contains(&fact.local_id())
             {
                 nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);

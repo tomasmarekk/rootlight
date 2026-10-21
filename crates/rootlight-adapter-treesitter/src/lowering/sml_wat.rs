@@ -8,15 +8,17 @@ pub(super) fn written_identity(kind: EntityKind, label: &str) -> bool {
         (
             EntityKind::Function,
             "sml.function.declaration" | "wat.function.declaration"
-        ) | (EntityKind::Parameter, "wat.parameter.declaration")
-            | (EntityKind::Module, "wat.module.declaration")
+        ) | (
+            EntityKind::Parameter,
+            "wat.parameter.declaration" | "sml.standalone_parameter.declaration"
+        ) | (EntityKind::Module, "wat.module.declaration")
     )
 }
 pub(super) fn symbol_signature(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Signature
         && matches!(
             fact.syntax_kind().as_str(),
-            "sml.header.signature" | "wat.header.signature"
+            "sml.header.signature" | "sml.formal_header.signature" | "wat.header.signature"
         )
 }
 pub(super) fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
@@ -31,6 +33,7 @@ pub(super) fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
     }
     match fact.syntax_kind().as_str() {
         "sml.own_function_call.reference" => Some(OccurrenceRole::CallSite),
+        "sml.standalone_formal_read.reference" => Some(OccurrenceRole::Read),
         "sml.unresolved_name.reference" | "wat.unresolved_name.reference" => {
             Some(OccurrenceRole::Reference)
         }
@@ -45,6 +48,9 @@ pub(super) fn source_gap(fact: &SyntaxFact) -> Option<&'static str> {
         "sml.own_function_call.reference" => {
             Some("sml-native-own-function-recursion-binding-unavailable")
         }
+        "sml.standalone_formal_read.reference" => {
+            Some("sml-standalone-formal-read-native-binding-witness-unavailable")
+        }
         "sml.unresolved_name.reference" => {
             Some("sml-incoming-basis-pattern-identifier-status-and-binding-unavailable")
         }
@@ -56,6 +62,9 @@ pub(super) fn source_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 pub(super) fn gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
     let detail = match (fact.kind(), fact.syntax_kind().as_str()) {
+        (SyntaxFactKind::Signature, "sml.closed_standard_basis_context.signature") => Some(
+            "sml-standalone-standard-basis-profile-only-incoming-and-project-basis-unqualified",
+        ),
         (SyntaxFactKind::Root, "sml.source_file.root") => Some(
             "sml-clean-single-clause-function-heads-only-incoming-basis-pattern-binders-and-bindings-unavailable",
         ),

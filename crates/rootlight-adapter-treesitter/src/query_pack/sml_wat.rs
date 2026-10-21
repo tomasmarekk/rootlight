@@ -1,5 +1,5 @@
-//! Native written SML/WAT identities without inferred SML pattern bindings.
-//! Structural headers do not borrow semantic closure from unrelated siblings.
+//! Native written SML/WAT identities with a qualified standalone SML basis profile.
+//! Unknown incoming environments retain headers without inferred pattern binders.
 
 use super::{HARD_MAX_QUERY_CAPTURES, QueryCandidate, StructuralRole, query_failure};
 use rootlight_adapter_sdk::AdapterError;
@@ -17,6 +17,9 @@ pub(super) struct CaptureCache<'s> {
     source: &'s [u8],
     complete: bool,
     wat: bool,
+    standalone_basis: bool,
+    basis_context: Option<bool>,
+    formals: std::collections::HashMap<usize, Option<Range<usize>>>,
     remaining: usize,
     exhausted: bool,
 }
@@ -27,10 +30,353 @@ impl<'s> CaptureCache<'s> {
             source,
             complete,
             wat,
+            standalone_basis: false,
+            basis_context: None,
+            formals: std::collections::HashMap::new(),
             remaining: maximum.min(HARD_MAX_QUERY_CAPTURES) * 32,
             exhausted: false,
         }
     }
+    /// Select the closed standalone Standard Basis profile for complete files.
+    /// Source declarations that can change constructor status veto the proof.
+    pub(super) fn standalone_standard_basis(
+        source: &'s [u8],
+        maximum: usize,
+        complete: bool,
+    ) -> Self {
+        let mut cache = Self::new(source, maximum, complete, false);
+        cache.standalone_basis = true;
+        cache
+    }
+
+    fn standalone_context(
+        &mut self,
+        root: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        if let Some(valid) = self.basis_context {
+            return Ok(valid);
+        }
+        let valid = self.standalone_context_uncached(root, cancel)?;
+        self.basis_context = Some(valid);
+        Ok(valid)
+    }
+
+    fn standalone_context_uncached(
+        &mut self,
+        root: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        if !self.standalone_basis
+            || self.wat
+            || !self.complete
+            || !self.clean(root)
+            || root.kind() != "source_file"
+            || root.parent().is_some()
+            || !(root.start_byte() == 0
+                || (root.start_byte() == 3 && self.source.starts_with(b"\xef\xbb\xbf")))
+            || root.end_byte() != self.source.len()
+        {
+            return Ok(false);
+        }
+        let mut seen_function = false;
+        let mut seen_expression = false;
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if !self.visit(cancel)? {
+                return Ok(false);
+            }
+            match child.kind() {
+                "block_comment" | "line_comment" => {}
+                "fun_dec" => {
+                    if seen_expression {
+                        return Ok(false);
+                    }
+                    seen_function = true;
+                }
+                kind if kind.ends_with("_dec") || !seen_function => return Ok(false),
+                _ => seen_expression = true,
+            }
+        }
+        Ok(seen_function)
+    }
+
+    fn sml_identifier(
+        &mut self,
+        node: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<Option<&'s [u8]>, AdapterError> {
+        if !self.clean(node) || node.kind() != "vid" {
+            return Ok(None);
+        }
+        let Some(raw) = self.source.get(node.byte_range()) else {
+            return Ok(None);
+        };
+        for (offset, chunk) in raw.chunks(64).enumerate() {
+            if !self.visit(cancel)? {
+                return Ok(None);
+            }
+            for (index, byte) in chunk.iter().enumerate() {
+                let valid = if offset == 0 && index == 0 {
+                    byte.is_ascii_lowercase()
+                } else {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\'')
+                };
+                if !valid {
+                    return Ok(None);
+                }
+            }
+        }
+        // The closed initial basis has these lowercase constructors, not fresh binders.
+        if raw.is_empty() || matches!(raw, b"nil" | b"true" | b"false" | b"ref") {
+            return Ok(None);
+        }
+        Ok(Some(raw))
+    }
+
+    fn sml_equal(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        if left.len() != right.len() {
+            return Ok(false);
+        }
+        for (left, right) in left.chunks(64).zip(right.chunks(64)) {
+            if !self.visit(cancel)? || left != right {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn sml_formal<'t>(
+        &mut self,
+        rule: Node<'t>,
+        cancel: &Cancellation,
+    ) -> Result<Option<Node<'t>>, AdapterError> {
+        if let Some(cached) = self.formals.get(&rule.id()).cloned() {
+            let Some(expected) = cached else {
+                return Ok(None);
+            };
+            let Some(pattern) = self.field(rule, "arg", cancel)? else {
+                return Ok(None);
+            };
+            let Some(path) = self.only(pattern, "longvid", cancel)? else {
+                return Ok(None);
+            };
+            return Ok(self
+                .only(path, "vid", cancel)?
+                .filter(|node| node.byte_range() == expected));
+        }
+        let formal = self.sml_formal_uncached(rule, cancel)?;
+        self.formals
+            .try_reserve(1)
+            .map_err(|_| rootlight_adapter_sdk::SinkError::AllocationFailed)?;
+        self.formals
+            .insert(rule.id(), formal.map(|node| node.byte_range()));
+        Ok(formal)
+    }
+
+    fn sml_formal_uncached<'t>(
+        &mut self,
+        rule: Node<'t>,
+        cancel: &Cancellation,
+    ) -> Result<Option<Node<'t>>, AdapterError> {
+        if !self.standalone_basis || self.wat || !self.complete {
+            return Ok(None);
+        }
+        let Some((function, body)) = self.sml_header(rule, cancel)? else {
+            return Ok(None);
+        };
+        let Some(pattern) = self.field(rule, "arg", cancel)? else {
+            return Ok(None);
+        };
+        if pattern.kind() != "vid_pat" || !self.clean(pattern) {
+            return Ok(None);
+        }
+        let Some(path) = self.only(pattern, "longvid", cancel)? else {
+            return Ok(None);
+        };
+        let Some(formal) = self.only(path, "vid", cancel)? else {
+            return Ok(None);
+        };
+        if pattern.byte_range() != formal.byte_range() {
+            return Ok(None);
+        }
+        let Some(spelling) = self.sml_identifier(formal, cancel)? else {
+            return Ok(None);
+        };
+        let Some(function_name) = self.sml_identifier(function, cancel)? else {
+            return Ok(None);
+        };
+        if self.sml_equal(spelling, function_name, cancel)? {
+            return Ok(None);
+        }
+        let Some(root) = rule
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        else {
+            return Ok(None);
+        };
+        if root.kind() != "source_file"
+            || root.parent().is_some()
+            || !self.clean(root)
+            || !(root.start_byte() == 0
+                || (root.start_byte() == 3 && self.source.starts_with(b"\xef\xbb\xbf")))
+            || root.end_byte() != self.source.len()
+        {
+            return Ok(None);
+        }
+        if !self.standalone_context(root, cancel)? {
+            return Ok(None);
+        }
+        let mut functions = 0_usize;
+        let mut cursor = root.walk();
+        for declaration in root.named_children(&mut cursor) {
+            if !self.visit(cancel)? {
+                return Ok(None);
+            }
+            match declaration.kind() {
+                "block_comment" | "line_comment" => {}
+                "fun_dec" => {
+                    let Some(binding) = self.only(declaration, "fvalbind", cancel)? else {
+                        return Ok(None);
+                    };
+                    let Some(other) = self.only(binding, "fmrule", cancel)? else {
+                        return Ok(None);
+                    };
+                    let Some(name) = self.field(other, "name", cancel)? else {
+                        return Ok(None);
+                    };
+                    let Some(name) = self.sml_identifier(name, cancel)? else {
+                        return Ok(None);
+                    };
+                    if self.sml_equal(name, function_name, cancel)? {
+                        functions = functions.saturating_add(1);
+                    }
+                }
+                kind if kind.ends_with("_dec") || declaration.start_byte() < rule.start_byte() => {
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+        if functions != 1 {
+            return Ok(None);
+        }
+        // A body-local environment is deliberately not reconstructed by this profile.
+        // A different handler formal does not shadow the function's own formal.
+        let mut pending = Vec::new();
+        pending
+            .try_reserve(1)
+            .map_err(|_| rootlight_adapter_sdk::SinkError::AllocationFailed)?;
+        pending.push(body);
+        while let Some(node) = pending.pop() {
+            if !self.visit(cancel)? || !self.clean(node) {
+                return Ok(None);
+            }
+            if matches!(node.kind(), "fn_exp" | "let_exp" | "case_exp")
+                || node.kind().ends_with("_dec")
+            {
+                return Ok(None);
+            }
+            if node.kind() == "mrule" {
+                let mut cursor = node.walk();
+                let mut pattern = None;
+                for child in node.named_children(&mut cursor) {
+                    if !self.visit(cancel)? {
+                        return Ok(None);
+                    }
+                    if !matches!(child.kind(), "block_comment" | "line_comment") {
+                        pattern = Some(child);
+                        break;
+                    }
+                }
+                let Some(pattern) = pattern else {
+                    return Ok(None);
+                };
+                if pattern.kind() != "vid_pat" {
+                    return Ok(None);
+                }
+                let Some(path) = self.only(pattern, "longvid", cancel)? else {
+                    return Ok(None);
+                };
+                let Some(name) = self.only(path, "vid", cancel)? else {
+                    return Ok(None);
+                };
+                let Some(name) = self.sml_identifier(name, cancel)? else {
+                    return Ok(None);
+                };
+                if self.sml_equal(name, spelling, cancel)? {
+                    return Ok(None);
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if !self.visit(cancel)? {
+                    return Ok(None);
+                }
+                pending
+                    .try_reserve(1)
+                    .map_err(|_| rootlight_adapter_sdk::SinkError::AllocationFailed)?;
+                pending.push(child);
+            }
+        }
+        Ok(Some(formal))
+    }
+
+    fn sml_formal_read(
+        &mut self,
+        node: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<Option<Range<usize>>, AdapterError> {
+        let Some(path) = node.parent().filter(|p| p.kind() == "longvid") else {
+            return Ok(None);
+        };
+        if self.only(path, "vid", cancel)? != Some(node) {
+            return Ok(None);
+        }
+        let Some(mut child) = path.parent().filter(|p| p.kind() == "vid_exp") else {
+            return Ok(None);
+        };
+        let rule = loop {
+            if !self.visit(cancel)? {
+                return Ok(None);
+            }
+            let Some(parent) = child.parent().filter(|p| self.clean(*p)) else {
+                return Ok(None);
+            };
+            if parent.kind() == "fmrule" {
+                if self.field(parent, "def", cancel)? != Some(child) {
+                    return Ok(None);
+                }
+                break parent;
+            }
+            if !matches!(
+                parent.kind(),
+                "app_exp" | "paren_exp" | "cond_exp" | "raise_exp"
+            ) {
+                return Ok(None);
+            }
+            child = parent;
+        };
+        let Some(formal) = self.sml_formal(rule, cancel)? else {
+            return Ok(None);
+        };
+        let Some(left) = self.sml_identifier(formal, cancel)? else {
+            return Ok(None);
+        };
+        let Some(right) = self.sml_identifier(node, cancel)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .sml_equal(left, right, cancel)?
+            .then_some(formal.start_byte()..node.end_byte()))
+    }
+
     pub(super) const fn exhausted(&self) -> bool {
         self.exhausted
     }
@@ -423,6 +769,22 @@ impl<'s> CaptureCache<'s> {
                 syntax,
             }));
         }
+        if node.kind() == "vid_pat" {
+            let Some(rule) = node.parent().filter(|parent| parent.kind() == "fmrule") else {
+                return Ok(None);
+            };
+            let Some(formal) = self.sml_formal(rule, cancel)? else {
+                return Ok(None);
+            };
+            if formal.byte_range() != node.byte_range() {
+                return Ok(None);
+            }
+            return Ok(Some(Declaration {
+                name: formal.byte_range(),
+                header: node.byte_range(),
+                syntax: "sml.standalone_parameter",
+            }));
+        }
         if node.kind() == "fmrule" {
             let Some((name, body)) = self.sml_header(node, cancel)? else {
                 return Ok(None);
@@ -472,6 +834,16 @@ pub(super) fn candidate(
             "sml.file"
         }
     } else if !cache.wat
+        && node.parent().is_none()
+        && node.kind() == "source_file"
+        && role == StructuralRole::Signature
+    {
+        if !cache.standalone_context(node, cancel)? {
+            return Ok(None);
+        }
+        range = 0..cache.source.len();
+        "sml.closed_standard_basis_context"
+    } else if !cache.wat
         && node.kind() == "vid"
         && matches!(role, StructuralRole::Reference | StructuralRole::Signature)
     {
@@ -488,6 +860,14 @@ pub(super) fn candidate(
             } else {
                 "sml.own_function_call"
             }
+        } else if let Some(proof) = cache.sml_formal_read(node, cancel)? {
+            required = true;
+            if role == StructuralRole::Signature {
+                range = proof;
+                "sml.standalone_formal_target"
+            } else {
+                "sml.standalone_formal_read"
+            }
         } else if role == StructuralRole::Reference {
             "sml.unresolved_name"
         } else {
@@ -501,21 +881,32 @@ pub(super) fn candidate(
             | StructuralRole::Scope
     ) {
         if let Some(d) = cache.declaration(node, cancel)? {
+            let formal = d.syntax == "sml.standalone_parameter";
             match role {
                 StructuralRole::Definition => {
                     range = d.name;
-                    if cache.wat { "wat.name" } else { "sml.name" }
+                    if cache.wat {
+                        "wat.name"
+                    } else if formal {
+                        "sml.formal_name"
+                    } else {
+                        "sml.name"
+                    }
                 }
                 StructuralRole::Signature => {
                     range = d.header;
                     if cache.wat {
                         "wat.header"
+                    } else if formal {
+                        "sml.formal_header"
                     } else {
                         "sml.header"
                     }
                 }
                 _ => d.syntax,
             }
+        } else if node.kind() == "vid_pat" {
+            return Ok(None);
         } else if role == StructuralRole::Declaration {
             if cache.wat {
                 "wat.unsupported"
@@ -860,5 +1251,157 @@ mod recursive_call_tests {
                     .is_none()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod standalone_formal_tests {
+    use super::*;
+
+    fn parse(source: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_sml::LANGUAGE.into())
+            .unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    fn find<'t>(root: Node<'t>, kind: &str, start: usize) -> Node<'t> {
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if node.kind() == kind && node.start_byte() == start {
+                return node;
+            }
+            let mut cursor = node.walk();
+            pending.extend(node.named_children(&mut cursor));
+        }
+        panic!("missing actual {kind}@{start}");
+    }
+
+    #[test]
+    fn explicit_standalone_basis_supplies_formal_and_read_but_unknown_basis_stays_unknown() {
+        let source = "fun measure value = value;";
+        let tree = parse(source);
+        assert!(!tree.root_node().has_error());
+        let rule = find(tree.root_node(), "fmrule", 4);
+        let parameter = find(tree.root_node(), "vid_pat", source.find("value").unwrap());
+        let usage = find(tree.root_node(), "vid", source.rfind("value").unwrap());
+        let mut unknown = CaptureCache::new(source.as_bytes(), 16384, true, false);
+        assert!(
+            unknown
+                .sml_formal(rule, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !unknown
+                .standalone_context(tree.root_node(), &Cancellation::new())
+                .unwrap()
+        );
+        let mut known = CaptureCache::standalone_standard_basis(source.as_bytes(), 16384, true);
+        assert!(
+            known
+                .standalone_context(tree.root_node(), &Cancellation::new())
+                .unwrap()
+        );
+        assert_eq!(
+            known
+                .declaration(parameter, &Cancellation::new())
+                .unwrap()
+                .unwrap()
+                .syntax,
+            "sml.standalone_parameter"
+        );
+        for (role, syntax, range) in [
+            (
+                StructuralRole::Reference,
+                "sml.standalone_formal_read",
+                usage.byte_range(),
+            ),
+            (
+                StructuralRole::Signature,
+                "sml.standalone_formal_target",
+                parameter.start_byte()..usage.end_byte(),
+            ),
+        ] {
+            let proof = candidate(
+                usage,
+                role,
+                source.as_bytes(),
+                &Cancellation::new(),
+                &mut known,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(proof.syntax, syntax);
+            assert_eq!(proof.start..proof.end, range);
+            assert!(proof.required);
+        }
+    }
+
+    #[test]
+    fn standalone_formals_refuse_constructor_prefixes_and_body_shadowing() {
+        for source in [
+            "datatype status = value; fun measure value = value;",
+            "exception value; fun measure value = value;",
+            "open External; fun measure value = value;",
+            "infix 6 custom; fun measure value = value;",
+            "val prefix = 1; fun measure value = value;",
+            "fun measure value = (fn value => value) value;",
+            "fun measure value = let val local_value = value in local_value end;",
+            "fun measure value = value handle value => value;",
+            "fun measure (value, other) = value;",
+            "fun measure value other = value;",
+            "fun measure nil = 0;",
+        ] {
+            let tree = parse(source);
+            assert!(!tree.root_node().has_error(), "{source}");
+            let rule = find(tree.root_node(), "fmrule", source.find("measure").unwrap());
+            let mut known = CaptureCache::standalone_standard_basis(source.as_bytes(), 16384, true);
+            assert!(
+                known
+                    .sml_formal(rule, &Cancellation::new())
+                    .unwrap()
+                    .is_none(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn original_standalone_formal_proof_has_complete_source_and_charged_native_work() {
+        let source = include_str!("../../tests/fixtures/standard_ml/deephandle.sml");
+        let tree = parse(source);
+        let rule = find(tree.root_node(), "fmrule", 4);
+        let mut known = CaptureCache::standalone_standard_basis(source.as_bytes(), 16384, true);
+        assert_eq!(
+            known
+                .sml_formal(rule, &Cancellation::new())
+                .unwrap()
+                .unwrap()
+                .byte_range(),
+            6..7
+        );
+        let mut partial = CaptureCache::standalone_standard_basis(source.as_bytes(), 16384, false);
+        assert!(
+            partial
+                .sml_formal(rule, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+        let mut limited = CaptureCache::standalone_standard_basis(source.as_bytes(), 0, true);
+        assert!(
+            limited
+                .sml_formal(rule, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(limited.exhausted());
+        let cancelled = Cancellation::new();
+        assert!(cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        assert!(matches!(
+            known.sml_formal(rule, &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 }

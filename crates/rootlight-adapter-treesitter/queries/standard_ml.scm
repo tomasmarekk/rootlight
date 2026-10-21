@@ -7,3 +7,5 @@
 [(block_comment) (line_comment)] @comment
 (string_scon) @string
 (vid) @reference @signature
+(vid_pat) @declaration @definition @signature
+(source_file) @signature

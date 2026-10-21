@@ -4606,6 +4606,8 @@ mod c_written_bindings;
 
 #[path = "analyzer_e2e/qsharp_native.rs"]
 mod qsharp_native;
+#[path = "analyzer_e2e/sml_standalone_formals.rs"]
+mod sml_standalone_formals;
 #[path = "analyzer_e2e/sml_wat_native.rs"]
 mod sml_wat_native;
 
