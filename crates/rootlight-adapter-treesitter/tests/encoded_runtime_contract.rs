@@ -432,7 +432,15 @@ fn assert_same_projected_captures(encoded: &ParseOutput, utf8: &ParseOutput, tex
         .map(|fact| {
             (
                 fact.syntax_kind().as_str(),
-                physical_offset(text, usize::try_from(fact.span().start_byte()).unwrap()),
+                // Whole-file module envelopes include the BOM; child offsets do not.
+                if fact.kind() == SyntaxFactKind::Module
+                    && fact.span().start_byte() == 0
+                    && fact.span().end_byte() == u64::try_from(text.len()).unwrap()
+                {
+                    0
+                } else {
+                    physical_offset(text, usize::try_from(fact.span().start_byte()).unwrap())
+                },
                 physical_offset(text, usize::try_from(fact.span().end_byte()).unwrap()),
             )
         })

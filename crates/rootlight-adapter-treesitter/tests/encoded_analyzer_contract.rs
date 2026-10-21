@@ -291,7 +291,8 @@ fn assert_native_payloads(fixture: &Fixture, language: &str, document: &Normaliz
                         .then(|| decode_vba_compilation_envelope(envelope).unwrap())
                 })
                 .unwrap();
-            assert_eq!(compilation.scope, fixture.span(VBA));
+            // Complete compilation scopes include the physical BOM, unlike child tokens.
+            assert_eq!(compilation.scope, fixture.source.span());
             assert!(compilation.complete);
             assert_eq!(compilation.branches.len(), 2);
             let group = fixture.span("#If Enabled Then\r\nDim included As Long\r\n#Else\r\nDim excluded As Long\r\n#End If");

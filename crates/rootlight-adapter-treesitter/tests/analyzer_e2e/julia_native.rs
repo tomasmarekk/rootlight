@@ -1064,18 +1064,29 @@ fn julia_empty_and_control_name_evidence_stays_on_original_encoded_bytes() {
         utf16_le.extend_from_slice(&unit.to_le_bytes());
         utf16_be.extend_from_slice(&unit.to_be_bytes());
     }
-    for (bytes, bom, utf16) in [
-        (text.as_bytes().to_vec(), 0, false),
-        (utf8_bom, 3, false),
-        (utf16_le, 2, true),
-        (utf16_be, 2, true),
+    for (bytes, bom, utf16, encoding) in [
+        (text.as_bytes().to_vec(), 0, false, "utf-8"),
+        (utf8_bom, 3, false, "utf-8"),
+        (utf16_le, 2, true, "utf-16le"),
+        (utf16_be, 2, true, "utf-16be"),
     ] {
         let provider = Arc::new(provider());
         let fixture = Fixture::new(JULIA, &bytes);
         let budget = limits();
+        let input = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            language(JULIA),
+            EncodingId::new(encoding).unwrap(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            build_context(),
+            &budget,
+        )
+        .unwrap()
+        .with_generated_status(JULIA.generated);
         let result = analyze(
             &analyzer(&provider, JULIA),
-            &request(&fixture.snapshot, &fixture.source, JULIA, &budget),
+            &input,
             &ExtensionSupport::default(),
         );
         let document = result.document();
