@@ -2,11 +2,11 @@
   "archive_sha256_preverified": false,
   "archive_signatures_verified": false,
   "association": {
-    "canonical_lock_sha256": "a429c1876066deb789aa12d1a3150165f8ca88242434a7695be8fbe217c89f46",
+    "canonical_lock_sha256": "f3b49129508a2d4da4c135e6c2e32d7698f3c4cc9a65a1c43870287a8337a0b4",
     "expected_metadata_url": "https://registry.npmjs.org/lightningcss/1.33.0",
     "git_head": "1d680fa14e9a089c92dc0929f869d6757ae91c30",
     "kind": "caller-supplied publisher metadata matching authenticated local npm pins",
-    "npm_report_sha256": "49fc85435a17f81897d49d3cd48f10fe8c33e57f9b1f0eedc87b7a22719360e9",
+    "npm_report_sha256": "52503e54c99892b30020b02a9cdc56c9faeba0bcc5b3beea3058e986d4e2c702",
     "published_main_distribution": {
       "archive": {
         "bytes": 87655,
@@ -463,7 +463,7 @@
     ],
     "related_platform_producer_association_verified": false,
     "source_to_binary_association_attested": false,
-    "upstream_lock_sha256": "dffb32a4f14e2a52a029d4c514d85a51b1fd5def05782feb883a565562a3287d"
+    "upstream_lock_sha256": "320758559a23bfd0863724bd4e5b0db685e5749ce7ed147249ae0d6aa3a84660"
   },
   "build_and_packaging_acceptance_verified": false,
   "frontend_source_complete": false,
