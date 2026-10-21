@@ -46,12 +46,12 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
-import runpy
 import sys
 
 root = Path(sys.argv[1]).resolve()
 paths = json.loads(sys.argv[2])
 archive_pin = sys.argv[3]
+fixture_locks = tuple(json.loads(sys.argv[4]))
 sys.path.insert(0, str(root / "scripts"))
 origins = {}
 source_files = {}
@@ -73,7 +73,10 @@ if archive_pin:
     sys.modules["verify_lightning_producer_sources"].ARCHIVE_SHA256 = archive_pin
 sys.argv = [str(root / "scripts/prepare_rust_source_bundle.py"),
             "--destination", str(root), "--verify-only"]
-runpy.run_path(sys.argv[0], run_name="__main__")
+# The authored frame uses the same explicit lock catalogue in both processes.
+exporter = sys.modules["prepare_rust_source_bundle"]
+exporter.LOCK_PATHS = fixture_locks
+exporter.main()
 print(json.dumps({"module_origins": origins, "source_files": source_files}, sort_keys=True))
 """
 
@@ -93,7 +96,8 @@ def _verify_with_exported_scripts(case, exported: Path, *, archive_pin: str = ""
     # Isolated startup ignores poisoned PYTHONPATH; only exported scripts are added.
     result = subprocess.run(
         [sys.executable, "-I", "-S", "-B", "-c", _EXPORTED_VERIFIER_BOOTSTRAP,
-         str(exported), json.dumps(bundle.VERIFICATION_SCRIPT_PATHS), archive_pin],
+         str(exported), json.dumps(bundle.VERIFICATION_SCRIPT_PATHS), archive_pin,
+         json.dumps(bundle.LOCK_PATHS)],
         cwd=unrelated, env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)},
         check=False, capture_output=True, text=True, timeout=60,
     )
@@ -120,6 +124,11 @@ def _verify_with_exported_scripts(case, exported: Path, *, archive_pin: str = ""
 
 class RustSourceBundleTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Base fixtures model the original Rust/npm frame without native siblings.
+        locks = patch.object(bundle, "LOCK_PATHS",
+                             ("Cargo.lock", "tests/native-grammars/Cargo.lock", "fuzz/Cargo.lock"))
+        locks.start()
+        self.addCleanup(locks.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -289,7 +298,7 @@ class RustSourceBundleTests(unittest.TestCase):
         acquired = self.root / f"{name}-archives"
         acquired.mkdir()
         (acquired / self.archive.name).write_bytes(self.archive.read_bytes())
-        vendor.vendor_sources(source, acquired)
+        vendor.vendor_sources(source, acquired, lock_paths=bundle.LOCK_PATHS)
         self.add_npm_inputs(source)
         _add_verification_scripts(source)
         # A Windows Git index may mark all vendor files non-executable; the

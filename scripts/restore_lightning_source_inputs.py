@@ -17,6 +17,7 @@ import tempfile
 
 import verify_lightning_producer_sources as producer
 import verify_lightning_yarn_sources as yarn
+from verify_native_producer_sources import REVIEWED_PRODUCERS, native_source_inputs
 
 
 # These preparation-only budgets bound untrusted hints before archive authentication.
@@ -121,7 +122,13 @@ def _namespace(project: Path, parent_relative: str, children: tuple[str, ...]) -
         return None
     current = parent
     for name in children:
-        _require({child.name for child in current.iterdir()} == {name}, "namespace_inventory_differs")
+        names = {child.name for child in current.iterdir()}
+        if current == parent and parent_relative == "source-inputs/producers":
+            _require(name in names and names <= {name, *REVIEWED_PRODUCERS},
+                     "namespace_inventory_differs")
+            native_source_inputs(project)
+        else:
+            _require(names == {name}, "namespace_inventory_differs")
         current = producer.safe_path(current / name, directory=True)
     return current
 
@@ -240,7 +247,9 @@ def restore_project(project: Path, *, restore_file_modes: bool = False) -> dict:
 
     Args:
         project: Existing project with the fixed optional producer/Yarn namespaces.
-            Only complete namespace-parent absence is optional; partial trees reject.
+            Shared-parent Flux/Raffia siblings must match their pinned catalogs
+            and are never modified. Only complete namespace-parent absence is
+            optional; partial owned trees reject.
         restore_file_modes: Permit archive-derived 755/644 normalization of existing
             regular files on POSIX. Without it, existing POSIX file modes must match.
             Windows permission/executable restoration is not claimed.

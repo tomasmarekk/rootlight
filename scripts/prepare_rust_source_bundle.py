@@ -22,6 +22,7 @@ import tarfile
 import tomllib
 
 from verify_cargo_source_bundle import verify_bundle
+from verify_native_producer_sources import REVIEWED_PRODUCERS, native_source_inputs
 from verify_lightning_producer_sources import (
     COMMIT as LIGHTNING_COMMIT, PACKAGE as LIGHTNING_PACKAGE, ROOT as LIGHTNING_ARCHIVE_ROOT,
     verify_bundle as verify_lightning_producer_bundle,
@@ -65,6 +66,7 @@ VERIFICATION_SCRIPT_PATHS = (
     "scripts/verify_lightning_producer_sources.py", "scripts/verify_lightning_yarn_sources.py",
     "scripts/verify_lightning_security_sources.py",
     "scripts/verify_local_npm_sources.py", "scripts/verify_npm_source_bundle.py",
+    "scripts/verify_native_producer_sources.py",
 )
 BUNDLE_SCOPE = "rust_workspace_native_grammars_fuzz_and_local_npm_inputs"
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,7 +247,8 @@ def _producer_source_inputs(root: Path) -> tuple[dict | None, dict[str, int], di
     """Bind an optional complete producer namespace to its offline verifier.
 
     Only complete absence supports older Rust/npm-only exports. A present parent
-    must contain exactly the reviewed producer. Authored directories, including
+    admits only Lightning and the separately pinned Flux/Raffia source catalogs.
+    Authored directories, including
     empty ones, are source inventory; their raw modes remain report metadata,
     not a guarantee of restored directory permissions or binary reproduction.
     """
@@ -254,10 +257,13 @@ def _producer_source_inputs(root: Path) -> tuple[dict | None, dict[str, int], di
         raise ValueError("linked producer source namespace")
     if not parent.exists():
         return None, {}, {}, set()
-    if not parent.is_dir() or {entry.name for entry in parent.iterdir()} != {
-        PurePosixPath(LIGHTNING_PRODUCER_PATH).name
-    }:
+    names = {entry.name for entry in parent.iterdir()} if parent.is_dir() else set()
+    lightning = PurePosixPath(LIGHTNING_PRODUCER_PATH).name
+    if not parent.is_dir() or not names or names - {lightning, *REVIEWED_PRODUCERS}:
         raise ValueError("producer namespace inventory differs from reviewed inputs")
+    native_modes, native_hashes, native_directories = native_source_inputs(root)
+    if lightning not in names:
+        return None, native_modes, native_hashes, native_directories
     report = verify_lightning_producer_bundle(root, root / LIGHTNING_PRODUCER_PATH)
     hashes = {f"{LIGHTNING_PRODUCER_PATH}/{name}": record["sha256"]
               for name, record in report["retained_inputs"].items()}
@@ -284,7 +290,8 @@ def _producer_source_inputs(root: Path) -> tuple[dict | None, dict[str, int], di
             raise ValueError("producer source inputs changed before export")
         directories.update(str(path) for path in PurePosixPath(name).parents
                            if str(path).startswith(PRODUCERS_PATH + "/"))
-    return report, dict(sorted(modes.items())), dict(sorted(hashes.items())), directories
+    return (report, dict(sorted((modes | native_modes).items())),
+            dict(sorted((hashes | native_hashes).items())), directories | native_directories)
 
 
 def _yarn_source_inputs(root: Path) -> tuple[dict | None, dict[str, int], dict[str, str], set[str]]:

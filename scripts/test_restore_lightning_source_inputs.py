@@ -21,7 +21,9 @@ import unittest
 from unittest.mock import patch
 
 import restore_lightning_source_inputs as restore
+import verify_native_producer_sources as native
 import test_prepare_rust_source_bundle as exports
+from test_verify_native_producer_sources import authored_siblings
 from test_verify_lightning_producer_sources import AuthoredFixture
 
 
@@ -145,6 +147,32 @@ class SourceRestorationTests(AuthoredFixture, unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "namespace_inventory_differs"):
                     restore.restore_project(project)
                 path.rmdir()
+
+    def test_shared_producer_parents_preserve_siblings_outside_the_owned_bundle(self):
+        pins = authored_siblings(self.project)
+        authority = patch.dict(native.REVIEWED_PRODUCERS, pins, clear=True)
+        authority.start()
+        self.addCleanup(authority.stop)
+        siblings = [path for name in pins
+                    for path in (self.destination.parent / name).rglob("*")]
+        before = {str(path): (path.lstat(), path.read_bytes() if path.is_file() else None)
+                  for path in siblings}
+        self.remove_empties()
+        proof = restore.restore_project(self.project, restore_file_modes=True)
+        self.assertEqual(sum(len(row["restored_directories"]) for row in proof["namespaces"]), 3)
+        for path in siblings:
+            metadata, payload = before[str(path)]
+            after = path.lstat()
+            self.assertEqual((after.st_mode, after.st_ino, after.st_size, after.st_mtime_ns),
+                             (metadata.st_mode, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns))
+            if payload is not None:
+                self.assertEqual(path.read_bytes(), payload)
+        repeated = restore.restore_project(self.project, restore_file_modes=True)
+        self.assertTrue(all(not row["restored_directories"] and not row["restored_file_modes"]
+                            for row in repeated["namespaces"]))
+        foreign = self.destination.parent / "unreviewed-producer"
+        foreign.mkdir()
+        self.reject_unchanged()
 
     def test_partial_foreign_and_extra_namespace_children_are_not_optional_absence(self):
         parent = self.yarn_root.parent
