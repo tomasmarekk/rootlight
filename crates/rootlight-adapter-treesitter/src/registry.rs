@@ -919,8 +919,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Coq => GrammarIdentity {
             language_id: "coq",
             grammar_version: "0.2.0",
-            source_package_sha256: "784a5319e136d5917ac3f171f3f48f15e88785cf72f961707c9bbe2888b975de",
-            parser_sha256: "0f64dd190ed13303382087254e858ac2196c8d71aa3ab02e1b9cc3e119d6b9a3",
+            source_package_sha256: "9811769961dac8af1e1c673588e692e48f5bbe4df8e0db698b659a4a32221323",
+            parser_sha256: "61b0322f58bd7f0c6fba25e8e5dac3f62d62ce1d4192fc96a2f89e3dd8b370d0",
             scanner_sha256: None,
         },
         GrammarFamily::V => GrammarIdentity {

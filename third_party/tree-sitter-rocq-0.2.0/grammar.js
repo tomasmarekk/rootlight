@@ -178,6 +178,7 @@ export default grammar({
         $.end_command,
         $.reserved_notation_command,
         $.notation_command,
+        $.abbreviation_command,
         $.tactic_notation_command,
 
         $.proof_command,
@@ -695,6 +696,12 @@ export default grammar({
       optional($.notation_scope)
     ),
 
+    abbreviation_command: $ => seq(
+      choice("Notation", "Abbreviation"),
+      field("name", $.ident), repeat(field("parameter", $.ident)),
+      ":=", field("definition", $._one_term), optional($.syntax_modifier_list)
+    ),
+
     notation_scope: $ => seq(
       ":",
       field("scope_name", $.ident)
@@ -896,6 +903,7 @@ export default grammar({
 
     _term1: $ => choice(
       $.term_projection,
+      $.numeric_projection_notation,
       $.scoped_term,
       $._term0,
     ),
@@ -909,6 +917,13 @@ export default grammar({
           repeat(field("argument", alias($.projection_explicit_argument, $.projection_argument))))
       ), ")"
     )),
+
+    numeric_projection_notation: $ => prec.left('scope', seq(
+      field("object", $.projection_object),
+      field("notation", $.numeric_projection_suffix)
+    )),
+
+    numeric_projection_suffix: $ => token.immediate(/\.[0-9]+/),
 
     projection_object: $ => $._term1,
     projection_name: $ => $._qualid,
@@ -1332,7 +1347,7 @@ export default grammar({
       field("body", $._ltac_expr)
     ),
 
-    tactic_notation_level: $ => /[0-5]/,
+    tactic_notation_level: $ => token(prec(-1, /[0-5]/)),
 
     tactic_notation_item: $ => choice(
       $.string,

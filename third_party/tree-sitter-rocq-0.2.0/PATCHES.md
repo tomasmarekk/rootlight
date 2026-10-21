@@ -63,6 +63,18 @@ Projection syntax does not establish a field target, elaborated type or a
 semantic projection relation. Existing generic notation and tactic recovery can
 still lose command boundaries; these nodes do not qualify complete recovery.
 
+The [abbreviation syntax](https://rocq-prover.org/doc/V9.0.0/refman/user-extensions/syntax-extensions.html#abbreviations)
+retains a written name, identifier parameters and a delimited term for legacy
+`Notation` and `Abbreviation` commands. Glued numeric projection notation has
+separate object and atomic dot-plus-digits suffix nodes; decimal numbers and
+sentence-ending periods remain distinct. These nodes retain written syntax only:
+they neither install notation nor establish a projection target or elaborated
+type. Dynamic notation and unsupported spacing remain separate applicable gaps.
+The lower lexical priority of a tactic-notation level prevents ordinary digits
+from becoming level nodes during unrelated error recovery. Native controls keep
+the original neighboring lemma ranges, reject malformed abbreviation heads and
+textual decoys, and distinguish chained numeric suffixes from decimal literals.
+
 The [Rocq 9.2 tactic-notation command](https://rocq-prover.org/doc/V9.2.0/refman/user-extensions/syntax-extensions.html#tactic-notations)
 retains ordered literal and parameterized nonterminal items, optional precedence
 levels zero through five and a separate Ltac body. Parameter items retain their

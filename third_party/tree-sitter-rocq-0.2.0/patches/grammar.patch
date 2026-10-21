@@ -8,7 +8,7 @@
  
      [$.fixannot, $._qualid],
      [$.assert_tactic, $._qualid],
-@@ -159,15 +160,25 @@
+@@ -159,15 +160,26 @@
  
          $.theorem_command,
          $.definition_command,
@@ -30,11 +30,12 @@
          $.end_command,
          $.reserved_notation_command,
          $.notation_command,
++        $.abbreviation_command,
 +        $.tactic_notation_command,
  
          $.proof_command,
          $.qed_command,
-@@ -379,6 +390,97 @@
+@@ -379,6 +391,97 @@
        $._def_body
      ),
  
@@ -132,7 +133,7 @@
      _def_body: $ => choice(
        seq(
          repeat($.binder),
-@@ -518,7 +620,58 @@
+@@ -518,7 +621,58 @@
  
      section_command: $ => seq("Section", $.ident),
  
@@ -192,11 +193,25 @@
  
      end_command: $ => seq("End", $.ident),
  
-@@ -742,9 +895,29 @@
+@@ -540,6 +694,12 @@
+       field("definition", $._one_term),
+       optional($.syntax_modifier_list),
+       optional($.notation_scope)
++    ),
++
++    abbreviation_command: $ => seq(
++      choice("Notation", "Abbreviation"),
++      field("name", $.ident), repeat(field("parameter", $.ident)),
++      ":=", field("definition", $._one_term), optional($.syntax_modifier_list)
+     ),
+ 
+     notation_scope: $ => seq(
+@@ -742,9 +902,37 @@
      ),
  
      _term1: $ => choice(
 +      $.term_projection,
++      $.numeric_projection_notation,
        $.scoped_term,
        $._term0,
      ),
@@ -211,6 +226,13 @@
 +      ), ")"
 +    )),
 +
++    numeric_projection_notation: $ => prec.left('scope', seq(
++      field("object", $.projection_object),
++      field("notation", $.numeric_projection_suffix)
++    )),
++
++    numeric_projection_suffix: $ => token.immediate(/\.[0-9]+/),
++
 +    projection_object: $ => $._term1,
 +    projection_name: $ => $._qualid,
 +    projection_argument: $ => choice(
@@ -222,7 +244,7 @@
  
      _term0: $ => seq(
        optional("'"), // For ImpParser Chapter
-@@ -755,6 +928,8 @@
+@@ -755,6 +943,8 @@
          $.match_expression,
          $.parenthesized_term,
          $.metavariable,
@@ -231,7 +253,7 @@
  
          // Custom
          $.list_literal,
-@@ -765,6 +940,10 @@
+@@ -765,6 +955,10 @@
  
  
      double_dot: $ => "..",
@@ -242,7 +264,7 @@
  
      recursive_notation_term: $ => seq(
        $.double_dot,
-@@ -1114,6 +1293,7 @@
+@@ -1114,6 +1308,7 @@
        seq("(", repeat($._name), ":", $.type, ")"),
        seq("(", $._name, optional(seq(":", $.type)), ":=", $._term, ")"),
        $.implicit_binders,
@@ -250,7 +272,7 @@
        seq("(", $._name, ":", $.type, "|", $._term, ")"),
        seq($.destructuring_pattern),
      ),
-@@ -1123,12 +1303,42 @@
+@@ -1123,12 +1318,42 @@
        seq("[", repeat1($._name), optional(seq(":", $.type)), "]")
      ),
  
@@ -283,7 +305,7 @@
 +      field("body", $._ltac_expr)
 +    ),
 +
-+    tactic_notation_level: $ => /[0-5]/,
++    tactic_notation_level: $ => token(prec(-1, /[0-5]/)),
 +
 +    tactic_notation_item: $ => choice(
 +      $.string,
@@ -293,7 +315,7 @@
  
      ltac_definition: $ => seq(
        "Ltac",
-@@ -1147,6 +1357,28 @@
+@@ -1147,6 +1372,28 @@
  
        $.tactic_or,
        $.match_goal,
@@ -322,7 +344,7 @@
      ),
  
      parenthesized_tactic: $ => seq(
-@@ -1482,8 +1714,7 @@
+@@ -1482,8 +1729,7 @@
      // Rules for Software Foundations Imp Chapters
      custom_notation_block: $ => choice(
        seq('<{', repeat($._dsl_token), '}>'),

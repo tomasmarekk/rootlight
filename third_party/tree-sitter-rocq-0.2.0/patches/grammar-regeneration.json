@@ -20,8 +20,8 @@
   "local_javascript_input_closure": [
     {
       "path": "grammar.js",
-      "bytes": 41043,
-      "sha256": "583e4184cbee76dfe0c4535a23ce345c905a96ed4105d0e5a551c8971e943788"
+      "bytes": 41595,
+      "sha256": "9fb86ec010c1fc4230fc9518e7f9ade2d715a0ee67232ea28bbd772d5d2c5bc9"
     },
     {
       "path": "tree-sitter.json",
@@ -33,18 +33,18 @@
   "outputs": [
     {
       "path": "src/parser.c",
-      "bytes": 23540969,
-      "sha256": "0f64dd190ed13303382087254e858ac2196c8d71aa3ab02e1b9cc3e119d6b9a3"
+      "bytes": 24037465,
+      "sha256": "61b0322f58bd7f0c6fba25e8e5dac3f62d62ce1d4192fc96a2f89e3dd8b370d0"
     },
     {
       "path": "src/grammar.json",
-      "bytes": 236438,
-      "sha256": "661f25c8c7559ebfc8cfb3402c4b44393fa280448da01aae4f1aa84144859de4"
+      "bytes": 238769,
+      "sha256": "cc1332c9ad2e30c1a3423083a1ceecf983e3ac6e82d7f4bb1542a3454003690d"
     },
     {
       "path": "src/node-types.json",
-      "bytes": 250122,
-      "sha256": "562335150a88e02ffcaad898741226e5092be110f7a9d9685af64435fc5041b1"
+      "bytes": 258628,
+      "sha256": "88d714196b9576501bbb57d998298af023251322cc9ccbff33119f92ba7d0980"
     },
     {
       "path": "src/tree_sitter/parser.h",
@@ -76,6 +76,7 @@
     "https://rocq-prover.org/doc/V9.2.0/refman/language/extensions/evars.html",
     "https://rocq-prover.org/doc/V9.2.0/refman/language/core/records.html",
     "https://rocq-prover.org/doc/V9.2.0/refman/user-extensions/syntax-extensions.html#tactic-notations",
-    "https://rocq-prover.org/doc/V9.2.0/refman/proof-engine/ltac.html"
+    "https://rocq-prover.org/doc/V9.2.0/refman/proof-engine/ltac.html",
+    "https://rocq-prover.org/doc/V9.0.0/refman/user-extensions/syntax-extensions.html#abbreviations"
   ]
 }

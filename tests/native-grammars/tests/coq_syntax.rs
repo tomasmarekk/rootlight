@@ -1141,7 +1141,7 @@ fn tactic_notation_original_mrutils_retains_all_five_exact_clean_lemma_heads() {
 }
 
 #[test]
-fn tactic_notation_level_recovery_preserves_original_and_authored_neighbors() {
+fn abbreviations_and_numeric_notation_preserve_original_and_authored_neighbors() {
     let original = include_str!("fixtures/coq-tactic-notations/record-notation-neighbor.v");
     assert_eq!(original.len(), 219);
     let authored = "Notation x := (fun x : A => {| g := x.1 |}).\nLemma kept : True.\n";
@@ -1151,8 +1151,40 @@ fn tactic_notation_level_recovery_preserves_original_and_authored_neighbors() {
         (authored, "Lemma kept"),
     ] {
         let tree = parser().parse(source, None).unwrap();
-        assert!(tree.root_node().has_error());
-        assert!(named_nodes(tree.root_node(), "tactic_notation_level").is_empty());
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(
+            named_nodes(tree.root_node(), "abbreviation_command").len(),
+            1
+        );
+        let projections = named_nodes(tree.root_node(), "numeric_projection_notation");
+        assert_eq!(projections.len(), if source == original { 2 } else { 1 });
+        for projection in projections {
+            assert_eq!(
+                projection
+                    .child_by_field_name("object")
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                "x"
+            );
+            assert!(matches!(
+                projection
+                    .child_by_field_name("notation")
+                    .unwrap()
+                    .utf8_text(source.as_bytes())
+                    .unwrap(),
+                ".1" | ".2"
+            ));
+        }
+        assert!(
+            named_nodes(tree.root_node(), "tactic_notation_level").is_empty(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
         let start = source.find(expected).unwrap();
         let end = start + source[start..].find('.').unwrap();
         let commands = named_nodes(tree.root_node(), "theorem_command");
@@ -1199,4 +1231,78 @@ fn tactic_notation_levels_stay_bounded_and_do_not_replace_ordinary_numbers() {
     let tree = parser().parse(source, None).unwrap();
     assert!(!tree.root_node().has_error());
     assert!(named_nodes(tree.root_node(), "tactic_notation_level").is_empty());
+}
+
+#[test]
+fn abbreviation_and_numeric_notation_reject_decoys_and_keep_malformed_neighbors() {
+    let decoy = "Definition wording := \"x.1\".\n(* y.2 *) Lemma kept : True.\n";
+    let tree = parser().parse(decoy, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{}",
+        tree.root_node().to_sexp()
+    );
+    assert!(named_nodes(tree.root_node(), "numeric_projection_notation").is_empty());
+    for source in [
+        "Notation := (fun x : A => x).\nLemma kept : True.\n",
+        "Notation named := .\nLemma kept : True.\n",
+    ] {
+        let tree = parser().parse(source, None).unwrap();
+        assert!(
+            tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let start = source.find("Lemma kept").unwrap();
+        assert!(
+            named_nodes(tree.root_node(), "theorem_command")
+                .iter()
+                .any(|node| node.start_byte() == start && !node.has_error()),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
+fn abbreviations_keep_parameters_and_numeric_suffixes_separate_from_decimals() {
+    for command in ["Notation", "Abbreviation"] {
+        let source = format!(
+            "{command} written argument := (argument).\nDefinition decimal := 3.14.\nDefinition projected := pair.1.2.\n"
+        );
+        let tree = parser().parse(&source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let abbreviations = named_nodes(tree.root_node(), "abbreviation_command");
+        assert_eq!(abbreviations.len(), 1);
+        assert_eq!(
+            abbreviations[0]
+                .child_by_field_name("name")
+                .unwrap()
+                .utf8_text(source.as_bytes())
+                .unwrap(),
+            "written"
+        );
+        assert_eq!(
+            abbreviations[0]
+                .child_by_field_name("parameter")
+                .unwrap()
+                .utf8_text(source.as_bytes())
+                .unwrap(),
+            "argument"
+        );
+        let suffixes = named_nodes(tree.root_node(), "numeric_projection_suffix");
+        assert_eq!(suffixes.len(), 2);
+        assert!(
+            suffixes
+                .iter()
+                .all(|suffix| matches!(suffix.utf8_text(source.as_bytes()).unwrap(), ".1" | ".2"))
+        );
+        let decimals = named_nodes(tree.root_node(), "number");
+        assert_eq!(decimals.len(), 1);
+        assert_eq!(decimals[0].utf8_text(source.as_bytes()).unwrap(), "3.14");
+    }
 }

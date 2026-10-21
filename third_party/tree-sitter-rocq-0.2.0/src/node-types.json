@@ -1,5 +1,115 @@
 [
   {
+    "type": "abbreviation_command",
+    "named": true,
+    "fields": {
+      "definition": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "'",
+            "named": false
+          },
+          {
+            "type": "@",
+            "named": false
+          },
+          {
+            "type": "custom_notation_block",
+            "named": true
+          },
+          {
+            "type": "dotted_qualid",
+            "named": true
+          },
+          {
+            "type": "ident",
+            "named": true
+          },
+          {
+            "type": "list_literal",
+            "named": true
+          },
+          {
+            "type": "ltac_term",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "metavariable",
+            "named": true
+          },
+          {
+            "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
+            "type": "parenthesized_term",
+            "named": true
+          },
+          {
+            "type": "record_construction",
+            "named": true
+          },
+          {
+            "type": "recursive_notation_term",
+            "named": true
+          },
+          {
+            "type": "scoped_term",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "term_projection",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "ident",
+            "named": true
+          }
+        ]
+      },
+      "parameter": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "ident",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "syntax_modifier_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "abort_command",
     "named": true,
     "fields": {}
@@ -137,6 +247,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -280,6 +394,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -431,6 +549,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -608,6 +730,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -751,6 +877,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -921,6 +1051,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -1082,6 +1216,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -1297,6 +1435,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -1479,6 +1621,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -1547,6 +1693,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -1744,6 +1894,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -2070,6 +2224,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -2210,6 +2368,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -2512,6 +2674,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -2749,6 +2915,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -2916,6 +3086,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -3101,6 +3275,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -3460,6 +3638,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -3682,6 +3864,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -3802,6 +3988,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -3945,6 +4135,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -4167,6 +4361,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -4463,6 +4661,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -4656,6 +4858,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -4802,6 +5008,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -4945,6 +5155,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -5114,6 +5328,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -5257,6 +5475,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -5601,6 +5823,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_pattern",
           "named": true
         },
@@ -5765,6 +5991,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -6037,6 +6267,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "open_binders",
           "named": true
         },
@@ -6199,6 +6433,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -6377,6 +6615,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -6607,6 +6849,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -6755,6 +7001,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -6913,6 +7163,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -7053,6 +7307,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -7199,6 +7457,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -7331,6 +7593,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -7514,6 +7780,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -7776,6 +8046,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -8191,6 +8465,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -8339,6 +8617,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -8437,6 +8719,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -8498,6 +8784,32 @@
         "types": [
           {
             "type": "ident",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "numeric_projection_notation",
+    "named": true,
+    "fields": {
+      "notation": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "numeric_projection_suffix",
+            "named": true
+          }
+        ]
+      },
+      "object": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "projection_object",
             "named": true
           }
         ]
@@ -8709,6 +9021,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_pattern",
           "named": true
         },
@@ -8903,6 +9219,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -9056,6 +9376,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -9247,6 +9571,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -9474,6 +9802,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -9566,6 +9898,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -10021,6 +10357,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -10312,6 +10652,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -10395,6 +10739,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "abbreviation_command",
+          "named": true
+        },
         {
           "type": "abort_command",
           "named": true
@@ -11213,6 +11561,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -11389,6 +11741,10 @@
           },
           {
             "type": "number",
+            "named": true
+          },
+          {
+            "type": "numeric_projection_notation",
             "named": true
           },
           {
@@ -11604,6 +11960,10 @@
             "named": true
           },
           {
+            "type": "numeric_projection_notation",
+            "named": true
+          },
+          {
             "type": "parenthesized_term",
             "named": true
           },
@@ -11798,6 +12158,10 @@
           "named": true
         },
         {
+          "type": "numeric_projection_notation",
+          "named": true
+        },
+        {
           "type": "parenthesized_term",
           "named": true
         },
@@ -11885,6 +12249,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "numeric_projection_notation",
           "named": true
         },
         {
@@ -12121,6 +12489,10 @@
   },
   {
     "type": "@",
+    "named": false
+  },
+  {
+    "type": "Abbreviation",
     "named": false
   },
   {
@@ -12849,6 +13221,10 @@
   },
   {
     "type": "number",
+    "named": true
+  },
+  {
+    "type": "numeric_projection_suffix",
     "named": true
   },
   {
