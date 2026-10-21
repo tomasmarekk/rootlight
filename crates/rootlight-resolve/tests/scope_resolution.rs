@@ -31,6 +31,9 @@ mod perl_binding;
 #[path = "scope_resolution/erlang_binding.rs"]
 mod erlang_binding;
 
+#[path = "scope_resolution/elm_binding.rs"]
+mod elm_binding;
+
 #[path = "scope_resolution/fsharp_binding.rs"]
 mod fsharp_binding;
 

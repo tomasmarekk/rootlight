@@ -102,6 +102,11 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
             content_hash(b"rootlight.first-slice.resolve/125"),
             ArtifactDecisionKind::Reuse,
         ),
+        (
+            InputKey::ResolverVersion,
+            content_hash(b"rootlight.first-slice.resolve/140"),
+            ArtifactDecisionKind::Reuse,
+        ),
     ] {
         let previous = InputSnapshot::new(
             current.iter().map(|input| {

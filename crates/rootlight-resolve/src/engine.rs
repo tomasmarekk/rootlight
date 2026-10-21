@@ -607,7 +607,7 @@ impl ResolutionEngine {
                 || !matches!(entity.kind, EntityKind::Enum | EntityKind::TypeAlias)
                 || entity.flags.contains(&EntityFlag::Synthetic)
                 || entity_source_file(entity) != Some(occurrence.file)
-                || entity.container != Some(ContainerRef::File(occurrence.file))
+                || !elm_local_type_owner(entity, occurrence, index)
                 || u64::try_from(entity.canonical_name.len())
                     .map_err(|_| ResolutionError::CountOverflow)?
                     != source_length
@@ -1417,6 +1417,67 @@ fn parameter_outside_r_scope(
     }
     // Exhausting the bounded walk is uncertainty, not evidence of invisibility.
     false
+}
+
+// Elm's complete leading module owns its top-level type declarations. Accept
+// that direct parser-owned scope without extending local lookup into imports
+// or arbitrary nested entities; older file-owned type facts remain compatible.
+fn elm_local_type_owner(
+    entity: &EntityRecord,
+    occurrence: &OccurrenceRecord,
+    index: &CandidateIndex<'_>,
+) -> bool {
+    let Some(ContainerRef::Entity(module_id)) = entity.container else {
+        return entity.container == Some(ContainerRef::File(occurrence.file));
+    };
+    let (Some(module), Some(file), Some(target_source)) = (
+        index.entities.get(&module_id),
+        index.files.get(&occurrence.file),
+        entity.evidence.source.as_ref(),
+    ) else {
+        return false;
+    };
+    let Some(module_source) = module.evidence.source.as_ref() else {
+        return false;
+    };
+    let parser_owned = index
+        .provenance
+        .get(&module.provenance)
+        .is_some_and(|record| {
+            record.language == "elm" && record.producer_kind == rootlight_ir::ProducerKind::Parser
+        });
+    if file.language != "elm"
+        || module.language != "elm"
+        || module.kind != EntityKind::Module
+        || module.flags.contains(&EntityFlag::Synthetic)
+        || module.container != Some(ContainerRef::File(file.id))
+        || !module.evidence.derivation.is_empty()
+        || !parser_owned
+        || module.repository != file.repository
+        || module.generation != file.generation
+        || entity.repository != file.repository
+        || entity.generation != file.generation
+        || occurrence.repository != file.repository
+        || occurrence.generation != file.generation
+    {
+        return false;
+    }
+    for source in [module_source, target_source, &occurrence.source] {
+        if source.repository() != file.repository
+            || source.generation() != file.generation
+            || source.content_hash() != file.content_hash
+            || source.span().file() != file.id
+            || source.span().start_byte() >= source.span().end_byte()
+            || source.span().end_byte() > file.byte_length
+        {
+            return false;
+        }
+    }
+    module_source.span().end_byte() == file.byte_length
+        && module_source.span().start_byte() < target_source.span().start_byte()
+        && target_source.span().end_byte() <= module_source.span().end_byte()
+        && module_source.span().start_byte() <= occurrence.source.span().start_byte()
+        && occurrence.source.span().end_byte() <= module_source.span().end_byte()
 }
 
 fn entity_source_file(entity: &EntityRecord) -> Option<FileId> {
