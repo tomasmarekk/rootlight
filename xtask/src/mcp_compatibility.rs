@@ -1688,7 +1688,7 @@ mod tests {
                 },
                 {
                     "tool": "source.read",
-                    "current_version": "1.3",
+                    "current_version": "1.4",
                     "projected_version": "1.0",
                 },
                 {

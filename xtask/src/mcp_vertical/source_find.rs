@@ -1505,7 +1505,7 @@ mod tests {
         };
         let reference = serde_json::to_value(source(0, 5)).unwrap();
         let wire = serde_json::json!({
-            "schema_version":"1.0",
+            "schema_version":"1.1",
             "repository":{"repository_id":repository,"display_name":"fixture"},
             "generation":generation,
             "data":{

@@ -4005,6 +4005,7 @@ fn assert_mixed_fixture_coverage_status(
         "coverage_excluded",
         "coverage_parse_error",
         "coverage_unrecognized",
+        "coverage_unsupported",
         "negative_claims_inconclusive",
     ]);
     for field in ["structural_freshness", "semantic_freshness"] {
@@ -7549,6 +7550,7 @@ mod tests {
             {"code": "coverage_excluded"},
             {"code": "coverage_parse_error"},
             {"code": "coverage_unrecognized"},
+            {"code": "coverage_unsupported"},
             {"code": "negative_claims_inconclusive"}
         ]);
         assert!(assert_mixed_fixture_coverage(&mixed).is_ok());
@@ -7573,7 +7575,7 @@ mod tests {
                 "{pointer}"
             );
         }
-        for omitted in 0..4 {
+        for omitted in 0..5 {
             let mut invalid = unknown.clone();
             invalid["warnings"].as_array_mut().unwrap().remove(omitted);
             assert!(assert_malformed_fixture_coverage(&invalid).is_err());
@@ -7598,7 +7600,7 @@ mod tests {
                 "{pointer}"
             );
         }
-        for omitted in 0..4 {
+        for omitted in 0..5 {
             let mut invalid = mixed.clone();
             invalid["warnings"].as_array_mut().unwrap().remove(omitted);
             assert!(assert_mixed_fixture_coverage(&invalid).is_err());
