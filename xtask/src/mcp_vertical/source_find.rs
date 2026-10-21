@@ -814,11 +814,16 @@ fn storage_failures(
     cells: &mut Vec<ToolMatrixCell>,
     storage_trace: &Path,
 ) -> Result<(), VerticalError> {
-    for state in ["corrupt_persisted_state", "incompatible_persisted_schema"] {
+    for (case, state) in ["corrupt_persisted_state", "incompatible_persisted_schema"]
+        .into_iter()
+        .enumerate()
+    {
         let target = temporary.join(format!("literal-{state}"));
         let root = target.join("repository");
         prepare(&root, std::slice::from_ref(original))?;
-        let paths = RuntimePaths::new(target.join("state"), target.join("runtime"))
+        // Keep the socket beneath the same short root as the main fixture so
+        // isolated fault cases also fit macOS's Unix socket path limit.
+        let paths = RuntimePaths::new(target.join("state"), temporary.join(format!("s{case}")))
             .map_err(VerticalError::Runtime)?;
         let environment = Environment::new(&paths);
         // The daemon must create each private storage tree. A regular recursive
