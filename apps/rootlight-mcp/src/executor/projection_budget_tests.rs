@@ -82,7 +82,7 @@ async fn standalone_explain_still_rejects_public_output_over_caller_limit() {
     let error = execute(&harness.executor, VerticalTool::SymbolExplain, arguments)
         .await
         .expect_err("the mapped public envelope remains bounded");
-    assert_canonical_budget_error(error.public_error().unwrap());
+    assert_measured_budget_error(error.public_error().unwrap(), "tokens", 16_000);
     let ObservedCall::SymbolExplain(call) = harness.only_call() else {
         panic!("only Explain was dispatched");
     };

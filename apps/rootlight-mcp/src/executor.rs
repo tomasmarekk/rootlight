@@ -150,6 +150,7 @@ const MAX_LOCATE_LANGUAGES: usize = 32;
 const MAX_LOCATE_LANGUAGE_BYTES: usize = 64;
 const DEFAULT_ADVANCED_RESULTS: u16 = 100;
 const ANALYTICAL_TRANSPORT_OVERHEAD: Duration = Duration::from_secs(1);
+const ANALYTICAL_WORK_DURATION: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const INVALID_ARGUMENT_MESSAGE: &str = error_definition(ErrorCode::InvalidArgument).message;
 #[cfg(test)]
@@ -225,13 +226,23 @@ impl AnalyticalBudget {
         source_duration: Option<bool>,
     ) -> Result<Self, ToolExecutionError> {
         let maximums = limits.maximums();
-        let execution_duration = Duration::from_millis(maximums.time_ms);
+        // Queueing, IPC, and mapping use the outer allowance. Ordinary daemon
+        // work retains the two-second engine policy; explicit full-source
+        // verification separately admits the caller's duration up to the
+        // existing protocol maximum.
+        let inclusive_duration = Duration::from_millis(maximums.time_ms);
+        let execution_duration = inclusive_duration.min(if source_duration == Some(true) {
+            client::EffectiveBudget::MAXIMUM_DURATION
+        } else {
+            ANALYTICAL_WORK_DURATION
+        });
         // An explicit transport deadline also covers negotiation and response
         // framing. Source-only requests with omitted duration retain all byte
         // and memory ceilings but do not invent a full-verification timeout.
-        let transport_duration = execution_duration
+        let transport_duration = inclusive_duration
             .checked_add(ANALYTICAL_TRANSPORT_OVERHEAD)
-            .ok_or_else(|| internal(ToolExecutionFailure::Executor))?;
+            .ok_or_else(|| internal(ToolExecutionFailure::Executor))?
+            .min(client::RequestTimeout::MAXIMUM);
         let timeout = client::RequestTimeout::new(transport_duration)
             .map_err(|_| internal(ToolExecutionFailure::Executor))?;
         let mut effective = client::EffectiveBudget::new(client::EffectiveBudgetLimits {
@@ -10044,19 +10055,27 @@ where
         if counters_match {
             let usage = usage(&mut output);
             let maximums = limits.maximums();
-            if usage.rows > maximums.rows
-                || usage.edges > maximums.traversal_facts
-                || usage.source_bytes > maximums.source_bytes
-                || usage.json_bytes > maximums.json_bytes
+            let exceeded = [
+                ("rows", usage.rows, maximums.rows),
+                ("edges", usage.edges, maximums.traversal_facts),
+                ("source_bytes", usage.source_bytes, maximums.source_bytes),
+                ("json_bytes", usage.json_bytes, maximums.json_bytes),
                 // The public estimate is bytes/4 for stable comparisons, not a
                 // safety upper bound. Exact UTF-8 bytes are the conservative
                 // provider-neutral token ceiling used for hard admission.
-                || usage.json_bytes > maximums.tokens
-                || enforce_duration && usage.wall_time_ms > maximums.time_ms
-            {
-                return Err(ToolExecutionError::new(authoritative_error(
-                    MappedDomainFailure::budget_exceeded(),
-                )));
+                ("tokens", usage.json_bytes, maximums.tokens),
+            ]
+            .into_iter()
+            .find(|(_, observed, limit)| observed > limit)
+            .or_else(|| {
+                (enforce_duration && usage.wall_time_ms > maximums.time_ms).then_some((
+                    "wall_time_ms",
+                    usage.wall_time_ms,
+                    maximums.time_ms,
+                ))
+            });
+            if let Some((resource, observed, limit)) = exceeded {
+                return Err(final_response_budget_error(resource, limit, observed));
             }
             let Value::Object(output) = value else {
                 return Err(internal(ToolExecutionFailure::Executor));
@@ -10071,6 +10090,35 @@ where
         usage.estimated_tokens = estimated_tokens;
     }
     Err(internal(ToolExecutionFailure::Executor))
+}
+
+fn final_response_budget_error(
+    resource: &'static str,
+    limit: u64,
+    observed: u64,
+) -> ToolExecutionError {
+    ToolExecutionError::new(
+        public_error_with_details(
+            MappedDomainFailure::budget_exceeded(),
+            [
+                (
+                    DetailKey::parse("resource").expect("static detail key is valid"),
+                    PublicValue::Label(
+                        SafeLabel::parse(resource).expect("static resource is valid"),
+                    ),
+                ),
+                (
+                    DetailKey::parse("limit").expect("static detail key is valid"),
+                    PublicValue::Unsigned(limit),
+                ),
+                (
+                    DetailKey::parse("observed").expect("static detail key is valid"),
+                    PublicValue::Unsigned(observed),
+                ),
+            ],
+        )
+        .expect("authoritative budget details satisfy public bounds"),
+    )
 }
 
 fn map_port_error(error: ClientPortError) -> ToolExecutionError {

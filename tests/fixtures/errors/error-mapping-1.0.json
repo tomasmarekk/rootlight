@@ -74,7 +74,11 @@
       "field_policy": "fixed",
       "fixed_field": "budget",
       "next_action": "correct_field",
-      "allowed_detail_keys": []
+      "allowed_detail_keys": [
+        "resource",
+        "limit",
+        "observed"
+      ]
     },
     {
       "failure": "resource_exhausted",

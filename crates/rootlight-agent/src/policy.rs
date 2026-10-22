@@ -12,7 +12,9 @@ const SERVER_MAX_SOURCE_BYTES: u64 = 64 * 1024;
 const SERVER_MAX_JSON_BYTES: u64 = 1024 * 1024;
 const SERVER_MAX_TOKENS: u64 = 1_000_000;
 const SERVER_MAX_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
-const SERVER_MAX_TIME_MS: u64 = 2_000;
+// The inclusive agent/MCP allowance covers queueing, IPC, and response mapping.
+// Query, search, and source work keep their independent cooperative limits.
+const SERVER_MAX_TIME_MS: u64 = 30_000;
 
 /// Read-only cancellation signal supplied by an application adapter.
 ///
@@ -851,7 +853,7 @@ mod tests {
                 paths: 1_000,
                 json_bytes: 1024 * 1024,
                 memory_bytes: 16 * 1024 * 1024,
-                time_ms: 2_000,
+                time_ms: 30_000,
             }
         );
     }
@@ -886,7 +888,7 @@ mod tests {
                 paths: 5,
                 json_bytes: 1_048_576,
                 memory_bytes: 16_777_216,
-                time_ms: 2_000,
+                time_ms: 30_000,
             }
         );
     }
@@ -1216,7 +1218,7 @@ mod tests {
         assert_eq!(ledger.consumed().depth, 4);
         assert_eq!(ledger.consumed().time_ms, 20);
         assert_eq!(ledger.remaining().depth, 16);
-        assert_eq!(ledger.remaining().time_ms, 2_000);
+        assert_eq!(ledger.remaining().time_ms, 30_000);
     }
 
     #[test]

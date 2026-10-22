@@ -3079,6 +3079,10 @@ pub struct EffectiveBudgetLimits {
 pub struct EffectiveBudget(EffectiveBudgetLimits, Option<bool>);
 
 impl EffectiveBudget {
+    /// Largest execution duration accepted by the daemon budget protocol.
+    pub const MAXIMUM_DURATION: Duration =
+        Duration::from_micros(MAX_FIRST_SLICE_BUDGET_DURATION_MICROS);
+
     /// Validates a complete set of resource ceilings against transport maxima.
     ///
     /// # Errors
@@ -17841,6 +17845,15 @@ mod tests {
             EffectiveBudget::new(invalid),
             Err(ClientError::InvalidEffectiveBudget)
         ));
+        let mut maximum_duration = limits;
+        maximum_duration.duration = EffectiveBudget::MAXIMUM_DURATION;
+        assert_eq!(
+            EffectiveBudget::new(maximum_duration)
+                .expect("the advertised duration boundary is admitted")
+                .limits()
+                .duration,
+            Duration::from_micros(MAX_FIRST_SLICE_BUDGET_DURATION_MICROS)
+        );
         let mut invalid = limits;
         invalid.duration = Duration::from_micros(MAX_FIRST_SLICE_BUDGET_DURATION_MICROS + 1);
         assert!(matches!(

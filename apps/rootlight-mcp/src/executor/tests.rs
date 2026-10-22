@@ -1342,36 +1342,46 @@ fn context_evidence_options_use_the_reserved_json_envelope_for_daemon_tokens() {
         memory_bytes: 8_192,
         time_ms: 17,
     };
-    let options = context_evidence::context_evidence_options(reservation)
-        .expect("complete parent reservation is valid");
-    let transported = options
-        .effective_budget()
-        .expect("child request carries an explicit budget")
-        .limits();
+    for time_ms in [
+        reservation.time_ms,
+        BudgetLimits::server_ceiling().maximums().time_ms,
+    ] {
+        let reservation = BudgetCharge {
+            time_ms,
+            ..reservation
+        };
+        let options = context_evidence::context_evidence_options(reservation)
+            .expect("complete parent reservation is valid");
+        let transported = options
+            .effective_budget()
+            .expect("child request carries an explicit budget")
+            .limits();
 
-    assert_eq!(transported.rows, reservation.rows);
-    assert_eq!(transported.edges, reservation.traversal_facts);
-    assert_eq!(transported.results, reservation.results);
-    assert_eq!(transported.source_bytes, reservation.source_bytes);
-    assert_eq!(transported.json_bytes, reservation.json_bytes);
-    assert_eq!(
-        transported.estimated_tokens,
-        reservation.tokens.max(reservation.json_bytes)
-    );
-    assert_eq!(transported.memory_bytes, reservation.memory_bytes);
-    assert_eq!(
-        transported.duration,
-        Duration::from_millis(reservation.time_ms)
-    );
-    assert_eq!(transported.depth, Some(reservation.depth));
-    assert_eq!(transported.paths, Some(reservation.paths));
-    assert_eq!(
-        options
-            .timeout()
-            .expect("child request carries a bounded transport deadline")
-            .duration(),
-        Duration::from_millis(reservation.time_ms) + ANALYTICAL_TRANSPORT_OVERHEAD
-    );
+        assert_eq!(transported.rows, reservation.rows);
+        assert_eq!(transported.edges, reservation.traversal_facts);
+        assert_eq!(transported.results, reservation.results);
+        assert_eq!(transported.source_bytes, reservation.source_bytes);
+        assert_eq!(transported.json_bytes, reservation.json_bytes);
+        assert_eq!(
+            transported.estimated_tokens,
+            reservation.tokens.max(reservation.json_bytes)
+        );
+        assert_eq!(transported.memory_bytes, reservation.memory_bytes);
+        assert_eq!(
+            transported.duration,
+            Duration::from_millis(reservation.time_ms).min(ANALYTICAL_WORK_DURATION)
+        );
+        assert_eq!(transported.depth, Some(reservation.depth));
+        assert_eq!(transported.paths, Some(reservation.paths));
+        assert_eq!(
+            options
+                .timeout()
+                .expect("child request carries a bounded transport deadline")
+                .duration(),
+            (Duration::from_millis(reservation.time_ms) + ANALYTICAL_TRANSPORT_OVERHEAD)
+                .min(client::RequestTimeout::MAXIMUM)
+        );
+    }
 }
 
 #[test]
@@ -1386,7 +1396,7 @@ fn streamed_source_budget_preserves_omitted_and_explicit_duration_provenance() {
             .source_verification_duration_explicit(),
         Some(false)
     );
-    for milliseconds in [2000, 5000] {
+    for milliseconds in [2_000_u64, 5_000, 60_000] {
         let requested: ResponseBudget =
             serde_json::from_value(json!({"timeout_ms": milliseconds})).unwrap();
         let explicit = AnalyticalBudget::new_source(Some(&requested)).unwrap();
@@ -1398,17 +1408,62 @@ fn streamed_source_budget_preserves_omitted_and_explicit_duration_provenance() {
                 .source_verification_duration_explicit(),
             Some(true)
         );
+        let admitted = milliseconds.min(BudgetLimits::server_ceiling().maximums().time_ms);
         assert_eq!(
             explicit.options.timeout().unwrap().duration(),
-            Duration::from_secs(2) + ANALYTICAL_TRANSPORT_OVERHEAD
+            (Duration::from_millis(admitted) + ANALYTICAL_TRANSPORT_OVERHEAD)
+                .min(client::RequestTimeout::MAXIMUM)
         );
-        assert_eq!(explicit.limits.maximums().time_ms, 2000);
-        if milliseconds == 5000 {
+        assert_eq!(
+            explicit
+                .options
+                .effective_budget()
+                .unwrap()
+                .limits()
+                .duration,
+            Duration::from_millis(admitted).min(client::EffectiveBudget::MAXIMUM_DURATION)
+        );
+        assert_eq!(explicit.limits.maximums().time_ms, admitted);
+        if milliseconds > BudgetLimits::server_ceiling().maximums().time_ms {
             assert!(explicit.limits.maximums().time_ms < milliseconds);
         }
+        let ordinary = AnalyticalBudget::new(Some(&requested)).unwrap();
+        assert_eq!(ordinary.limits.maximums().time_ms, admitted);
+        assert_eq!(
+            ordinary
+                .options
+                .effective_budget()
+                .unwrap()
+                .limits()
+                .duration,
+            Duration::from_millis(admitted).min(Duration::from_secs(2))
+        );
+        assert_eq!(
+            ordinary.options.timeout().unwrap().duration(),
+            (Duration::from_millis(admitted) + ANALYTICAL_TRANSPORT_OVERHEAD)
+                .min(client::RequestTimeout::MAXIMUM)
+        );
     }
     let ordinary = AnalyticalBudget::new(None).unwrap();
     assert!(ordinary.options.timeout().is_some());
+    assert_eq!(
+        ordinary
+            .options
+            .effective_budget()
+            .unwrap()
+            .limits()
+            .duration,
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        omitted
+            .options
+            .effective_budget()
+            .unwrap()
+            .limits()
+            .duration,
+        Duration::from_secs(2)
+    );
     assert_eq!(
         ordinary
             .options
@@ -1460,6 +1515,130 @@ fn measured_streamed_source_success_retains_elapsed_time_without_an_implicit_dea
             &mut value.usage
         })
         .is_err()
+    );
+}
+
+#[test]
+fn inclusive_analytical_allowance_preserves_explicit_and_server_duration_limits() {
+    #[derive(Clone, serde::Serialize)]
+    struct Measured {
+        usage: UsageSummary,
+    }
+    let output = Measured {
+        usage: serde_json::from_value(json!({
+            "rows":0,"edges":0,"source_bytes":0,"json_bytes":0,"estimated_tokens":0,
+            "wall_time_ms":0,"cache_status":"not_applicable","trace_id":"inclusive-duration"
+        }))
+        .unwrap(),
+    };
+    let omitted = AnalyticalBudget::new(None).unwrap();
+    assert_eq!(omitted.limits.maximums().time_ms, 30_000);
+    assert_eq!(
+        omitted.options.timeout().unwrap().duration(),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        omitted
+            .options
+            .effective_budget()
+            .unwrap()
+            .limits()
+            .duration,
+        Duration::from_secs(2)
+    );
+    let elapsed = Duration::from_millis(2_500);
+    let started = Instant::now().checked_sub(elapsed).unwrap();
+    let response = serialize_measured_success(output.clone(), started, omitted.limits, |value| {
+        &mut value.usage
+    })
+    .expect("the inclusive allowance admits response work after the old two-second ceiling");
+    assert!(response["usage"]["wall_time_ms"].as_u64().unwrap() >= 2_500);
+
+    let requested: ResponseBudget = serde_json::from_value(json!({"timeout_ms":2000})).unwrap();
+    let explicit = AnalyticalBudget::new(Some(&requested)).unwrap();
+    assert_eq!(explicit.limits.maximums().time_ms, 2_000);
+    assert_eq!(
+        explicit.options.timeout().unwrap().duration(),
+        Duration::from_secs(3)
+    );
+    assert_eq!(
+        explicit
+            .options
+            .effective_budget()
+            .unwrap()
+            .limits()
+            .duration,
+        Duration::from_secs(2)
+    );
+    let error = serialize_measured_success(output.clone(), started, explicit.limits, |value| {
+        &mut value.usage
+    })
+    .expect_err("an explicit lower duration still refuses the same elapsed work");
+    let observed =
+        assert_measured_budget_error(error.public_error().unwrap(), "wall_time_ms", 2_000);
+    assert!(observed >= 2_500);
+
+    let started = Instant::now()
+        .checked_sub(Duration::from_millis(30_001))
+        .unwrap();
+    let error =
+        serialize_measured_success(output, started, omitted.limits, |value| &mut value.usage)
+            .expect_err("omitting a budget cannot disable the inclusive server ceiling");
+    let observed =
+        assert_measured_budget_error(error.public_error().unwrap(), "wall_time_ms", 30_000);
+    assert!(observed >= 30_001);
+}
+
+#[test]
+fn final_serialization_reports_the_actual_exceeded_resource() {
+    #[derive(Clone, serde::Serialize)]
+    struct Measured {
+        usage: UsageSummary,
+    }
+    let output = Measured {
+        usage: serde_json::from_value(json!({
+            "rows":1,"edges":1,"source_bytes":1,"json_bytes":0,"estimated_tokens":0,
+            "wall_time_ms":0,"cache_status":"not_applicable","trace_id":"final-resource"
+        }))
+        .unwrap(),
+    };
+    for resource in ["rows", "edges", "source_bytes", "json_bytes", "tokens"] {
+        let mut maximums = BudgetLimits::server_ceiling().maximums();
+        match resource {
+            "rows" => maximums.rows = 0,
+            "edges" => maximums.traversal_facts = 0,
+            "source_bytes" => maximums.source_bytes = 0,
+            "json_bytes" => maximums.json_bytes = 0,
+            "tokens" => maximums.tokens = 0,
+            _ => unreachable!("the test covers the closed final resource dimensions"),
+        }
+        let error = serialize_measured_success(
+            output.clone(),
+            Instant::now(),
+            BudgetLimits::from_maximums(maximums),
+            |value| &mut value.usage,
+        )
+        .expect_err("each final resource ceiling remains enforced");
+        let observed = assert_measured_budget_error(error.public_error().unwrap(), resource, 0);
+        if matches!(resource, "rows" | "edges" | "source_bytes") {
+            assert_eq!(observed, 1);
+        } else {
+            assert!(observed > 1);
+        }
+    }
+    let mut maximums = BudgetLimits::server_ceiling().maximums();
+    maximums.rows = 0;
+    maximums.traversal_facts = 0;
+    let error = serialize_measured_success(
+        output,
+        Instant::now(),
+        BudgetLimits::from_maximums(maximums),
+        |value| &mut value.usage,
+    )
+    .expect_err("multiple exceeded limits preserve deterministic precedence");
+    assert_eq!(
+        assert_measured_budget_error(error.public_error().unwrap(), "rows", 0),
+        1
     );
 }
 
@@ -1630,8 +1809,13 @@ fn omitted_analytical_budget_transports_the_complete_server_ceiling() {
             .timeout()
             .expect("server ceiling supplies the transport timeout")
             .duration(),
-        Duration::from_millis(BudgetLimits::server_ceiling().maximums().time_ms)
-            + ANALYTICAL_TRANSPORT_OVERHEAD
+        (Duration::from_millis(BudgetLimits::server_ceiling().maximums().time_ms)
+            + ANALYTICAL_TRANSPORT_OVERHEAD)
+            .min(client::RequestTimeout::MAXIMUM)
+    );
+    assert_eq!(
+        budget.options.effective_budget().unwrap().limits().duration,
+        Duration::from_secs(2)
     );
 }
 
@@ -1760,11 +1944,14 @@ fn final_serialization_enforces_exact_byte_and_conservative_token_boundaries() {
         BudgetLimits::from_maximums(below_bytes),
     )
     .expect_err("one byte above the response ceiling is rejected");
-    assert_canonical_budget_error(
+    let observed = assert_measured_budget_error(
         error
             .public_error()
             .expect("byte exhaustion is a checked budget error"),
+        "json_bytes",
+        exact_bytes - 1,
     );
+    assert_eq!(observed, exact_bytes);
 
     let mut below_tokens = exact;
     below_tokens.tokens = exact_bytes - 1;
@@ -1774,11 +1961,14 @@ fn final_serialization_enforces_exact_byte_and_conservative_token_boundaries() {
         BudgetLimits::from_maximums(below_tokens),
     )
     .expect_err("one byte above the conservative token ceiling is rejected");
-    assert_canonical_budget_error(
+    let observed = assert_measured_budget_error(
         error
             .public_error()
             .expect("token exhaustion is a checked budget error"),
+        "tokens",
+        exact_bytes - 1,
     );
+    assert_eq!(observed, exact_bytes);
 }
 
 #[test]
@@ -2924,12 +3114,38 @@ fn plan_impact_response() -> ChangeImpactPortResponse {
 }
 
 fn assert_canonical_budget_error(error: &PublicError) {
+    assert_budget_error_identity(error);
+    assert!(error.details().is_empty());
+}
+
+fn assert_measured_budget_error(error: &PublicError, resource: &str, limit: u64) -> u64 {
+    assert_budget_error_identity(error);
+    let details = error.details();
+    assert_eq!(details.len(), 3);
+    assert_eq!(
+        details.get(&DetailKey::parse("resource").unwrap()),
+        Some(&PublicValue::Label(SafeLabel::parse(resource).unwrap()))
+    );
+    assert_eq!(
+        details.get(&DetailKey::parse("limit").unwrap()),
+        Some(&PublicValue::Unsigned(limit))
+    );
+    let PublicValue::Unsigned(observed) = details
+        .get(&DetailKey::parse("observed").unwrap())
+        .expect("the exact measured value is retained")
+    else {
+        panic!("observed usage has the unsigned public type");
+    };
+    assert!(*observed > limit);
+    *observed
+}
+
+fn assert_budget_error_identity(error: &PublicError) {
     let definition = error_definition(ErrorCode::BudgetExceeded);
     assert_eq!(error.code(), ErrorCode::BudgetExceeded);
     assert_eq!(error.message(), definition.message);
     assert!(!error.retryable());
     assert!(error.retry_after_ms().is_none());
-    assert!(error.details().is_empty());
     assert_eq!(
         error.next_actions(),
         &[NextAction::CorrectField {

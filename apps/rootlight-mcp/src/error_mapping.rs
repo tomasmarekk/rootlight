@@ -16,6 +16,7 @@ pub(crate) const ERROR_MAPPING_VERSION: &str = "1.0";
 const NO_DETAILS: &[&str] = &[];
 const CAPABILITY_DETAILS: &[&str] = &["capability_reason", "field_path"];
 const COST_DETAILS: &[&str] = &["cost_limit", "estimated_cost"];
+const BUDGET_DETAILS: &[&str] = &["resource", "limit", "observed"];
 
 /// Closed failure families currently converted at the MCP boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -127,7 +128,7 @@ pub(crate) const ERROR_MAPPINGS: [ErrorMapping; 11] = [
         field_policy: FieldPolicy::Fixed,
         fixed_field: Some("budget"),
         next_action: ActionPolicy::CorrectField,
-        allowed_detail_keys: NO_DETAILS,
+        allowed_detail_keys: BUDGET_DETAILS,
     },
     ErrorMapping {
         failure: DomainFailureKind::ResourceExhausted,
@@ -534,6 +535,35 @@ mod tests {
             ),
             Err(rootlight_mcp_contract::PublicErrorBuildError::InvalidDetailKey)
         );
+    }
+
+    #[test]
+    fn budget_details_preserve_resource_identity_and_unsigned_measurements() {
+        let resource = rootlight_mcp_contract::SafeLabel::parse("wall_time_ms").unwrap();
+        let details = [
+            (
+                rootlight_mcp_contract::DetailKey::parse("resource").unwrap(),
+                rootlight_mcp_contract::PublicValue::Label(resource),
+            ),
+            (
+                rootlight_mcp_contract::DetailKey::parse("limit").unwrap(),
+                rootlight_mcp_contract::PublicValue::Unsigned(2_000),
+            ),
+            (
+                rootlight_mcp_contract::DetailKey::parse("observed").unwrap(),
+                rootlight_mcp_contract::PublicValue::Unsigned(2_001),
+            ),
+        ];
+        let enriched =
+            public_error_with_details(MappedDomainFailure::budget_exceeded(), details.clone())
+                .expect("the closed budget detail keys are accepted");
+        let plain = public_error(MappedDomainFailure::budget_exceeded()).unwrap();
+        assert_eq!(enriched.code(), plain.code());
+        assert_eq!(enriched.message(), plain.message());
+        assert_eq!(enriched.retryable(), plain.retryable());
+        assert_eq!(enriched.retry_after_ms(), plain.retry_after_ms());
+        assert_eq!(enriched.next_actions(), plain.next_actions());
+        assert_eq!(enriched.details(), &details.into_iter().collect());
     }
 
     #[test]
