@@ -4086,6 +4086,2183 @@
         "The authoritative six-file NPM_RUNTIME_FILES allowlist excludes scripts/test_npm_wrappers.mjs from runtime packages. This disposition covers only the exact private fixture transition and does not exempt production filesystem operations or other tests."
       ],
       "disposition": "used_in_tests"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "These two reports describe the same inactive V VS Code extension installer path: globalStorageUri.fsPath produces install.vsh at :360-366 and cp.execSync interpolates it into a shell command at :444-448.",
+        "The original editor installer can download/run tools if manually executed. It is not used, loaded or packaged as an extension by Rootlight's selected V Rust parser binding, which compiles only src/parser.c.",
+        "A maintained installer would require explicit argument-vector execution and a separately reviewed source acquisition contract. Neither the original shell quoting nor its remote acquisition is approved for Rootlight builds."
+      ],
+      "function": "inactive upstream V editor installAnalyzer/getScriptPath",
+      "number": 232,
+      "path": "third_party/tree-sitter-v-0.0.6/upstream/v-analyzer-authored-files/editors/code/src/ctx.ts",
+      "rule": "js/shell-command-constructed-from-input",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 366,
+        "start": 366
+      },
+      "source_sha256": "4a5fd558548250d089b1ae4b7afed6a4e1afe59984ad1e5485913e71f83e63c1",
+      "upstream": {
+        "commit": "925d4570d1668746762a2cdf0ecb9a25be704a67",
+        "license": "MIT",
+        "member": "upstream/v-analyzer-authored-files/editors/code/src/ctx.ts",
+        "repository": "https://github.com/vlang/v-analyzer"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "These two reports describe the same inactive V VS Code extension installer path: globalStorageUri.fsPath produces install.vsh at :360-366 and cp.execSync interpolates it into a shell command at :444-448.",
+        "The original editor installer can download/run tools if manually executed. It is not used, loaded or packaged as an extension by Rootlight's selected V Rust parser binding, which compiles only src/parser.c.",
+        "A maintained installer would require explicit argument-vector execution and a separately reviewed source acquisition contract. Neither the original shell quoting nor its remote acquisition is approved for Rootlight builds."
+      ],
+      "function": "inactive upstream V editor installAnalyzer/getScriptPath",
+      "number": 233,
+      "path": "third_party/tree-sitter-v-0.0.6/upstream/v-analyzer-authored-files/editors/code/src/ctx.ts",
+      "rule": "js/shell-command-constructed-from-input",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 446,
+        "start": 446
+      },
+      "source_sha256": "4a5fd558548250d089b1ae4b7afed6a4e1afe59984ad1e5485913e71f83e63c1",
+      "upstream": {
+        "commit": "925d4570d1668746762a2cdf0ecb9a25be704a67",
+        "license": "MIT",
+        "member": "upstream/v-analyzer-authored-files/editors/code/src/ctx.ts",
+        "repository": "https://github.com/vlang/v-analyzer"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The preserved Eiffel Node test builds a shell command from a directory entry at :15-16. Quoting does not safely encode every possible filename; a maintained invocation would require execFileSync with a separate argument vector.",
+        "Rootlight's selected Rust build compiles active src/parser.c and src/scanner.c. It does not invoke this upstream Node test runner or its package lifecycle. Native Rust regressions and upstream source retention are separate from executing that script.",
+        "This source-specific inactive boundary does not assert that arbitrary filenames are safe for the original test command."
+      ],
+      "function": "inactive upstream Node parsing test command",
+      "number": 234,
+      "path": "third_party/tree-sitter-eiffel-1.0.0/upstream/authored-files/bindings/node/parsing_test.js",
+      "rule": "js/shell-command-injection-from-environment",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 16,
+        "start": 16
+      },
+      "source_sha256": "8de63db4f4c5420614bcf6fdf8ad7e20662f7c7810ee592487b3ecde9ab87b86",
+      "upstream": {
+        "commit": "ec098b67b98b7f5da10f8d66bdb6c52fc91341fc",
+        "license": "MIT",
+        "member": "upstream/authored-files/bindings/node/parsing_test.js",
+        "repository": "https://github.com/imustafin/tree-sitter-eiffel"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The preserved V editor development script constructs a shell command using an absolute checkout path at :26. Shell metacharacters in that path are not safely encoded; this is not claimed safe if invoked.",
+        "Rootlight's selected V binding compiles only src/parser.c. It does not run this editor minifier, its npx command, upstream npm hooks or upstream editor tooling; build-time acquisition remains prohibited.",
+        "A maintained use would require an argument-vector process API and reviewed local minifier. The original unused source remains byte-exact and attributed."
+      ],
+      "function": "inactive V editor JSON minifier development script",
+      "number": 235,
+      "path": "third_party/tree-sitter-v-0.0.6/upstream/v-analyzer-authored-files/editors/code/scripts/minify_json.js",
+      "rule": "js/shell-command-injection-from-environment",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 26,
+        "start": 26
+      },
+      "source_sha256": "f5967e788007809b3053219e412e763f02c97c4cf8b426b639f3ba8db1e62a2b",
+      "upstream": {
+        "commit": "925d4570d1668746762a2cdf0ecb9a25be704a67",
+        "license": "MIT",
+        "member": "upstream/v-analyzer-authored-files/editors/code/scripts/minify_json.js",
+        "repository": "https://github.com/vlang/v-analyzer"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The CDN script has no SRI in the preserved upstream playground HTML. It would remain a real supply-chain exposure if that original documentation page were served and opened.",
+        "The selected local Rust binding compiles only retained parser/scanner C inputs; it neither serves this HTML nor loads its external scripts. Rootlight's web application has a separate apps/rootlight-web/frontend source root and Vite build.",
+        "The exact file remains authenticated inert upstream source, with original license/provenance; it is not deleted, moved outside scanning, or rewritten as a false fixed upstream artifact."
+      ],
+      "function": "retained upstream playground CDN script tag",
+      "number": 236,
+      "path": "third_party/tree-sitter-v-0.0.6/upstream/tree-sitter-core-authored-files/crates/cli/src/playground.html",
+      "rule": "js/functionality-from-untrusted-source",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 464,
+        "start": 464
+      },
+      "source_sha256": "a200381a0e7481d47b5fc8e65eab003238208568eb0ae66c5d2b0409df99f7f9",
+      "upstream": {
+        "archive": {
+          "bytes": 901235,
+          "decoded_member_sha256": "a200381a0e7481d47b5fc8e65eab003238208568eb0ae66c5d2b0409df99f7f9",
+          "member": "tree-sitter-cd4b6e2ef996d4baca12caadb78dffc8b55bc869/crates/cli/src/playground.html",
+          "path": "third_party/tree-sitter-v-0.0.6/upstream/tree-sitter-core-authored.tar.gz",
+          "sha256": "40421cbc0f3610779e8968d9e14bb2b2f6cf2e7c41151f249a3376144aad3574"
+        },
+        "commit": "cd4b6e2ef996d4baca12caadb78dffc8b55bc869",
+        "git_tree": "5b88b70d3a11157a9b32f742a180d8c914667bab",
+        "inactive_gitlink_original_path": "tree_sitter_v/bindings/core",
+        "license": "MIT",
+        "member": "upstream/tree-sitter-core-authored-files/crates/cli/src/playground.html",
+        "original_member": "crates/cli/src/playground.html",
+        "repository": "https://github.com/tree-sitter/tree-sitter",
+        "used_by_local_binding": false
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The CDN script has no SRI in the preserved upstream playground HTML. It would remain a real supply-chain exposure if that original documentation page were served and opened.",
+        "The selected local Rust binding compiles only retained parser/scanner C inputs; it neither serves this HTML nor loads its external scripts. Rootlight's web application has a separate apps/rootlight-web/frontend source root and Vite build.",
+        "The exact file remains authenticated inert upstream source, with original license/provenance; it is not deleted, moved outside scanning, or rewritten as a false fixed upstream artifact."
+      ],
+      "function": "retained upstream playground CDN script tag",
+      "number": 237,
+      "path": "third_party/tree-sitter-v-0.0.6/upstream/tree-sitter-core-authored-files/crates/cli/src/playground.html",
+      "rule": "js/functionality-from-untrusted-source",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 463,
+        "start": 463
+      },
+      "source_sha256": "a200381a0e7481d47b5fc8e65eab003238208568eb0ae66c5d2b0409df99f7f9",
+      "upstream": {
+        "archive": {
+          "bytes": 901235,
+          "decoded_member_sha256": "a200381a0e7481d47b5fc8e65eab003238208568eb0ae66c5d2b0409df99f7f9",
+          "member": "tree-sitter-cd4b6e2ef996d4baca12caadb78dffc8b55bc869/crates/cli/src/playground.html",
+          "path": "third_party/tree-sitter-v-0.0.6/upstream/tree-sitter-core-authored.tar.gz",
+          "sha256": "40421cbc0f3610779e8968d9e14bb2b2f6cf2e7c41151f249a3376144aad3574"
+        },
+        "commit": "cd4b6e2ef996d4baca12caadb78dffc8b55bc869",
+        "git_tree": "5b88b70d3a11157a9b32f742a180d8c914667bab",
+        "inactive_gitlink_original_path": "tree_sitter_v/bindings/core",
+        "license": "MIT",
+        "member": "upstream/tree-sitter-core-authored-files/crates/cli/src/playground.html",
+        "original_member": "crates/cli/src/playground.html",
+        "repository": "https://github.com/tree-sitter/tree-sitter",
+        "used_by_local_binding": false
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "number": 238,
+      "rule": "js/file-system-race",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "path": "scripts/check_lightning_frontend_boundary.cjs",
+      "source_lines": {
+        "start": 112,
+        "end": 112
+      },
+      "function": "verifyDerivedArtifact",
+      "source_sha256": "5d1c2ab0c1bbf25e3b24a7cb47131a9887f5db62a69fe7e8498b72910551eba6",
+      "fixed_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "fixed_source_sha256": "3abc10f8019e61b947b40872fcc25405ea66461f50fd156ff69e89fb5b442110",
+      "evidence": [
+        "The old reader checked pathname metadata, opened the path and read it before admitting the opened descriptor. An open-boundary substitution could therefore read or wait on a nonregular or unexpectedly large object before the final identity rejection.",
+        "The corrected reader opens with available no-follow and nonblocking flags, then validates descriptor type, single-link identity, exact authorized size and canonical pathname agreement before allocation or reading. A 64 KiB scratch buffer hashes exactly the authorized bytes, followed by one EOF probe, final descriptor/path identity and SHA-256 checks; finally closes the descriptor on every opened path.",
+        "Three of the four added reader regressions failed against the original implementation on Windows. All 16 controls passed on pinned Node 24.11.1 Windows; the four pure-reader controls also passed on preinstalled Linux Node 18.19.1, including actual FIFO substitution, symlink rejection and fallback flags. All twelve original test bodies remain unchanged.",
+        "The supported native loader still reopens the authorized filename for dlopen after verification. This correction does not claim hostile-concurrency isolation of that separate load boundary or alter the fresh invocation-owned selection contract."
+      ],
+      "verification_command": "node --test scripts/test_lightning_frontend_boundary.cjs",
+      "disposition": "fixed_in_source"
+    },
+    {
+      "number": 239,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/fsharp_native_tests.rs",
+      "source_lines": {
+        "start": 8643,
+        "end": 8644
+      },
+      "function": "assert_native_admission_resource_bounded",
+      "source_sha256": "d8c7212432dd6a6beeccebec9d44d25b8c51e9c78401682c0cf558d00cf4079c",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "d8c7212432dd6a6beeccebec9d44d25b8c51e9c78401682c0cf558d00cf4079c",
+      "current_source_lines": {
+        "start": 8643,
+        "end": 8644
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 240,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/lib.rs",
+      "source_lines": {
+        "start": 40141,
+        "end": 40142
+      },
+      "function": "tests::utf16_dispositions_distinguish_routes_encodings_and_opaque_containers",
+      "source_sha256": "1a01e5cecb544dcc4fac10a09eb0e226e3f714fcfa92f17ecfddd19a7e54f8fc",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "c2e87099e4790a2ed63546183deaf6954e6e6619019f79583a1cd49acf0d1e5d",
+      "current_source_lines": {
+        "start": 40141,
+        "end": 40142
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404.",
+        "The current source file differs from the scanned blob because of the reviewed durable temporary-directory fixture correction. The complete enclosing sink function and primary statement bytes remain exact; current coordinates and blob hash are recorded separately, without changing the scanned source identity."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The reported first-only asterisk replacement remains in the preserved upstream docs/vendor/web-tree-sitter.js Emscripten helper at :1905; this review does not establish it as a complete generic sanitizer.",
+        "That JavaScript documentation runtime is not linked or invoked by the selected HCL Rust build, whose explicit inputs are src/parser.c and src/scanner.c. It is not Rootlight's browser parser/runtime.",
+        "The disposition covers only this exact authenticated inactive documentation payload, not the validity of other callers of that upstream helper."
+      ],
+      "function": "inactive documentation Emscripten cSig argument conversion",
+      "number": 241,
+      "path": "third_party/tree-sitter-hcl-1.2.0/upstream/docs/vendor/web-tree-sitter.js",
+      "rule": "js/incomplete-sanitization",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 1905,
+        "start": 1905
+      },
+      "source_sha256": "052b23c0816e3198d64c0c509fb4cfdeac79a52b85eb8ab42fc31499e6a141c3",
+      "upstream": {
+        "commit": "fad991865fee927dd1de5e172fb3f08ac674d914",
+        "license": "Apache-2.0",
+        "member": "upstream/docs/vendor/web-tree-sitter.js",
+        "repository": "https://github.com/tree-sitter-grammars/tree-sitter-hcl"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The CDN script has no SRI in the preserved upstream playground HTML. It would remain a real supply-chain exposure if that original documentation page were served and opened.",
+        "The selected local Rust binding compiles only retained parser/scanner C inputs; it neither serves this HTML nor loads its external scripts. Rootlight's web application has a separate apps/rootlight-web/frontend source root and Vite build.",
+        "The exact file remains authenticated inert upstream source, with original license/provenance; it is not deleted, moved outside scanning, or rewritten as a false fixed upstream artifact."
+      ],
+      "function": "retained upstream playground CDN script tag",
+      "number": 242,
+      "path": "third_party/tree-sitter-hcl-1.2.0/upstream/docs/index.html",
+      "rule": "js/functionality-from-untrusted-source",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 107,
+        "start": 107
+      },
+      "source_sha256": "b98a718abb06ae2a143130fac793cc672dd385999bec6fb6939f23971273c649",
+      "upstream": {
+        "commit": "fad991865fee927dd1de5e172fb3f08ac674d914",
+        "license": "Apache-2.0",
+        "member": "upstream/docs/index.html",
+        "repository": "https://github.com/tree-sitter-grammars/tree-sitter-hcl"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The CDN script has no SRI in the preserved upstream playground HTML. It would remain a real supply-chain exposure if that original documentation page were served and opened.",
+        "The selected local Rust binding compiles only retained parser/scanner C inputs; it neither serves this HTML nor loads its external scripts. Rootlight's web application has a separate apps/rootlight-web/frontend source root and Vite build.",
+        "The exact file remains authenticated inert upstream source, with original license/provenance; it is not deleted, moved outside scanning, or rewritten as a false fixed upstream artifact."
+      ],
+      "function": "retained upstream playground CDN script tag",
+      "number": 243,
+      "path": "third_party/tree-sitter-hcl-1.2.0/upstream/docs/index.html",
+      "rule": "js/functionality-from-untrusted-source",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 98,
+        "start": 98
+      },
+      "source_sha256": "b98a718abb06ae2a143130fac793cc672dd385999bec6fb6939f23971273c649",
+      "upstream": {
+        "commit": "fad991865fee927dd1de5e172fb3f08ac674d914",
+        "license": "Apache-2.0",
+        "member": "upstream/docs/index.html",
+        "repository": "https://github.com/tree-sitter-grammars/tree-sitter-hcl"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "false_positive",
+      "evidence": [
+        "The two constant patterns at grammar.js:75-76 become Tree-sitter token definitions at :306-307. They are not used by a JavaScript RegExp.exec/test operation on analyzed input.",
+        "bindings/rust/build.rs:5-9 compiles retained upstream/src/parser.c and the local scanner compatibility source; generation and JavaScript execution do not occur during the build.",
+        "Tree-sitter's official grammar DSL specifies generated regex-matching logic rather than the JavaScript backtracking engine. Therefore the reported JavaScript catastrophic-backtracking path is absent; this does not claim all parser work or grammar semantics are bounded."
+      ],
+      "function": "Tree-sitter string_scon/char_scon token definitions",
+      "number": 244,
+      "path": "third_party/tree-sitter-sml-0.25.0/upstream/grammar.js",
+      "rule": "js/redos",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 75,
+        "start": 75
+      },
+      "source_sha256": "bce192c1ad5f0152c2f200d5de9706a92e50eff3beed33d2a1cdc88221a366fd",
+      "upstream": {
+        "commit": "fd4b4955bb998262840ab8119885b3edf20ea75a",
+        "license": "MIT",
+        "member": "upstream/grammar.js",
+        "repository": "https://github.com/MatthewFluet/tree-sitter-sml"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "disposition": "false_positive",
+      "evidence": [
+        "The two constant patterns at grammar.js:75-76 become Tree-sitter token definitions at :306-307. They are not used by a JavaScript RegExp.exec/test operation on analyzed input.",
+        "bindings/rust/build.rs:5-9 compiles retained upstream/src/parser.c and the local scanner compatibility source; generation and JavaScript execution do not occur during the build.",
+        "Tree-sitter's official grammar DSL specifies generated regex-matching logic rather than the JavaScript backtracking engine. Therefore the reported JavaScript catastrophic-backtracking path is absent; this does not claim all parser work or grammar semantics are bounded."
+      ],
+      "function": "Tree-sitter string_scon/char_scon token definitions",
+      "number": 245,
+      "path": "third_party/tree-sitter-sml-0.25.0/upstream/grammar.js",
+      "rule": "js/redos",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 76,
+        "start": 76
+      },
+      "source_sha256": "bce192c1ad5f0152c2f200d5de9706a92e50eff3beed33d2a1cdc88221a366fd",
+      "upstream": {
+        "commit": "fd4b4955bb998262840ab8119885b3edf20ea75a",
+        "license": "MIT",
+        "member": "upstream/grammar.js",
+        "repository": "https://github.com/MatthewFluet/tree-sitter-sml"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The reported upstream identifier character classes really contain the unintended A-z range; this is not a regex-engine false positive.",
+        "The original upstream grammar is retained separately. The declared active finite derivative grammar.js:343-345 uses a-zA-Z in both classes; LOCAL_CHANGES.md discloses that separation.",
+        "bindings/rust/build.rs:5-11 compiles only active src/parser.c and src/scanner.c, never the upstream grammar or upstream historical parser. The reported original rule is superseded and not used by the selected parser."
+      ],
+      "function": "superseded upstream rules.identifier",
+      "number": 246,
+      "path": "third_party/tree-sitter-chapel-0.0.1/upstream/grammar.js",
+      "rule": "js/overly-large-range",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 293,
+        "start": 293
+      },
+      "source_sha256": "de55b7e61afa292e07d31f49fcfe8e45a1759eb47d7c8ba605161b3909a30d46",
+      "upstream": {
+        "commit": "630bdd0b01200eb6ebff82037f9bc5355491f965",
+        "license": "MIT",
+        "member": "upstream/grammar.js",
+        "package_license": "MIT AND Apache-2.0",
+        "repository": "https://github.com/ghbrown/tree-sitter-chapel"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "disposition": "not_used",
+      "evidence": [
+        "The reported upstream identifier character classes really contain the unintended A-z range; this is not a regex-engine false positive.",
+        "The original upstream grammar is retained separately. The declared active finite derivative grammar.js:343-345 uses a-zA-Z in both classes; LOCAL_CHANGES.md discloses that separation.",
+        "bindings/rust/build.rs:5-11 compiles only active src/parser.c and src/scanner.c, never the upstream grammar or upstream historical parser. The reported original rule is superseded and not used by the selected parser."
+      ],
+      "function": "superseded upstream rules.identifier",
+      "number": 247,
+      "path": "third_party/tree-sitter-chapel-0.0.1/upstream/grammar.js",
+      "rule": "js/overly-large-range",
+      "source_commit": "0aa4e8830ca0c6e9b19ea7f01fdd1a34580ed204",
+      "source_hash_basis": "current member matches the exact versioned grammars.lock source digest; alert API and SARIF source revision independently agree",
+      "source_lines": {
+        "end": 294,
+        "start": 294
+      },
+      "source_sha256": "de55b7e61afa292e07d31f49fcfe8e45a1759eb47d7c8ba605161b3909a30d46",
+      "upstream": {
+        "commit": "630bdd0b01200eb6ebff82037f9bc5355491f965",
+        "license": "MIT",
+        "member": "upstream/grammar.js",
+        "package_license": "MIT AND Apache-2.0",
+        "repository": "https://github.com/ghbrown/tree-sitter-chapel"
+      },
+      "analysis_id": 2002206725,
+      "github_dismissed_reason": "mitigated"
+    },
+    {
+      "number": 248,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/src/runtime/astro_reads.rs",
+      "source_lines": {
+        "start": 373,
+        "end": 373
+      },
+      "function": "append",
+      "source_sha256": "968014bf8e955a8cae1b6b817571150f1fa97a6ef58265013fc1589059450e93",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "968014bf8e955a8cae1b6b817571150f1fa97a6ef58265013fc1589059450e93",
+      "current_source_lines": {
+        "start": 373,
+        "end": 373
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 2,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The reported production primary location is candidates.swap_remove(index) in astro_reads::append. The complete append function contains no output/logging macro; it removes QueryCandidate metadata from an owned Vec. A secret-to-log flow is not established at this primary location.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 2 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 249,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/haxe_source.rs",
+      "source_lines": {
+        "start": 1253,
+        "end": 1253
+      },
+      "function": "haxe_original_required_preflight_keeps_both_contains_edges_and_exact_record_boundaries",
+      "source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "current_source_lines": {
+        "start": 1253,
+        "end": 1253
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 69,
+      "model_source_group": "partition_and_accounting",
+      "model_source_witnesses": [
+        "certified_partition",
+        "account_string",
+        "require_resource_limit"
+      ],
+      "evidence": [
+        "One attached flow labels certified_partition as sensitive although it constructs a checked structural SyntaxFact partition for an embedded Rust block. The other three start at account_string, whose inputs and outputs are only numeric string-byte accounting and typed resource-limit results.",
+        "The exact sink is the Haxe required-preflight record-boundary regression's failure diagnostic over its authored fixture and strict budget. All four attached flows and all related source references were inspected. This does not classify arbitrary SyntaxFact source text as nonsensitive or waive production logging.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 69 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 250,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/java_setter_parameters_source.rs",
+      "source_lines": {
+        "start": 448,
+        "end": 448
+      },
+      "function": "resolved_reads_and_scope_limits_fit_exact_record_admission",
+      "source_sha256": "08d8b90bb58ef2d8d9ed898caeb18e9c3627ad1c4b634d85bb5ad8490cb2a890",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "08d8b90bb58ef2d8d9ed898caeb18e9c3627ad1c4b634d85bb5ad8490cb2a890",
+      "current_source_lines": {
+        "start": 448,
+        "end": 448
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 251,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/ring_source.rs",
+      "source_lines": {
+        "start": 478,
+        "end": 478
+      },
+      "function": "required_closure_limits_cancellation_and_partial_source_cannot_publish_certificate",
+      "source_sha256": "99087aeaccb04adf4e588e0f6c96e518c7810153a82368ede1f1010620a5f6d6",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "99087aeaccb04adf4e588e0f6c96e518c7810153a82368ede1f1010620a5f6d6",
+      "current_source_lines": {
+        "start": 478,
+        "end": 478
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 252,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/tests/fresh_projection_capacity.rs",
+      "source_lines": {
+        "start": 273,
+        "end": 273
+      },
+      "function": "measured",
+      "source_sha256": "cc5ea254c6288b9576badcb1edf4eab66f24aa1a67aff89f3ae5c0eb9e7b4b17",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "93eef4ef8c392ca4e74ee1906a0274e7b50fa3704c460b4063a63ada20a58dc3",
+      "current_source_lines": {
+        "start": 273,
+        "end": 273
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404.",
+        "The current source file differs from the scanned blob because of the reviewed durable temporary-directory fixture correction. The complete enclosing sink function and primary statement bytes remain exact; current coordinates and blob hash are recorded separately, without changing the scanned source identity."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 253,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/tests/fresh_projection_capacity.rs",
+      "source_lines": {
+        "start": 431,
+        "end": 431
+      },
+      "function": "explicit_deep_and_custom_limits_keep_their_real_refusal",
+      "source_sha256": "cc5ea254c6288b9576badcb1edf4eab66f24aa1a67aff89f3ae5c0eb9e7b4b17",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "93eef4ef8c392ca4e74ee1906a0274e7b50fa3704c460b4063a63ada20a58dc3",
+      "current_source_lines": {
+        "start": 431,
+        "end": 431
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404.",
+        "The current source file differs from the scanned blob because of the reviewed durable temporary-directory fixture correction. The complete enclosing sink function and primary statement bytes remain exact; current coordinates and blob hash are recorded separately, without changing the scanned source identity."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 254,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/tests/fresh_projection_capacity.rs",
+      "source_lines": {
+        "start": 471,
+        "end": 471
+      },
+      "function": "unrelated_memory_and_cancellation_never_mint_projection_recovery",
+      "source_sha256": "cc5ea254c6288b9576badcb1edf4eab66f24aa1a67aff89f3ae5c0eb9e7b4b17",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "93eef4ef8c392ca4e74ee1906a0274e7b50fa3704c460b4063a63ada20a58dc3",
+      "current_source_lines": {
+        "start": 471,
+        "end": 471
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404.",
+        "The current source file differs from the scanned blob because of the reviewed durable temporary-directory fixture correction. The complete enclosing sink function and primary statement bytes remain exact; current coordinates and blob hash are recorded separately, without changing the scanned source identity."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 255,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/tests/fresh_projection_capacity.rs",
+      "source_lines": {
+        "start": 500,
+        "end": 500
+      },
+      "function": "unfit_source_only_admission_is_still_a_real_typed_failure",
+      "source_sha256": "cc5ea254c6288b9576badcb1edf4eab66f24aa1a67aff89f3ae5c0eb9e7b4b17",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "93eef4ef8c392ca4e74ee1906a0274e7b50fa3704c460b4063a63ada20a58dc3",
+      "current_source_lines": {
+        "start": 500,
+        "end": 500
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404.",
+        "The current source file differs from the scanned blob because of the reviewed durable temporary-directory fixture correction. The complete enclosing sink function and primary statement bytes remain exact; current coordinates and blob hash are recorded separately, without changing the scanned source identity."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 256,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/tests/fresh_projection_capacity.rs",
+      "source_lines": {
+        "start": 901,
+        "end": 901
+      },
+      "function": "run_preservation_lifecycle",
+      "source_sha256": "cc5ea254c6288b9576badcb1edf4eab66f24aa1a67aff89f3ae5c0eb9e7b4b17",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "93eef4ef8c392ca4e74ee1906a0274e7b50fa3704c460b4063a63ada20a58dc3",
+      "current_source_lines": {
+        "start": 901,
+        "end": 901
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404.",
+        "The current source file differs from the scanned blob because of the reviewed durable temporary-directory fixture correction. The complete enclosing sink function and primary statement bytes remain exact; current coordinates and blob hash are recorded separately, without changing the scanned source identity."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 257,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-service/src/tests/fresh_projection_capacity.rs",
+      "source_lines": {
+        "start": 1003,
+        "end": 1003
+      },
+      "function": "run_preservation_lifecycle",
+      "source_sha256": "cc5ea254c6288b9576badcb1edf4eab66f24aa1a67aff89f3ae5c0eb9e7b4b17",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "93eef4ef8c392ca4e74ee1906a0274e7b50fa3704c460b4063a63ada20a58dc3",
+      "current_source_lines": {
+        "start": 1003,
+        "end": 1003
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 13,
+      "model_source_group": "accounting",
+      "model_source_witnesses": [
+        "account_staging_bytes",
+        "account_external_staging_bytes",
+        "certificate_entry_bytes"
+      ],
+      "evidence": [
+        "The attached flows label staging byte-accounting return values as sensitive. account_staging_bytes and its external wrapper accept u64 byte counts, checked-add atomic resource counters and return only Ok(()) or the fieldless Limits error; they do not return account information, credentials or file text.",
+        "Other reported related sources include certificate_entry_bytes, which returns a checked conversion of two fixed Rust size_of expressions. That value is a memory admission size, not a certificate. Exact source bodies and every attached complete flow were inspected.",
+        "This specific source-classification error is separate from the sensitivity of arbitrary reports. The reported sinks here are failure diagnostics in reviewed synthetic service tests; no production source/secret logging waiver is proposed.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 13 related source references were reviewed in GitHub CodeQL analysis 2001913404.",
+        "The current source file differs from the scanned blob because of the reviewed durable temporary-directory fixture correction. The complete enclosing sink function and primary statement bytes remain exact; current coordinates and blob hash are recorded separately, without changing the scanned source identity."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 258,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/src/query_pack/vba.rs",
+      "source_lines": {
+        "start": 1454,
+        "end": 1456
+      },
+      "function": "tests::procedure_pointer_capture_retains_the_complete_qualified_target",
+      "source_sha256": "4a10d3e90cb1c4ec2dc21f7ac96fd02be2a487f0b9f41cf12562fcb5f65c1bf6",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "4a10d3e90cb1c4ec2dc21f7ac96fd02be2a487f0b9f41cf12562fcb5f65c1bf6",
+      "current_source_lines": {
+        "start": 1454,
+        "end": 1456
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 2,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 2 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 259,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/src/query_pack/vba.rs",
+      "source_lines": {
+        "start": 1659,
+        "end": 1660
+      },
+      "function": "tests::exported_header_selects_the_last_module_name",
+      "source_sha256": "4a10d3e90cb1c4ec2dc21f7ac96fd02be2a487f0b9f41cf12562fcb5f65c1bf6",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "4a10d3e90cb1c4ec2dc21f7ac96fd02be2a487f0b9f41cf12562fcb5f65c1bf6",
+      "current_source_lines": {
+        "start": 1659,
+        "end": 1660
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 2,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 2 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 260,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/analyzer_e2e/coq_native.rs",
+      "source_lines": {
+        "start": 1050,
+        "end": 1051
+      },
+      "function": "named_definition",
+      "source_sha256": "fdd720ceda76d3b0badb8f1c67cf213493e49965d5a71893c5c2c0adcb9e8cbb",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "fdd720ceda76d3b0badb8f1c67cf213493e49965d5a71893c5c2c0adcb9e8cbb",
+      "current_source_lines": {
+        "start": 1050,
+        "end": 1051
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 9,
+      "model_source_group": "certificate_output",
+      "model_source_witnesses": [
+        "certificate_output"
+      ],
+      "evidence": [
+        "Each attached flow begins in the test-only certificate_output helper, which constructs a private Coq Fixture, runs the real analyzer, validates its IR and checks source provenance. The helper returns AnalysisOutput for authored parser fixtures, not credential or cryptographic certificate material.",
+        "The sink is the named_definition test assertion's failure diagnostic over the same synthetic analysis document. Its test/source enclosure and all four attached flows were inspected; this is not a production logging exemption.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 9 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 261,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/c_parameters_source.rs",
+      "source_lines": {
+        "start": 754,
+        "end": 754
+      },
+      "function": "resolved_formal_relations_and_records_obey_exact_transaction_limits_and_cancel",
+      "source_sha256": "ad6b961fadb47b9d39432a0b9311875c84bb581611cbf77ece4b4a8efa82f996",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "ad6b961fadb47b9d39432a0b9311875c84bb581611cbf77ece4b4a8efa82f996",
+      "current_source_lines": {
+        "start": 754,
+        "end": 754
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 262,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/cue_source.rs",
+      "source_lines": {
+        "start": 369,
+        "end": 370
+      },
+      "function": "dynamic_alias_comprehension_and_expression_text_do_not_fabricate_fields",
+      "source_sha256": "85d731e86efe11e21c72fb93ca444fc8feb41f09e060c8af42773792d295f717",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "85d731e86efe11e21c72fb93ca444fc8feb41f09e060c8af42773792d295f717",
+      "current_source_lines": {
+        "start": 369,
+        "end": 370
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 263,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/fish_source.rs",
+      "source_lines": {
+        "start": 257,
+        "end": 258
+      },
+      "function": "option_values_documentary_text_and_dynamic_contexts_do_not_fabricate_parameters",
+      "source_sha256": "5264588ab0c06adf942eabd2369a6475531c5813813d2a2b7e9eaac29a4a4b3a",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "5264588ab0c06adf942eabd2369a6475531c5813813d2a2b7e9eaac29a4a4b3a",
+      "current_source_lines": {
+        "start": 257,
+        "end": 258
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 264,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/fuzz_parser.rs",
+      "source_lines": {
+        "start": 304,
+        "end": 304
+      },
+      "function": "cleanup_fixtures_fit_the_bounded_parser_budget",
+      "source_sha256": "eeaceda8088001b0168721a37a1203c4413dc5cd74cb59e13ea01d5095b1c7f3",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "eeaceda8088001b0168721a37a1203c4413dc5cd74cb59e13ea01d5095b1c7f3",
+      "current_source_lines": {
+        "start": 304,
+        "end": 304
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 265,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/haxe_source.rs",
+      "source_lines": {
+        "start": 518,
+        "end": 520
+      },
+      "function": "haxe_partial_ranges_and_cancelled_preflight_cannot_supply_a_complete_local_certificate",
+      "source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "current_source_lines": {
+        "start": 518,
+        "end": 520
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 266,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/java_parameters.rs",
+      "source_lines": {
+        "start": 171,
+        "end": 172
+      },
+      "function": "entity_at",
+      "source_sha256": "69e14b50ee836474c89aa4dd3184642b4b4166201ec52e2674e1028c2b06c897",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "69e14b50ee836474c89aa4dd3184642b4b4166201ec52e2674e1028c2b06c897",
+      "current_source_lines": {
+        "start": 171,
+        "end": 172
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 267,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/java_setter_parameters_source.rs",
+      "source_lines": {
+        "start": 181,
+        "end": 182
+      },
+      "function": "entity_at",
+      "source_sha256": "08d8b90bb58ef2d8d9ed898caeb18e9c3627ad1c4b634d85bb5ad8490cb2a890",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "08d8b90bb58ef2d8d9ed898caeb18e9c3627ad1c4b634d85bb5ad8490cb2a890",
+      "current_source_lines": {
+        "start": 181,
+        "end": 182
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 268,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/java_setter_parameters_source.rs",
+      "source_lines": {
+        "start": 251,
+        "end": 253
+      },
+      "function": "resolved_formal_read",
+      "source_sha256": "08d8b90bb58ef2d8d9ed898caeb18e9c3627ad1c4b634d85bb5ad8490cb2a890",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "08d8b90bb58ef2d8d9ed898caeb18e9c3627ad1c4b634d85bb5ad8490cb2a890",
+      "current_source_lines": {
+        "start": 251,
+        "end": 253
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 269,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/modelica_source.rs",
+      "source_lines": {
+        "start": 175,
+        "end": 176
+      },
+      "function": "entity_at",
+      "source_sha256": "18acd8c236a41e596605ccec6e1ea0c1101b499a881eefd83bfcacd2fd169fc3",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "18acd8c236a41e596605ccec6e1ea0c1101b499a881eefd83bfcacd2fd169fc3",
+      "current_source_lines": {
+        "start": 175,
+        "end": 176
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 270,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/pony_source.rs",
+      "source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "function": "entity_at",
+      "source_sha256": "016d9721de38e159191844ecd17f53dc4509e66225cc764e4fc5c5f54d2b6b04",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "016d9721de38e159191844ecd17f53dc4509e66225cc764e4fc5c5f54d2b6b04",
+      "current_source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 271,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/python_parameters.rs",
+      "source_lines": {
+        "start": 172,
+        "end": 173
+      },
+      "function": "entity_at",
+      "source_sha256": "b579e1746711ad19bdddb55022a2667bf21a49e1ecc8f6ce860bd1eccf96eeac",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "b579e1746711ad19bdddb55022a2667bf21a49e1ecc8f6ce860bd1eccf96eeac",
+      "current_source_lines": {
+        "start": 172,
+        "end": 173
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 272,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/qml_source.rs",
+      "source_lines": {
+        "start": 183,
+        "end": 184
+      },
+      "function": "entity_at",
+      "source_sha256": "fd86c08ef8f70e661dd9ae5edfd9123cbb851dd422ac1129c1c2a39034dda8a2",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "fd86c08ef8f70e661dd9ae5edfd9123cbb851dd422ac1129c1c2a39034dda8a2",
+      "current_source_lines": {
+        "start": 183,
+        "end": 184
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 273,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/qml_source.rs",
+      "source_lines": {
+        "start": 250,
+        "end": 250
+      },
+      "function": "original_qml_four_definitions_and_three_relations_keep_exact_kinds_and_witnesses",
+      "source_sha256": "fd86c08ef8f70e661dd9ae5edfd9123cbb851dd422ac1129c1c2a39034dda8a2",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "fd86c08ef8f70e661dd9ae5edfd9123cbb851dd422ac1129c1c2a39034dda8a2",
+      "current_source_lines": {
+        "start": 250,
+        "end": 250
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 274,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/python_parameters.rs",
+      "source_lines": {
+        "start": 470,
+        "end": 472
+      },
+      "function": "resolved_formal_read",
+      "source_sha256": "b579e1746711ad19bdddb55022a2667bf21a49e1ecc8f6ce860bd1eccf96eeac",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "b579e1746711ad19bdddb55022a2667bf21a49e1ecc8f6ce860bd1eccf96eeac",
+      "current_source_lines": {
+        "start": 470,
+        "end": 472
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 275,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/ring_source.rs",
+      "source_lines": {
+        "start": 193,
+        "end": 194
+      },
+      "function": "entity_at",
+      "source_sha256": "99087aeaccb04adf4e588e0f6c96e518c7810153a82368ede1f1010620a5f6d6",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "99087aeaccb04adf4e588e0f6c96e518c7810153a82368ede1f1010620a5f6d6",
+      "current_source_lines": {
+        "start": 193,
+        "end": 194
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 276,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/ring_source.rs",
+      "source_lines": {
+        "start": 264,
+        "end": 264
+      },
+      "function": "original_ring_class_method_parameter_and_read_keep_exact_source_ownership",
+      "source_sha256": "99087aeaccb04adf4e588e0f6c96e518c7810153a82368ede1f1010620a5f6d6",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "99087aeaccb04adf4e588e0f6c96e518c7810153a82368ede1f1010620a5f6d6",
+      "current_source_lines": {
+        "start": 264,
+        "end": 264
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 277,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/zig_source.rs",
+      "source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "function": "entity_at",
+      "source_sha256": "566f500fc470252df63958641cecf586b3aeeefb80d3569ed206fed418567878",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "566f500fc470252df63958641cecf586b3aeeefb80d3569ed206fed418567878",
+      "current_source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 278,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/src/query_pack/pascal.rs",
+      "source_lines": {
+        "start": 872,
+        "end": 872
+      },
+      "function": "tests::capture_at",
+      "source_sha256": "0516eec78b07768123a036d212f0a3ff1332b126e3fc87e79808238a219d8d5f",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "0516eec78b07768123a036d212f0a3ff1332b126e3fc87e79808238a219d8d5f",
+      "current_source_lines": {
+        "start": 872,
+        "end": 872
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 279,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/c_direct_calls.rs",
+      "source_lines": {
+        "start": 189,
+        "end": 190
+      },
+      "function": "entity_at",
+      "source_sha256": "e17e1d732677360c6ef1cafd9596c88e37cda303d9d1601c73d7dd146e340112",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "e17e1d732677360c6ef1cafd9596c88e37cda303d9d1601c73d7dd146e340112",
+      "current_source_lines": {
+        "start": 189,
+        "end": 190
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 280,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/c_original_timer_calls.rs",
+      "source_lines": {
+        "start": 164,
+        "end": 165
+      },
+      "function": "entity_at",
+      "source_sha256": "782cf1ec6dd8de55c6aa1ed0906fa9a0df12602c032248d330a471fa02dad2d7",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "782cf1ec6dd8de55c6aa1ed0906fa9a0df12602c032248d330a471fa02dad2d7",
+      "current_source_lines": {
+        "start": 164,
+        "end": 165
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 281,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/c_parameters_source.rs",
+      "source_lines": {
+        "start": 187,
+        "end": 188
+      },
+      "function": "entity_at",
+      "source_sha256": "ad6b961fadb47b9d39432a0b9311875c84bb581611cbf77ece4b4a8efa82f996",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "ad6b961fadb47b9d39432a0b9311875c84bb581611cbf77ece4b4a8efa82f996",
+      "current_source_lines": {
+        "start": 187,
+        "end": 188
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 282,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/crystal_source.rs",
+      "source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "function": "entity_at",
+      "source_sha256": "60b118fb52d90bc371bf5134d3d88c6fb968e774ae828fc440fd8def3ef37a1a",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "60b118fb52d90bc371bf5134d3d88c6fb968e774ae828fc440fd8def3ef37a1a",
+      "current_source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 283,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/cue_source.rs",
+      "source_lines": {
+        "start": 167,
+        "end": 167
+      },
+      "function": "entity",
+      "source_sha256": "85d731e86efe11e21c72fb93ca444fc8feb41f09e060c8af42773792d295f717",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "85d731e86efe11e21c72fb93ca444fc8feb41f09e060c8af42773792d295f717",
+      "current_source_lines": {
+        "start": 167,
+        "end": 167
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 284,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/d_source.rs",
+      "source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "function": "entity_at",
+      "source_sha256": "31869ad19fb5a45b4027c538e67bf2317fe36434c0cd53270c90e54fb9dc9fcb",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "31869ad19fb5a45b4027c538e67bf2317fe36434c0cd53270c90e54fb9dc9fcb",
+      "current_source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 285,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/fish_source.rs",
+      "source_lines": {
+        "start": 167,
+        "end": 167
+      },
+      "function": "entity",
+      "source_sha256": "5264588ab0c06adf942eabd2369a6475531c5813813d2a2b7e9eaac29a4a4b3a",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "5264588ab0c06adf942eabd2369a6475531c5813813d2a2b7e9eaac29a4a4b3a",
+      "current_source_lines": {
+        "start": 167,
+        "end": 167
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 286,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/go_parameters_source.rs",
+      "source_lines": {
+        "start": 200,
+        "end": 201
+      },
+      "function": "entity_at",
+      "source_sha256": "c8067ceccef9aee35fa3b4c3a4664e94df67b956fd9237c3926fdde64de9202c",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "c8067ceccef9aee35fa3b4c3a4664e94df67b956fd9237c3926fdde64de9202c",
+      "current_source_lines": {
+        "start": 200,
+        "end": 201
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 287,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/go_parameters_source.rs",
+      "source_lines": {
+        "start": 442,
+        "end": 444
+      },
+      "function": "certified_go_formal_read",
+      "source_sha256": "c8067ceccef9aee35fa3b4c3a4664e94df67b956fd9237c3926fdde64de9202c",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "c8067ceccef9aee35fa3b4c3a4664e94df67b956fd9237c3926fdde64de9202c",
+      "current_source_lines": {
+        "start": 442,
+        "end": 444
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 288,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/haxe_source.rs",
+      "source_lines": {
+        "start": 193,
+        "end": 194
+      },
+      "function": "entity_at",
+      "source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "current_source_lines": {
+        "start": 193,
+        "end": 194
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 289,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/hcl_source.rs",
+      "source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "function": "entity_at",
+      "source_sha256": "ed259710a7f7ca802795bb5af1e612b23946410631d59bf6f6f124951802cf15",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "ed259710a7f7ca802795bb5af1e612b23946410631d59bf6f6f124951802cf15",
+      "current_source_lines": {
+        "start": 176,
+        "end": 177
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 4,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 4 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 290,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/haxe_source.rs",
+      "source_lines": {
+        "start": 269,
+        "end": 269
+      },
+      "function": "original_haxe_macro_method_and_local_read_keep_written_ownership",
+      "source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "f81445d8a3f0b05efd04119df341059b84db0e822004133e201d7e1ee847a3e1",
+      "current_source_lines": {
+        "start": 269,
+        "end": 269
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 291,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/src/query_pack/glsl.rs",
+      "source_lines": {
+        "start": 1493,
+        "end": 1495
+      },
+      "function": "original_written_binding_observation::inspect_original_common_shader_cst_and_capture_frames",
+      "source_sha256": "0e5ae4a505786367beb7c46f92766cc485dce844f6aa495dccab14999fecded6",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "0e5ae4a505786367beb7c46f92766cc485dce844f6aa495dccab14999fecded6",
+      "current_source_lines": {
+        "start": 1493,
+        "end": 1495
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    },
+    {
+      "number": 292,
+      "rule": "rust/cleartext-logging",
+      "source_commit": "5bc44f8aecfd692fa6ebaa5676c5ce8f58ce4665",
+      "path": "crates/rootlight-adapter-treesitter/tests/analyzer_e2e/python_module_updates.rs",
+      "source_lines": {
+        "start": 515,
+        "end": 517
+      },
+      "function": "observe_complete_original_required_admission_and_rebound_reference_dispositions",
+      "source_sha256": "b743563390f34df1f47be4421d6bdb24ed6e10713aac45d160b1ee1ac80f4a58",
+      "source_hash_basis": "git_blob_at_source_commit",
+      "current_source_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "current_source_sha256": "b743563390f34df1f47be4421d6bdb24ed6e10713aac45d160b1ee1ac80f4a58",
+      "current_source_lines": {
+        "start": 515,
+        "end": 517
+      },
+      "current_sink_function_bytes_equal": true,
+      "attached_flow_count": 3,
+      "related_source_reference_count": 2,
+      "model_source_group": "certificate_candidate",
+      "model_source_witnesses": [
+        "certificate_candidate",
+        "QueryCandidate"
+      ],
+      "evidence": [
+        "The attached SARIF flows label the return of Coq certificate_candidate as sensitive. Its successful return payload is Option<QueryCandidate>: integer source offsets, StructuralRole, a static syntax label, a required flag and native depth. It does not return a cryptographic certificate, credential or source-text payload.",
+        "The exact QueryCandidate field list and the complete certificate_candidate function were inspected at the scanned commit; their current function/record bytes remain unchanged. This rejects the source classification in these attached flows, not logging of arbitrary analyzed content.",
+        "The primary location is enclosed by a test crate, a cfg(test) module or an explicit test function. It reports parser/IR facts for authored fixtures, not a production log of an externally supplied secret.",
+        "The exact SARIF result was joined using its full physical region and normalized complete alert message; all 3 attached complete flows and 2 related source references were reviewed in GitHub CodeQL analysis 2001913404."
+      ],
+      "disposition": "false_positive",
+      "analysis_id": 2001913404,
+      "github_dismissed_reason": "false positive"
+    }
+  ],
+  "follow_up_reviews": [
+    {
+      "review_date": "2026-10-22",
+      "source_correspondence_commit": "3587c6c2e068204250deaeaa97f1bb12ee557aa4",
+      "alert_numbers": [
+        232,
+        233,
+        234,
+        235,
+        236,
+        237,
+        238,
+        239,
+        240,
+        241,
+        242,
+        243,
+        244,
+        245,
+        246,
+        247,
+        248,
+        249,
+        250,
+        251,
+        252,
+        253,
+        254,
+        255,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270,
+        271,
+        272,
+        273,
+        274,
+        275,
+        276,
+        277,
+        278,
+        279,
+        280,
+        281,
+        282,
+        283,
+        284,
+        285,
+        286,
+        287,
+        288,
+        289,
+        290,
+        291,
+        292
+      ],
+      "dispositions": {
+        "false_positive": 49,
+        "not_used": 11,
+        "fixed_in_source": 1
+      },
+      "scope": "All 61 open code-scanning alerts retrieved on this date. Earlier entries retain their original source-specific review scope. Genuine unused upstream defects remain unchanged and require a fresh review before their scripts, documentation or superseded grammars are made executable. No scanner path, query or test was disabled."
     }
   ]
 }
