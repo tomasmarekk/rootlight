@@ -171,6 +171,9 @@ allowed_build_scripts = [
   "rayon-core@1.13.0",
   "ref-cast@1.0.25",
   "rootlight-bench@0.1.0",
+  # Windows MSVC stack reservations for the CLI and service examples.
+  "rootlight@0.1.0",
+  "rootlight-service@0.1.0",
   "rustix@1.1.4",
   "rustversion@1.0.23",
   "serde@1.0.228",

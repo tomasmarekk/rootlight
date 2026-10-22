@@ -87,7 +87,8 @@ allowed_internal_dependencies = [
   "rootlight-runtime",
   "rootlight-service",
 ]
-allow_build_script = false
+# The CLI build script reserves the stack used by synchronous MSVC indexing.
+allow_build_script = true
 
 [[crates]]
 name = "rootlight-launcher"
@@ -444,7 +445,8 @@ allowed_internal_dependencies = [
   "rootlight-unicode",
   "rootlight-vfs",
 ]
-allow_build_script = false
+# Service examples need the same MSVC indexing stack reserve as the CLI.
+allow_build_script = true
 
 [[crates]]
 name = "rootlight-source"
