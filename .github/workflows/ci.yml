@@ -170,7 +170,7 @@ jobs:
           if (
               registry.get("schema") != "rootlight.mcp-capability-registry/1"
               or registry.get("sourceRevision") != revision
-              or len(registry.get("tools", [])) != 19
+              or len(registry.get("tools", [])) != 20
           ):
               raise SystemExit("capability registry artifact differs")
 
