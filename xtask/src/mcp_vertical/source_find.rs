@@ -1039,13 +1039,12 @@ fn storage_failures(
             verify_storage_republication_receipt(&index, &early_publication)?;
             wait_until_journal_idle(&paths.operation_journal_path())?;
         }
-        let status = call_tool(
+        let status = wait_for_storage_recovery_status(
             &format!("literal.{state}.verified-predecessor-status"),
             &mut process,
             &catalog,
             transcript,
-            "repo.status",
-            json!({"repository":{"repository_id":index.repository},"response_profile":"compact"}),
+            &index,
         )?;
         require_tool_success(&status, "repo.status")?;
         let observed = record_storage_trace(
@@ -1068,13 +1067,12 @@ fn storage_failures(
         )?;
         verify_storage_republication_receipt(&index, &republication)?;
         wait_until_journal_idle(&paths.operation_journal_path())?;
-        let status = call_tool(
+        let status = wait_for_storage_recovery_status(
             &format!("literal.{state}.republication-status"),
             &mut process,
             &catalog,
             transcript,
-            "repo.status",
-            json!({"repository":{"repository_id":index.repository},"response_profile":"compact"}),
+            &index,
         )?;
         let recovered = record_storage_trace(
             storage_trace,
@@ -1344,6 +1342,62 @@ fn head_activation<'a>(
         ));
     }
     Ok(record)
+}
+
+fn storage_recovery_is_pending(status: &Value, index: &IndexReceipt) -> bool {
+    let data = &status["data"];
+    let active = &data["active_generation"];
+    status["repository"]["repository_id"] == index.repository
+        && data["publication_state"] == "published"
+        && data["repository_state"] == "indexing"
+        && active["generation_id"].as_str().is_some_and(|generation| {
+            data["resolved_generation"] == generation
+                && (Some(generation) == index.parent_generation.as_deref()
+                    || (generation == index.generation
+                        && active["parent_generation"] == json!(index.parent_generation)))
+        })
+        && data["operations"].as_array().is_some_and(|operations| {
+            operations.iter().any(|operation| {
+                matches!(
+                    operation["state"].as_str(),
+                    Some("queued" | "running" | "waiting_for_context")
+                )
+            })
+        })
+}
+
+fn wait_for_storage_recovery_status(
+    label: &str,
+    process: &mut McpProcess,
+    catalog: &ToolCatalog,
+    transcript: &mut TranscriptWriter,
+    index: &IndexReceipt,
+) -> Result<ToolOutcome, VerticalError> {
+    let deadline = Instant::now()
+        .checked_add(REQUEST_TIMEOUT)
+        .ok_or(VerticalError::Clock)?;
+    loop {
+        let status = call_tool(
+            label,
+            process,
+            catalog,
+            transcript,
+            "repo.status",
+            json!({"repository":{"repository_id":index.repository},
+                "include_operations":true,"response_profile":"compact"}),
+        )?;
+        require_tool_success(&status, "repo.status")?;
+        // Journal idleness is a sample, not a watcher admission barrier. Only
+        // a witnessed operation on this publication permits another sample.
+        if !storage_recovery_is_pending(&status.structured, index) {
+            return Ok(status);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(VerticalError::RequestTimedOut);
+        }
+        thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+    }
 }
 
 fn verify_storage_recovery_observation(
@@ -1819,6 +1873,67 @@ mod tests {
                 peak_rss_available: false,
                 durable_written_bytes_reported: true,
             },
+        }
+    }
+
+    #[test]
+    fn storage_readiness_wait_requires_exact_publication_and_active_operation() {
+        use serde_json::{Value, json};
+
+        let index = storage_index_receipt();
+        for generation in [&index.generation, index.parent_generation.as_ref().unwrap()] {
+            let mut status = json!({
+                "repository":{"repository_id":index.repository},
+                "data":{"repository_state":"indexing","publication_state":"published",
+                    "resolved_generation":generation,"active_generation":{
+                        "generation_id":generation,"parent_generation":index.parent_generation},
+                    "operations":[{"state":"running"}]}
+            });
+            if Some(generation) == index.parent_generation.as_ref() {
+                status["data"]["active_generation"]["parent_generation"] = Value::Null;
+            }
+            for state in ["queued", "running", "waiting_for_context"] {
+                status["data"]["operations"][0]["state"] = json!(state);
+                assert!(super::storage_recovery_is_pending(&status, &index));
+                assert!(
+                    super::verify_storage_recovery_observation(
+                        &Value::Null,
+                        &Value::Null,
+                        &json!({"response":status}),
+                        &index,
+                    )
+                    .is_err(),
+                    "an indexing observation cannot satisfy the final recovery proof"
+                );
+            }
+            for (pointer, value) in [
+                ("/repository/repository_id", json!("foreign-repository")),
+                ("/data/publication_state", json!("retained")),
+                ("/data/repository_state", json!("ready")),
+                ("/data/repository_state", json!("failed")),
+                ("/data/resolved_generation", json!("foreign-generation")),
+                (
+                    "/data/active_generation/generation_id",
+                    json!("foreign-generation"),
+                ),
+                ("/data/operations", json!([])),
+                ("/data/operations", Value::Null),
+                ("/data/operations/0/state", json!("published")),
+                ("/data/operations/0/state", json!("cancelled")),
+            ] {
+                let mut invalid = status.clone();
+                *invalid.pointer_mut(pointer).unwrap() = value;
+                assert!(!super::storage_recovery_is_pending(&invalid, &index));
+            }
+            let mut foreign = status.clone();
+            foreign["data"]["resolved_generation"] = json!("foreign-generation");
+            foreign["data"]["active_generation"]["generation_id"] = json!("foreign-generation");
+            assert!(!super::storage_recovery_is_pending(&foreign, &index));
+            if generation == &index.generation {
+                let mut foreign_parent = status.clone();
+                foreign_parent["data"]["active_generation"]["parent_generation"] = json!("foreign");
+                assert!(!super::storage_recovery_is_pending(&foreign_parent, &index));
+            }
         }
     }
 
