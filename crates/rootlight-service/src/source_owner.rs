@@ -120,6 +120,8 @@ impl FirstSliceEphemeralSources {
                 parent: retained_parent,
                 name: instance_name.to_owned(),
                 identity,
+                root_identity_guard: None,
+                root_removed: false,
                 root_cleanup_failed: false,
                 limits,
                 charges: Mutex::new(BTreeMap::new()),
@@ -185,6 +187,8 @@ struct SourceInstance {
     parent: Dir,
     name: OsString,
     identity: PlatformFileIdentity,
+    root_identity_guard: Option<std::fs::File>,
+    root_removed: bool,
     root_cleanup_failed: bool,
     limits: FirstSliceStreamedStorageLimits,
     charges: Mutex<BTreeMap<OsString, DirectoryCharge>>,
@@ -204,25 +208,54 @@ impl SourceInstance {
         &mut self,
         synchronize: impl FnOnce(&Dir) -> Result<(), rootlight_vfs::platform::PlatformError>,
     ) -> Result<(), FirstSliceError> {
+        self.finish_root_with(|directory| directory.remove(), synchronize)
+    }
+
+    fn finish_root_with(
+        &mut self,
+        remove: impl FnOnce(
+            PrivateDirectory<'static>,
+        ) -> Result<(), rootlight_vfs::platform::PlatformError>,
+        synchronize: impl FnOnce(&Dir) -> Result<(), rootlight_vfs::platform::PlatformError>,
+    ) -> Result<(), FirstSliceError> {
         self.root_cleanup_failed = true;
-        if let Some(directory) = self.directory.take() {
-            if directory.identity() != self.identity {
-                return Err(FirstSliceError::CatalogCorrupt);
-            }
-            directory.remove().map_err(|_| FirstSliceError::Catalog)?;
-        } else {
-            match self.parent.symlink_metadata(&self.name) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Ok(_) => {
-                    let directory = PrivateDirectory::open(&self.parent, &self.name)
-                        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-                    if directory.identity() != self.identity {
-                        return Err(FirstSliceError::CatalogCorrupt);
-                    }
-                    directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+        if !self.root_removed {
+            if let Some(directory) = self.directory.as_ref() {
+                if directory.identity() != self.identity {
+                    return Err(FirstSliceError::CatalogCorrupt);
                 }
-                Err(_) => return Err(FirstSliceError::Catalog),
+                if self.root_identity_guard.is_none() {
+                    self.root_identity_guard = Some(
+                        directory
+                            .retain_identity_handle()
+                            .map_err(|_| FirstSliceError::Catalog)?,
+                    );
+                }
             }
+            if let Some(directory) = self.directory.take() {
+                remove(directory).map_err(|_| FirstSliceError::Catalog)?;
+            } else {
+                match self.parent.symlink_metadata(&self.name) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        if self.root_identity_guard.is_none() {
+                            return Err(FirstSliceError::CatalogCorrupt);
+                        }
+                        let directory = PrivateDirectory::open(&self.parent, &self.name)
+                            .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+                        if directory.identity() != self.identity {
+                            return Err(FirstSliceError::CatalogCorrupt);
+                        }
+                        remove(directory).map_err(|_| FirstSliceError::Catalog)?;
+                    }
+                    Err(_) => return Err(FirstSliceError::Catalog),
+                }
+            }
+            // An uncertain unlink keeps the original identity pinned. Once
+            // unlink is confirmed, a reused filesystem ID cannot authorize a
+            // newly created directory at this name.
+            self.root_removed = true;
+            self.root_identity_guard = None;
         }
         match self.parent.symlink_metadata(&self.name) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -962,6 +995,98 @@ mod tests {
             b"replacement"
         );
         assert_eq!(owner.usage().unwrap().pending_cleanup_directories, 1);
+    }
+
+    #[test]
+    fn confirmed_root_unlink_rejects_replacement_even_with_reused_identity() {
+        let (temporary, parent) = parent();
+        let mut owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(1024, 1024, 1).unwrap(),
+        )
+        .unwrap();
+        Arc::get_mut(&mut owner.instance)
+            .unwrap()
+            .finish_root(|_| Err(rootlight_vfs::platform::PlatformError::ResourceLimit))
+            .unwrap_err();
+        let replacement = PrivateDirectory::create(&parent, OsStr::new("owned")).unwrap();
+        let replacement_identity = replacement.identity();
+        replacement
+            .create_file(OsStr::new("keep"))
+            .unwrap()
+            .write_all(b"replacement")
+            .unwrap();
+        drop(replacement);
+        // Reproduce filesystem-ID reuse without relying on allocator timing.
+        Arc::get_mut(&mut owner.instance).unwrap().identity = replacement_identity;
+        assert!(owner.finish_if_idle().is_err());
+        assert_eq!(
+            std::fs::read(temporary.path().join("private/owned/keep")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(owner.usage().unwrap().pending_cleanup_directories, 1);
+    }
+
+    #[test]
+    fn uncertain_root_removal_before_unlink_retries_with_original_identity_pinned() {
+        let (temporary, parent) = parent();
+        let mut owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(1024, 1024, 1).unwrap(),
+        )
+        .unwrap();
+        let instance = Arc::get_mut(&mut owner.instance).unwrap();
+        instance
+            .finish_root_with(
+                |directory| {
+                    drop(directory);
+                    Err(rootlight_vfs::platform::PlatformError::ResourceLimit)
+                },
+                |_| panic!("failed unlink must not report parent durability"),
+            )
+            .unwrap_err();
+        assert!(instance.root_identity_guard.is_some());
+        assert!(!instance.root_removed);
+        assert!(temporary.path().join("private/owned").exists());
+        assert_eq!(owner.usage().unwrap().pending_cleanup_directories, 1);
+        assert!(owner.finish_if_idle().unwrap());
+        assert!(!temporary.path().join("private/owned").exists());
+        assert_eq!(owner.usage().unwrap().pending_cleanup_directories, 0);
+        let instance = Arc::get_mut(&mut owner.instance).unwrap();
+        assert!(instance.root_removed);
+        assert!(instance.root_identity_guard.is_none());
+    }
+
+    #[test]
+    fn uncertain_root_removal_after_unlink_retains_identity_until_absence_is_confirmed() {
+        let (temporary, parent) = parent();
+        let mut owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(1024, 1024, 1).unwrap(),
+        )
+        .unwrap();
+        let instance = Arc::get_mut(&mut owner.instance).unwrap();
+        instance
+            .finish_root_with(
+                |directory| {
+                    directory.remove()?;
+                    Err(rootlight_vfs::platform::PlatformError::ResourceLimit)
+                },
+                |_| panic!("uncertain unlink must not report parent durability"),
+            )
+            .unwrap_err();
+        assert!(instance.root_identity_guard.is_some());
+        assert!(!instance.root_removed);
+        assert_eq!(owner.usage().unwrap().pending_cleanup_directories, 1);
+        assert!(owner.finish_if_idle().unwrap());
+        assert!(!temporary.path().join("private/owned").exists());
+        assert_eq!(owner.usage().unwrap().pending_cleanup_directories, 0);
+        let instance = Arc::get_mut(&mut owner.instance).unwrap();
+        assert!(instance.root_removed);
+        assert!(instance.root_identity_guard.is_none());
     }
 
     #[test]

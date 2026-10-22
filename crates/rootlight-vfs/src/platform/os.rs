@@ -464,6 +464,31 @@ pub(crate) fn directory_capability(directory: &Directory) -> &Dir {
     directory_handle(directory).expect("validated private directory retains its capability")
 }
 
+pub(crate) fn retain_directory_identity(
+    directory: &Directory,
+) -> Result<std::fs::File, PlatformError> {
+    #[cfg(unix)]
+    {
+        directory_handle(directory)?
+            .try_clone()
+            .map(Dir::into_std_file)
+            .map_err(|source| platform_io("retain_directory_identity", source))
+    }
+    #[cfg(windows)]
+    {
+        directory
+            .identity_handle
+            .try_clone()
+            .map(CapFile::into_std)
+            .map_err(|source| platform_io("retain_directory_identity", source))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = directory;
+        Err(PlatformError::UnsupportedPlatform)
+    }
+}
+
 pub(crate) fn file_identity(file: &File) -> PlatformFileIdentity {
     file.identity
 }

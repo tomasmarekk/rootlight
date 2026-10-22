@@ -301,6 +301,18 @@ impl<'parent> PrivateDirectory<'parent> {
         os::directory_capability(self.inner())
     }
 
+    /// Retains the original object identity across fallible removal attempts.
+    ///
+    /// This handle pins the object without reopening its pathname. On Windows
+    /// it permits deletion, unlike a cloned directory capability. Release it
+    /// after confirmed unlink before checking that the name is absent.
+    ///
+    /// # Errors
+    /// Returns a typed platform or I/O error if the handle cannot be cloned.
+    pub fn retain_identity_handle(&self) -> Result<std::fs::File, PlatformError> {
+        os::retain_directory_identity(self.inner())
+    }
+
     /// Synchronizes the directory represented by the retained handle.
     ///
     /// # Errors
