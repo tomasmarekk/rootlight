@@ -2373,6 +2373,22 @@ jobs:
             --target "$TARGET_TRIPLE" \
             --output-dir artifacts/ci-package/npm-smoke \
             --evidence "artifacts/ci-package/$TARGET_TRIPLE.npm-smoke.json"
+      - name: Upload verified native package
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-native-package-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ci-package/candidate/*.zip
+            artifacts/ci-package/candidate/*.zip.sha256
+            artifacts/ci-package/candidate/*.zip.blake3
+            artifacts/ci-package/${{ matrix.target }}.lifecycle.json
+            artifacts/ci-package/${{ matrix.target }}.web-smoke.json
+            artifacts/ci-package/${{ matrix.target }}.npm-smoke.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
       - name: Upload installed-package failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
