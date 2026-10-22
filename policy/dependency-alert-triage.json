@@ -8687,6 +8687,658 @@
       "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/397",
       "vulnerable_active_versions": [],
       "vulnerable_version_range": ">= 0.7.0, < 0.8.6"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-mw99-9chc-xw7r",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 398,
+      "package": {
+        "ecosystem": "go",
+        "name": "gopkg.in/src-d/go-git.v4"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/398",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": ">= 4.7.1, <= 4.13.1",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-449p-3h89-pw88",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 399,
+      "package": {
+        "ecosystem": "go",
+        "name": "gopkg.in/src-d/go-git.v4"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/399",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": ">= 4.0.0, <= 4.13.1",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-v725-9546-7q7m",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 400,
+      "package": {
+        "ecosystem": "go",
+        "name": "gopkg.in/src-d/go-git.v4"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/400",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": ">= 4.0.0, <= 4.13.1",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-r9px-m959-cxf4",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 401,
+      "package": {
+        "ecosystem": "go",
+        "name": "gopkg.in/src-d/go-git.v4"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/401",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": ">= 4.0.0, <= 4.13.1",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-pxq6-2prw-chj9",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 402,
+      "package": {
+        "ecosystem": "go",
+        "name": "github.com/docker/docker"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/402",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 29.3.1",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-x86f-5xw2-fm2r",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 403,
+      "package": {
+        "ecosystem": "go",
+        "name": "github.com/docker/docker"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/403",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "<= 28.5.2",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-vp62-88p7-qqf5",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 404,
+      "package": {
+        "ecosystem": "go",
+        "name": "github.com/docker/docker"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/404",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "<= 28.5.2",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-rg2x-37c3-w2rh",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 405,
+      "package": {
+        "ecosystem": "go",
+        "name": "github.com/docker/docker"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/405",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "<= 28.5.2",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "superseded_original_build_plan",
+      "ghsa_id": "GHSA-r7fv-28h4-cvq7",
+      "manifest_sha256": "9930d898407018bbe5119271d90bd05c106aa4699081f8108bdc1c1edab82165",
+      "number": 406,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "Exact authored Lightning upstream lock retained for provenance. The required native security profile replaces the original manifest/lock before installation and never falls back to it. Its current 48-package executable graph excludes markdown-it; website/benchmark/WASM/AST workflows are not enabled by this native profile.",
+      "reported_manifest": "source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/tree/yarn.lock",
+      "source_witness": {
+        "archive": {
+          "archive": {
+            "bytes": 7575823,
+            "path": "source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30.tar.gz",
+            "sha256": "ab377f42f5aa2f7f85058408ab45dbd03caa65fe6c00f4fdc32b9611c4e51bb4"
+          },
+          "member": "lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn.lock",
+          "member_sha256": "9930d898407018bbe5119271d90bd05c106aa4699081f8108bdc1c1edab82165"
+        },
+        "bytes": 190888,
+        "effective_lock": {
+          "bytes": 14242,
+          "path": "source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/yarn.lock",
+          "sha256": "b3173c3f416c5af47442b513fc991411ff17678043d2bc725c16b00ff445e992"
+        },
+        "path": "source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/tree/yarn.lock",
+        "sha256": "9930d898407018bbe5119271d90bd05c106aa4699081f8108bdc1c1edab82165",
+        "type": "superseded_original_yarn_lock"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/406",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.2",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-259r-337f-4rfw",
+      "manifest_sha256": "931a562e79ebf552abffbcfb067cf3b6c273f2fa7b2c6b7556bd4b751eb63d6d",
+      "number": 413,
+      "package": {
+        "ecosystem": "go",
+        "name": "github.com/klauspost/compress"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/go.mod",
+      "source_witness": {
+        "bytes": 9486,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "931a562e79ebf552abffbcfb067cf3b6c273f2fa7b2c6b7556bd4b751eb63d6d",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "2623807decf478df8d6cdd9ad630cbc202debf8f",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/413",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "<= 1.18.6",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-259r-337f-4rfw",
+      "manifest_sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+      "number": 414,
+      "package": {
+        "ecosystem": "go",
+        "name": "github.com/klauspost/compress"
+      },
+      "reason": "This exact Go module manifest is retained from the pinned complete Flux upstream Git tree. Rootlight compiles the separately selected Rust parser/Cargo source; it does not build the upstream Go runtime or internal tools. The named Go package is absent from executable frontend/native npm graphs. Mutating this original file/go.sum would break the upstream Git-blob and source-catalog provenance, not repair an executable Rootlight dependency.",
+      "reported_manifest": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+      "source_witness": {
+        "bytes": 17014,
+        "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/internal/tools/go.mod",
+        "selected_compiled_manifest": {
+          "bytes": 572,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser/Cargo.toml",
+          "sha256": "31e6d0724ee435294a089b319f7efd71abdf21423626a6f67c14245800eca700"
+        },
+        "sha256": "ccb48a6369f99b96880583f5431bfb208eabe4e1311b0b31046bd0e95e40a1c9",
+        "type": "immutable_authored_upstream_go_manifest",
+        "upstream_git_blob_sha1": "16ccb4684a36b44bee786b836aabb677b22d3e1e",
+        "upstream_manifest": {
+          "bytes": 416139,
+          "path": "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/UPSTREAM_MANIFEST.json",
+          "sha256": "604df1ac93281cbe2f141bb04d41cb388cc0dc7f608cab33ef5896f5abbe8ad5"
+        },
+        "upstream_revision": "9eb12f7f4702875e79189789cf9b3ac560499c11"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/414",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "<= 1.18.6",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-r7fv-28h4-cvq7",
+      "manifest_sha256": "474e0b6fe5567d3045668ecf06f0be661171b2c589b27dd0e16977bee5090aab",
+      "number": 415,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "This embedded manifest is an exact authenticated member of an original historical Yarn distribution. The supported installer uses only the separate effective native profile and its 48 selected archives; it neither installs this expanded provenance directory nor resolves this embedded dependency declaration. markdown-it is absent from both current executable frontend and native npm graphs.",
+      "reported_manifest": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/f43e572de494e4c5e44b3f45a77b0d44540899ea379636a763b84d2941f61284/package/package.json",
+      "source_witness": {
+        "bytes": 1817,
+        "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/f43e572de494e4c5e44b3f45a77b0d44540899ea379636a763b84d2941f61284/package/package.json",
+        "published_source": {
+          "archive": {
+            "bytes": 9221,
+            "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/archives/f43e572de494e4c5e44b3f45a77b0d44540899ea379636a763b84d2941f61284.tgz",
+            "sha256": "0228c28c4dc7996778ba79944ebf6bd1e6420870c0444324300a4a833d37d2f2"
+          },
+          "container": "markdown-it-prism@2.3.0",
+          "member_sha256": "474e0b6fe5567d3045668ecf06f0be661171b2c589b27dd0e16977bee5090aab",
+          "published_member": "package/package.json",
+          "registry_integrity": "sha512-ePtHY80gZyeje4bn3R3SL0jpd1C9HFaYffJW2Ma0YD+tspqa2v9TuVwUyFwboFu4jnFNcO8oPQROgbcYJbmBvw==",
+          "resolved": "https://registry.yarnpkg.com/markdown-it-prism/-/markdown-it-prism-2.3.0.tgz#8b3ca2105e665ca20f62b2dc2b81f9393660a5af"
+        },
+        "sha256": "474e0b6fe5567d3045668ecf06f0be661171b2c589b27dd0e16977bee5090aab",
+        "type": "nonexecuted_original_published_manifest"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/415",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.2",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "superseded_original_build_plan",
+      "ghsa_id": "GHSA-vfgh-jcmw-g37q",
+      "manifest_sha256": "9930d898407018bbe5119271d90bd05c106aa4699081f8108bdc1c1edab82165",
+      "number": 416,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "Exact authored Lightning upstream lock retained for provenance. The required native security profile replaces the original manifest/lock before installation and never falls back to it. Its current 48-package executable graph excludes markdown-it; website/benchmark/WASM/AST workflows are not enabled by this native profile.",
+      "reported_manifest": "source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/tree/yarn.lock",
+      "source_witness": {
+        "archive": {
+          "archive": {
+            "bytes": 7575823,
+            "path": "source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30.tar.gz",
+            "sha256": "ab377f42f5aa2f7f85058408ab45dbd03caa65fe6c00f4fdc32b9611c4e51bb4"
+          },
+          "member": "lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn.lock",
+          "member_sha256": "9930d898407018bbe5119271d90bd05c106aa4699081f8108bdc1c1edab82165"
+        },
+        "bytes": 190888,
+        "effective_lock": {
+          "bytes": 14242,
+          "path": "source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/yarn.lock",
+          "sha256": "b3173c3f416c5af47442b513fc991411ff17678043d2bc725c16b00ff445e992"
+        },
+        "path": "source-inputs/producers/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/tree/yarn.lock",
+        "sha256": "9930d898407018bbe5119271d90bd05c106aa4699081f8108bdc1c1edab82165",
+        "type": "superseded_original_yarn_lock"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/416",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.3",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-r7fv-28h4-cvq7",
+      "manifest_sha256": "5760c7c0224b9adcb05e115bdaa6b8ad48738e396795cd8b32d5d4ab885902c8",
+      "number": 420,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "This embedded manifest is an exact authenticated member of an original historical Yarn distribution. The supported installer uses only the separate effective native profile and its 48 selected archives; it neither installs this expanded provenance directory nor resolves this embedded dependency declaration. markdown-it is absent from both current executable frontend and native npm graphs.",
+      "reported_manifest": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/3cd6c5c6e0541e725a119f4d7cab6b082ebf7b0529dfc82158c7889149a00a7b/package/package.json",
+      "source_witness": {
+        "bytes": 1055,
+        "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/3cd6c5c6e0541e725a119f4d7cab6b082ebf7b0529dfc82158c7889149a00a7b/package/package.json",
+        "published_source": {
+          "archive": {
+            "bytes": 10097,
+            "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/archives/3cd6c5c6e0541e725a119f4d7cab6b082ebf7b0529dfc82158c7889149a00a7b.tgz",
+            "sha256": "f3349fa2832c4ed976238e7cd4654572a108a522116599334e97986eac20b8ee"
+          },
+          "container": "markdown-it-table-of-contents@0.6.0",
+          "member_sha256": "5760c7c0224b9adcb05e115bdaa6b8ad48738e396795cd8b32d5d4ab885902c8",
+          "published_member": "package/package.json",
+          "registry_integrity": "sha512-jHvEjZVEibyW97zEYg19mZCIXO16lHbvRaPDkEuOfMPBmzlI7cYczMZLMfUvwkhdOVQpIxu3gx6mgaw46KsNsQ==",
+          "resolved": "https://registry.yarnpkg.com/markdown-it-table-of-contents/-/markdown-it-table-of-contents-0.6.0.tgz#7c9e8d619fb12f88c9fb05a7b32b2fe932b9c541"
+        },
+        "sha256": "5760c7c0224b9adcb05e115bdaa6b8ad48738e396795cd8b32d5d4ab885902c8",
+        "type": "nonexecuted_original_published_manifest"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/420",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.2",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-vfgh-jcmw-g37q",
+      "manifest_sha256": "5760c7c0224b9adcb05e115bdaa6b8ad48738e396795cd8b32d5d4ab885902c8",
+      "number": 421,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "This embedded manifest is an exact authenticated member of an original historical Yarn distribution. The supported installer uses only the separate effective native profile and its 48 selected archives; it neither installs this expanded provenance directory nor resolves this embedded dependency declaration. markdown-it is absent from both current executable frontend and native npm graphs.",
+      "reported_manifest": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/3cd6c5c6e0541e725a119f4d7cab6b082ebf7b0529dfc82158c7889149a00a7b/package/package.json",
+      "source_witness": {
+        "bytes": 1055,
+        "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/3cd6c5c6e0541e725a119f4d7cab6b082ebf7b0529dfc82158c7889149a00a7b/package/package.json",
+        "published_source": {
+          "archive": {
+            "bytes": 10097,
+            "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/archives/3cd6c5c6e0541e725a119f4d7cab6b082ebf7b0529dfc82158c7889149a00a7b.tgz",
+            "sha256": "f3349fa2832c4ed976238e7cd4654572a108a522116599334e97986eac20b8ee"
+          },
+          "container": "markdown-it-table-of-contents@0.6.0",
+          "member_sha256": "5760c7c0224b9adcb05e115bdaa6b8ad48738e396795cd8b32d5d4ab885902c8",
+          "published_member": "package/package.json",
+          "registry_integrity": "sha512-jHvEjZVEibyW97zEYg19mZCIXO16lHbvRaPDkEuOfMPBmzlI7cYczMZLMfUvwkhdOVQpIxu3gx6mgaw46KsNsQ==",
+          "resolved": "https://registry.yarnpkg.com/markdown-it-table-of-contents/-/markdown-it-table-of-contents-0.6.0.tgz#7c9e8d619fb12f88c9fb05a7b32b2fe932b9c541"
+        },
+        "sha256": "5760c7c0224b9adcb05e115bdaa6b8ad48738e396795cd8b32d5d4ab885902c8",
+        "type": "nonexecuted_original_published_manifest"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/421",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.3",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-vfgh-jcmw-g37q",
+      "manifest_sha256": "474e0b6fe5567d3045668ecf06f0be661171b2c589b27dd0e16977bee5090aab",
+      "number": 422,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "This embedded manifest is an exact authenticated member of an original historical Yarn distribution. The supported installer uses only the separate effective native profile and its 48 selected archives; it neither installs this expanded provenance directory nor resolves this embedded dependency declaration. markdown-it is absent from both current executable frontend and native npm graphs.",
+      "reported_manifest": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/f43e572de494e4c5e44b3f45a77b0d44540899ea379636a763b84d2941f61284/package/package.json",
+      "source_witness": {
+        "bytes": 1817,
+        "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/f43e572de494e4c5e44b3f45a77b0d44540899ea379636a763b84d2941f61284/package/package.json",
+        "published_source": {
+          "archive": {
+            "bytes": 9221,
+            "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/archives/f43e572de494e4c5e44b3f45a77b0d44540899ea379636a763b84d2941f61284.tgz",
+            "sha256": "0228c28c4dc7996778ba79944ebf6bd1e6420870c0444324300a4a833d37d2f2"
+          },
+          "container": "markdown-it-prism@2.3.0",
+          "member_sha256": "474e0b6fe5567d3045668ecf06f0be661171b2c589b27dd0e16977bee5090aab",
+          "published_member": "package/package.json",
+          "registry_integrity": "sha512-ePtHY80gZyeje4bn3R3SL0jpd1C9HFaYffJW2Ma0YD+tspqa2v9TuVwUyFwboFu4jnFNcO8oPQROgbcYJbmBvw==",
+          "resolved": "https://registry.yarnpkg.com/markdown-it-prism/-/markdown-it-prism-2.3.0.tgz#8b3ca2105e665ca20f62b2dc2b81f9393660a5af"
+        },
+        "sha256": "474e0b6fe5567d3045668ecf06f0be661171b2c589b27dd0e16977bee5090aab",
+        "type": "nonexecuted_original_published_manifest"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/422",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.3",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-r7fv-28h4-cvq7",
+      "manifest_sha256": "c978146ecb5927bfe39b0bc969e79982e1592055faf1dea7c4566e69b7f2c880",
+      "number": 423,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "This embedded manifest is an exact authenticated member of an original historical Yarn distribution. The supported installer uses only the separate effective native profile and its 48 selected archives; it neither installs this expanded provenance directory nor resolves this embedded dependency declaration. markdown-it is absent from both current executable frontend and native npm graphs.",
+      "reported_manifest": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/fdbe304c5d46be4f06eebe3604b57edf12c9cec845a79141e5ceb49bf0e0952a/package/package.json",
+      "source_witness": {
+        "bytes": 1130,
+        "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/fdbe304c5d46be4f06eebe3604b57edf12c9cec845a79141e5ceb49bf0e0952a/package/package.json",
+        "published_source": {
+          "archive": {
+            "bytes": 3542,
+            "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/archives/fdbe304c5d46be4f06eebe3604b57edf12c9cec845a79141e5ceb49bf0e0952a.tgz",
+            "sha256": "8d17751d5170a2e9fcd3b61a5a0a7cb836101bcb2b5723b1b50a04ee86becb1f"
+          },
+          "container": "posthtml-markdownit@1.3.1",
+          "member_sha256": "c978146ecb5927bfe39b0bc969e79982e1592055faf1dea7c4566e69b7f2c880",
+          "published_member": "package/package.json",
+          "registry_integrity": "sha512-ohva3TR6zD+k+yRirsvC5tYvSNs6FyZ4rD5WdS2rXA7ZP8z5XXispGJPuGKFt4L7pS4eBmB5oROoggG/pwatuA==",
+          "resolved": "https://registry.yarnpkg.com/posthtml-markdownit/-/posthtml-markdownit-1.3.1.tgz#7ba3d5aa92ebbe2e06002909b55faaf7c889f4d5"
+        },
+        "sha256": "c978146ecb5927bfe39b0bc969e79982e1592055faf1dea7c4566e69b7f2c880",
+        "type": "nonexecuted_original_published_manifest"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/423",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.2",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
+    },
+    {
+      "active_versions": [],
+      "disposition": "nonexecuted_published_metadata",
+      "ghsa_id": "GHSA-vfgh-jcmw-g37q",
+      "manifest_sha256": "c978146ecb5927bfe39b0bc969e79982e1592055faf1dea7c4566e69b7f2c880",
+      "number": 424,
+      "package": {
+        "ecosystem": "npm",
+        "name": "markdown-it"
+      },
+      "reason": "This embedded manifest is an exact authenticated member of an original historical Yarn distribution. The supported installer uses only the separate effective native profile and its 48 selected archives; it neither installs this expanded provenance directory nor resolves this embedded dependency declaration. markdown-it is absent from both current executable frontend and native npm graphs.",
+      "reported_manifest": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/fdbe304c5d46be4f06eebe3604b57edf12c9cec845a79141e5ceb49bf0e0952a/package/package.json",
+      "source_witness": {
+        "bytes": 1130,
+        "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/fdbe304c5d46be4f06eebe3604b57edf12c9cec845a79141e5ceb49bf0e0952a/package/package.json",
+        "published_source": {
+          "archive": {
+            "bytes": 3542,
+            "path": "source-inputs/producer-dependencies/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/archives/fdbe304c5d46be4f06eebe3604b57edf12c9cec845a79141e5ceb49bf0e0952a.tgz",
+            "sha256": "8d17751d5170a2e9fcd3b61a5a0a7cb836101bcb2b5723b1b50a04ee86becb1f"
+          },
+          "container": "posthtml-markdownit@1.3.1",
+          "member_sha256": "c978146ecb5927bfe39b0bc969e79982e1592055faf1dea7c4566e69b7f2c880",
+          "published_member": "package/package.json",
+          "registry_integrity": "sha512-ohva3TR6zD+k+yRirsvC5tYvSNs6FyZ4rD5WdS2rXA7ZP8z5XXispGJPuGKFt4L7pS4eBmB5oROoggG/pwatuA==",
+          "resolved": "https://registry.yarnpkg.com/posthtml-markdownit/-/posthtml-markdownit-1.3.1.tgz#7ba3d5aa92ebbe2e06002909b55faaf7c889f4d5"
+        },
+        "sha256": "c978146ecb5927bfe39b0bc969e79982e1592055faf1dea7c4566e69b7f2c880",
+        "type": "nonexecuted_original_published_manifest"
+      },
+      "url": "https://github.com/tomasmarekk/rootlight/security/dependabot/424",
+      "vulnerable_active_versions": [],
+      "vulnerable_version_range": "< 14.3.3",
+      "github_dismissed_reason": "not_used",
+      "review_date": "2026-10-22"
     }
   ],
   "counts": {
@@ -8912,5 +9564,101 @@
   "repository": "tomasmarekk/rootlight",
   "review_date": "2026-10-12",
   "schema": "rootlight.dependency-alert-review/1",
-  "scope": "All 359 open Dependabot alerts retrieved before remediation plus two published nested-lock alerts discovered after the dependency graph refreshed; every selected executable dependency and optional/development pin included."
+  "scope": "All 359 open Dependabot alerts retrieved before remediation plus two published nested-lock alerts discovered after the dependency graph refreshed; every selected executable dependency and optional/development pin included.",
+  "follow_up_reviews": [
+    {
+      "review_date": "2026-10-22",
+      "alert_numbers": [
+        398,
+        399,
+        400,
+        401,
+        402,
+        403,
+        404,
+        405,
+        406,
+        413,
+        414,
+        415,
+        416,
+        420,
+        421,
+        422,
+        423,
+        424
+      ],
+      "active_locks": [
+        {
+          "path": "apps/rootlight-web/frontend/package-lock.json",
+          "sha256": "03f11b14f1f75c4a668244204835ce4c5e8a280cf7b3ba601e4432113cf3b3a1"
+        },
+        {
+          "path": "source-inputs/npm/upstream-package-lock.json",
+          "sha256": "cb7ae1a32580c301e2c0cadd985ae0c658fec61fc8ed3dd929104dc1c8b81dfc"
+        },
+        {
+          "path": "source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/yarn.lock",
+          "sha256": "b3173c3f416c5af47442b513fc991411ff17678043d2bc725c16b00ff445e992"
+        },
+        {
+          "path": "Cargo.lock",
+          "sha256": "e9bebcf066afb642de34ee0cc05bbebe4acc2fdc6c7da4fe0816de81c1205bb6"
+        },
+        {
+          "path": "tests/native-grammars/Cargo.lock",
+          "sha256": "ad28164eb5e5fc1096b92eb1bd48335f89479c49b39a50c7e1182ea3f1d7bf6b"
+        },
+        {
+          "path": "fuzz/Cargo.lock",
+          "sha256": "64dea7881dcdb2b742b63da482d0217fb68d8d778608770918e87d3cf7ec713c"
+        },
+        {
+          "path": "source-inputs/producer-security/lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/overlays/Cargo.lock",
+          "sha256": "82d8ae9c2330c479f1e231d8fb9863e10f1708904db76e5d29465472791ae426"
+        }
+      ],
+      "vulnerable_active_versions": [],
+      "scope": "All 18 open dependency alerts retrieved on this date concern authenticated original upstream metadata, not executable Rootlight dependency selections. Original manifests, archives and published member identities remain unchanged. Earlier review records retain their historical date, versions, source witnesses and native-artifact qualifications; their old hashes are not current-input claims. Enabling the original Go runtime/tools or unsupported Lightning website/AST/WASM workflows requires a new dependency review.",
+      "recommendations": [
+        {
+          "pull_request": 9,
+          "url": "https://github.com/tomasmarekk/rootlight/pull/9",
+          "package": "vite",
+          "recommended_version": "8.3.4",
+          "active_version": "8.3.4",
+          "disposition": "updated_active_dependency",
+          "reason": "The recommendation is applied with its required compatible transitive versions and all retained platform distributions. The canonical lock continues to resolve exclusively to authenticated local archives; the PR's registry-URL replacement is not applied. Lightning CSS 1.33.0 and its declared native security profile remain unchanged."
+        },
+        {
+          "pull_request": 10,
+          "url": "https://github.com/tomasmarekk/rootlight/pull/10",
+          "package": "github.com/klauspost/compress",
+          "recommended_version": "1.18.7",
+          "reported_original_version": "1.18.0",
+          "disposition": "nonexecuted_original_build_plan",
+          "reason": "The recommendation targets the exact original Flux Go runtime manifest. Rootlight selects the separate reviewed Rust parser and does not compile the Go runtime. Changing this retained original manifest and go.sum would invalidate its recorded upstream Git identity without updating an executable Rootlight dependency."
+        },
+        {
+          "pull_request": 11,
+          "url": "https://github.com/tomasmarekk/rootlight/pull/11",
+          "package": "github.com/klauspost/compress",
+          "recommended_version": "1.18.7",
+          "reported_original_version": "1.18.6",
+          "disposition": "nonexecuted_original_build_plan",
+          "reason": "The recommendation targets original Flux internal Go tooling that Rootlight does not execute. Its exact manifest and go.sum remain upstream provenance; executable Rootlight parser inputs are selected through the separate Rust Cargo manifest."
+        },
+        {
+          "pull_request": 12,
+          "url": "https://github.com/tomasmarekk/rootlight/pull/12",
+          "package": "markdown-it",
+          "recommended_version": "14.3.3",
+          "reported_original_version": "13.0.1",
+          "disposition": "nonexecuted_published_metadata",
+          "reason": "The recommendation changes an embedded development dependency declaration inside the authenticated markdown-it-prism 2.3.0 distribution. This provenance directory is not an installation root. Neither the current frontend nor the mandatory effective native profile selects markdown-it; changing the embedded manifest alone would not replace markdown-it implementation code."
+        }
+      ],
+      "acceptance_boundary": "Complete authenticated published-distribution input verification and finite frontend checks do not prove complete preferred native sources, source-to-binary reproduction or independently network-denied full-product acceptance."
+    }
+  ]
 }
