@@ -878,6 +878,7 @@ async fn execution_propagates_policy_and_shapes_child_response() {
     let mut request = input(generation(2));
     request.token_budget = 20_000;
 
+    let started = Instant::now();
     let output = ContextPackService
         .execute(
             Arc::clone(&port),
@@ -887,6 +888,7 @@ async fn execution_propagates_policy_and_shapes_child_response() {
         )
         .await
         .expect("context-pack request succeeds");
+    let finished = Instant::now();
 
     let calls = port
         .evidence_calls
@@ -897,12 +899,23 @@ async fn execution_propagates_policy_and_shapes_child_response() {
     assert_eq!(calls[0].invocation.repository(), repository());
     assert_eq!(calls[0].invocation.generation(), generation(2));
     assert_eq!(calls[0].reservation, calls[0].invocation.reservation());
-    assert_eq!(
-        u64::from(CONTEXT_PACK_TIMEOUT_MS),
-        rootlight_agent::policy::BudgetLimits::server_ceiling()
-            .maximums()
-            .time_ms
+    let work_duration = std::time::Duration::from_millis(u64::from(CONTEXT_PACK_TIMEOUT_MS));
+    assert_eq!(work_duration, std::time::Duration::from_secs(2));
+    assert!(
+        u64::from(CONTEXT_PACK_TIMEOUT_MS)
+            < rootlight_agent::policy::BudgetLimits::server_ceiling()
+                .maximums()
+                .time_ms
     );
+    assert!(calls[0].deadline >= started + work_duration);
+    assert!(calls[0].deadline <= finished + work_duration);
+    let identity_calls = port
+        .identity_calls
+        .lock()
+        .expect("identity call lock is available");
+    assert_eq!(identity_calls.len(), 1);
+    assert_eq!(calls[0].deadline, identity_calls[0].deadline);
+    assert!(calls.iter().all(|call| call.deadline == calls[0].deadline));
     assert!(!calls[0].cancelled);
     assert!(calls[0].deadline > Instant::now());
     assert_eq!(

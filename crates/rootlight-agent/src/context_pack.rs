@@ -90,7 +90,7 @@ pub const MIN_PACK_TOKENS: u32 = 500;
 
 /// Bounded wall-clock ceiling for context-pack identity and evidence reads.
 ///
-/// This matches the common server-owned analytical deadline.
+/// This orchestration work limit is independent of the inclusive response allowance.
 pub const CONTEXT_PACK_TIMEOUT_MS: u32 = 2_000;
 
 /// Evidence role classification for pack items.
