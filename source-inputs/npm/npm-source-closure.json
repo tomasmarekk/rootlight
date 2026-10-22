@@ -1,15 +1,14 @@
 {
-  "archive_count": 281,
+  "archive_count": 282,
   "archive_paths": [
     "source-inputs/npm/archives/000ec49ac4651c68bd8a06a317da9869e7cd1cc37a3a3bfbe2f67e674381bb9c.tgz",
+    "source-inputs/npm/archives/001b3cbf1d1890c7b692002263056575d06eb0e18839e343b784df745ac37e3a.tgz",
     "source-inputs/npm/archives/010d3818587ca705ceb039d2d4209b9f8c8472421b284d66e3fadca06e96a6ba.tgz",
     "source-inputs/npm/archives/0280264227e0570a355b7019d089efbf6f03d96b0d28d57b72b9c8bb9c21ed84.tgz",
-    "source-inputs/npm/archives/02830b1d31e3ea493bec9c6b9aa8fa1d35223c94e017ce28b7d3ec5c67b3c15f.tgz",
     "source-inputs/npm/archives/03fad9f6a5c360d0aaa98623ce86e1faf49799a8d622be4f766b7cfeb191aa88.tgz",
     "source-inputs/npm/archives/0421525ed4c64f0230ed9cc213db0e12177329a9308a4f31c9d9f766b32dafc6.tgz",
     "source-inputs/npm/archives/06b87f446259d5bb470127744ad84cfc76d17500f7947bf658368a89d7a9204f.tgz",
     "source-inputs/npm/archives/077736c195809fb0d44289444ab5c257640f605c7bf1f3d3a9d5e9b03ec170be.tgz",
-    "source-inputs/npm/archives/07a49a4813a1a5628f4248756e1127ff71ffffda5a8c7f54a2b3765e5fe6ca85.tgz",
     "source-inputs/npm/archives/08a5a3bcd5a7bb91adfdf85764d0498116a79498e4d79e2b20e82d8d50a0ad13.tgz",
     "source-inputs/npm/archives/097f29824926d008df13f9eae083552bddf26eedbb253192024df81813e136bb.tgz",
     "source-inputs/npm/archives/0bb42eee8dcda366ba0df0293ce4ab4c615487e8f6950c8f57c7b1b89f23cf20.tgz",
@@ -35,17 +34,15 @@
     "source-inputs/npm/archives/1bb580469c4163d39f8b3f60c9048b1912caa645472caf4e01ada62146ed0181.tgz",
     "source-inputs/npm/archives/1c9fcda3b5504a2abd5a35c12b5ee93ed00accb81cd78a13cee37c74f070ec07.tgz",
     "source-inputs/npm/archives/1d745da6bea7dfc755b751dc63c0c73fa793f19cfd5a9fae256d307816cbc345.tgz",
-    "source-inputs/npm/archives/1eb542dc704518d0b80554a73ccaae449e547ca6a484b4950542edd169806f73.tgz",
     "source-inputs/npm/archives/2006b1009c6c57b1dba87455b53f5890d4a623a18769f6bd4180d8eafb3e147d.tgz",
     "source-inputs/npm/archives/20086cdd9509b3b0de979fa66e28d702bf31b863c3c305b0ed0232762804124f.tgz",
     "source-inputs/npm/archives/209754582428438670a45aed502b1eaecf46aa6a9ba8b8dd6545c91a1ddd5933.tgz",
-    "source-inputs/npm/archives/2143934a3a9cec8412d23a12d7e598d1988c36dba8f1afbb8a4099fc15e3602c.tgz",
     "source-inputs/npm/archives/22939c645f52775caf425375d89500010e2608f34deb6859038f50d7d240eced.tgz",
     "source-inputs/npm/archives/229fee93871aced23e0ed82b6a152a60126ae44ddd2b4c4a2cfe5ec6aa6bdaf7.tgz",
-    "source-inputs/npm/archives/24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
     "source-inputs/npm/archives/2536b933056970d21b3bec7e9bd3920b472c07e3b5dd5099a3f2dcfd840007f5.tgz",
     "source-inputs/npm/archives/27993fd7bc5b03d473e4edbb4d34d87de30af10bba552c33453c591dc414432f.tgz",
     "source-inputs/npm/archives/2922078a0690ba31aa84840e69255fb376692119fc04088a145e2084cfa183b4.tgz",
+    "source-inputs/npm/archives/2a237ced7b97737843bc7ca228be1a7733945683204ca591f1346b4b0506166b.tgz",
     "source-inputs/npm/archives/2ca62ad7a973402352b03a5a6751370376ba66f653909aecd44f3df9b04e5016.tgz",
     "source-inputs/npm/archives/2cd9f4d14c8e1db76ce18987cd7da34231d022f595c41770585bd295b8fa678d.tgz",
     "source-inputs/npm/archives/2da5ec6c5b3eef5a4f2d3359b15a1386dc9331b707b6647087ce64e3c1439315.tgz",
@@ -56,16 +53,16 @@
     "source-inputs/npm/archives/32ffb18d0b00e7947aadcd9cac8935005ad69d27ee5e1ad8b52aa9f9edbd7b44.tgz",
     "source-inputs/npm/archives/3396cd48ebc7177f5c155d5156150c9289000abbe8ad4a58cf1aec0e6d019a60.tgz",
     "source-inputs/npm/archives/33d1e36615c6285cea8e8da41ed1c220ad68ed8f8b05854459e6d3f07dcb9fa1.tgz",
-    "source-inputs/npm/archives/33dec41e8bfebea834afd0ad0cbd67f9dfb3a2ccdde86c0167967251ed1fdf36.tgz",
-    "source-inputs/npm/archives/343f28452ba07abf6525738fc6c20b2da26a28acea5133076b4caeebdac3bf29.tgz",
     "source-inputs/npm/archives/3547dfe2eb469ecabd36ef1514205f21c0ad336e97c39cc0ff9dae443127bece.tgz",
     "source-inputs/npm/archives/38a171e88885336645fd93241424592940caa77bd2bdfd35e3fc2e30f8a92dad.tgz",
     "source-inputs/npm/archives/3bac56654b8e31e61cb05bf1fbaffcb5d6ba4eb6d37c3ab708c47ffaf80017c6.tgz",
     "source-inputs/npm/archives/3e8d0833b37fa5f0f9e69cec78b57a0869a710a2b251b8b3524b16bd00eee7af.tgz",
+    "source-inputs/npm/archives/3f970ead7ab0b554349cfb6af0329e31d13610011ee38a3eca60bba1805a8942.tgz",
     "source-inputs/npm/archives/3fe5d06519439782d6f296fb35bcef6ac8babd1196391e78ae9de26a905b80cf.tgz",
     "source-inputs/npm/archives/4045ccd200bba9a78ebd093c8818fd4e6e67db7568b548e04e8be0f0b81fdf71.tgz",
     "source-inputs/npm/archives/405712d30991a9f041739b038ecdd59aae4e8f92f1a4c59028b13b07cf360e17.tgz",
     "source-inputs/npm/archives/407f24fe54263cd895f8965736d86ee5e6b9a829aab4b82076d50ba159da00f4.tgz",
+    "source-inputs/npm/archives/411757a2ba5984012727a7fe9f48545fbefc47632576ed3b543356f08b9f49a2.tgz",
     "source-inputs/npm/archives/41d28777f840088fe7728d9eff069b4065c8c1bbc23ed7f713c5489751cdca90.tgz",
     "source-inputs/npm/archives/44503230c89fa3b2fa2f4a7e604a525e009fd29750cdd1aff92b6ea1aa7abca8.tgz",
     "source-inputs/npm/archives/44e44264da728cf6fd36c1945446a707d832986d48715925f6bbe0955d0d300b.tgz",
@@ -75,7 +72,6 @@
     "source-inputs/npm/archives/47c1d283db25ce9a0ba436da6ef7a6920e3562ea61f7d3ed2d0703a0bea5429c.tgz",
     "source-inputs/npm/archives/48691b85c9d16dff234745670faf6346d2c4d0b544d4de9fde4082a490dd9715.tgz",
     "source-inputs/npm/archives/486eb6391417af52777d25f684ec79b733a11b2c9299091b43b423f3ba77e95a.tgz",
-    "source-inputs/npm/archives/48d0e1d7133c6f047a6f5ed4d84e05413462f645b73b26fabf2e97883339e491.tgz",
     "source-inputs/npm/archives/490f9eb1f114a1cadfe7d6763411c1d965e1d4e1e19475d1ba2d187a6866be76.tgz",
     "source-inputs/npm/archives/4b2534dd23a6ad06946765ac3fa0afa877fb48fca2ca6eb23cca009e6c807e32.tgz",
     "source-inputs/npm/archives/4e87bc8f7e821e6b87700db95d6d594754c753da6e6ee455c5a45bf204ab09c9.tgz",
@@ -86,14 +82,13 @@
     "source-inputs/npm/archives/53929e5386e20780a4fb1cf32034d3fd54f6e889dd8ca1bb3963aa40c3b373ee.tgz",
     "source-inputs/npm/archives/53ee7a8a0dfa7afd005fa034e77b94c755cfa548bc2a3979a4374f5387ff0af6.tgz",
     "source-inputs/npm/archives/5424b29dcbe39788d6b102bca58d5da80a26283ba19d4daedf2c372a8d6432bc.tgz",
-    "source-inputs/npm/archives/547d51b5f59211dabf61eeb743bcc0d30de29be51cac40e9139e4085ed46c220.tgz",
     "source-inputs/npm/archives/548e504f6abddf48e9622d1b09ce15d218c86426b72504f77c62d8bc9c05a651.tgz",
     "source-inputs/npm/archives/54bd4ed7b97554d189f9ed362945dc042260de80bbeb7ee4ba35d658cf071691.tgz",
     "source-inputs/npm/archives/5556171a30f6ba9d70b0dca70cbc3219d68d9d5254467c58be3d3426d0cdcca8.tgz",
     "source-inputs/npm/archives/557b29302b489837db43e707afccab59ec9a18f7856e7a0b4490b229fd5a2156.tgz",
-    "source-inputs/npm/archives/55cdb3029c7679e98f3feaa344ae3848f56e1742eccc9a23bd67db660e815257.tgz",
     "source-inputs/npm/archives/560fe253be8d0e8d35aeb2c2635281ebbcce8c29f03e2902edd5585ed06e8231.tgz",
     "source-inputs/npm/archives/561982a77bc7cd811d165e9792a257e984a64cbeb527f881747f30b2f08399a5.tgz",
+    "source-inputs/npm/archives/573f88cab939f52df84c057b5a3914f83b8e31204dbe55e219d591ed5576520f.tgz",
     "source-inputs/npm/archives/58646b8a59d29705f0c93eca680f5df02af17ff723c24b90a67d568c916620d4.tgz",
     "source-inputs/npm/archives/58e91972fa4b4a3d89298c0c4e54f55e0176a7037ab936514d75804c483322e8.tgz",
     "source-inputs/npm/archives/5aff3c59692b6a642b65b6a0e6f30a087a81f337e9b800d335f07f69b5fdb845.tgz",
@@ -108,8 +103,11 @@
     "source-inputs/npm/archives/656527738a01e7a86631008c2e5714c474dc24a96401ec63a83b3f3066e12028.tgz",
     "source-inputs/npm/archives/6635f55af076fd08e210e155d12013274a098fa9e169a0aef14cb4638909a61b.tgz",
     "source-inputs/npm/archives/667a4f557d3454b4dffceeaca4107b998ece1d1c62485b4605b749ffc1d70c9b.tgz",
+    "source-inputs/npm/archives/66c939efcc44b9348357e8d73f64a3a78b8a6d44bb3b811c03793df1a307be47.tgz",
     "source-inputs/npm/archives/68c362525bfa6bb05b768bab2c4cda6c85754bc1491ac4ede4a337fe8f3b2a74.tgz",
+    "source-inputs/npm/archives/69f2995836af54e7da2f3e19a21ab3467975477309a886abf4a1d138b404994b.tgz",
     "source-inputs/npm/archives/6aade581bf027ed9da06c03b2ec36c3b55ce86792f18e92dd3804fefc43eb337.tgz",
+    "source-inputs/npm/archives/6b582be69e0d186a0857f201d2a3fde092de29882c815da88bc3d720f874ac0d.tgz",
     "source-inputs/npm/archives/6c5170ee9a7342d1d3ca4ca17e0d85d92bc1628908bf989513ec084af2138221.tgz",
     "source-inputs/npm/archives/6cdd3f94fa7182bb606bd728c4a58f6c5ca41473d20b7ad9b3bfdd270580873c.tgz",
     "source-inputs/npm/archives/6d985ecd5b48c6e29abd1e1af542632bda8b897ac24e7d2e4080cffb1103b7cd.tgz",
@@ -117,13 +115,13 @@
     "source-inputs/npm/archives/6f2cf8cc128928a450abbdd47171ccb3d7e8431159bf3f7b6e2ab8e4d80ec5d0.tgz",
     "source-inputs/npm/archives/6f6073f962dd52fe880aea002c40a9a7b6b11063829e1349dc94c10c1107c297.tgz",
     "source-inputs/npm/archives/6fdf6fa0427c999229066c4e057b8069842595ea2eb9bb7fc2d5d71352f8096d.tgz",
-    "source-inputs/npm/archives/7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
     "source-inputs/npm/archives/70b8eabed4d0c41f84ad0c9d43f70e6180f19c9555e06fbc53e741b8e25acfb0.tgz",
     "source-inputs/npm/archives/719714ea585dd083d74aea75a14a43ebf48e97ab5f9cd5555a96da009f486d14.tgz",
     "source-inputs/npm/archives/722d236daa3924dd0e07cbd6605867a89fabc45984c2da1d8654327767ffb683.tgz",
     "source-inputs/npm/archives/72690a7e810df1fec58b7f0b148125b9fcd93e3776926745dcdedf3a186d4b9e.tgz",
     "source-inputs/npm/archives/76ca6aee25baad7357cb50bfbd05c78908dc6196044586e43c5dc3db3f45e3ab.tgz",
     "source-inputs/npm/archives/7a49a238b50bb55246f56253de3619496826a329adc7f0418d87531e1f1d7dde.tgz",
+    "source-inputs/npm/archives/7a4b40fbfacc7a8edf1b1a816d5f7eedece202a5cced8a0d00b14a7b4bdbd076.tgz",
     "source-inputs/npm/archives/7a8efe1e61f7699df75e53a063f0c7637485f222260bcf966616eb7fd95cda31.tgz",
     "source-inputs/npm/archives/7b09c49ed17c7dc463981c812b683c06775b6877f6b4da7948dc6f121b090d3e.tgz",
     "source-inputs/npm/archives/7c17c984e0799d4c3b45701887c97b8a79ea24a4effd9f53ff619355ae1d6597.tgz",
@@ -140,6 +138,7 @@
     "source-inputs/npm/archives/885b72dfbc9ddc90b8333e19eceede47c1718cb781681273fc71124e4a3c3a18.tgz",
     "source-inputs/npm/archives/89881588aa2a7824f9cd17c195053f8dedc5ce7ce59ed47d46295c9ff31ca475.tgz",
     "source-inputs/npm/archives/89c46d8d2560302d9035926109fe21f8b7efb26f1188a51cdc8f1c8d633cd29b.tgz",
+    "source-inputs/npm/archives/8c16b491dfbe406d8ebc57daaa070cc9ad799b315fbe27075dff4b378576608b.tgz",
     "source-inputs/npm/archives/8c5420eae26a5d6e86d8a6185a02437d01370202cbb297ecc2efeaecfcf07b90.tgz",
     "source-inputs/npm/archives/8c67bf8a527871411db5becc667a814148744eb9bcb6ab66e0d0095b6f82a231.tgz",
     "source-inputs/npm/archives/8c9754c675cca24e5afbb310f40594ef4086e18a9b4ee2661c48f63f71c20a54.tgz",
@@ -149,12 +148,14 @@
     "source-inputs/npm/archives/90c62455b83722746ebe8e7d0f66ed855887f36b83ae3f912fb7c1c05f9ba445.tgz",
     "source-inputs/npm/archives/951b4c6fb0613c68b391ba6b1ce9824f82c526b8c54a04ec5ea5d27e24ffb8a1.tgz",
     "source-inputs/npm/archives/95934bf610f85e570bc2711c81c66c51ee85b3d36531618573bfd7effd79b828.tgz",
+    "source-inputs/npm/archives/9599dfdcee9abe9d1e1209f85d4304d963d6b5c5d39378043460e5847ed3306c.tgz",
     "source-inputs/npm/archives/9700cb765c17785aea6eb010da72dbfc5e3285080b5ab706024920bc28795d55.tgz",
     "source-inputs/npm/archives/974007b5d563c5b7e7a695b47c248d2244666a57e0d09db030dad1d1d02675c5.tgz",
     "source-inputs/npm/archives/98048b77ecadcb357f144f5416d7718ee8869a45eef3b3ca2f1cf7b2d1b8208b.tgz",
     "source-inputs/npm/archives/98b8444b0c288fef58a0cfb27686fbc05268b8a1a995714cfaa8eacfc111c7ea.tgz",
     "source-inputs/npm/archives/999ffef6291700f24a6160a06a1c89f745a780918925df770070e9631d39fb2f.tgz",
     "source-inputs/npm/archives/9a72db500d4e541d52c14b408c3a0f335576b08ab0d82cf14ab80655a8523203.tgz",
+    "source-inputs/npm/archives/9ad4e9287104d1c1d381062005f5ed079481b4c043bae3a28934b33fbc442868.tgz",
     "source-inputs/npm/archives/9bb398b24e03cdf7c1491ce2019ffc567c6ce0b005f408e9299f9edbb1be31b3.tgz",
     "source-inputs/npm/archives/9c4595c385128bb7dd0767a0bdbed7a32e9d8cc6bded1d2557bb1f51d2d2ee6e.tgz",
     "source-inputs/npm/archives/9c5a37000f1ecf5b3ad23434a4b468c71d78f4316704f81459bc790b2f2c2d96.tgz",
@@ -179,23 +180,22 @@
     "source-inputs/npm/archives/a9916eec4f9d9b74b1b51bfa8af0a500287595d73057bd79ce253a38a22179ca.tgz",
     "source-inputs/npm/archives/aade2de68054de22720183157f5d2bd14db6cb6df7b109cc725d067725323634.tgz",
     "source-inputs/npm/archives/ab90d2f951b10f4922f1a5b0a55faf77e48eac6d8f4a6446d60879795e7fb3b6.tgz",
+    "source-inputs/npm/archives/ac04d03d56dd1a715d80bd414542df6ce9ae95e14b774d15675450247e0d96ae.tgz",
     "source-inputs/npm/archives/acc469d04f72e496b44767664d887c9e8da26599457f6cf66b31c11342593475.tgz",
     "source-inputs/npm/archives/ae5e094eafa52949e9dd49c17338ba045b41da8c0647725fd64f962df2d7d7ea.tgz",
     "source-inputs/npm/archives/afe422ed8828ee37fc691b0a8276038e968bb058e12e7c3337d7c4a665f09ef1.tgz",
-    "source-inputs/npm/archives/b2b55c171243a1e305e269ca3568c0f2e1edf06911bd805fbc21e012721ba4f5.tgz",
     "source-inputs/npm/archives/b2caafa9a386895c63b4f1077c37d36f0aaee035c2e1e78bfe3f240fa4d22aed.tgz",
     "source-inputs/npm/archives/b2cbbbf63ace7d8cd9c3117a6d665f9fcf97bc0f77bb44ca406cf714a685b0c7.tgz",
     "source-inputs/npm/archives/b3a03daac3779f42865b457750ba52fdaefc96543913926aa1ccd759ba9b151f.tgz",
     "source-inputs/npm/archives/b4610b5357e91c0bda9e088a70fb531c382102f6d9b5c39cc2797b6a5d298a3d.tgz",
     "source-inputs/npm/archives/b4bc87e85e309130f3ba093ac43b3f9e75c987cab8939af9a25bfa7781177720.tgz",
-    "source-inputs/npm/archives/b7d0b3b34e5a332da8b556e720570413207b8990109a1d6ffc73af9fa2d936bd.tgz",
     "source-inputs/npm/archives/b7f95cf416041181b4cb89df7506e220179d6f271a35f60aa9f32e088d978652.tgz",
+    "source-inputs/npm/archives/b8323ad9ab18da4a0d436f8451b9cbf6f05e78f2337b3f32d320e23f48bdac2d.tgz",
     "source-inputs/npm/archives/b844643c113a74d53a4190af304f3a2f9614320886a43a4714f886e9a88bc13b.tgz",
     "source-inputs/npm/archives/b86e14b1e4f51a39477fbbb0e5939da4c8e60db084aabea05d7d851cfcd31ad2.tgz",
     "source-inputs/npm/archives/b9654482452403004c52810178d0cae41254382f85e8fd33b526c72969e2d126.tgz",
     "source-inputs/npm/archives/ba329884b91aa8616f64f94afbe4393356915e381f2f4e6820d0dab9d48d79a8.tgz",
     "source-inputs/npm/archives/bb2eb4cd9d8b31dbceadb28339e332dcb4ed93048e78047ee3bd0ab407d7ad07.tgz",
-    "source-inputs/npm/archives/bef9468d5763896ae6f356def7cc821cfca3310540bab910225af0308cfd0365.tgz",
     "source-inputs/npm/archives/bf5d7ced6d856d96b10471784340b7f4fc665c269fb78616f742f63c8501430a.tgz",
     "source-inputs/npm/archives/bff2768441a1dcf9c7db54e42fc19aa7d04f5cc21c961ae892e7ff1b48e5a28e.tgz",
     "source-inputs/npm/archives/c02c221e97cb9c656c805ca37c5700b1b31ee056f2b6445a70b8b60a92f77ac7.tgz",
@@ -215,6 +215,7 @@
     "source-inputs/npm/archives/d00ef92bc638db0d1d513e6d87c47dc8a0c64d1a281ba7d7837e5b78093e72c1.tgz",
     "source-inputs/npm/archives/d1b9dfef2280c5d5b4abbeac0f7435388c565974616708e684471adb3951f2f0.tgz",
     "source-inputs/npm/archives/d2c8e3cc2e58321859c4af4caf293041bbd02f04765b62df063ea12220f264f8.tgz",
+    "source-inputs/npm/archives/d304925fd201c21f630df3dab22a41b1588a84062647a2af298727983cc292fb.tgz",
     "source-inputs/npm/archives/d5c2d5f377dc118552a6e918fc408ed3e0b37f6f7f1a5102164bd77e28574ef5.tgz",
     "source-inputs/npm/archives/d5f9be10c3dc2855c09aed6ed3d839301cd4b78f7f5996d7edfef2c24322f300.tgz",
     "source-inputs/npm/archives/d61c1f7d4250623cd7fcb687290c43168bfc6e13485c0e4e4dd3e415b07ed90b.tgz",
@@ -235,30 +236,28 @@
     "source-inputs/npm/archives/e12b4b1e798f7d2706e7d60fdfb5b1fabbd748bc9f77f39ddb1a36c4c07c491a.tgz",
     "source-inputs/npm/archives/e139267cb5b71a23cf4928ad1abc233bf21123261042e3b4e24162504317fe32.tgz",
     "source-inputs/npm/archives/e20a60e92ef1769b706afbde5fb2836369077415c2b83f909b44a4a4dda45431.tgz",
-    "source-inputs/npm/archives/e28aff82d3979e77d0a3b6e583d59b4b999cff99019026c3ee24c604868ebfaa.tgz",
     "source-inputs/npm/archives/e2f5d2ef8e769aeff5548751db13e4f30362e1ad1090cc128ade9462f8cb65e3.tgz",
     "source-inputs/npm/archives/e2f795c7b6c17bf74472b0f9ff64b0aa4ebcbbdb79fb0e6feacf393c5ebb4bdc.tgz",
+    "source-inputs/npm/archives/e39ff3a91c4bacd65aece5625f3ae2ce49f2f35b07fe2d9e300e70270a1e2f77.tgz",
     "source-inputs/npm/archives/e41974d662ab2846c7d4aa9b66e05ce95a5b997e36f4226b6a119202af8aeda2.tgz",
     "source-inputs/npm/archives/e44ad45f4e2d5da9fc38809768cf23b632b3c96622c8398e80378ee10c63bef6.tgz",
-    "source-inputs/npm/archives/e5857dcd5d4c2769554d7ffe971f86e2faecae15a5a5cf15d9e5325c672e9db0.tgz",
     "source-inputs/npm/archives/e59a236538be85bfdc2e762e312b3526efa284541ce0f875a18a27c7ef4f4562.tgz",
+    "source-inputs/npm/archives/e5bd040aa5a2025fb476203e30188f5ddbd631390b4393673af4412c7fb33ec1.tgz",
     "source-inputs/npm/archives/e5c3e0ea92c6d94d74e080fef4808dcad6869d9295f96a5c41a082100da1e3ee.tgz",
     "source-inputs/npm/archives/e82e3ec022a8c15491a2728d1c0fa50af33a5eb5f3078d8f534f0e1010b984cf.tgz",
     "source-inputs/npm/archives/e8b1c750cb5a5480b75b368541fdefda7dfda0bd2ccafe554b4e48f6324c8e02.tgz",
-    "source-inputs/npm/archives/e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
     "source-inputs/npm/archives/e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
     "source-inputs/npm/archives/eaa5b7e7300c7bb1400c429db86571eaac1ae640ee1cc5f0022d3885d082ae0e.tgz",
     "source-inputs/npm/archives/eaa88cdb2bb487257123313615ea7b69462c5ef8eed5ca5c8d08ea3c09195d8a.tgz",
     "source-inputs/npm/archives/ead74f681a5c07c9c324fe2b62b82a26143f8097b0a1b3bd368f1a7f8ebee0f6.tgz",
+    "source-inputs/npm/archives/eb08d5ba930ec739df8ad98b5834b16f0c571b15f32b43bed0d7ee0c7f6ae9e5.tgz",
     "source-inputs/npm/archives/ec142c7bc942b358276e1ab857731a1c105a3946b2b80e54cea845600984efb8.tgz",
     "source-inputs/npm/archives/ec3dfa42c42c037dc5f10e6d8f0b375a3961be180398bfcc03748ff9ca0bbc1a.tgz",
     "source-inputs/npm/archives/ec4de4b41ad2a8c76a1b71f3e5f2831b7f51d45b7d12917c9b111105c4d671ae.tgz",
     "source-inputs/npm/archives/ec77360a6f9639e1ad472ae6cf42f21fca5aadeeb2884f075d696941c3c6ac41.tgz",
-    "source-inputs/npm/archives/ec8625a94caf8af0095565e8273067f281c4a9ff84400ce79f25cea793b24c76.tgz",
     "source-inputs/npm/archives/ec99933a21e954b1b63ea6662370a92330aa212ba3a87ab0f6ae53ae3ebada75.tgz",
     "source-inputs/npm/archives/ecfdc0f17bdcdb2d20381f4044fba6e4b7b2b4ffd4e09c87dfcf25a48d0a5644.tgz",
     "source-inputs/npm/archives/edd84de219e1902ee2822d6a8acb04bf41c5b0f63d5efd4d60e14a262cc7df49.tgz",
-    "source-inputs/npm/archives/ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
     "source-inputs/npm/archives/efacea37cad6e2ad6946796c55953f1e5803935d02d1295622f3455f1bc442f0.tgz",
     "source-inputs/npm/archives/f0dcc6df5e137f093bb756021e6874f75fd99b3cef6a352313531d340f5afdf3.tgz",
     "source-inputs/npm/archives/f1b4eee8634b34afeda5f2b095cf6361fc7bd15d9cf2ae8894689ce290d06da1.tgz",
@@ -269,10 +268,12 @@
     "source-inputs/npm/archives/f43e5363048a8e11cd033e8cee73a927a04364da38b95eba69a2db99cefb5466.tgz",
     "source-inputs/npm/archives/f48cc9e94567610d1a8f71840b129c586f671187fe854bec435656c249b1812c.tgz",
     "source-inputs/npm/archives/f4abd4ccdd3dc378f6a6d3275ec7c8f0d4c96744fbf9005d7f63722f26e0e893.tgz",
+    "source-inputs/npm/archives/f55c9ca9857650799acac622b6d591d7362afa29e5f6e029faa909977f035b45.tgz",
     "source-inputs/npm/archives/f5f65da42f3338c7c7e2f593d1a9b3df8848c48d45a1d264d2917efa4cf53364.tgz",
+    "source-inputs/npm/archives/f64cbfe228ed25df8e3f17fd35206efd304fed56ea6b1e715d2ef5025e25cfcc.tgz",
     "source-inputs/npm/archives/f6f4b357ef98542464f68b5393db79743a9299ce48a3c8adf7056c385346324b.tgz",
+    "source-inputs/npm/archives/f761ac08b454404b1d5e8d11c4dee2d493ee68667c73cf332d64bd3b4005747e.tgz",
     "source-inputs/npm/archives/f77f56e5c6b970e0d88ff5968c60112fdffbd3d1e06b5625eb327a3e51bfcdee.tgz",
-    "source-inputs/npm/archives/f97d78c6cbaf508f99d294f70f50f395fd50d29ca328aa890400f345fcfdafe0.tgz",
     "source-inputs/npm/archives/fa7d5881406a17257f2013a18c9dfd4a0058f7b645665f8f036d1fb4bc507413.tgz",
     "source-inputs/npm/archives/fa8b8ba7787d626b779f0c3507c6318c96ecb1df1cee4198bb921f14738fe48f.tgz",
     "source-inputs/npm/archives/fb0a052ea86933d5a9dd375de31cd974f54cd9150986bb8c467c6d72d8dbc525.tgz",
@@ -290,11 +291,15 @@
   "input_files": [
     {
       "path": "apps/rootlight-web/frontend/package-lock.json",
-      "sha256": "5bfae4adb95e93bd635970c73980e405379ee73a411fa30d7f0c5da82a4d2976"
+      "sha256": "03f11b14f1f75c4a668244204835ce4c5e8a280cf7b3ba601e4432113cf3b3a1"
     },
     {
       "path": "source-inputs/npm/archives/000ec49ac4651c68bd8a06a317da9869e7cd1cc37a3a3bfbe2f67e674381bb9c.tgz",
       "sha256": "7774adde8013a91e5502d550f071ab61b1077ce5cc3c4933fb853bba55a02280"
+    },
+    {
+      "path": "source-inputs/npm/archives/001b3cbf1d1890c7b692002263056575d06eb0e18839e343b784df745ac37e3a.tgz",
+      "sha256": "60521dc21e20dc98bd52439b91381108d2cf4ffe5cfecb37ba97f47d596e98bd"
     },
     {
       "path": "source-inputs/npm/archives/010d3818587ca705ceb039d2d4209b9f8c8472421b284d66e3fadca06e96a6ba.tgz",
@@ -303,10 +308,6 @@
     {
       "path": "source-inputs/npm/archives/0280264227e0570a355b7019d089efbf6f03d96b0d28d57b72b9c8bb9c21ed84.tgz",
       "sha256": "e5957205b9664935858a2d2e2049118bf577b3afa64a83d513b99184ee7c247f"
-    },
-    {
-      "path": "source-inputs/npm/archives/02830b1d31e3ea493bec9c6b9aa8fa1d35223c94e017ce28b7d3ec5c67b3c15f.tgz",
-      "sha256": "e9c66e5d17f481e919bd32fda92d5d79876c89e93beedc58fbe4b6c91d929ae5"
     },
     {
       "path": "source-inputs/npm/archives/03fad9f6a5c360d0aaa98623ce86e1faf49799a8d622be4f766b7cfeb191aa88.tgz",
@@ -323,10 +324,6 @@
     {
       "path": "source-inputs/npm/archives/077736c195809fb0d44289444ab5c257640f605c7bf1f3d3a9d5e9b03ec170be.tgz",
       "sha256": "fd485dfd57082c4ef864dd867fa87fd8e1a9b5d58ee85c2b76e28e42c8f3e1d3"
-    },
-    {
-      "path": "source-inputs/npm/archives/07a49a4813a1a5628f4248756e1127ff71ffffda5a8c7f54a2b3765e5fe6ca85.tgz",
-      "sha256": "2b3dcdc637cf9f75930fc9e8f758eaa29c4f197164a1f5478ca9bbd1818689e5"
     },
     {
       "path": "source-inputs/npm/archives/08a5a3bcd5a7bb91adfdf85764d0498116a79498e4d79e2b20e82d8d50a0ad13.tgz",
@@ -429,10 +426,6 @@
       "sha256": "ff1a36cb0eceeb0f4f67d853d773c82c335010f50950f42693434227829e2ded"
     },
     {
-      "path": "source-inputs/npm/archives/1eb542dc704518d0b80554a73ccaae449e547ca6a484b4950542edd169806f73.tgz",
-      "sha256": "cad215957255ea62f5f5872515ae5b3ea4f62e6714709ed2cf05b297b75aafee"
-    },
-    {
       "path": "source-inputs/npm/archives/2006b1009c6c57b1dba87455b53f5890d4a623a18769f6bd4180d8eafb3e147d.tgz",
       "sha256": "90bce27325f3cfedad2acd0dc83b39b69989d437d2342d7b5419b49768a99031"
     },
@@ -445,20 +438,12 @@
       "sha256": "5dbd60ac858b8eb9fb8219cd0dbe89cb866405749cbac90c2f8bc18acc77aeea"
     },
     {
-      "path": "source-inputs/npm/archives/2143934a3a9cec8412d23a12d7e598d1988c36dba8f1afbb8a4099fc15e3602c.tgz",
-      "sha256": "8f8daa2fa358fdf5fec1bb5be6c9b9a228bb066e6061d1b23dd64f867f50053a"
-    },
-    {
       "path": "source-inputs/npm/archives/22939c645f52775caf425375d89500010e2608f34deb6859038f50d7d240eced.tgz",
       "sha256": "01871c5d52a43db863ec1f3600f62fc3977925dd81a218fb4034f5216c0348de"
     },
     {
       "path": "source-inputs/npm/archives/229fee93871aced23e0ed82b6a152a60126ae44ddd2b4c4a2cfe5ec6aa6bdaf7.tgz",
       "sha256": "d8d324d73d21b0847b7b22936e23685a1b27e25ca1c1566861be00134f5f2896"
-    },
-    {
-      "path": "source-inputs/npm/archives/24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
-      "sha256": "9ea29f58a51822c17bc7eb198d4f0fb2cd66fa02feb193efb6ece17ce011a882"
     },
     {
       "path": "source-inputs/npm/archives/2536b933056970d21b3bec7e9bd3920b472c07e3b5dd5099a3f2dcfd840007f5.tgz",
@@ -471,6 +456,10 @@
     {
       "path": "source-inputs/npm/archives/2922078a0690ba31aa84840e69255fb376692119fc04088a145e2084cfa183b4.tgz",
       "sha256": "f16acafd1634624e60c24a5538004c4e168c82607f10dbe28395e9df3e7d5e4a"
+    },
+    {
+      "path": "source-inputs/npm/archives/2a237ced7b97737843bc7ca228be1a7733945683204ca591f1346b4b0506166b.tgz",
+      "sha256": "84d85153a0f3f527f8861f839ef6caaf82f6f3064982dad077f6871d48a0547a"
     },
     {
       "path": "source-inputs/npm/archives/2ca62ad7a973402352b03a5a6751370376ba66f653909aecd44f3df9b04e5016.tgz",
@@ -513,14 +502,6 @@
       "sha256": "b5cb22e604ad47f511e96b7aa57910995994f3e48744fbc507018da9efae0f12"
     },
     {
-      "path": "source-inputs/npm/archives/33dec41e8bfebea834afd0ad0cbd67f9dfb3a2ccdde86c0167967251ed1fdf36.tgz",
-      "sha256": "2858ead734bdec9c19199a92a704f28a5acd81b91468996b31720ad1f62ff67a"
-    },
-    {
-      "path": "source-inputs/npm/archives/343f28452ba07abf6525738fc6c20b2da26a28acea5133076b4caeebdac3bf29.tgz",
-      "sha256": "1d132a84f4980b2cbb15e1c1c78728aed90f5eb81c70791ed0cf133a1211139a"
-    },
-    {
       "path": "source-inputs/npm/archives/3547dfe2eb469ecabd36ef1514205f21c0ad336e97c39cc0ff9dae443127bece.tgz",
       "sha256": "2dbcfbf6e26a7a5abcee139ee225e16eee38e962f6a2348a73351b85be3f0a90"
     },
@@ -537,6 +518,10 @@
       "sha256": "8737146639e92140a7bf77090b8a09539ec7610b60fcf9a412567cb7280e2881"
     },
     {
+      "path": "source-inputs/npm/archives/3f970ead7ab0b554349cfb6af0329e31d13610011ee38a3eca60bba1805a8942.tgz",
+      "sha256": "14da3fe15e00fe1aaeb5e229ca92378cb2229deb95fac3a9f6e4d4dfa6bdeec6"
+    },
+    {
       "path": "source-inputs/npm/archives/3fe5d06519439782d6f296fb35bcef6ac8babd1196391e78ae9de26a905b80cf.tgz",
       "sha256": "1d8f1edc5d3ed985ea71dfce73b28af075995b3a292fe0f63f813e57cccd8e20"
     },
@@ -551,6 +536,10 @@
     {
       "path": "source-inputs/npm/archives/407f24fe54263cd895f8965736d86ee5e6b9a829aab4b82076d50ba159da00f4.tgz",
       "sha256": "e6a9945573ad1d6a1d7668fc7ca19d4431019bd06cdba47329aaa2a038a74089"
+    },
+    {
+      "path": "source-inputs/npm/archives/411757a2ba5984012727a7fe9f48545fbefc47632576ed3b543356f08b9f49a2.tgz",
+      "sha256": "b162ae34a55e3796b493344a1976eed7093164903ca2aadd1db3b46a1d3a5ecd"
     },
     {
       "path": "source-inputs/npm/archives/41d28777f840088fe7728d9eff069b4065c8c1bbc23ed7f713c5489751cdca90.tgz",
@@ -587,10 +576,6 @@
     {
       "path": "source-inputs/npm/archives/486eb6391417af52777d25f684ec79b733a11b2c9299091b43b423f3ba77e95a.tgz",
       "sha256": "92b5c0f5c6bdcb74c9d139b2c8fdf40d366ededc0b774909db2a2fc88c03b9d6"
-    },
-    {
-      "path": "source-inputs/npm/archives/48d0e1d7133c6f047a6f5ed4d84e05413462f645b73b26fabf2e97883339e491.tgz",
-      "sha256": "e89c478225a42b3793bb4a39fd576de142c9829c26a5bd71782249e48b112f51"
     },
     {
       "path": "source-inputs/npm/archives/490f9eb1f114a1cadfe7d6763411c1d965e1d4e1e19475d1ba2d187a6866be76.tgz",
@@ -633,10 +618,6 @@
       "sha256": "5f51889bc70428e43ee5a5e098e22c1673f1721d0251540e0a3cd3d6cceb37a5"
     },
     {
-      "path": "source-inputs/npm/archives/547d51b5f59211dabf61eeb743bcc0d30de29be51cac40e9139e4085ed46c220.tgz",
-      "sha256": "d04b1672cb309e98e1ca7ce68acd1f6c48086f22357de69391c7d024be4bcf8d"
-    },
-    {
       "path": "source-inputs/npm/archives/548e504f6abddf48e9622d1b09ce15d218c86426b72504f77c62d8bc9c05a651.tgz",
       "sha256": "b7beb7c13d7cb80d5cf559973e89e24898414cc5ac2fb699341682e22540c6b6"
     },
@@ -653,16 +634,16 @@
       "sha256": "19136a1e7ef183bc0f9757197de4a9539a380b70b930d1673ab2eb4097ba7aa5"
     },
     {
-      "path": "source-inputs/npm/archives/55cdb3029c7679e98f3feaa344ae3848f56e1742eccc9a23bd67db660e815257.tgz",
-      "sha256": "7f3edfb18691fb0a12e5480c095feaf8b05b06cb305dc9483ee7c5228fd0c3cf"
-    },
-    {
       "path": "source-inputs/npm/archives/560fe253be8d0e8d35aeb2c2635281ebbcce8c29f03e2902edd5585ed06e8231.tgz",
       "sha256": "2e5ef2ed254fbc3155299399c0f8d0791c48d51813a93cc2e8844cd0e7064fe7"
     },
     {
       "path": "source-inputs/npm/archives/561982a77bc7cd811d165e9792a257e984a64cbeb527f881747f30b2f08399a5.tgz",
       "sha256": "55c455ad612da798dd68776e51c51cd0d520457c0ac024203a2728f53fdd919f"
+    },
+    {
+      "path": "source-inputs/npm/archives/573f88cab939f52df84c057b5a3914f83b8e31204dbe55e219d591ed5576520f.tgz",
+      "sha256": "3617e223fd84182b2375f356787d9d641def4bec5aaf3bc0b32ae6c856e04268"
     },
     {
       "path": "source-inputs/npm/archives/58646b8a59d29705f0c93eca680f5df02af17ff723c24b90a67d568c916620d4.tgz",
@@ -721,12 +702,24 @@
       "sha256": "a7a05bef1ca0004694cee31438c8b16431896add18e3da805031a12268cb072a"
     },
     {
+      "path": "source-inputs/npm/archives/66c939efcc44b9348357e8d73f64a3a78b8a6d44bb3b811c03793df1a307be47.tgz",
+      "sha256": "ff56ac38c26f009895e298a34126c6477d8a5e0338ad67e0b492ea7e22ba0301"
+    },
+    {
       "path": "source-inputs/npm/archives/68c362525bfa6bb05b768bab2c4cda6c85754bc1491ac4ede4a337fe8f3b2a74.tgz",
       "sha256": "a7cc59b071f40782b660352e57da68863510c842d93c0f42efe40c1394658cd2"
     },
     {
+      "path": "source-inputs/npm/archives/69f2995836af54e7da2f3e19a21ab3467975477309a886abf4a1d138b404994b.tgz",
+      "sha256": "1acdff0749e51e28aa8c94e08a65b229cb53fe08ddda486f36fa7e43aeb448da"
+    },
+    {
       "path": "source-inputs/npm/archives/6aade581bf027ed9da06c03b2ec36c3b55ce86792f18e92dd3804fefc43eb337.tgz",
       "sha256": "d2f668f77953509d0079ef05617ac9f5b5f64ed194f8b05872ad12ba06ec9963"
+    },
+    {
+      "path": "source-inputs/npm/archives/6b582be69e0d186a0857f201d2a3fde092de29882c815da88bc3d720f874ac0d.tgz",
+      "sha256": "4e371b71e3d5081fa0052356d5c1904e7a60e049864c26f0724cfd32dc303849"
     },
     {
       "path": "source-inputs/npm/archives/6c5170ee9a7342d1d3ca4ca17e0d85d92bc1628908bf989513ec084af2138221.tgz",
@@ -757,10 +750,6 @@
       "sha256": "10b57fb1cb37d110309dd64e22a154bf26bd98526cc1ea5307b2f2478cbdddf5"
     },
     {
-      "path": "source-inputs/npm/archives/7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
-      "sha256": "2091448e30f6221cca29fea5f7a54205613766d935a157261c88390e5b361a76"
-    },
-    {
       "path": "source-inputs/npm/archives/70b8eabed4d0c41f84ad0c9d43f70e6180f19c9555e06fbc53e741b8e25acfb0.tgz",
       "sha256": "c44b3fea7bcae8a4ce328b457da171e8debf553cbeb6a049817975b8e050e3a1"
     },
@@ -783,6 +772,10 @@
     {
       "path": "source-inputs/npm/archives/7a49a238b50bb55246f56253de3619496826a329adc7f0418d87531e1f1d7dde.tgz",
       "sha256": "50b22954f78c880d1de67c861725d430560a08f2c8c20ad13b65d4ab18dd6cbb"
+    },
+    {
+      "path": "source-inputs/npm/archives/7a4b40fbfacc7a8edf1b1a816d5f7eedece202a5cced8a0d00b14a7b4bdbd076.tgz",
+      "sha256": "18c402a07284684a098becb29e4ca95c9bc67ebc161c0d8acce477c02bc21207"
     },
     {
       "path": "source-inputs/npm/archives/7a8efe1e61f7699df75e53a063f0c7637485f222260bcf966616eb7fd95cda31.tgz",
@@ -849,6 +842,10 @@
       "sha256": "f4a64efb583769c09638d81963fd3f7aa883b632f9992a256de3fbe962ca75b4"
     },
     {
+      "path": "source-inputs/npm/archives/8c16b491dfbe406d8ebc57daaa070cc9ad799b315fbe27075dff4b378576608b.tgz",
+      "sha256": "9b7051f76ac9bc422d436f1eaf02a3830d83fae3f93c7409d7b606858cba0dca"
+    },
+    {
       "path": "source-inputs/npm/archives/8c5420eae26a5d6e86d8a6185a02437d01370202cbb297ecc2efeaecfcf07b90.tgz",
       "sha256": "9f8413255be6492501f0d9344034aa517d578afd5e7114ebb26627eee9a62670"
     },
@@ -885,6 +882,10 @@
       "sha256": "3d40b1428dae32a6328ea20543abaafb72101a2652a95f43ec8757fef213f0be"
     },
     {
+      "path": "source-inputs/npm/archives/9599dfdcee9abe9d1e1209f85d4304d963d6b5c5d39378043460e5847ed3306c.tgz",
+      "sha256": "b5ad810c24ba712b00c51d7c0af3c34b7b71448cc9637ee274fe472d07ccd724"
+    },
+    {
       "path": "source-inputs/npm/archives/9700cb765c17785aea6eb010da72dbfc5e3285080b5ab706024920bc28795d55.tgz",
       "sha256": "a20fd853c4514049964aca176d4198d58802b28dc481e82cb57f2101b2c7701b"
     },
@@ -907,6 +908,10 @@
     {
       "path": "source-inputs/npm/archives/9a72db500d4e541d52c14b408c3a0f335576b08ab0d82cf14ab80655a8523203.tgz",
       "sha256": "b11e78819544a6606e3317647a5593c102ea38d3c5afae62cd63f9c2c369485a"
+    },
+    {
+      "path": "source-inputs/npm/archives/9ad4e9287104d1c1d381062005f5ed079481b4c043bae3a28934b33fbc442868.tgz",
+      "sha256": "8f7a8036c3b25ce7b515b5768fb58fce87292f9f89c1b49ac1972e2c07e68e67"
     },
     {
       "path": "source-inputs/npm/archives/9bb398b24e03cdf7c1491ce2019ffc567c6ce0b005f408e9299f9edbb1be31b3.tgz",
@@ -1005,6 +1010,10 @@
       "sha256": "e85c8aa5ac2500ef7f3925fbbd42af685705ee857808b4d98a80cc8b733ad62a"
     },
     {
+      "path": "source-inputs/npm/archives/ac04d03d56dd1a715d80bd414542df6ce9ae95e14b774d15675450247e0d96ae.tgz",
+      "sha256": "a98f689e2dd4cab8482678ad660215bb750db7288e0b5c1673d51ffb743b6b9a"
+    },
+    {
       "path": "source-inputs/npm/archives/acc469d04f72e496b44767664d887c9e8da26599457f6cf66b31c11342593475.tgz",
       "sha256": "37d2af15ae7f2123a9d121fa1cdfa2ab003df6c287a0a296d2ccf514b51b3fce"
     },
@@ -1015,10 +1024,6 @@
     {
       "path": "source-inputs/npm/archives/afe422ed8828ee37fc691b0a8276038e968bb058e12e7c3337d7c4a665f09ef1.tgz",
       "sha256": "d17fc2ba1f036a4c6c448d3ae1893a163f29c064a33984b11520c3992e9a66b2"
-    },
-    {
-      "path": "source-inputs/npm/archives/b2b55c171243a1e305e269ca3568c0f2e1edf06911bd805fbc21e012721ba4f5.tgz",
-      "sha256": "808b865ba5c14bc704a20d6d2d908ce9e200c185419527982e6bf970b4ef4bfa"
     },
     {
       "path": "source-inputs/npm/archives/b2caafa9a386895c63b4f1077c37d36f0aaee035c2e1e78bfe3f240fa4d22aed.tgz",
@@ -1041,12 +1046,12 @@
       "sha256": "1f4457d4df0f93521899c0fdee0263de0f243ecb90ea6bc6d744fadd132067d1"
     },
     {
-      "path": "source-inputs/npm/archives/b7d0b3b34e5a332da8b556e720570413207b8990109a1d6ffc73af9fa2d936bd.tgz",
-      "sha256": "b10cb23cdaf16994d8ddd6bce99736b53b3088d43b3285c2e7c0e2f257e2cc87"
-    },
-    {
       "path": "source-inputs/npm/archives/b7f95cf416041181b4cb89df7506e220179d6f271a35f60aa9f32e088d978652.tgz",
       "sha256": "bd54a5fe6a083d480a3ab03972cbba7742da4da5035bb5bd5b53b374cc97c374"
+    },
+    {
+      "path": "source-inputs/npm/archives/b8323ad9ab18da4a0d436f8451b9cbf6f05e78f2337b3f32d320e23f48bdac2d.tgz",
+      "sha256": "697b463be3cdbd9ffc8f4194fd5019a69ddf95875fb703d78b2b115cc9e740a8"
     },
     {
       "path": "source-inputs/npm/archives/b844643c113a74d53a4190af304f3a2f9614320886a43a4714f886e9a88bc13b.tgz",
@@ -1067,10 +1072,6 @@
     {
       "path": "source-inputs/npm/archives/bb2eb4cd9d8b31dbceadb28339e332dcb4ed93048e78047ee3bd0ab407d7ad07.tgz",
       "sha256": "4bdf46cf597b875ce16770f151159ca34f96c20ba3c112dc8d7f6c6d6cce770c"
-    },
-    {
-      "path": "source-inputs/npm/archives/bef9468d5763896ae6f356def7cc821cfca3310540bab910225af0308cfd0365.tgz",
-      "sha256": "b9dc81cb403ea2510314dd2d1ad8d71934f325db90c1b43805e781b87e3fb009"
     },
     {
       "path": "source-inputs/npm/archives/bf5d7ced6d856d96b10471784340b7f4fc665c269fb78616f742f63c8501430a.tgz",
@@ -1147,6 +1148,10 @@
     {
       "path": "source-inputs/npm/archives/d2c8e3cc2e58321859c4af4caf293041bbd02f04765b62df063ea12220f264f8.tgz",
       "sha256": "8ecd352ee99b1c8291bee007f43d58356ae5057782de9635563aec2e604dcee2"
+    },
+    {
+      "path": "source-inputs/npm/archives/d304925fd201c21f630df3dab22a41b1588a84062647a2af298727983cc292fb.tgz",
+      "sha256": "c02fcaea0bef927cae3a287dd6c316d8a9da12c8b9ba104f2387978fbe16234d"
     },
     {
       "path": "source-inputs/npm/archives/d5c2d5f377dc118552a6e918fc408ed3e0b37f6f7f1a5102164bd77e28574ef5.tgz",
@@ -1229,16 +1234,16 @@
       "sha256": "16b004c4e056634c6b96c44821d453c268359d781a5db3652bddb191b3195dc3"
     },
     {
-      "path": "source-inputs/npm/archives/e28aff82d3979e77d0a3b6e583d59b4b999cff99019026c3ee24c604868ebfaa.tgz",
-      "sha256": "cd872e32e957eb0b094e298e1c11ca24fc03465f6bef02c8d8add813a3a0a761"
-    },
-    {
       "path": "source-inputs/npm/archives/e2f5d2ef8e769aeff5548751db13e4f30362e1ad1090cc128ade9462f8cb65e3.tgz",
       "sha256": "4b44a14da6987a3c0585c2ff16b3800425732ff35cad710c65e72d7f8e33b11b"
     },
     {
       "path": "source-inputs/npm/archives/e2f795c7b6c17bf74472b0f9ff64b0aa4ebcbbdb79fb0e6feacf393c5ebb4bdc.tgz",
       "sha256": "8e9652205f5fca36dec78e11650ed998e639f5744600e1dbfc024cd627eed8bd"
+    },
+    {
+      "path": "source-inputs/npm/archives/e39ff3a91c4bacd65aece5625f3ae2ce49f2f35b07fe2d9e300e70270a1e2f77.tgz",
+      "sha256": "6ca2408f73d7d4549426d45b02e8aae7abbc35887a02f7f836cace7cb7f6979e"
     },
     {
       "path": "source-inputs/npm/archives/e41974d662ab2846c7d4aa9b66e05ce95a5b997e36f4226b6a119202af8aeda2.tgz",
@@ -1249,12 +1254,12 @@
       "sha256": "3a38e953c2366359670fb41e7efae2d8a818ac12615fbea6f9d0614010582e39"
     },
     {
-      "path": "source-inputs/npm/archives/e5857dcd5d4c2769554d7ffe971f86e2faecae15a5a5cf15d9e5325c672e9db0.tgz",
-      "sha256": "9d5e5589341d760748c824877dc6a9fe7a82c64037a488434614309918cc4123"
-    },
-    {
       "path": "source-inputs/npm/archives/e59a236538be85bfdc2e762e312b3526efa284541ce0f875a18a27c7ef4f4562.tgz",
       "sha256": "f3a1a10f3c393db5ce03438035b94fcd48bc7b7b52bb97f76a3ed52784624441"
+    },
+    {
+      "path": "source-inputs/npm/archives/e5bd040aa5a2025fb476203e30188f5ddbd631390b4393673af4412c7fb33ec1.tgz",
+      "sha256": "12813852cdb577e6e29ad3523ad5828a910a7d5c7c9da3b1e4d67e447e2c049a"
     },
     {
       "path": "source-inputs/npm/archives/e5c3e0ea92c6d94d74e080fef4808dcad6869d9295f96a5c41a082100da1e3ee.tgz",
@@ -1267,10 +1272,6 @@
     {
       "path": "source-inputs/npm/archives/e8b1c750cb5a5480b75b368541fdefda7dfda0bd2ccafe554b4e48f6324c8e02.tgz",
       "sha256": "49b0a9db41f743b59375e355aa9489a97c51ac9a655107de83140fc03be2f7cc"
-    },
-    {
-      "path": "source-inputs/npm/archives/e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
-      "sha256": "d3126d71994ac340c5df4016da82a72d6b5263bcf4fc36c6b37b4410585cb8cf"
     },
     {
       "path": "source-inputs/npm/archives/e9716b98ea2d43c1e16a3a8a54d24fb40b18d95b0246571020a3b9049f8837f6.tgz",
@@ -1289,6 +1290,10 @@
       "sha256": "77a7eb1411d927bb8a5ca7069dbe168886d63c88f446f0b81500a2cf23ddb5b1"
     },
     {
+      "path": "source-inputs/npm/archives/eb08d5ba930ec739df8ad98b5834b16f0c571b15f32b43bed0d7ee0c7f6ae9e5.tgz",
+      "sha256": "c3359b2f7a81343bbd2bf492f8f144f2a11551cebc5f14101498de139e2e8e42"
+    },
+    {
       "path": "source-inputs/npm/archives/ec142c7bc942b358276e1ab857731a1c105a3946b2b80e54cea845600984efb8.tgz",
       "sha256": "d884c7a2d8adb5568c1272d92b4f9c62707f4226cf9e7b22e7b957c7361e3c53"
     },
@@ -1305,10 +1310,6 @@
       "sha256": "b2a0af78c27da36a2449c2fe71eb3730e6c40d7aaab20bdc3689282432bb3117"
     },
     {
-      "path": "source-inputs/npm/archives/ec8625a94caf8af0095565e8273067f281c4a9ff84400ce79f25cea793b24c76.tgz",
-      "sha256": "92ed1c46d4a59380c8d4ed6302bb6972821f190eda4dd83351d9aa819ce5cbe9"
-    },
-    {
       "path": "source-inputs/npm/archives/ec99933a21e954b1b63ea6662370a92330aa212ba3a87ab0f6ae53ae3ebada75.tgz",
       "sha256": "4c06bfe733d006103a4c070dcf8e0a3b2eb6b6a83e20e21c32d2d3b9c3ffae0a"
     },
@@ -1319,10 +1320,6 @@
     {
       "path": "source-inputs/npm/archives/edd84de219e1902ee2822d6a8acb04bf41c5b0f63d5efd4d60e14a262cc7df49.tgz",
       "sha256": "0c93c0967461fdfc174a3ef5a35bda5853679d2d984b9109b6eeb5533640f3a2"
-    },
-    {
-      "path": "source-inputs/npm/archives/ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
-      "sha256": "dd11c3d836c5ce3fe0ebede42ea8d673ae34659e44f2dedadd53f450939e41f2"
     },
     {
       "path": "source-inputs/npm/archives/efacea37cad6e2ad6946796c55953f1e5803935d02d1295622f3455f1bc442f0.tgz",
@@ -1365,20 +1362,28 @@
       "sha256": "bdf900298963e4bd95b76aa95e96d29f05687e6ae662d617061778267b576da8"
     },
     {
+      "path": "source-inputs/npm/archives/f55c9ca9857650799acac622b6d591d7362afa29e5f6e029faa909977f035b45.tgz",
+      "sha256": "a25527d2964e57dcaaabad3a4119a5f0060d78b6698636b1b94cb749715a0131"
+    },
+    {
       "path": "source-inputs/npm/archives/f5f65da42f3338c7c7e2f593d1a9b3df8848c48d45a1d264d2917efa4cf53364.tgz",
       "sha256": "c64c71a119630d5abe8246889edf334b2ca9ddad094e20d623332956b1453ccf"
+    },
+    {
+      "path": "source-inputs/npm/archives/f64cbfe228ed25df8e3f17fd35206efd304fed56ea6b1e715d2ef5025e25cfcc.tgz",
+      "sha256": "53e075a52a5ce9f84db1fdc64b52011d241ecf341140a3f9028e7327d86db2ff"
     },
     {
       "path": "source-inputs/npm/archives/f6f4b357ef98542464f68b5393db79743a9299ce48a3c8adf7056c385346324b.tgz",
       "sha256": "a0ac35e67812c71b10b834a64704a2aace7e12e4ef0f2bbaea2dd3fe9fee6fe9"
     },
     {
-      "path": "source-inputs/npm/archives/f77f56e5c6b970e0d88ff5968c60112fdffbd3d1e06b5625eb327a3e51bfcdee.tgz",
-      "sha256": "dbb3b9b10b0a2828f5af58a6317685b1a150464c6bd54995069c526aba45e6e4"
+      "path": "source-inputs/npm/archives/f761ac08b454404b1d5e8d11c4dee2d493ee68667c73cf332d64bd3b4005747e.tgz",
+      "sha256": "f8735b2c43d2e53678a994c11e914b76d9cd034b72aa7b9d59194a46b19b4de5"
     },
     {
-      "path": "source-inputs/npm/archives/f97d78c6cbaf508f99d294f70f50f395fd50d29ca328aa890400f345fcfdafe0.tgz",
-      "sha256": "65f05345da13e72a60c37b874e6cbc88131d9825d57a5b04e3a43a6525eacc33"
+      "path": "source-inputs/npm/archives/f77f56e5c6b970e0d88ff5968c60112fdffbd3d1e06b5625eb327a3e51bfcdee.tgz",
+      "sha256": "dbb3b9b10b0a2828f5af58a6317685b1a150464c6bd54995069c526aba45e6e4"
     },
     {
       "path": "source-inputs/npm/archives/fa7d5881406a17257f2013a18c9dfd4a0058f7b645665f8f036d1fb4bc507413.tgz",
@@ -1414,11 +1419,11 @@
     },
     {
       "path": "source-inputs/npm/local-distributions.json",
-      "sha256": "06104502c13e736dbfdcd856c9b8e6145c86d93d1864a2477bbbce0cf392202a"
+      "sha256": "0a94ec9aaf4c28271007d62976b35b45757056a20b69838ce064f7fbf79d1e0b"
     },
     {
       "path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.provenance.json",
-      "sha256": "5f8c3105b441f84b562ae03979f421f1a085200c5f0337433abe7f882570401b"
+      "sha256": "edc84632093efd955b11352b9c5252f169682bdd6e17cfc0172599af24225620"
     },
     {
       "path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.tgz",
@@ -1426,16 +1431,16 @@
     },
     {
       "path": "source-inputs/npm/upstream-package-lock.json",
-      "sha256": "fc43220b2212fc53fb566083fe836971ed8bbc72b79c8c30fcd2a1709a673dee"
+      "sha256": "cb7ae1a32580c301e2c0cadd985ae0c658fec61fc8ed3dd929104dc1c8b81dfc"
     }
   ],
   "installation_verified": false,
   "licensing_scope": "supplied metadata and preserved files; not legal completeness or authorship evidence",
   "local_distribution_count": 1,
-  "local_distributions_sha256": "06104502c13e736dbfdcd856c9b8e6145c86d93d1864a2477bbbce0cf392202a",
-  "lock_record_count": 282,
-  "lockfile_sha256": "5bfae4adb95e93bd635970c73980e405379ee73a411fa30d7f0c5da82a4d2976",
-  "original_archive_count": 280,
+  "local_distributions_sha256": "0a94ec9aaf4c28271007d62976b35b45757056a20b69838ce064f7fbf79d1e0b",
+  "lock_record_count": 283,
+  "lockfile_sha256": "03f11b14f1f75c4a668244204835ce4c5e8a280cf7b3ba601e4432113cf3b3a1",
+  "original_archive_count": 281,
   "os_denied_acceptance_verified": false,
   "packages": [
     {
@@ -15752,16 +15757,16 @@
     },
     {
       "archive": {
-        "bytes": 7712,
-        "sha256": "d3126d71994ac340c5df4016da82a72d6b5263bcf4fc36c6b37b4410585cb8cf",
-        "sha512": "9ee85920e2ee23a4c5437d88fd69d4c7e4823d8ed27522b0827147c9d02ea12d7e67805171a3fe4512661b397d970fb438517b52668449feca4115da34b1f2a6",
+        "bytes": 7677,
+        "sha256": "6ca2408f73d7d4549426d45b02e8aae7abbc35887a02f7f836cace7cb7f6979e",
+        "sha512": "a0cff9acb066dad3e48348818241ff14e791dcf083a58d7d19380066330533c87d588f555bb70b833a7a9f0b5aad82a6a2f6af21067e15efd1297ffc0bc3bf47",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
-      "archive_path": "source-inputs/npm/archives/e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
+      "archive_filename": "e39ff3a91c4bacd65aece5625f3ae2ce49f2f35b07fe2d9e300e70270a1e2f77.tgz",
+      "archive_path": "source-inputs/npm/archives/e39ff3a91c4bacd65aece5625f3ae2ce49f2f35b07fe2d9e300e70270a1e2f77.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-nuhZIOLuI6TFQ32I/WnUx+SCPY7SdSKwgnFHydAuoS1+Z4BRcaP+RRJmGzl9lw+0OFF7UmaESf7KQRXaNLHypg==",
+      "integrity": "sha512-oM/5rLBm2tPkg0iBgkH/FOeR3PCDpY19GTgAZjMFM8h9WI9VW7cLgzp6nwtarYKmovavIQZ+Fe/RKX/8C8O/Rw==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -15802,23 +15807,23 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 577,
+          "bytes": 582,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "e7d7c0d4c05a2cf91517b80f3f3c5de59933d031c1b0d33f672f765cc56c7be1"
+          "sha256": "78ba8a6b8cf8c037c6e4eb2b9857402c0b51164dadbe9ccf18696a9b5e0bb681"
         },
         {
           "archive_mode": 420,
-          "bytes": 42826,
+          "bytes": 42840,
           "kind": "file",
           "path": "package/types.d.ts",
-          "sha256": "13f758619efc1ce2eda9da363ddbefc48813163cd6d8de45cbdef600c6f366a4"
+          "sha256": "f76d2226b20ec0d3e884114cfbbb933cb4d25d26cc306e8315e21a0e3afafc39"
         }
       ],
-      "members_sha256": "d3a34a27539c0658e94abfbe5afaac5438d5feca86f5121655894ccff7e9aaae",
+      "members_sha256": "1b1cbc2d5c0f39737d9b50776fb3ada7ccedd6ba39d105c73acace743e4a514c",
       "name": "@oxc-project/types",
       "native_binary_files": [],
-      "package_json_sha256": "e7d7c0d4c05a2cf91517b80f3f3c5de59933d031c1b0d33f672f765cc56c7be1",
+      "package_json_sha256": "78ba8a6b8cf8c037c6e4eb2b9857402c0b51164dadbe9ccf18696a9b5e0bb681",
       "provenance_metadata": {
         "homepage": "https://oxc.rs",
         "repository": {
@@ -15827,11 +15832,11 @@
           "url": "git+https://github.com/oxc-project/oxc.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/e39ff3a91c4bacd65aece5625f3ae2ce49f2f35b07fe2d9e300e70270a1e2f77.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "e8ff5f7bd9f1e76cc50604e43a48dbefcfecf35ed1c03196c1bfd5acdc111fbe.tgz",
-        "integrity": "sha512-nuhZIOLuI6TFQ32I/WnUx+SCPY7SdSKwgnFHydAuoS1+Z4BRcaP+RRJmGzl9lw+0OFF7UmaESf7KQRXaNLHypg==",
+        "archive_filename": "e39ff3a91c4bacd65aece5625f3ae2ce49f2f35b07fe2d9e300e70270a1e2f77.tgz",
+        "integrity": "sha512-oM/5rLBm2tPkg0iBgkH/FOeR3PCDpY19GTgAZjMFM8h9WI9VW7cLgzp6nwtarYKmovavIQZ+Fe/RKX/8C8O/Rw==",
         "lock_paths": [
           "node_modules/@oxc-project/types"
         ],
@@ -15843,10 +15848,10 @@
           }
         ],
         "name": "@oxc-project/types",
-        "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.144.0.tgz",
-        "version": "0.144.0"
+        "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.152.0.tgz",
+        "version": "0.152.0"
       },
-      "version": "0.144.0"
+      "version": "0.152.0"
     },
     {
       "archive": {
@@ -16003,16 +16008,125 @@
     },
     {
       "archive": {
-        "bytes": 7533238,
-        "sha256": "e9c66e5d17f481e919bd32fda92d5d79876c89e93beedc58fbe4b6c91d929ae5",
-        "sha512": "8c70b6727c8acf9c54d9f8440ad165f0e67cddc60db75dc66500fed2e309fd7de8fa28e6779ea8907853530c554873f1d48455209119d7fd693f378b094e9728",
+        "bytes": 6643057,
+        "sha256": "84d85153a0f3f527f8861f839ef6caaf82f6f3064982dad077f6871d48a0547a",
+        "sha512": "741fdad76d78a8a7c73170a982a4783994fe8d2e244f21176d01893eace86ede44c07e6b5f4f34a71137eda96ddd1cef4756dfd58cffc86a917eb600c6e3f0d0",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "02830b1d31e3ea493bec9c6b9aa8fa1d35223c94e017ce28b7d3ec5c67b3c15f.tgz",
-      "archive_path": "source-inputs/npm/archives/02830b1d31e3ea493bec9c6b9aa8fa1d35223c94e017ce28b7d3ec5c67b3c15f.tgz",
+      "archive_filename": "2a237ced7b97737843bc7ca228be1a7733945683204ca591f1346b4b0506166b.tgz",
+      "archive_path": "source-inputs/npm/archives/2a237ced7b97737843bc7ca228be1a7733945683204ca591f1346b4b0506166b.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-jHC2cnyKz5xU2fhECtFl8OZ83cYNt13GZQD+0uMJ/X3o+ijmd56okHhTUwxVSHPx1IRVIJEZ1/1pPzeLCU6XKA==",
+      "integrity": "sha512-dB/a1214qKfHMXCpgqR4OZT+jS4kTyEXbQGJPqzobt5EwH5rX080pxE37alt3RzvR1bf1Yz/yGqRfrYAxuPw0A==",
+      "license_files": [],
+      "license_metadata": {
+        "license": "MIT"
+      },
+      "lock_paths": [
+        "node_modules/@rolldown/binding-android-arm-eabi"
+      ],
+      "lock_records": [
+        {
+          "cpu": [
+            "arm"
+          ],
+          "dev": true,
+          "license": "MIT",
+          "optional": true,
+          "os": [
+            "android"
+          ],
+          "path": "node_modules/@rolldown/binding-android-arm-eabi"
+        }
+      ],
+      "member_count": 3,
+      "members": [
+        {
+          "archive_mode": 420,
+          "bytes": 111,
+          "kind": "file",
+          "path": "package/README.md",
+          "sha256": "6392ea54c75013b7bc86aa1ac6b828851a0fb43406ade4a6bec8a4c96074c318"
+        },
+        {
+          "archive_mode": 420,
+          "bytes": 866,
+          "kind": "file",
+          "path": "package/package.json",
+          "sha256": "64555f0d120ce68dd8b8cf0efa0bc2e130cf2d8c0f8042dce74f0a939a1dd055"
+        },
+        {
+          "archive_mode": 420,
+          "bytes": 11538344,
+          "kind": "file",
+          "path": "package/rolldown-binding.android-arm-eabi.node",
+          "sha256": "7571e5f58000951822c88337d578bd9a32e72d651ff9b4248330e4a40cd995d5"
+        }
+      ],
+      "members_sha256": "eb7c6a95f2963ad0f8d9d8770de996db2d63af3a83aca500dcebe6f32bc52c3b",
+      "name": "@rolldown/binding-android-arm-eabi",
+      "native_binary_files": [
+        {
+          "archive_mode": 420,
+          "bytes": 11538344,
+          "detected_formats": [
+            "native-file-extension",
+            "elf"
+          ],
+          "kind": "file",
+          "path": "package/rolldown-binding.android-arm-eabi.node",
+          "sha256": "7571e5f58000951822c88337d578bd9a32e72d651ff9b4248330e4a40cd995d5"
+        }
+      ],
+      "package_json_sha256": "64555f0d120ce68dd8b8cf0efa0bc2e130cf2d8c0f8042dce74f0a939a1dd055",
+      "provenance_metadata": {
+        "homepage": "https://rolldown.rs/",
+        "repository": {
+          "directory": "packages/rolldown",
+          "type": "git",
+          "url": "git+https://github.com/rolldown/rolldown.git"
+        }
+      },
+      "resolved": "file:../../../source-inputs/npm/archives/2a237ced7b97737843bc7ca228be1a7733945683204ca591f1346b4b0506166b.tgz",
+      "upstream_original_sri_recomputed": true,
+      "upstream_pin": {
+        "archive_filename": "2a237ced7b97737843bc7ca228be1a7733945683204ca591f1346b4b0506166b.tgz",
+        "integrity": "sha512-dB/a1214qKfHMXCpgqR4OZT+jS4kTyEXbQGJPqzobt5EwH5rX080pxE37alt3RzvR1bf1Yz/yGqRfrYAxuPw0A==",
+        "lock_paths": [
+          "node_modules/@rolldown/binding-android-arm-eabi"
+        ],
+        "lock_records": [
+          {
+            "cpu": [
+              "arm"
+            ],
+            "dev": true,
+            "license": "MIT",
+            "optional": true,
+            "os": [
+              "android"
+            ],
+            "path": "node_modules/@rolldown/binding-android-arm-eabi"
+          }
+        ],
+        "name": "@rolldown/binding-android-arm-eabi",
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.12.tgz",
+        "version": "1.2.12"
+      },
+      "version": "1.2.12"
+    },
+    {
+      "archive": {
+        "bytes": 7622662,
+        "sha256": "9b7051f76ac9bc422d436f1eaf02a3830d83fae3f93c7409d7b606858cba0dca",
+        "sha512": "eca1c5810e5527120770b96bc2b7375db76cee84cd413ecf822f6040224aaddd9519a6ff524b08398a7a543f0ccc2b2d1b138a32035a98fc1409fc4f74fd4e1e",
+        "sri_verified_algorithm": "sha512"
+      },
+      "archive_filename": "8c16b491dfbe406d8ebc57daaa070cc9ad799b315fbe27075dff4b378576608b.tgz",
+      "archive_path": "source-inputs/npm/archives/8c16b491dfbe406d8ebc57daaa070cc9ad799b315fbe27075dff4b378576608b.tgz",
+      "archive_root": "package",
+      "distribution_kind": "original_registry_archive",
+      "integrity": "sha512-7KHFgQ5VJxIHcLlrwrc3Xbds7oTNQT7Pgi9gQCJKrd2VGab/UksIOYp6VD8MzCstGxOKMgNamPwUCfxPdP1OHg==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16045,35 +16159,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 783,
+          "bytes": 859,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "65e124c9c98f89ce9d3e81968ded8bc9180b0f17e887042dad10a3a81d101af1"
+          "sha256": "51f4624a108eded23a845ad8c9250a7875f43dbe3f5ed6b82e52d82539b11df8"
         },
         {
           "archive_mode": 420,
-          "bytes": 17493160,
+          "bytes": 17547984,
           "kind": "file",
           "path": "package/rolldown-binding.android-arm64.node",
-          "sha256": "590063b9e7e61d678ff3da26b6920584b0da3a6ed34f05ce79e1847b019bc4cd"
+          "sha256": "51b60dedfdab6ccdc13c2c50c17d662066d524060b03e3baf8fb9d6e539fd3d2"
         }
       ],
-      "members_sha256": "6bde80a0be077d999e5ba7d39ae9a55bb61f49eb38b7d1734bf6e8b517a9a87b",
+      "members_sha256": "26dbf9f33850f6a780ccc19c196390d9f1bdf0e7a7299026300ed2556f30dddc",
       "name": "@rolldown/binding-android-arm64",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 17493160,
+          "bytes": 17547984,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.android-arm64.node",
-          "sha256": "590063b9e7e61d678ff3da26b6920584b0da3a6ed34f05ce79e1847b019bc4cd"
+          "sha256": "51b60dedfdab6ccdc13c2c50c17d662066d524060b03e3baf8fb9d6e539fd3d2"
         }
       ],
-      "package_json_sha256": "65e124c9c98f89ce9d3e81968ded8bc9180b0f17e887042dad10a3a81d101af1",
+      "package_json_sha256": "51f4624a108eded23a845ad8c9250a7875f43dbe3f5ed6b82e52d82539b11df8",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16082,11 +16196,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/02830b1d31e3ea493bec9c6b9aa8fa1d35223c94e017ce28b7d3ec5c67b3c15f.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/8c16b491dfbe406d8ebc57daaa070cc9ad799b315fbe27075dff4b378576608b.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "02830b1d31e3ea493bec9c6b9aa8fa1d35223c94e017ce28b7d3ec5c67b3c15f.tgz",
-        "integrity": "sha512-jHC2cnyKz5xU2fhECtFl8OZ83cYNt13GZQD+0uMJ/X3o+ijmd56okHhTUwxVSHPx1IRVIJEZ1/1pPzeLCU6XKA==",
+        "archive_filename": "8c16b491dfbe406d8ebc57daaa070cc9ad799b315fbe27075dff4b378576608b.tgz",
+        "integrity": "sha512-7KHFgQ5VJxIHcLlrwrc3Xbds7oTNQT7Pgi9gQCJKrd2VGab/UksIOYp6VD8MzCstGxOKMgNamPwUCfxPdP1OHg==",
         "lock_paths": [
           "node_modules/@rolldown/binding-android-arm64"
         ],
@@ -16105,23 +16219,23 @@
           }
         ],
         "name": "@rolldown/binding-android-arm64",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7267990,
-        "sha256": "8f8daa2fa358fdf5fec1bb5be6c9b9a228bb066e6061d1b23dd64f867f50053a",
-        "sha512": "0dce663c3f05e45fc54bc8b4d6cc9dec54c5eb20767d5b611ff4d1923c0993350ae84a68c47b6abd940fe59c2af34ff9cf5f535981c883528e1dba02815c7f69",
+        "bytes": 7323369,
+        "sha256": "8f7a8036c3b25ce7b515b5768fb58fce87292f9f89c1b49ac1972e2c07e68e67",
+        "sha512": "dd8221a870fdea703949a60d441475e879c6bf8a1abd9bd77c3fdac8733ea18674583ffc94102d7facd0b9ae2413202fa6aae5b8a5e5d259ce06888d6f2ef1f7",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "2143934a3a9cec8412d23a12d7e598d1988c36dba8f1afbb8a4099fc15e3602c.tgz",
-      "archive_path": "source-inputs/npm/archives/2143934a3a9cec8412d23a12d7e598d1988c36dba8f1afbb8a4099fc15e3602c.tgz",
+      "archive_filename": "9ad4e9287104d1c1d381062005f5ed079481b4c043bae3a28934b33fbc442868.tgz",
+      "archive_path": "source-inputs/npm/archives/9ad4e9287104d1c1d381062005f5ed079481b4c043bae3a28934b33fbc442868.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-Dc5mPD8F5F/FS8i01syd7FTF6yB2fVthH/TRkjwJkzUK6EpoxHtqvZQP5Zwq80/5z19TWYHIg1KOHboCgVx/aQ==",
+      "integrity": "sha512-3YIhqHD96nA5SaYNRBR16HnGv4oavZvXfD/ayHM+oYZ0WD/8lBAtf6zQua4kEyAvpqrluKXl0lnOBoiNby7x9w==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16154,35 +16268,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 779,
+          "bytes": 855,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "2bb821557f035fe8acd526eabb4f3d4904f74c3c2de9cdf7f667bbf485d52da5"
+          "sha256": "f6810bbd99d8d43c6e2e7fcfd647a8fa37b571f4aa9905c40f9d4ac96ea66165"
         },
         {
           "archive_mode": 420,
-          "bytes": 16639664,
+          "bytes": 16703408,
           "kind": "file",
           "path": "package/rolldown-binding.darwin-arm64.node",
-          "sha256": "89d71333d944040fd84ee47e2f86122b7d072c33d49e15053f230bd07868b840"
+          "sha256": "3d3a04898915d7dcd6809ca15c0f02d20fd07ab28b58863a3889e5f61d6620de"
         }
       ],
-      "members_sha256": "e28f6ad64608a66349aca03384eca99640605711708410805a42e22988113e16",
+      "members_sha256": "87894a0fd6588576b3b0dc67c8bddce27211f914da945d9791ba92aadf6b85d0",
       "name": "@rolldown/binding-darwin-arm64",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 16639664,
+          "bytes": 16703408,
           "detected_formats": [
             "native-file-extension",
             "mach-o-or-fat-binary"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.darwin-arm64.node",
-          "sha256": "89d71333d944040fd84ee47e2f86122b7d072c33d49e15053f230bd07868b840"
+          "sha256": "3d3a04898915d7dcd6809ca15c0f02d20fd07ab28b58863a3889e5f61d6620de"
         }
       ],
-      "package_json_sha256": "2bb821557f035fe8acd526eabb4f3d4904f74c3c2de9cdf7f667bbf485d52da5",
+      "package_json_sha256": "f6810bbd99d8d43c6e2e7fcfd647a8fa37b571f4aa9905c40f9d4ac96ea66165",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16191,11 +16305,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/2143934a3a9cec8412d23a12d7e598d1988c36dba8f1afbb8a4099fc15e3602c.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/9ad4e9287104d1c1d381062005f5ed079481b4c043bae3a28934b33fbc442868.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "2143934a3a9cec8412d23a12d7e598d1988c36dba8f1afbb8a4099fc15e3602c.tgz",
-        "integrity": "sha512-Dc5mPD8F5F/FS8i01syd7FTF6yB2fVthH/TRkjwJkzUK6EpoxHtqvZQP5Zwq80/5z19TWYHIg1KOHboCgVx/aQ==",
+        "archive_filename": "9ad4e9287104d1c1d381062005f5ed079481b4c043bae3a28934b33fbc442868.tgz",
+        "integrity": "sha512-3YIhqHD96nA5SaYNRBR16HnGv4oavZvXfD/ayHM+oYZ0WD/8lBAtf6zQua4kEyAvpqrluKXl0lnOBoiNby7x9w==",
         "lock_paths": [
           "node_modules/@rolldown/binding-darwin-arm64"
         ],
@@ -16214,23 +16328,23 @@
           }
         ],
         "name": "@rolldown/binding-darwin-arm64",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7567578,
-        "sha256": "d04b1672cb309e98e1ca7ce68acd1f6c48086f22357de69391c7d024be4bcf8d",
-        "sha512": "7e90e6e28068e92a8bbd65180a616175d7b753d287d9f44d34c7809c03c0230c512f7e39c6eb4bd04b4451cba8c6ca1acdd246bff32e0c14079420ebb5bbea3a",
+        "bytes": 7674980,
+        "sha256": "1acdff0749e51e28aa8c94e08a65b229cb53fe08ddda486f36fa7e43aeb448da",
+        "sha512": "52eb89df9305c3882614eac4f6912a215f8adecc882af7a987e41cd7f9631d955da035b8a73fc91d1fde315a26f9364697fe4e3af18939668e095b7765faa1c4",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "547d51b5f59211dabf61eeb743bcc0d30de29be51cac40e9139e4085ed46c220.tgz",
-      "archive_path": "source-inputs/npm/archives/547d51b5f59211dabf61eeb743bcc0d30de29be51cac40e9139e4085ed46c220.tgz",
+      "archive_filename": "69f2995836af54e7da2f3e19a21ab3467975477309a886abf4a1d138b404994b.tgz",
+      "archive_path": "source-inputs/npm/archives/69f2995836af54e7da2f3e19a21ab3467975477309a886abf4a1d138b404994b.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-fpDm4oBo6SqLvWUYCmFhdde3U9KH2fRNNMeAnAPAIwxRL345xutL0EtEUcuoxsoazdJGv/MuDBQHlCDrtbvqOg==",
+      "integrity": "sha512-UuuJ35MFw4gmFOrE9pEqIV+K3syIKveph+Qc1/ljHZVdoDW4pz/JHR/eMVom+TZGl/5OOvGJOWaOCVt3ZfqhxA==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16263,35 +16377,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 771,
+          "bytes": 847,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "a58af2f97f1e1f33f7771ae3da9198659b8f04eed734108f12b1ffdb494b33d9"
+          "sha256": "dc62799d1f97200da797fbf184f9a1e9dba61e96959bf4c36f3680c79871cdba"
         },
         {
           "archive_mode": 420,
-          "bytes": 17468712,
+          "bytes": 17642488,
           "kind": "file",
           "path": "package/rolldown-binding.darwin-x64.node",
-          "sha256": "0ae2b941c8cd5bba164d635ffb2192f635416faf2a995e44e570df27bea35e82"
+          "sha256": "789571e85ab41e6f7e78f98b7cfd14a779d08b0b0297d4223c67aada7136831f"
         }
       ],
-      "members_sha256": "a6933782db41aa8b56acec762fcdf411a2aa74514105a4c64fb02aa9bbd3a0f1",
+      "members_sha256": "6ed5efc1e5a7bc249ee45c4af4733a1f0df31584bebfd0c9b2a043df0412a1c9",
       "name": "@rolldown/binding-darwin-x64",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 17468712,
+          "bytes": 17642488,
           "detected_formats": [
             "native-file-extension",
             "mach-o-or-fat-binary"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.darwin-x64.node",
-          "sha256": "0ae2b941c8cd5bba164d635ffb2192f635416faf2a995e44e570df27bea35e82"
+          "sha256": "789571e85ab41e6f7e78f98b7cfd14a779d08b0b0297d4223c67aada7136831f"
         }
       ],
-      "package_json_sha256": "a58af2f97f1e1f33f7771ae3da9198659b8f04eed734108f12b1ffdb494b33d9",
+      "package_json_sha256": "dc62799d1f97200da797fbf184f9a1e9dba61e96959bf4c36f3680c79871cdba",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16300,11 +16414,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/547d51b5f59211dabf61eeb743bcc0d30de29be51cac40e9139e4085ed46c220.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/69f2995836af54e7da2f3e19a21ab3467975477309a886abf4a1d138b404994b.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "547d51b5f59211dabf61eeb743bcc0d30de29be51cac40e9139e4085ed46c220.tgz",
-        "integrity": "sha512-fpDm4oBo6SqLvWUYCmFhdde3U9KH2fRNNMeAnAPAIwxRL345xutL0EtEUcuoxsoazdJGv/MuDBQHlCDrtbvqOg==",
+        "archive_filename": "69f2995836af54e7da2f3e19a21ab3467975477309a886abf4a1d138b404994b.tgz",
+        "integrity": "sha512-UuuJ35MFw4gmFOrE9pEqIV+K3syIKveph+Qc1/ljHZVdoDW4pz/JHR/eMVom+TZGl/5OOvGJOWaOCVt3ZfqhxA==",
         "lock_paths": [
           "node_modules/@rolldown/binding-darwin-x64"
         ],
@@ -16323,23 +16437,23 @@
           }
         ],
         "name": "@rolldown/binding-darwin-x64",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7939393,
-        "sha256": "2b3dcdc637cf9f75930fc9e8f758eaa29c4f197164a1f5478ca9bbd1818689e5",
-        "sha512": "ad2268ade0c4fc7a08ce86a26fa313a798d0b424dd307288bc8b40293fc8992e98e96c3bea851a78cca9e1573f7c081dfde8638b4ebc2317ad1d7027a94c0df4",
+        "bytes": 8023730,
+        "sha256": "c3359b2f7a81343bbd2bf492f8f144f2a11551cebc5f14101498de139e2e8e42",
+        "sha512": "b8cbecb22b746b85beffb0fc09b1d4bc6ef5f661f74768f05c0961fd770fbee1d313483ef8bca617cf03086357d07336ac13a7d31af381792d201e9f2d22414d",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "07a49a4813a1a5628f4248756e1127ff71ffffda5a8c7f54a2b3765e5fe6ca85.tgz",
-      "archive_path": "source-inputs/npm/archives/07a49a4813a1a5628f4248756e1127ff71ffffda5a8c7f54a2b3765e5fe6ca85.tgz",
+      "archive_filename": "eb08d5ba930ec739df8ad98b5834b16f0c571b15f32b43bed0d7ee0c7f6ae9e5.tgz",
+      "archive_path": "source-inputs/npm/archives/eb08d5ba930ec739df8ad98b5834b16f0c571b15f32b43bed0d7ee0c7f6ae9e5.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-rSJoreDE/HoIzoaib6MTp5jQtCTdMHKIvItAKT/ImS6Y6Ww76oUaeMyp4Vc/fAgd/ehji068IxetHXAnqUwN9A==",
+      "integrity": "sha512-uMvssit0a4W+/7D8CbHUvG719mH3R2jwXAlh/XcPvuHTE0g++LymF88DCGNX0HM2rBOn0xrzgXktIB6fLSJBTQ==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16372,35 +16486,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 775,
+          "bytes": 851,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "ec9febfb5aaca3aee002ef1a17a7e5bced797acdca29066290a208ed2ee63fdd"
+          "sha256": "63450bc887e3a05293f3e31716aeaa5bab2d10e7f4b5cf195254c9623c9672cf"
         },
         {
           "archive_mode": 420,
-          "bytes": 19406264,
+          "bytes": 19473952,
           "kind": "file",
           "path": "package/rolldown-binding.freebsd-x64.node",
-          "sha256": "b7baff21f4c58e93d9241563bc48726b08c976e76928427e0cee510652328729"
+          "sha256": "e5151d3dd94cefb00e26342e653b1fcfdf67624b4998783ff63c0bc596707724"
         }
       ],
-      "members_sha256": "cc716337aff4b1215a95422064be1a44be73e96d93ee9b10c45721f8339cebcb",
+      "members_sha256": "8c514f303543b5f51d7280806a79f24bd0619a7c523ff760653a810233026dbd",
       "name": "@rolldown/binding-freebsd-x64",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 19406264,
+          "bytes": 19473952,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.freebsd-x64.node",
-          "sha256": "b7baff21f4c58e93d9241563bc48726b08c976e76928427e0cee510652328729"
+          "sha256": "e5151d3dd94cefb00e26342e653b1fcfdf67624b4998783ff63c0bc596707724"
         }
       ],
-      "package_json_sha256": "ec9febfb5aaca3aee002ef1a17a7e5bced797acdca29066290a208ed2ee63fdd",
+      "package_json_sha256": "63450bc887e3a05293f3e31716aeaa5bab2d10e7f4b5cf195254c9623c9672cf",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16409,11 +16523,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/07a49a4813a1a5628f4248756e1127ff71ffffda5a8c7f54a2b3765e5fe6ca85.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/eb08d5ba930ec739df8ad98b5834b16f0c571b15f32b43bed0d7ee0c7f6ae9e5.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "07a49a4813a1a5628f4248756e1127ff71ffffda5a8c7f54a2b3765e5fe6ca85.tgz",
-        "integrity": "sha512-rSJoreDE/HoIzoaib6MTp5jQtCTdMHKIvItAKT/ImS6Y6Ww76oUaeMyp4Vc/fAgd/ehji068IxetHXAnqUwN9A==",
+        "archive_filename": "eb08d5ba930ec739df8ad98b5834b16f0c571b15f32b43bed0d7ee0c7f6ae9e5.tgz",
+        "integrity": "sha512-uMvssit0a4W+/7D8CbHUvG719mH3R2jwXAlh/XcPvuHTE0g++LymF88DCGNX0HM2rBOn0xrzgXktIB6fLSJBTQ==",
         "lock_paths": [
           "node_modules/@rolldown/binding-freebsd-x64"
         ],
@@ -16432,23 +16546,23 @@
           }
         ],
         "name": "@rolldown/binding-freebsd-x64",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7266775,
-        "sha256": "9d5e5589341d760748c824877dc6a9fe7a82c64037a488434614309918cc4123",
-        "sha512": "fe39bc3861e09fba06689bb78bfa9923db29506709fb2fe5938dedb50fe23b5b4e77d362b2c1baa3dedb8a08410a22fe04a467826703b91ea291fc18749995b9",
+        "bytes": 7377678,
+        "sha256": "b162ae34a55e3796b493344a1976eed7093164903ca2aadd1db3b46a1d3a5ecd",
+        "sha512": "5dc16ed11d315a7c3349fe08420147d6b2487243cdd692f2d91fb8afd20307b61fbbfcacf5c56a7dae2906b3078fb6b7825f26211e2744d3e0d1ee48bc456cea",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "e5857dcd5d4c2769554d7ffe971f86e2faecae15a5a5cf15d9e5325c672e9db0.tgz",
-      "archive_path": "source-inputs/npm/archives/e5857dcd5d4c2769554d7ffe971f86e2faecae15a5a5cf15d9e5325c672e9db0.tgz",
+      "archive_filename": "411757a2ba5984012727a7fe9f48545fbefc47632576ed3b543356f08b9f49a2.tgz",
+      "archive_path": "source-inputs/npm/archives/411757a2ba5984012727a7fe9f48545fbefc47632576ed3b543356f08b9f49a2.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-/jm8OGHgn7oGaJu3i/qZI9spUGcJ+y/lk43ttQ/iO1tOd9NissG6o97bighBCiL+BKRngmcDuR6ikfwYdJmVuQ==",
+      "integrity": "sha512-XcFu0R0xWnwzSf4IQgFH1rJIckPN1pLy2R+4r9IDB7Yfu/ys9cVqfa4pBrMHj7a3gl8mIR4nRNPg0e5IvEVs6g==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16481,35 +16595,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 797,
+          "bytes": 873,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "34d115e8f7e5094c8d773767781fb58261878a2e6817e620548fa07adca18225"
+          "sha256": "37b443b5a866112afc8bdb1fe1b050577c89ea5471158443ae05267e9e2e832a"
         },
         {
           "archive_mode": 420,
-          "bytes": 15899596,
+          "bytes": 16069404,
           "kind": "file",
           "path": "package/rolldown-binding.linux-arm-gnueabihf.node",
-          "sha256": "922cc3e676c4109cfd4d59b05b81b346d2271a65d4e1e1211a664c26154f872c"
+          "sha256": "a91ef882aa1406163f126eb1124915f57741fc3d31cf3f54d66814ea9523b861"
         }
       ],
-      "members_sha256": "5c3433bf4ef75a045a767d2374060ac063274bb536ce709e371e77be7be87fcc",
+      "members_sha256": "64d951f4c7e626c65b59d34a139b3e0635730d38d368b50b9953b0909b1df8fb",
       "name": "@rolldown/binding-linux-arm-gnueabihf",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 15899596,
+          "bytes": 16069404,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.linux-arm-gnueabihf.node",
-          "sha256": "922cc3e676c4109cfd4d59b05b81b346d2271a65d4e1e1211a664c26154f872c"
+          "sha256": "a91ef882aa1406163f126eb1124915f57741fc3d31cf3f54d66814ea9523b861"
         }
       ],
-      "package_json_sha256": "34d115e8f7e5094c8d773767781fb58261878a2e6817e620548fa07adca18225",
+      "package_json_sha256": "37b443b5a866112afc8bdb1fe1b050577c89ea5471158443ae05267e9e2e832a",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16518,11 +16632,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/e5857dcd5d4c2769554d7ffe971f86e2faecae15a5a5cf15d9e5325c672e9db0.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/411757a2ba5984012727a7fe9f48545fbefc47632576ed3b543356f08b9f49a2.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "e5857dcd5d4c2769554d7ffe971f86e2faecae15a5a5cf15d9e5325c672e9db0.tgz",
-        "integrity": "sha512-/jm8OGHgn7oGaJu3i/qZI9spUGcJ+y/lk43ttQ/iO1tOd9NissG6o97bighBCiL+BKRngmcDuR6ikfwYdJmVuQ==",
+        "archive_filename": "411757a2ba5984012727a7fe9f48545fbefc47632576ed3b543356f08b9f49a2.tgz",
+        "integrity": "sha512-XcFu0R0xWnwzSf4IQgFH1rJIckPN1pLy2R+4r9IDB7Yfu/ys9cVqfa4pBrMHj7a3gl8mIR4nRNPg0e5IvEVs6g==",
         "lock_paths": [
           "node_modules/@rolldown/binding-linux-arm-gnueabihf"
         ],
@@ -16541,23 +16655,23 @@
           }
         ],
         "name": "@rolldown/binding-linux-arm-gnueabihf",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7579826,
-        "sha256": "cad215957255ea62f5f5872515ae5b3ea4f62e6714709ed2cf05b297b75aafee",
-        "sha512": "b483f4e81783f44aaf10206b3d9faca9d3e562b4fe6986808aed70633895c797a544afdfb66df7271543cb66d719bafa2740abb62ac2911f3bfd7e5ad9eb849e",
+        "bytes": 7641883,
+        "sha256": "a98f689e2dd4cab8482678ad660215bb750db7288e0b5c1673d51ffb743b6b9a",
+        "sha512": "dbad14aca827f2dcf7f5a93e48c0ce8ab2b3afb574e0cf5d58fc399655b4d12c018af099a1671104a57577c7179d1914992640dc17625260475a4efbdf8525a7",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "1eb542dc704518d0b80554a73ccaae449e547ca6a484b4950542edd169806f73.tgz",
-      "archive_path": "source-inputs/npm/archives/1eb542dc704518d0b80554a73ccaae449e547ca6a484b4950542edd169806f73.tgz",
+      "archive_filename": "ac04d03d56dd1a715d80bd414542df6ce9ae95e14b774d15675450247e0d96ae.tgz",
+      "archive_path": "source-inputs/npm/archives/ac04d03d56dd1a715d80bd414542df6ce9ae95e14b774d15675450247e0d96ae.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-tIP06BeD9EqvECBrPZ+sqdPlYrT+aYaAiu1wYziVx5elRK/ftm33JxVDy2bXGbr6J0CrtirCkR87/X5a2euEng==",
+      "integrity": "sha512-260UrKgn8tz39ak+SMDOirKzr7V04M9dWPw5llW00SwBivCZoWcRBKV1d8cXnRkUmSZA3BdiUmBHWk7734Ulpw==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16590,35 +16704,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 816,
+          "bytes": 892,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "4a1c135226049cf64fc972e734e8fb7a3402005cba7de8f19a07bc62376b5270"
+          "sha256": "7b51de6e160238b58d18aed1db48bb4090fa4b51a0168997173f0f4e3b88fb10"
         },
         {
           "archive_mode": 420,
-          "bytes": 17472872,
+          "bytes": 17513968,
           "kind": "file",
           "path": "package/rolldown-binding.linux-arm64-gnu.node",
-          "sha256": "489b1357e252255b0124ed41517705753aaa94500821b6f6fe9d13800543a4f0"
+          "sha256": "61e64e24a3d0511281d73af01b42f6e6384330550c6b7baa2af2ff74941f871c"
         }
       ],
-      "members_sha256": "119ff75daecc7bc8ba572a76743ff6fb91e43323b35e3ff37e7006a5a27b7916",
+      "members_sha256": "89d7fa12f4afecaa7bb95054cc7d4ce74051c4832ce691763bfe1838857db09b",
       "name": "@rolldown/binding-linux-arm64-gnu",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 17472872,
+          "bytes": 17513968,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.linux-arm64-gnu.node",
-          "sha256": "489b1357e252255b0124ed41517705753aaa94500821b6f6fe9d13800543a4f0"
+          "sha256": "61e64e24a3d0511281d73af01b42f6e6384330550c6b7baa2af2ff74941f871c"
         }
       ],
-      "package_json_sha256": "4a1c135226049cf64fc972e734e8fb7a3402005cba7de8f19a07bc62376b5270",
+      "package_json_sha256": "7b51de6e160238b58d18aed1db48bb4090fa4b51a0168997173f0f4e3b88fb10",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16627,11 +16741,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/1eb542dc704518d0b80554a73ccaae449e547ca6a484b4950542edd169806f73.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/ac04d03d56dd1a715d80bd414542df6ce9ae95e14b774d15675450247e0d96ae.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "1eb542dc704518d0b80554a73ccaae449e547ca6a484b4950542edd169806f73.tgz",
-        "integrity": "sha512-tIP06BeD9EqvECBrPZ+sqdPlYrT+aYaAiu1wYziVx5elRK/ftm33JxVDy2bXGbr6J0CrtirCkR87/X5a2euEng==",
+        "archive_filename": "ac04d03d56dd1a715d80bd414542df6ce9ae95e14b774d15675450247e0d96ae.tgz",
+        "integrity": "sha512-260UrKgn8tz39ak+SMDOirKzr7V04M9dWPw5llW00SwBivCZoWcRBKV1d8cXnRkUmSZA3BdiUmBHWk7734Ulpw==",
         "lock_paths": [
           "node_modules/@rolldown/binding-linux-arm64-gnu"
         ],
@@ -16650,23 +16764,23 @@
           }
         ],
         "name": "@rolldown/binding-linux-arm64-gnu",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7589049,
-        "sha256": "7f3edfb18691fb0a12e5480c095feaf8b05b06cb305dc9483ee7c5228fd0c3cf",
-        "sha512": "425d50d0442a55386f9fd540565c0dcec52f6d216d08c1a32e94518b8a64e62ecd659e27e484a22cc8c762dbace154363ef912c36e33c9a095b224beb173e3d7",
+        "bytes": 7663250,
+        "sha256": "53e075a52a5ce9f84db1fdc64b52011d241ecf341140a3f9028e7327d86db2ff",
+        "sha512": "e582b523d4aa0e46cf81cd4803c0600e5df8b2ea944b6ab42969c1ae2ae6d04e756233ace9ea3a755ea36d07cd13f6ab807452bddd1050682da48a18c7e596a7",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "55cdb3029c7679e98f3feaa344ae3848f56e1742eccc9a23bd67db660e815257.tgz",
-      "archive_path": "source-inputs/npm/archives/55cdb3029c7679e98f3feaa344ae3848f56e1742eccc9a23bd67db660e815257.tgz",
+      "archive_filename": "f64cbfe228ed25df8e3f17fd35206efd304fed56ea6b1e715d2ef5025e25cfcc.tgz",
+      "archive_path": "source-inputs/npm/archives/f64cbfe228ed25df8e3f17fd35206efd304fed56ea6b1e715d2ef5025e25cfcc.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-Ql1Q0EQqVThvn9VAVlwNzsUvbSFtCMGjLpRRi4pk5i7NZZ4n5ISiLMjHYtus4VQ2PvkSw24zyaCVsiS+sXPj1w==",
+      "integrity": "sha512-5YK1I9SqDkbPgc1IA8BgDl34suqUS2q0KWnBrirm0E51YjOs6eo6dV6jbQfNE/argHRSvd0QUGgtpIoYx+WWpw==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16699,35 +16813,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 818,
+          "bytes": 894,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "1697f13f75d4332a2fbbc9b7531f1257bec045d7550a8894d42edbfa58a80f24"
+          "sha256": "caacec8019eedd14e5fb19d32caaa0073afcf5fe2f1b332fc7af24cfbe4166e5"
         },
         {
           "archive_mode": 420,
-          "bytes": 17518984,
+          "bytes": 17533472,
           "kind": "file",
           "path": "package/rolldown-binding.linux-arm64-musl.node",
-          "sha256": "b4bcf7bea790e378b4ae1c7f6ae3324f252e65cd97725596348cc28e25e1c9db"
+          "sha256": "d6f84e8edf5e3147d2556cebc26179c2323fd129f2eff6b0df3b7a1b5dccdff7"
         }
       ],
-      "members_sha256": "329b7ae1dab4cd0b08f11ef0c9919ed30f87b1034cd21dfa24a6d669d12d624d",
+      "members_sha256": "e4076cc82d9f515944807674bf23ef46f282ee9072f9e0172bd22496eb22199c",
       "name": "@rolldown/binding-linux-arm64-musl",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 17518984,
+          "bytes": 17533472,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.linux-arm64-musl.node",
-          "sha256": "b4bcf7bea790e378b4ae1c7f6ae3324f252e65cd97725596348cc28e25e1c9db"
+          "sha256": "d6f84e8edf5e3147d2556cebc26179c2323fd129f2eff6b0df3b7a1b5dccdff7"
         }
       ],
-      "package_json_sha256": "1697f13f75d4332a2fbbc9b7531f1257bec045d7550a8894d42edbfa58a80f24",
+      "package_json_sha256": "caacec8019eedd14e5fb19d32caaa0073afcf5fe2f1b332fc7af24cfbe4166e5",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16736,11 +16850,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/55cdb3029c7679e98f3feaa344ae3848f56e1742eccc9a23bd67db660e815257.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/f64cbfe228ed25df8e3f17fd35206efd304fed56ea6b1e715d2ef5025e25cfcc.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "55cdb3029c7679e98f3feaa344ae3848f56e1742eccc9a23bd67db660e815257.tgz",
-        "integrity": "sha512-Ql1Q0EQqVThvn9VAVlwNzsUvbSFtCMGjLpRRi4pk5i7NZZ4n5ISiLMjHYtus4VQ2PvkSw24zyaCVsiS+sXPj1w==",
+        "archive_filename": "f64cbfe228ed25df8e3f17fd35206efd304fed56ea6b1e715d2ef5025e25cfcc.tgz",
+        "integrity": "sha512-5YK1I9SqDkbPgc1IA8BgDl34suqUS2q0KWnBrirm0E51YjOs6eo6dV6jbQfNE/argHRSvd0QUGgtpIoYx+WWpw==",
         "lock_paths": [
           "node_modules/@rolldown/binding-linux-arm64-musl"
         ],
@@ -16759,23 +16873,23 @@
           }
         ],
         "name": "@rolldown/binding-linux-arm64-musl",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 8879223,
-        "sha256": "b10cb23cdaf16994d8ddd6bce99736b53b3088d43b3285c2e7c0e2f257e2cc87",
-        "sha512": "1a36e35c3e175df375f43d0b64d6e6882054a03891002b181ebd326886db9fc685b178c76627dc62abbf5b912be57d97f7dd168c75c5af16ab9f9721cc8b68ad",
+        "bytes": 8940370,
+        "sha256": "3617e223fd84182b2375f356787d9d641def4bec5aaf3bc0b32ae6c856e04268",
+        "sha512": "46472b9a9ede15183be322f97d7114f7524459b7443cb7af5b01ad5e99a16e3943d52b5271b59398ef78061972f8ca3e91eb4a624766335bcd50a7964a5c7c71",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "b7d0b3b34e5a332da8b556e720570413207b8990109a1d6ffc73af9fa2d936bd.tgz",
-      "archive_path": "source-inputs/npm/archives/b7d0b3b34e5a332da8b556e720570413207b8990109a1d6ffc73af9fa2d936bd.tgz",
+      "archive_filename": "573f88cab939f52df84c057b5a3914f83b8e31204dbe55e219d591ed5576520f.tgz",
+      "archive_path": "source-inputs/npm/archives/573f88cab939f52df84c057b5a3914f83b8e31204dbe55e219d591ed5576520f.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-GjbjXD4XXfN19D0LZNbmiCBUoDiRACsYHr0yaIbbn8aFsXjHZifcYqu/W5Er5X2X990WjHXFrxarn5chzItorQ==",
+      "integrity": "sha512-Rkcrmp7eFRg74yL5fXEU91JEWbdEPLevWwGtXpmhbjlD1StScbWTmO94Bhly+Mo+ketKYkdmM1vNUKeWSlx8cQ==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16808,35 +16922,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 816,
+          "bytes": 892,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "aa2c0d3eb3ff58368db67add77a96850a2060fadb00489b05b292b470cee2774"
+          "sha256": "3a3dcffa6f83d424ad87eb39667826a95d062f1ea2b11d10a372d377615dd299"
         },
         {
           "archive_mode": 420,
-          "bytes": 22110072,
+          "bytes": 22102280,
           "kind": "file",
           "path": "package/rolldown-binding.linux-ppc64-gnu.node",
-          "sha256": "d19838e35e85f44962c2a77638cb36a4644d9bbefa70e95c731ed378c437a1d3"
+          "sha256": "7ad9466d7b8da81ccb9427af879ea0eba2525b38003fc03bf00de06a93cf27e0"
         }
       ],
-      "members_sha256": "5dda79d3c897979e603739f3f484138f0e83d1b7009c52b737bc586c95b46179",
+      "members_sha256": "446f7a82490b456d579c790d8a23cf01b68539316eefc13deef9e816392a9bf0",
       "name": "@rolldown/binding-linux-ppc64-gnu",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 22110072,
+          "bytes": 22102280,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.linux-ppc64-gnu.node",
-          "sha256": "d19838e35e85f44962c2a77638cb36a4644d9bbefa70e95c731ed378c437a1d3"
+          "sha256": "7ad9466d7b8da81ccb9427af879ea0eba2525b38003fc03bf00de06a93cf27e0"
         }
       ],
-      "package_json_sha256": "aa2c0d3eb3ff58368db67add77a96850a2060fadb00489b05b292b470cee2774",
+      "package_json_sha256": "3a3dcffa6f83d424ad87eb39667826a95d062f1ea2b11d10a372d377615dd299",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16845,11 +16959,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/b7d0b3b34e5a332da8b556e720570413207b8990109a1d6ffc73af9fa2d936bd.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/573f88cab939f52df84c057b5a3914f83b8e31204dbe55e219d591ed5576520f.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "b7d0b3b34e5a332da8b556e720570413207b8990109a1d6ffc73af9fa2d936bd.tgz",
-        "integrity": "sha512-GjbjXD4XXfN19D0LZNbmiCBUoDiRACsYHr0yaIbbn8aFsXjHZifcYqu/W5Er5X2X990WjHXFrxarn5chzItorQ==",
+        "archive_filename": "573f88cab939f52df84c057b5a3914f83b8e31204dbe55e219d591ed5576520f.tgz",
+        "integrity": "sha512-Rkcrmp7eFRg74yL5fXEU91JEWbdEPLevWwGtXpmhbjlD1StScbWTmO94Bhly+Mo+ketKYkdmM1vNUKeWSlx8cQ==",
         "lock_paths": [
           "node_modules/@rolldown/binding-linux-ppc64-gnu"
         ],
@@ -16868,23 +16982,23 @@
           }
         ],
         "name": "@rolldown/binding-linux-ppc64-gnu",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 8081762,
-        "sha256": "65f05345da13e72a60c37b874e6cbc88131d9825d57a5b04e3a43a6525eacc33",
-        "sha512": "a79591d0d3b0691989fc1d5be888c414b2e2bf012c7f73eb74122145b8530908ac6e8d92bc71e91b810b07ff8581036707cf0b4ce17ceaea662666ef65d43697",
+        "bytes": 8177335,
+        "sha256": "ff56ac38c26f009895e298a34126c6477d8a5e0338ad67e0b492ea7e22ba0301",
+        "sha512": "aaf2b80ee02c41cd814a3971f97afe233388befc5b199ab11707567c6e85e75f04ae3d061884b241b27aa486a9a673b194d3f3347be8fcbd01c01df4199fb357",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "f97d78c6cbaf508f99d294f70f50f395fd50d29ca328aa890400f345fcfdafe0.tgz",
-      "archive_path": "source-inputs/npm/archives/f97d78c6cbaf508f99d294f70f50f395fd50d29ca328aa890400f345fcfdafe0.tgz",
+      "archive_filename": "66c939efcc44b9348357e8d73f64a3a78b8a6d44bb3b811c03793df1a307be47.tgz",
+      "archive_path": "source-inputs/npm/archives/66c939efcc44b9348357e8d73f64a3a78b8a6d44bb3b811c03793df1a307be47.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-p5WR0NOwaRmJ/B1b6IjEFLLivwEsf3PrdBIhRbhTCQisbo2SvHHpG4ELB/+FgQNnB88LTOF86upmJmbvZdQ2lw==",
+      "integrity": "sha512-qvK4DuAsQc2BSjlx+Xr+IzOIvvxbGZqxFwdWfG6F518Erj0GGISyQbJ6pIappnOxlNPzNHvo/L0BwB30GZ+zVw==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -16917,35 +17031,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 816,
+          "bytes": 892,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "787d13cfa64235041fa38a9123c13163f2b002a5d2e231f88271b574e9e04293"
+          "sha256": "264bba79f20021684a646cfd585e608372d5d8dbde4982009df354e539cf0e7d"
         },
         {
           "archive_mode": 420,
-          "bytes": 20507968,
+          "bytes": 20602384,
           "kind": "file",
           "path": "package/rolldown-binding.linux-s390x-gnu.node",
-          "sha256": "a846ee7efa28733328366bde726d58ba66f251a1469f52bedf149019ddd629ec"
+          "sha256": "8616f990ef359b2b4474f26929d77ec3a54f82b81693242859907ebb4fa2970b"
         }
       ],
-      "members_sha256": "3c7cb7ca7dc95062bd0021bd9f1502272c0f186cec16ac1fa9dec0701d4d4065",
+      "members_sha256": "3cfa545016ae01e665d1913e9b37c31fc8756576b25b3356eb01d32ab64f2fae",
       "name": "@rolldown/binding-linux-s390x-gnu",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 20507968,
+          "bytes": 20602384,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.linux-s390x-gnu.node",
-          "sha256": "a846ee7efa28733328366bde726d58ba66f251a1469f52bedf149019ddd629ec"
+          "sha256": "8616f990ef359b2b4474f26929d77ec3a54f82b81693242859907ebb4fa2970b"
         }
       ],
-      "package_json_sha256": "787d13cfa64235041fa38a9123c13163f2b002a5d2e231f88271b574e9e04293",
+      "package_json_sha256": "264bba79f20021684a646cfd585e608372d5d8dbde4982009df354e539cf0e7d",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -16954,11 +17068,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/f97d78c6cbaf508f99d294f70f50f395fd50d29ca328aa890400f345fcfdafe0.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/66c939efcc44b9348357e8d73f64a3a78b8a6d44bb3b811c03793df1a307be47.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "f97d78c6cbaf508f99d294f70f50f395fd50d29ca328aa890400f345fcfdafe0.tgz",
-        "integrity": "sha512-p5WR0NOwaRmJ/B1b6IjEFLLivwEsf3PrdBIhRbhTCQisbo2SvHHpG4ELB/+FgQNnB88LTOF86upmJmbvZdQ2lw==",
+        "archive_filename": "66c939efcc44b9348357e8d73f64a3a78b8a6d44bb3b811c03793df1a307be47.tgz",
+        "integrity": "sha512-qvK4DuAsQc2BSjlx+Xr+IzOIvvxbGZqxFwdWfG6F518Erj0GGISyQbJ6pIappnOxlNPzNHvo/L0BwB30GZ+zVw==",
         "lock_paths": [
           "node_modules/@rolldown/binding-linux-s390x-gnu"
         ],
@@ -16977,23 +17091,23 @@
           }
         ],
         "name": "@rolldown/binding-linux-s390x-gnu",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7995462,
-        "sha256": "2091448e30f6221cca29fea5f7a54205613766d935a157261c88390e5b361a76",
-        "sha512": "e3f1b25639a147e4dce872c9bf0735b0e84fa8066dc9289231eb0e6725fa250e57071a130c430a433be8d3b3482ba9d3a27fd28af959aaf873bee54135084e6d",
+        "bytes": 8075816,
+        "sha256": "18c402a07284684a098becb29e4ca95c9bc67ebc161c0d8acce477c02bc21207",
+        "sha512": "43db8b04ee775dde1022ad563b27154323cfd4ee0786b684576aaa6f7b93ae7570e9066287d76e638bcd5ce8af2f5c68512d7fcfe5bc785e0d31f9766bc49d8f",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
-      "archive_path": "source-inputs/npm/archives/7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
+      "archive_filename": "7a4b40fbfacc7a8edf1b1a816d5f7eedece202a5cced8a0d00b14a7b4bdbd076.tgz",
+      "archive_path": "source-inputs/npm/archives/7a4b40fbfacc7a8edf1b1a816d5f7eedece202a5cced8a0d00b14a7b4bdbd076.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-4/GyVjmhR+Tc6HLJvwc1sOhPqAZtySiSMesOZyX6JQ5XBxoTDEMKQzvo07NIK6nTon/SivlZqvhzvuVBNQhObQ==",
+      "integrity": "sha512-Q9uLBO53Xd4QIq1WOycVQyPP1O4HhraEV2qqb3uTrnVw6QZih9duY4vNXOivL1xoUS1/z+W8eF4NMfl2a8Sdjw==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -17026,35 +17140,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 808,
+          "bytes": 884,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "19f36750c81f74dacf88a0bf34d02104e66ac0efe2b00d90ef7020f44e3f129c"
+          "sha256": "1c39de774b0545858596ce6cd4c96c2a7df574485739fdbad33ff79501ca5f36"
         },
         {
           "archive_mode": 420,
-          "bytes": 19410712,
+          "bytes": 19464288,
           "kind": "file",
           "path": "package/rolldown-binding.linux-x64-gnu.node",
-          "sha256": "b63076436b39ccbd8d96b44f19037ebc5cae559abe3d3cfa67bc809a3b588e06"
+          "sha256": "4ec43c7f54c8db7cced09004bc57f482c5cea9c61fef1267c025c53b79fb21cc"
         }
       ],
-      "members_sha256": "210d598ab06b463c2a98d365695b56f5b68a662da7018fb873604f7e24628563",
+      "members_sha256": "06f0a3ac2bf3dd346012b973e30e207f4edc4f8158c2222fa05960f50eb47e07",
       "name": "@rolldown/binding-linux-x64-gnu",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 19410712,
+          "bytes": 19464288,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.linux-x64-gnu.node",
-          "sha256": "b63076436b39ccbd8d96b44f19037ebc5cae559abe3d3cfa67bc809a3b588e06"
+          "sha256": "4ec43c7f54c8db7cced09004bc57f482c5cea9c61fef1267c025c53b79fb21cc"
         }
       ],
-      "package_json_sha256": "19f36750c81f74dacf88a0bf34d02104e66ac0efe2b00d90ef7020f44e3f129c",
+      "package_json_sha256": "1c39de774b0545858596ce6cd4c96c2a7df574485739fdbad33ff79501ca5f36",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -17063,11 +17177,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/7a4b40fbfacc7a8edf1b1a816d5f7eedece202a5cced8a0d00b14a7b4bdbd076.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "7008f1578717496a2b44414d28685bbcac09dd7e7737705ca58c05630be948e8.tgz",
-        "integrity": "sha512-4/GyVjmhR+Tc6HLJvwc1sOhPqAZtySiSMesOZyX6JQ5XBxoTDEMKQzvo07NIK6nTon/SivlZqvhzvuVBNQhObQ==",
+        "archive_filename": "7a4b40fbfacc7a8edf1b1a816d5f7eedece202a5cced8a0d00b14a7b4bdbd076.tgz",
+        "integrity": "sha512-Q9uLBO53Xd4QIq1WOycVQyPP1O4HhraEV2qqb3uTrnVw6QZih9duY4vNXOivL1xoUS1/z+W8eF4NMfl2a8Sdjw==",
         "lock_paths": [
           "node_modules/@rolldown/binding-linux-x64-gnu"
         ],
@@ -17086,23 +17200,23 @@
           }
         ],
         "name": "@rolldown/binding-linux-x64-gnu",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7967860,
-        "sha256": "808b865ba5c14bc704a20d6d2d908ce9e200c185419527982e6bf970b4ef4bfa",
-        "sha512": "97d79e2ec08dbcfa6649751e8f47adc3f2757aa574263d43e46ff11ba6138a3984e9d92fe84d907b38166d37d093adeff79d833eaae3382a22ab1abb070d1851",
+        "bytes": 8059795,
+        "sha256": "a25527d2964e57dcaaabad3a4119a5f0060d78b6698636b1b94cb749715a0131",
+        "sha512": "dc80715853236ce66c9033cabfc2dff410a76a194ab87b615a4627c88c4e1ff41c26b15c4b812671e9ed840a64c2bff9fa712a6652f37986f178c697ec0e6ee2",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "b2b55c171243a1e305e269ca3568c0f2e1edf06911bd805fbc21e012721ba4f5.tgz",
-      "archive_path": "source-inputs/npm/archives/b2b55c171243a1e305e269ca3568c0f2e1edf06911bd805fbc21e012721ba4f5.tgz",
+      "archive_filename": "f55c9ca9857650799acac622b6d591d7362afa29e5f6e029faa909977f035b45.tgz",
+      "archive_path": "source-inputs/npm/archives/f55c9ca9857650799acac622b6d591d7362afa29e5f6e029faa909977f035b45.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-l9eeLsCNvPpmSXUej0etw/J1eqV0Jj1D5G/xG6YTijmE6dkv6E2QezgWbTfQk63v952DPqrjOCoiqxq7Bw0YUQ==",
+      "integrity": "sha512-3IBxWFMjbOZskDPKv8Lf9BCnahlKuHthWkYnyIxOH/QcJrFcS4EmcenthApkwr/5+nEqZlLzeYbxeMaX7A5u4g==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -17135,35 +17249,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 810,
+          "bytes": 886,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "4bb32a27394e9a7f73fe0836bb14c9407887600d2430b3a3d6a13662bb09a029"
+          "sha256": "d57e22fb232e5720ef4f1e27d3e72275b9aefea5a010e80b800f74281ce22d78"
         },
         {
           "archive_mode": 420,
-          "bytes": 19457416,
+          "bytes": 19529264,
           "kind": "file",
           "path": "package/rolldown-binding.linux-x64-musl.node",
-          "sha256": "97c4004bf48af1e39c84ed4f663e5b1218809f117e6448d552be101f027d9bb0"
+          "sha256": "c2160bbdddae60d899e365326f5aeb334e1e2668c07f41e6ca4a59d22df20f8c"
         }
       ],
-      "members_sha256": "e6d0150e6aa774da99b8f6ed7866fdcb5774ffca7eb3946e465d17e652d3a912",
+      "members_sha256": "1269fc0265772f613a4a747d846869d2ee1d2f84d0d2c51729dc0fcbd0c71695",
       "name": "@rolldown/binding-linux-x64-musl",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 19457416,
+          "bytes": 19529264,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.linux-x64-musl.node",
-          "sha256": "97c4004bf48af1e39c84ed4f663e5b1218809f117e6448d552be101f027d9bb0"
+          "sha256": "c2160bbdddae60d899e365326f5aeb334e1e2668c07f41e6ca4a59d22df20f8c"
         }
       ],
-      "package_json_sha256": "4bb32a27394e9a7f73fe0836bb14c9407887600d2430b3a3d6a13662bb09a029",
+      "package_json_sha256": "d57e22fb232e5720ef4f1e27d3e72275b9aefea5a010e80b800f74281ce22d78",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -17172,11 +17286,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/b2b55c171243a1e305e269ca3568c0f2e1edf06911bd805fbc21e012721ba4f5.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/f55c9ca9857650799acac622b6d591d7362afa29e5f6e029faa909977f035b45.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "b2b55c171243a1e305e269ca3568c0f2e1edf06911bd805fbc21e012721ba4f5.tgz",
-        "integrity": "sha512-l9eeLsCNvPpmSXUej0etw/J1eqV0Jj1D5G/xG6YTijmE6dkv6E2QezgWbTfQk63v952DPqrjOCoiqxq7Bw0YUQ==",
+        "archive_filename": "f55c9ca9857650799acac622b6d591d7362afa29e5f6e029faa909977f035b45.tgz",
+        "integrity": "sha512-3IBxWFMjbOZskDPKv8Lf9BCnahlKuHthWkYnyIxOH/QcJrFcS4EmcenthApkwr/5+nEqZlLzeYbxeMaX7A5u4g==",
         "lock_paths": [
           "node_modules/@rolldown/binding-linux-x64-musl"
         ],
@@ -17195,23 +17309,23 @@
           }
         ],
         "name": "@rolldown/binding-linux-x64-musl",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7488782,
-        "sha256": "dd11c3d836c5ce3fe0ebede42ea8d673ae34659e44f2dedadd53f450939e41f2",
-        "sha512": "7b4177e793124cc9b7f943aab55dcbdb8805529d8de66d5ff0bffb779e9d7a293abdaf805ddaedf45f0b6f31a979619645b6440eae26f0d567243781b5ff4366",
+        "bytes": 7572608,
+        "sha256": "14da3fe15e00fe1aaeb5e229ca92378cb2229deb95fac3a9f6e4d4dfa6bdeec6",
+        "sha512": "c6d5fad718382ca3e43d68a5654d729ca0a5cf91a3e1b7fbe0b30be2bdde54b5ae98a9c68e812bd4e48742131d6c10e86138beca3aee8efa597b6a549ea0abac",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
-      "archive_path": "source-inputs/npm/archives/ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
+      "archive_filename": "3f970ead7ab0b554349cfb6af0329e31d13610011ee38a3eca60bba1805a8942.tgz",
+      "archive_path": "source-inputs/npm/archives/3f970ead7ab0b554349cfb6af0329e31d13610011ee38a3eca60bba1805a8942.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-e0F355MSTMm3+UOqtV3L24gFUp2N5m1f8L/7d56deik6va+AXdrt9F8LbzGpeWGWRbZEDq4m8NVnJDeBtf9DZg==",
+      "integrity": "sha512-xtX61xg4LKPkPWilZU1ynKClz5Gj4bf74LML4r3eVLWumKnGjoEr1OSHQhMdbBDoYTi+yjrujvpZe2pUnqCrrA==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -17244,35 +17358,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 799,
+          "bytes": 875,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "a89e87ed3afb68dc3a9d84fa8ee9d1871760bb7919023ab08d55af71952e1a56"
+          "sha256": "9c8754dd99ac01c64040a74a4380432c8435e00da439bd6295699c81d0fd4962"
         },
         {
           "archive_mode": 420,
-          "bytes": 17471376,
+          "bytes": 17532856,
           "kind": "file",
           "path": "package/rolldown-binding.openharmony-arm64.node",
-          "sha256": "c077e6e834a3036b081d0e1e54495dfb551b25ca0575bf8d24eaffd8253ba5cd"
+          "sha256": "d10f01d5353ffd766806727c3f3fec940b9ee5f327f6f83a68e06e3cc70d62e1"
         }
       ],
-      "members_sha256": "3865b170a4f126c2303e3e23e15ecab23367c4f15afc00afcb52b1be3688fd8a",
+      "members_sha256": "9ca9409856047aacf960df93779ee6e3902baa5a802c82589e75ad95578c5f64",
       "name": "@rolldown/binding-openharmony-arm64",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 17471376,
+          "bytes": 17532856,
           "detected_formats": [
             "native-file-extension",
             "elf"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.openharmony-arm64.node",
-          "sha256": "c077e6e834a3036b081d0e1e54495dfb551b25ca0575bf8d24eaffd8253ba5cd"
+          "sha256": "d10f01d5353ffd766806727c3f3fec940b9ee5f327f6f83a68e06e3cc70d62e1"
         }
       ],
-      "package_json_sha256": "a89e87ed3afb68dc3a9d84fa8ee9d1871760bb7919023ab08d55af71952e1a56",
+      "package_json_sha256": "9c8754dd99ac01c64040a74a4380432c8435e00da439bd6295699c81d0fd4962",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -17281,11 +17395,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/3f970ead7ab0b554349cfb6af0329e31d13610011ee38a3eca60bba1805a8942.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "ef94f42cfac348e77b8c4ad17355dd32fcc9dda7071bc497de79bf21cd47e6b9.tgz",
-        "integrity": "sha512-e0F355MSTMm3+UOqtV3L24gFUp2N5m1f8L/7d56deik6va+AXdrt9F8LbzGpeWGWRbZEDq4m8NVnJDeBtf9DZg==",
+        "archive_filename": "3f970ead7ab0b554349cfb6af0329e31d13610011ee38a3eca60bba1805a8942.tgz",
+        "integrity": "sha512-xtX61xg4LKPkPWilZU1ynKClz5Gj4bf74LML4r3eVLWumKnGjoEr1OSHQhMdbBDoYTi+yjrujvpZe2pUnqCrrA==",
         "lock_paths": [
           "node_modules/@rolldown/binding-openharmony-arm64"
         ],
@@ -17304,23 +17418,23 @@
           }
         ],
         "name": "@rolldown/binding-openharmony-arm64",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 7652976,
-        "sha256": "cd872e32e957eb0b094e298e1c11ca24fc03465f6bef02c8d8add813a3a0a761",
-        "sha512": "0162e2d2e051621e90944ece2a18b3fa98590b4ab0b628f64199a198e76c2dd167eb89bba0ca68a04f48084de5866f7131be12a43a3659b1dcc57d6214b16dab",
+        "bytes": 7747313,
+        "sha256": "12813852cdb577e6e29ad3523ad5828a910a7d5c7c9da3b1e4d67e447e2c049a",
+        "sha512": "02dedf3c1e8f09a223ce0221119171b93f81045aa24226c90d3e1ddcf8624777f813b6db31917868a6e56c57c4337b044d10ddd58890c7ff94fe0fc1fe8bb913",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "e28aff82d3979e77d0a3b6e583d59b4b999cff99019026c3ee24c604868ebfaa.tgz",
-      "archive_path": "source-inputs/npm/archives/e28aff82d3979e77d0a3b6e583d59b4b999cff99019026c3ee24c604868ebfaa.tgz",
+      "archive_filename": "e5bd040aa5a2025fb476203e30188f5ddbd631390b4393673af4412c7fb33ec1.tgz",
+      "archive_path": "source-inputs/npm/archives/e5bd040aa5a2025fb476203e30188f5ddbd631390b4393673af4412c7fb33ec1.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-AWLi0uBRYh6QlE7OKhiz+phZC0qwtij2QZmhmOdsLdFn64m7oMpooE9ICE3lhm9xMb4SpDo2WbHcxX1iFLFtqw==",
+      "integrity": "sha512-At7fPB6PCaIjzgIhEZFxuT+BBFqiQibJDT4d3PhiR3f4E7bbMZF4aKblbFfEM3sETRDd1YiQx/+U/g/B/ou5Ew==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -17353,35 +17467,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 790,
+          "bytes": 866,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "06766dd989313429975ef756bede8fdce8b002d69c3bca5d171bb66e40e50d05"
+          "sha256": "32d2e9b9d7e8b7cdcbb5c281a1d69318be4893a1040ccf94dd8cf408068bd256"
         },
         {
           "archive_mode": 420,
-          "bytes": 18070016,
+          "bytes": 18265600,
           "kind": "file",
           "path": "package/rolldown-binding.win32-arm64-msvc.node",
-          "sha256": "f2479e0a9db0c2d92d5ac44e3f47550f8ac5ecebb4f784a7b233209c153558bd"
+          "sha256": "c60094a2de3a61d1a4b7551bea30a9d19d6a87ae661d7fedfaf20bdb87fcf2c1"
         }
       ],
-      "members_sha256": "1ef5ab5713f9466e2d3c8bb2a3813e2e4d74498b0b2eea72dca976793c1b6ffe",
+      "members_sha256": "fdd734fdb08a8fcdce051d88c8fe09d44b538e983a8c7a7c5fe76ca8ec17101c",
       "name": "@rolldown/binding-win32-arm64-msvc",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 18070016,
+          "bytes": 18265600,
           "detected_formats": [
             "native-file-extension",
             "pe"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.win32-arm64-msvc.node",
-          "sha256": "f2479e0a9db0c2d92d5ac44e3f47550f8ac5ecebb4f784a7b233209c153558bd"
+          "sha256": "c60094a2de3a61d1a4b7551bea30a9d19d6a87ae661d7fedfaf20bdb87fcf2c1"
         }
       ],
-      "package_json_sha256": "06766dd989313429975ef756bede8fdce8b002d69c3bca5d171bb66e40e50d05",
+      "package_json_sha256": "32d2e9b9d7e8b7cdcbb5c281a1d69318be4893a1040ccf94dd8cf408068bd256",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -17390,11 +17504,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/e28aff82d3979e77d0a3b6e583d59b4b999cff99019026c3ee24c604868ebfaa.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/e5bd040aa5a2025fb476203e30188f5ddbd631390b4393673af4412c7fb33ec1.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "e28aff82d3979e77d0a3b6e583d59b4b999cff99019026c3ee24c604868ebfaa.tgz",
-        "integrity": "sha512-AWLi0uBRYh6QlE7OKhiz+phZC0qwtij2QZmhmOdsLdFn64m7oMpooE9ICE3lhm9xMb4SpDo2WbHcxX1iFLFtqw==",
+        "archive_filename": "e5bd040aa5a2025fb476203e30188f5ddbd631390b4393673af4412c7fb33ec1.tgz",
+        "integrity": "sha512-At7fPB6PCaIjzgIhEZFxuT+BBFqiQibJDT4d3PhiR3f4E7bbMZF4aKblbFfEM3sETRDd1YiQx/+U/g/B/ou5Ew==",
         "lock_paths": [
           "node_modules/@rolldown/binding-win32-arm64-msvc"
         ],
@@ -17413,23 +17527,23 @@
           }
         ],
         "name": "@rolldown/binding-win32-arm64-msvc",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
-        "bytes": 8035839,
-        "sha256": "2858ead734bdec9c19199a92a704f28a5acd81b91468996b31720ad1f62ff67a",
-        "sha512": "53048324e83776a0807a359dc5c9498c2b21dd0ab8bcb60c0f19b21eaa356edcf7b2d2b656a83035dde69b9b6e230cd2946210ff51fd1ebf999f4f66adeccda9",
+        "bytes": 8136612,
+        "sha256": "60521dc21e20dc98bd52439b91381108d2cf4ffe5cfecb37ba97f47d596e98bd",
+        "sha512": "588c3685a54ac23b987579076a80b4985f0b7bbd53b820718eb74aa8b6c919cb5b040063f8295f98dbed6ce9f3a6add1a24368e7e575aa1b52cc9c97a2bb2495",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "33dec41e8bfebea834afd0ad0cbd67f9dfb3a2ccdde86c0167967251ed1fdf36.tgz",
-      "archive_path": "source-inputs/npm/archives/33dec41e8bfebea834afd0ad0cbd67f9dfb3a2ccdde86c0167967251ed1fdf36.tgz",
+      "archive_filename": "001b3cbf1d1890c7b692002263056575d06eb0e18839e343b784df745ac37e3a.tgz",
+      "archive_path": "source-inputs/npm/archives/001b3cbf1d1890c7b692002263056575d06eb0e18839e343b784df745ac37e3a.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-UwSDJOg3dqCAejWdxclJjCsh3Qq4vLYMDxmyHqo1btz3stK2VqgwNd3mm5tuIwzSlGIQ/1H9Hr+Zn09mrezNqQ==",
+      "integrity": "sha512-WIw2haVKwjuYdXkHaoC0mF8Le71TuCBxjrdKqLbJGctbBABj+ClfmNvtbOnzpq3RokNo5+V1qhtSzJyXorsklQ==",
       "license_files": [],
       "license_metadata": {
         "license": "MIT"
@@ -17462,35 +17576,35 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 782,
+          "bytes": 858,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "9edab31985bcebb66b7aea6371c434d5d80fe1328ffad35ebb639ad0aa974456"
+          "sha256": "9d95cd401cb9fd69e437f82c5fff1de091d49d79c658dc045c6b086e7fc3aa4c"
         },
         {
           "archive_mode": 420,
-          "bytes": 20955136,
+          "bytes": 21176832,
           "kind": "file",
           "path": "package/rolldown-binding.win32-x64-msvc.node",
-          "sha256": "716991dc09837d123b49d447b7ebf9d0de68706b05a492163ea9b27907a042ef"
+          "sha256": "f1c811c0c78a92be8bf81311407fa2d4f440c58371a125c75b50fd4d81a4aeec"
         }
       ],
-      "members_sha256": "92b58ac17690dc9baa00029e217a3b0f5eee0b46e26b75d9a48c286ceacaf2f8",
+      "members_sha256": "45da3a89d921b07d776b61fb3ff95de3d46b56b42189fea2c47641a48072d250",
       "name": "@rolldown/binding-win32-x64-msvc",
       "native_binary_files": [
         {
           "archive_mode": 420,
-          "bytes": 20955136,
+          "bytes": 21176832,
           "detected_formats": [
             "native-file-extension",
             "pe"
           ],
           "kind": "file",
           "path": "package/rolldown-binding.win32-x64-msvc.node",
-          "sha256": "716991dc09837d123b49d447b7ebf9d0de68706b05a492163ea9b27907a042ef"
+          "sha256": "f1c811c0c78a92be8bf81311407fa2d4f440c58371a125c75b50fd4d81a4aeec"
         }
       ],
-      "package_json_sha256": "9edab31985bcebb66b7aea6371c434d5d80fe1328ffad35ebb639ad0aa974456",
+      "package_json_sha256": "9d95cd401cb9fd69e437f82c5fff1de091d49d79c658dc045c6b086e7fc3aa4c",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -17499,11 +17613,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/33dec41e8bfebea834afd0ad0cbd67f9dfb3a2ccdde86c0167967251ed1fdf36.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/001b3cbf1d1890c7b692002263056575d06eb0e18839e343b784df745ac37e3a.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "33dec41e8bfebea834afd0ad0cbd67f9dfb3a2ccdde86c0167967251ed1fdf36.tgz",
-        "integrity": "sha512-UwSDJOg3dqCAejWdxclJjCsh3Qq4vLYMDxmyHqo1btz3stK2VqgwNd3mm5tuIwzSlGIQ/1H9Hr+Zn09mrezNqQ==",
+        "archive_filename": "001b3cbf1d1890c7b692002263056575d06eb0e18839e343b784df745ac37e3a.tgz",
+        "integrity": "sha512-WIw2haVKwjuYdXkHaoC0mF8Le71TuCBxjrdKqLbJGctbBABj+ClfmNvtbOnzpq3RokNo5+V1qhtSzJyXorsklQ==",
         "lock_paths": [
           "node_modules/@rolldown/binding-win32-x64-msvc"
         ],
@@ -17522,10 +17636,10 @@
           }
         ],
         "name": "@rolldown/binding-win32-x64-msvc",
-        "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
@@ -65868,16 +65982,16 @@
     },
     {
       "archive": {
-        "bytes": 5713,
-        "sha256": "b9dc81cb403ea2510314dd2d1ad8d71934f325db90c1b43805e781b87e3fb009",
-        "sha512": "0d38383096c631691f8ba55915d36ddbf71a31b432e0ebbe3a9fe1250bc611672755fa00d5003ec7344a033c3d8c3ebe19538e798aff98872e0d276e83a17afb",
+        "bytes": 5694,
+        "sha256": "4e371b71e3d5081fa0052356d5c1904e7a60e049864c26f0724cfd32dc303849",
+        "sha512": "636b54372e28bb0eadab9a0348a7906063b286450184d39c195ff4d8a0beea477d7831aa75977efa68cc8880e296b058be3127098bd5b6cb870ae3fea2449fba",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "bef9468d5763896ae6f356def7cc821cfca3310540bab910225af0308cfd0365.tgz",
-      "archive_path": "source-inputs/npm/archives/bef9468d5763896ae6f356def7cc821cfca3310540bab910225af0308cfd0365.tgz",
+      "archive_filename": "6b582be69e0d186a0857f201d2a3fde092de29882c815da88bc3d720f874ac0d.tgz",
+      "archive_path": "source-inputs/npm/archives/6b582be69e0d186a0857f201d2a3fde092de29882c815da88bc3d720f874ac0d.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==",
+      "integrity": "sha512-Y2tUNy4ouw6tq5oDSKeQYGOyhkUBhNOcGV/02KC+6kd9eDGqdZd++mjMiIDilrBYvjEnCYvVtsuHCuP+okSfug==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -65988,10 +66102,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 1454,
+          "bytes": 1531,
           "kind": "file",
           "path": "package/index.cjs",
-          "sha256": "d345287b9f05a55b79c4e74b9a0f0d87e3acad5b01160e307b3345ad0e654918"
+          "sha256": "c960eaadebd1a0efb76a525bc6ea206a76dd555ba0cf658d494bdea908c40b6b"
         },
         {
           "archive_mode": 420,
@@ -66009,10 +66123,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 1498,
+          "bytes": 1514,
           "kind": "file",
           "path": "package/index.js",
-          "sha256": "8a991054401ca588465275d07a68f31217648dcffe7e2202f03b40a47a640792"
+          "sha256": "113bb62a626af833b5d7e06a8d89413748f1db18d303d31e092059f79fc5e530"
         },
         {
           "archive_mode": 420,
@@ -66054,7 +66168,7 @@
           "bytes": 2283,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "18673eb0d7ed43dd871d59dc22a5670303f5d4eb9b17783b1f698f5840ce1fff"
+          "sha256": "9085b3737c98a71e5cca3fe9f6469a974534a6a9afa384cebabf2c0a6e5f6fae"
         },
         {
           "archive_mode": 420,
@@ -66078,18 +66192,18 @@
           "sha256": "2f9b8c4bee9312538f388b49c13987f4565ac25d6756fabdbbb771d339945e3e"
         }
       ],
-      "members_sha256": "12f7ab1c742224d53a66e018cb6afb4f5905ff0dc943bd85e900e894b89372c2",
+      "members_sha256": "61ae878cb95f380d6b86ec70ab0bff490177768c3f4d3790441e03953b6527a8",
       "name": "nanoid",
       "native_binary_files": [],
-      "package_json_sha256": "18673eb0d7ed43dd871d59dc22a5670303f5d4eb9b17783b1f698f5840ce1fff",
+      "package_json_sha256": "9085b3737c98a71e5cca3fe9f6469a974534a6a9afa384cebabf2c0a6e5f6fae",
       "provenance_metadata": {
         "repository": "ai/nanoid"
       },
-      "resolved": "file:../../../source-inputs/npm/archives/bef9468d5763896ae6f356def7cc821cfca3310540bab910225af0308cfd0365.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/6b582be69e0d186a0857f201d2a3fde092de29882c815da88bc3d720f874ac0d.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "bef9468d5763896ae6f356def7cc821cfca3310540bab910225af0308cfd0365.tgz",
-        "integrity": "sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==",
+        "archive_filename": "6b582be69e0d186a0857f201d2a3fde092de29882c815da88bc3d720f874ac0d.tgz",
+        "integrity": "sha512-Y2tUNy4ouw6tq5oDSKeQYGOyhkUBhNOcGV/02KC+6kd9eDGqdZd++mjMiIDilrBYvjEnCYvVtsuHCuP+okSfug==",
         "lock_paths": [
           "node_modules/nanoid"
         ],
@@ -66101,10 +66215,10 @@
           }
         ],
         "name": "nanoid",
-        "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz",
-        "version": "3.3.18"
+        "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.19.tgz",
+        "version": "3.3.19"
       },
-      "version": "3.3.18"
+      "version": "3.3.19"
     },
     {
       "archive": {
@@ -67551,16 +67665,16 @@
     },
     {
       "archive": {
-        "bytes": 24079,
-        "sha256": "e89c478225a42b3793bb4a39fd576de142c9829c26a5bd71782249e48b112f51",
-        "sha512": "46fc3072bb8d8c8d67713e7145a91ec92f4b7fc95c22dbf7e0a0fe6a27fe547f6476e0327d8062a46875db6ef8c6d7a720f675d7dfd1f4175305af200304a1d0",
+        "bytes": 24326,
+        "sha256": "697b463be3cdbd9ffc8f4194fd5019a69ddf95875fb703d78b2b115cc9e740a8",
+        "sha512": "a9c26ef3c436216a89b030f9dbd24a31dc069bf76f2275b81ef427470887f49b62849bf318eb1c0ed1c4df1d6904a794393cac43c91598b9c9da426eef285c18",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "48d0e1d7133c6f047a6f5ed4d84e05413462f645b73b26fabf2e97883339e491.tgz",
-      "archive_path": "source-inputs/npm/archives/48d0e1d7133c6f047a6f5ed4d84e05413462f645b73b26fabf2e97883339e491.tgz",
+      "archive_filename": "b8323ad9ab18da4a0d436f8451b9cbf6f05e78f2337b3f32d320e23f48bdac2d.tgz",
+      "archive_path": "source-inputs/npm/archives/b8323ad9ab18da4a0d436f8451b9cbf6f05e78f2337b3f32d320e23f48bdac2d.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==",
+      "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -67615,10 +67729,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 34668,
+          "bytes": 35144,
           "kind": "file",
           "path": "package/lib/parse.js",
-          "sha256": "73211a8ba85ce257b827abd8960e52c9750385b3fd18e8ef1080b114d774eb23"
+          "sha256": "4e1e05447668aa1e94366c5516a2bcd8f5fff800cc92b1d0cd7d77703b8618c4"
         },
         {
           "archive_mode": 420,
@@ -67629,10 +67743,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 9189,
+          "bytes": 9483,
           "kind": "file",
           "path": "package/lib/scan.js",
-          "sha256": "227fcc994a477ea95c5a0435d32783566334c6bd0dcc4a103029735ad8c9c535"
+          "sha256": "6457a1764e5c2e543cc3a0c00ce12ebb3764097628868198370b64d4e642aaae"
         },
         {
           "archive_mode": 420,
@@ -67646,7 +67760,7 @@
           "bytes": 1915,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "fb7766f5f9c724e13e075760a95d16f87cdb327143d153a913135fde267ec615"
+          "sha256": "479b70b87aa7b44344d62c8a459ae7e53dd2bca6c61f1396bd55e63e9de73fc6"
         },
         {
           "archive_mode": 420,
@@ -67656,19 +67770,19 @@
           "sha256": "5695ff5dfcd5a338a40630bd506056f2950bcb08fe1cc068519cbbfe60add480"
         }
       ],
-      "members_sha256": "769240dcd6f8c707aa74fd067708da26a742af4ce1fe85f33bb72a62288a4654",
+      "members_sha256": "d127864a48a6be5d2a50a5effffaa4ce9627ca580f7cd1c35fd3fa7b25e38c2e",
       "name": "picomatch",
       "native_binary_files": [],
-      "package_json_sha256": "fb7766f5f9c724e13e075760a95d16f87cdb327143d153a913135fde267ec615",
+      "package_json_sha256": "479b70b87aa7b44344d62c8a459ae7e53dd2bca6c61f1396bd55e63e9de73fc6",
       "provenance_metadata": {
         "homepage": "https://github.com/micromatch/picomatch",
         "repository": "micromatch/picomatch"
       },
-      "resolved": "file:../../../source-inputs/npm/archives/48d0e1d7133c6f047a6f5ed4d84e05413462f645b73b26fabf2e97883339e491.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/b8323ad9ab18da4a0d436f8451b9cbf6f05e78f2337b3f32d320e23f48bdac2d.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "48d0e1d7133c6f047a6f5ed4d84e05413462f645b73b26fabf2e97883339e491.tgz",
-        "integrity": "sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==",
+        "archive_filename": "b8323ad9ab18da4a0d436f8451b9cbf6f05e78f2337b3f32d320e23f48bdac2d.tgz",
+        "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
         "lock_paths": [
           "node_modules/picomatch"
         ],
@@ -67680,10 +67794,10 @@
           }
         ],
         "name": "picomatch",
-        "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.5.tgz",
-        "version": "4.0.5"
+        "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+        "version": "4.0.7"
       },
-      "version": "4.0.5"
+      "version": "4.0.7"
     },
     {
       "archive": {
@@ -69062,16 +69176,16 @@
     },
     {
       "archive": {
-        "bytes": 51997,
-        "sha256": "9ea29f58a51822c17bc7eb198d4f0fb2cd66fa02feb193efb6ece17ce011a882",
-        "sha512": "bbcd8def82c5cc6f1c6be743f29b8f9e99535e8187e1f4cfa551ae21bb77e86deabcd964bdf0f49440194b16a5cb7297f134bf2f503582c0849af2a605c55b91",
+        "bytes": 52828,
+        "sha256": "c02fcaea0bef927cae3a287dd6c316d8a9da12c8b9ba104f2387978fbe16234d",
+        "sha512": "e3d7068546d78fc41e9efd224ccc40d5c141cf15e872da42f548ddefbb7559c6c922bea717f788ee0ffc320c6b62574546e017be36bbc504706afa16ee482bc5",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
-      "archive_path": "source-inputs/npm/archives/24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
+      "archive_filename": "d304925fd201c21f630df3dab22a41b1588a84062647a2af298727983cc292fb.tgz",
+      "archive_path": "source-inputs/npm/archives/d304925fd201c21f630df3dab22a41b1588a84062647a2af298727983cc292fb.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==",
+      "integrity": "sha512-49cGhUbXj8Qenv0iTMxA1cFBzxXoctpC9Ujd77t1WcbJIr6nF/eI7g/8MgxrYldFRuAXvja7xQRwavoW7kgrxQ==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -69140,10 +69254,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 14025,
+          "bytes": 13919,
           "kind": "file",
           "path": "package/lib/container.d.ts",
-          "sha256": "2977b7884aedc895a1d0c9c210c7cf3272c29d6959a08a6fa3ff71e0aff08175"
+          "sha256": "9a195d8476f48523446ece812e5450b5b1ec8c3b6abf99efb8ee2479524f6f56"
         },
         {
           "archive_mode": 420,
@@ -69168,10 +69282,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 3833,
+          "bytes": 3866,
           "kind": "file",
           "path": "package/lib/declaration.d.ts",
-          "sha256": "cc4a4903fb698ca1d961d4c10dce658aa3a479faf40509d526f122b044eaf6a4"
+          "sha256": "38cb107048cd8ba54a70014ef9a30cf57bee0d9f10a0ca4cefa974056e1ee460"
         },
         {
           "archive_mode": 420,
@@ -69245,17 +69359,17 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 1273,
+          "bytes": 1745,
           "kind": "file",
           "path": "package/lib/list.js",
-          "sha256": "86a4cd4a0c1cdf3fa650f9ae8d73709c59d7cd3925c54b49daf546747de8bee2"
+          "sha256": "212ed2b68528dcfeb697ef6e762df2fe37cda84fa1330eb49ff471192e91864d"
         },
         {
           "archive_mode": 420,
-          "bytes": 10031,
+          "bytes": 10345,
           "kind": "file",
           "path": "package/lib/map-generator.js",
-          "sha256": "feccbc87472d5d1cc660c2bfd4958cbe5442173f03cbfa518808725f684a313c"
+          "sha256": "800dc6f5f11158db8c691fba7d6d0d8e723566034846348e1005ab3f388e2a91"
         },
         {
           "archive_mode": 420,
@@ -69301,10 +69415,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 15168,
+          "bytes": 15535,
           "kind": "file",
           "path": "package/lib/parser.js",
-          "sha256": "5ac73eb5da16ec8f998a1a5aac28b15815c892c2a3957ab06ee8333f8718be6e"
+          "sha256": "4afa96a64053fe1df4a41d44e7b481bb39fb4f7497ae3f7eafbccc7dad541d9c"
         },
         {
           "archive_mode": 420,
@@ -69325,7 +69439,7 @@
           "bytes": 2898,
           "kind": "file",
           "path": "package/lib/postcss.js",
-          "sha256": "8314c843f5dfa922e6f3fb9b8d8bf3e4b0be0d94b08075e1b4f3599f4276fb67"
+          "sha256": "80304467231d94293a4c1ca5549d6d5a6fe9985171f3e64b98c3c1c22d08a4f9"
         },
         {
           "archive_mode": 420,
@@ -69360,7 +69474,7 @@
           "bytes": 1739,
           "kind": "file",
           "path": "package/lib/processor.js",
-          "sha256": "cb43df877a47c70b065c20732014d4fe2696cac772784bebf41e55e2ea72c9c7"
+          "sha256": "cdd909ebdc8cc9c9d41d5e15632d01e80595df7160b7e920a5b11db83646aa4e"
         },
         {
           "archive_mode": 420,
@@ -69413,10 +69527,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 11816,
+          "bytes": 11527,
           "kind": "file",
           "path": "package/lib/stringifier.js",
-          "sha256": "76094d7547be325f5155759fa1c6b979b3fd576ab686715ddce51b8efa0de2d7"
+          "sha256": "9652479c2f660511db3e6229097a261b5d9cd150328462c6d5c6dd06dd2d0a96"
         },
         {
           "archive_mode": 420,
@@ -69427,10 +69541,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 213,
+          "bytes": 2012,
           "kind": "file",
           "path": "package/lib/stringify.js",
-          "sha256": "99229cdda200513f88f7fee46004d5c39c1492a73451509e66164d26dff34abc"
+          "sha256": "00f1bafe4e9bd7d25885ca2cb7bdbb6c61fa0163c6be3808d7ab37139252871b"
         },
         {
           "archive_mode": 420,
@@ -69479,22 +69593,22 @@
           "bytes": 2497,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "e0f23518d0e8fc0570ac68438eff7ecc7554774de3194af6f54f502e33f0c25b"
+          "sha256": "d6f3d1e4970b5f3b4424348769974fecc13afccefccb95f09f8883f70b7f3d2e"
         }
       ],
-      "members_sha256": "b26b8eb7813c83be36a8672dc2c4bcf93674ebeeb73b00429ecd41dee5fd690c",
+      "members_sha256": "5807c58e4035ab82e40ef3e8ecc2e7c6b1684ee8424e052e5f0e70147d35282c",
       "name": "postcss",
       "native_binary_files": [],
-      "package_json_sha256": "e0f23518d0e8fc0570ac68438eff7ecc7554774de3194af6f54f502e33f0c25b",
+      "package_json_sha256": "d6f3d1e4970b5f3b4424348769974fecc13afccefccb95f09f8883f70b7f3d2e",
       "provenance_metadata": {
         "homepage": "https://postcss.org/",
         "repository": "postcss/postcss"
       },
-      "resolved": "file:../../../source-inputs/npm/archives/24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/d304925fd201c21f630df3dab22a41b1588a84062647a2af298727983cc292fb.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "24d1d9fb573effeda9ff0df8526d4d900102559c40c4c7b9349922f1dfd36da3.tgz",
-        "integrity": "sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==",
+        "archive_filename": "d304925fd201c21f630df3dab22a41b1588a84062647a2af298727983cc292fb.tgz",
+        "integrity": "sha512-49cGhUbXj8Qenv0iTMxA1cFBzxXoctpC9Ujd77t1WcbJIr6nF/eI7g/8MgxrYldFRuAXvja7xQRwavoW7kgrxQ==",
         "lock_paths": [
           "node_modules/postcss"
         ],
@@ -69506,10 +69620,10 @@
           }
         ],
         "name": "postcss",
-        "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.26.tgz",
-        "version": "8.5.26"
+        "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.29.tgz",
+        "version": "8.5.29"
       },
-      "version": "8.5.26"
+      "version": "8.5.29"
     },
     {
       "archive": {
@@ -73718,16 +73832,16 @@
     },
     {
       "archive": {
-        "bytes": 192845,
-        "sha256": "92ed1c46d4a59380c8d4ed6302bb6972821f190eda4dd83351d9aa819ce5cbe9",
-        "sha512": "ad2afb8ab5b42bb4115b38dd257a99a3091c45d0ed8d176e878deb065b6754a774545abcdfd975949a03bc625bea097bfb8ad34c2acf5aef987ee8d42fc520ef",
+        "bytes": 203366,
+        "sha256": "b5ad810c24ba712b00c51d7c0af3c34b7b71448cc9637ee274fe472d07ccd724",
+        "sha512": "f3069fb1e89a1bcd3199749faa275436a65cca54e58663d966dfb36b69be8ecdac159f1d4cd96120e57659c6c83f1da18303c126911418500c67d6e00412d349",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "ec8625a94caf8af0095565e8273067f281c4a9ff84400ce79f25cea793b24c76.tgz",
-      "archive_path": "source-inputs/npm/archives/ec8625a94caf8af0095565e8273067f281c4a9ff84400ce79f25cea793b24c76.tgz",
+      "archive_filename": "9599dfdcee9abe9d1e1209f85d4304d963d6b5c5d39378043460e5847ed3306c.tgz",
+      "archive_path": "source-inputs/npm/archives/9599dfdcee9abe9d1e1209f85d4304d963d6b5c5d39378043460e5847ed3306c.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-rSr7irW0K7QRWzjdJXqZowkcRdDtjRduh43rBltnVKd0VFq839l1lJoDvGJb6gl7+4rTTCrPWu+YfujUL8Ug7w==",
+      "integrity": "sha512-8wafseiaG80xmXSfqidUNqZcylTlhmPZZt+za2m+js2sFZ8dTNlhIOV2WcbIPx2hgwPBJpEUGFAMZ9bgBBLTSQ==",
       "license_files": [
         {
           "archive_mode": 420,
@@ -73750,7 +73864,7 @@
           "path": "node_modules/rolldown"
         }
       ],
-      "member_count": 54,
+      "member_count": 52,
       "members": [
         {
           "archive_mode": 420,
@@ -73775,10 +73889,10 @@
         },
         {
           "archive_mode": 493,
-          "bytes": 46,
+          "bytes": 244,
           "kind": "file",
           "path": "package/bin/cli.mjs",
-          "sha256": "4f32d8fafabe786e739f8be56df684e56def00e63a32858ad9d5ede57406bc6c"
+          "sha256": "98d6df62aa3c84284db17944a2a8017f911640e9c4d3de907a9f93b467ee47c8"
         },
         {
           "archive_mode": 420,
@@ -73789,87 +73903,73 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 39744,
+          "bytes": 39804,
           "kind": "file",
           "path": "package/dist/cli.mjs",
-          "sha256": "928aae0b791ef8dbc0df63dcd96e4225f08c37bc5901a0b678f0974670a169a4"
+          "sha256": "162463d767e66099243a4bca9e345d8321611dcda390c568e38d3a249b00258b"
         },
         {
           "archive_mode": 420,
-          "bytes": 1080,
+          "bytes": 1075,
           "kind": "file",
           "path": "package/dist/config.d.mts",
-          "sha256": "1675be9ccb9a22fcae9ea63193e5dc0c2a83875c87acabad35804f06b85953ec"
+          "sha256": "85323fb2fd4f5c122a4f4427c42de2f4abca598062ae4eddacffbcf4f1553ff2"
         },
         {
           "archive_mode": 420,
           "bytes": 267,
           "kind": "file",
           "path": "package/dist/config.mjs",
-          "sha256": "26b75bd1818d5d5714547bb5f30ca5ed93806f61509afcb89399efeaf7a37406"
+          "sha256": "5b1d83412a017755c3c96cb18dc807f1299cec4888ed5a342f8690af1f3f7888"
         },
         {
           "archive_mode": 420,
-          "bytes": 3177,
-          "kind": "file",
-          "path": "package/dist/experimental-default-runtime.mjs",
-          "sha256": "37b4510892f875129956e8d7f72318eb8b480fda4c086f777113c65cf154f970"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 13218,
+          "bytes": 14614,
           "kind": "file",
           "path": "package/dist/experimental-index.d.mts",
-          "sha256": "7949cdc3ec9b930d988d6b07739561f6acaea6b497762fee0cf821094f30ea69"
+          "sha256": "587e554dc896bdbe12f545854a924d8dd04f23ab44190bc0158c16ee738c42bd"
         },
         {
           "archive_mode": 420,
-          "bytes": 13981,
+          "bytes": 15056,
           "kind": "file",
           "path": "package/dist/experimental-index.mjs",
-          "sha256": "8a88721b031cae6afed21d8e261499afeb70303032d0414899c0bb56f43a0782"
+          "sha256": "8a54d4313179b1d97c5398db402693b9e37de5436278fb463e0b7c5f03f1e3f4"
         },
         {
           "archive_mode": 420,
-          "bytes": 3445,
-          "kind": "file",
-          "path": "package/dist/experimental-runtime-base.mjs",
-          "sha256": "43e801e2a0ea81a50cfd48f9eb7659c5db77f4f0fd507c894d0b925fe3343982"
-        },
-        {
-          "archive_mode": 420,
-          "bytes": 5773,
+          "bytes": 7050,
           "kind": "file",
           "path": "package/dist/experimental-runtime-types.d.ts",
-          "sha256": "1572f07dace87128cedf3de09b911384cd4c27274acfe299ec230a35384c5629"
+          "sha256": "33f987557c3b8aef7114c23e9b27ffb8e495b26855312804b57ec6b9a317aefe"
         },
         {
           "archive_mode": 420,
-          "bytes": 5773,
+          "bytes": 7050,
           "kind": "file",
           "path": "package/dist/experimental-runtime.d.ts",
-          "sha256": "1572f07dace87128cedf3de09b911384cd4c27274acfe299ec230a35384c5629"
+          "sha256": "33f987557c3b8aef7114c23e9b27ffb8e495b26855312804b57ec6b9a317aefe"
         },
         {
           "archive_mode": 420,
-          "bytes": 7561,
+          "bytes": 9100,
           "kind": "file",
           "path": "package/dist/experimental-runtime.mjs",
-          "sha256": "5980b03eedbfa0b9b8ab272432d0898e0963e6259e780528341f11a26fffa15b"
+          "sha256": "aa38534c23dd0311698d5b79088cd768acd88c7b843b01434910885e1bdbef76"
         },
         {
           "archive_mode": 420,
           "bytes": 6817,
           "kind": "file",
           "path": "package/dist/filter-index.d.mts",
-          "sha256": "471c2797fa7dbd4cf392158f734dabed5e0628bfd8a72063bfdd658ff7c1be7b"
+          "sha256": "82c0d63e80a14ab63bd3e364b6b3d587d3ea4063f2ce7dbe893442c38e91a1db"
         },
         {
           "archive_mode": 420,
-          "bytes": 11189,
+          "bytes": 11176,
           "kind": "file",
           "path": "package/dist/filter-index.mjs",
-          "sha256": "14efa1927f9c3abb94b257bd7c211a29ff5486b1a92c7d0a34d05fd845ad376c"
+          "sha256": "4333b350b4735690998afb8a6cb15683793b8af26e01082a9468ae4469e7fa08"
         },
         {
           "archive_mode": 420,
@@ -73887,17 +73987,17 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 5240,
+          "bytes": 5390,
           "kind": "file",
           "path": "package/dist/index.d.mts",
-          "sha256": "a8116d6f8c9c38b28603a0fcde3f5913ab0a59a8534a76f620630eb9e33d25af"
+          "sha256": "7e5a3b2abd748dd0780678920a726ca7c364ecc9e90d3c91f31a3ff502fe9a31"
         },
         {
           "archive_mode": 420,
           "bytes": 1642,
           "kind": "file",
           "path": "package/dist/index.mjs",
-          "sha256": "402d9095a966408d8e28856afe0b2c7681c99ae7cd76489ba948e4baf82c5043"
+          "sha256": "f45fb44bf19e0c3a5151f8c623055798f72a84388c3faacf813106052bd28156"
         },
         {
           "archive_mode": 420,
@@ -73911,14 +74011,14 @@
           "bytes": 1113,
           "kind": "file",
           "path": "package/dist/parallel-plugin-worker.mjs",
-          "sha256": "82b66ef965aafe62573f0476b55c1f13724bd3d104b57a4abb3edb706802c4ca"
+          "sha256": "8dca2ded767381f382b8df6659262e7481a6e62bd27ae582042ba6e355316542"
         },
         {
           "archive_mode": 420,
-          "bytes": 609,
+          "bytes": 575,
           "kind": "file",
           "path": "package/dist/parallel-plugin.d.mts",
-          "sha256": "29571d55428a87cb9e069bbdc8725a11a0f4b8f49e35022fc765b9a4bb7810d8"
+          "sha256": "bbd3cec623b0d101d96414880f697c9581b376a6d12625df0251c13f1d8d5e33"
         },
         {
           "archive_mode": 420,
@@ -73929,73 +74029,73 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 1106,
+          "bytes": 1070,
           "kind": "file",
           "path": "package/dist/parse-ast-index.d.mts",
-          "sha256": "c0042ca8c8cbda9e978c4558933c47c812ac018e51d64ae8ff51e641672bed46"
+          "sha256": "f052de6716ff536fdfad7a768797306ac397fb29895898e8132b710dae88d573"
         },
         {
           "archive_mode": 420,
           "bytes": 2148,
           "kind": "file",
           "path": "package/dist/parse-ast-index.mjs",
-          "sha256": "a837c99440a6903e2f6db343bfc24b7992f62584c99b8ad2ab4ec97e26505c6d"
+          "sha256": "1d60b8f9ed2efe194d24a7a7ea633315ea85257ad71358a3313fcacc8642fdef"
         },
         {
           "archive_mode": 420,
-          "bytes": 1000,
+          "bytes": 992,
           "kind": "file",
           "path": "package/dist/plugins-index.d.mts",
-          "sha256": "75ff6ca0c4527bf357c82ac68f4a8afa29f994c587902c3bf611f247e34c06b1"
+          "sha256": "cb7977a4a6efee1ee95f567a31326bf0c13d3041ddeb5f868876c8a5ed5eb31b"
         },
         {
           "archive_mode": 420,
           "bytes": 1082,
           "kind": "file",
           "path": "package/dist/plugins-index.mjs",
-          "sha256": "7ea0031bc672cebbb82623c94cac87d03207c5bc605f19ff1263afc8917944da"
+          "sha256": "d326dc318de594fa1dd28853687d3670dc71ba09a64aaec52692e6c6de7fc5b3"
         },
         {
           "archive_mode": 420,
-          "bytes": 65371,
+          "bytes": 35039,
           "kind": "file",
-          "path": "package/dist/shared/binding-CVtkJvyl.d.mts",
-          "sha256": "aacf8a6955a6e97c902e3ad9644afc21544795c0cd35327e063814a564f4d4b4"
+          "path": "package/dist/shared/binding-B4m_2rFW.mjs",
+          "sha256": "13e921ba3a7c2addfa2fac691237322ca99dcc1c8e59e082fde357ab95efaadb"
         },
         {
           "archive_mode": 420,
-          "bytes": 33593,
+          "bytes": 69006,
           "kind": "file",
-          "path": "package/dist/shared/binding-Zhafd14U.mjs",
-          "sha256": "25735296beb0aa91f888b924f71b3bffae178b49e4214822b0aac8647b67001f"
+          "path": "package/dist/shared/binding-tzp6Hc_3.d.mts",
+          "sha256": "ac524e3a45aa716a18154c9f65cb4e0e45cb3862c752d71b3b13b6c0d86a69d8"
         },
         {
           "archive_mode": 420,
-          "bytes": 85925,
+          "bytes": 104089,
           "kind": "file",
-          "path": "package/dist/shared/bindingify-input-options-C-Zsy1EG.mjs",
-          "sha256": "6934659927cc5392366ed0581910fdeb10f0ee947b67e07ed795f239b4a91bcf"
+          "path": "package/dist/shared/bindingify-input-options-DCTviPFW.mjs",
+          "sha256": "24440a76827541433b1d3eae25d2f60ba725587f366b055720504e6591018927"
         },
         {
           "archive_mode": 420,
           "bytes": 2921,
           "kind": "file",
-          "path": "package/dist/shared/constructors-CGzna3vk.d.mts",
-          "sha256": "3bc4a3711104f5ebe704b5bba87b4763a04f20e2f483aa8c4d0a281202343ec4"
+          "path": "package/dist/shared/constructors-CGQ9ItSV.d.mts",
+          "sha256": "d8f1fd662d90057823d59d7e7dbc422ad39860313bf9ea51e8a7ad3d1340328d"
         },
         {
           "archive_mode": 420,
           "bytes": 2910,
           "kind": "file",
-          "path": "package/dist/shared/constructors-u6EEiG8n.mjs",
-          "sha256": "b662a3814478634e1e671fb4dda9204b0ea3dc8a8009faa2060c558c0ffa122d"
+          "path": "package/dist/shared/constructors-DDRbtWM1.mjs",
+          "sha256": "be2a1bc055e8fd212361b46b28345d65fdbee552c5e4f514dc9bdadc15e64aac"
         },
         {
           "archive_mode": 420,
-          "bytes": 151886,
+          "bytes": 158627,
           "kind": "file",
-          "path": "package/dist/shared/create-bundler-option-wRiQzEJ3.mjs",
-          "sha256": "598f0d02df94e646e7c3a9f87712678bc68b33c1c460b920222cca41723d2556"
+          "path": "package/dist/shared/create-bundler-option-DLv8UpsD.mjs",
+          "sha256": "680d84cb262ba97c2a1db62f04088c25dc2e9ecdbf1fdbcd069cb740a8174107"
         },
         {
           "archive_mode": 420,
@@ -74006,10 +74106,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 151171,
+          "bytes": 158223,
           "kind": "file",
-          "path": "package/dist/shared/define-config-Dsp5YQR4.d.mts",
-          "sha256": "e1deea0ca56fcb9607549d51635f8fd6ebedd201825778d2bcb1b6b82e30bd4a"
+          "path": "package/dist/shared/define-config-kIZKjX8Q.d.mts",
+          "sha256": "f4bf50a5a9cd1590e8d04f957a30084bdd6314909ba44f61baa293b44dcec5ac"
         },
         {
           "archive_mode": 420,
@@ -74020,10 +74120,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 2926,
+          "bytes": 2956,
           "kind": "file",
-          "path": "package/dist/shared/error-CVc7IgvG.mjs",
-          "sha256": "ebcd59744aa80a08c683a75f4ef4ba3acbbab14ea04ec311aafc20001aa13c43"
+          "path": "package/dist/shared/error-Bj1xBdEY.mjs",
+          "sha256": "d668c9b65fa5dac37c2b85dbd96f22e705a94f293c0795d07563c81b16ad93df"
         },
         {
           "archive_mode": 420,
@@ -74036,8 +74136,8 @@
           "archive_mode": 420,
           "bytes": 5241,
           "kind": "file",
-          "path": "package/dist/shared/load-config-63nAW5KO.mjs",
-          "sha256": "419631c585c63240b4df4be05d52aab80cc68a8f1623c36a68589b7baa810908"
+          "path": "package/dist/shared/load-config-B55tUA4L.mjs",
+          "sha256": "c37bd1a625b99d139c8d5f59bd74428254e5dc58c34c144727759a8670dc6193"
         },
         {
           "archive_mode": 420,
@@ -74048,10 +74148,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 6019,
+          "bytes": 6414,
           "kind": "file",
-          "path": "package/dist/shared/logs-DmYCAKcW.mjs",
-          "sha256": "7fd7aaed77211e38b7b02540801e86b10dc624e88dbb02abc23253d4475a41fe"
+          "path": "package/dist/shared/logs-D6uA606S.mjs",
+          "sha256": "7edfdf44f30af715dbac404c6a6b9909510e82bc9ca6762c127e2ef474dac3da"
         },
         {
           "archive_mode": 420,
@@ -74064,15 +74164,15 @@
           "archive_mode": 420,
           "bytes": 2131,
           "kind": "file",
-          "path": "package/dist/shared/normalize-string-or-regex-BxRYnPRv.mjs",
-          "sha256": "07711c7ce9bb86257541f0ee669e2499658ab0b9903892fd79313ef42efcee04"
+          "path": "package/dist/shared/normalize-string-or-regex-xyy0kCQR.mjs",
+          "sha256": "2ea5f29b2a9f5fb509e7f65a9b48a88cd2f179d51adeeeaad7504a84a4ca2886"
         },
         {
           "archive_mode": 420,
           "bytes": 2628,
           "kind": "file",
-          "path": "package/dist/shared/parse-DnWvq9XZ.mjs",
-          "sha256": "5b52191a03d0080c236561f06c51a71a4b343492f4b854f6e3774b590a3bf1b7"
+          "path": "package/dist/shared/parse-D5aRkQ8y.mjs",
+          "sha256": "750da23fd90d2d25559f410704c0129646381809b66f8e7b9b0d4fb1127b08e6"
         },
         {
           "archive_mode": 420,
@@ -74083,58 +74183,58 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 4731,
+          "bytes": 5024,
           "kind": "file",
-          "path": "package/dist/shared/resolve-tsconfig-SPewz4V3.mjs",
-          "sha256": "60aceecb17eca5e4aa1d4c7f5d65835b998779a9148128c097290e3e233be49d"
+          "path": "package/dist/shared/resolve-tsconfig-DRWFAQ3v.mjs",
+          "sha256": "785652f9d6dd7bf8a18c51e0eec17478e95f8bce487be854d8a7b19d03ee8c57"
         },
         {
           "archive_mode": 420,
-          "bytes": 5301,
+          "bytes": 5393,
           "kind": "file",
-          "path": "package/dist/shared/rolldown-DiYVDns9.mjs",
-          "sha256": "e619c4751dd78a26b5fa5d1552c5a96b9d04f86f9b8fb026306cee44768d214f"
+          "path": "package/dist/shared/rolldown-jmAeXo_f.mjs",
+          "sha256": "5d9f6687a36efb9153a47b8780bba27a0ccb56e8882d9600354c25cb538f8f41"
         },
         {
           "archive_mode": 420,
-          "bytes": 6048,
+          "bytes": 6338,
           "kind": "file",
-          "path": "package/dist/shared/transform-WmU_cI8e.d.mts",
-          "sha256": "08cad5153da753ed9c463b0e42a86bd8bc2b443368ce6a02a2a70e46adf7a4e0"
+          "path": "package/dist/shared/transform-D4RDjIPI.d.mts",
+          "sha256": "fe496a9c77ac30b9a9904332f1431bf2a8dab7e0e090edf2da59c9ed9e23f7ca"
         },
         {
           "archive_mode": 420,
           "bytes": 12019,
           "kind": "file",
-          "path": "package/dist/shared/watch-BNCfUBmW.mjs",
-          "sha256": "e4ef5463edcb5a02ec93273d8eddd406bf51058c7746516977d4d2b56e0a8d8c"
+          "path": "package/dist/shared/watch-DPhTjCBr.mjs",
+          "sha256": "ffbbff11916071d02c3c9d283aff9d467166ccff6ebe20d1efb54eea2f80269e"
         },
         {
           "archive_mode": 420,
-          "bytes": 24324,
+          "bytes": 24322,
           "kind": "file",
           "path": "package/dist/utils-index.d.mts",
-          "sha256": "3e263c383492c8edcfb6326107c63769d9bb75f901d0a49309049e46658197d9"
+          "sha256": "56c23d334497b71cb56d7b9a428021073ddad6e77fb47023ccaf03a0928e864d"
         },
         {
           "archive_mode": 420,
           "bytes": 70392,
           "kind": "file",
           "path": "package/dist/utils-index.mjs",
-          "sha256": "8bd8c1e56f7d12f6da8516fcbe9d28c7a7e36b842bce5356b86fd3716506f5cf"
+          "sha256": "caa42e141b2597a238783b1a1745d6a1ad55be9861503f90db4d75a41e1881fd"
         },
         {
           "archive_mode": 420,
-          "bytes": 6043,
+          "bytes": 6101,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "cea38cd16412ee2464164a9d70550fdf07c9039bc563aa6bde7f9566e6fc7baf"
+          "sha256": "6cbb247d5ff8ae3d45cba6af71ab424aa887835d917573ad1bb54ef6b2ff3b0f"
         }
       ],
-      "members_sha256": "16aabe4efb395d98a9cb8b80152cbce4121873ad602cce9cd4b0ca6146039b3e",
+      "members_sha256": "811ff2598037e48c78c2a5edc0e5b27f24dc801444f68ccaa2ed596dd8cb8107",
       "name": "rolldown",
       "native_binary_files": [],
-      "package_json_sha256": "cea38cd16412ee2464164a9d70550fdf07c9039bc563aa6bde7f9566e6fc7baf",
+      "package_json_sha256": "6cbb247d5ff8ae3d45cba6af71ab424aa887835d917573ad1bb54ef6b2ff3b0f",
       "provenance_metadata": {
         "homepage": "https://rolldown.rs/",
         "repository": {
@@ -74143,11 +74243,11 @@
           "url": "git+https://github.com/rolldown/rolldown.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/ec8625a94caf8af0095565e8273067f281c4a9ff84400ce79f25cea793b24c76.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/9599dfdcee9abe9d1e1209f85d4304d963d6b5c5d39378043460e5847ed3306c.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "ec8625a94caf8af0095565e8273067f281c4a9ff84400ce79f25cea793b24c76.tgz",
-        "integrity": "sha512-rSr7irW0K7QRWzjdJXqZowkcRdDtjRduh43rBltnVKd0VFq839l1lJoDvGJb6gl7+4rTTCrPWu+YfujUL8Ug7w==",
+        "archive_filename": "9599dfdcee9abe9d1e1209f85d4304d963d6b5c5d39378043460e5847ed3306c.tgz",
+        "integrity": "sha512-8wafseiaG80xmXSfqidUNqZcylTlhmPZZt+za2m+js2sFZ8dTNlhIOV2WcbIPx2hgwPBJpEUGFAMZ9bgBBLTSQ==",
         "lock_paths": [
           "node_modules/rolldown"
         ],
@@ -74159,10 +74259,10 @@
           }
         ],
         "name": "rolldown",
-        "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.4.tgz",
-        "version": "1.2.4"
+        "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.12.tgz",
+        "version": "1.2.12"
       },
-      "version": "1.2.4"
+      "version": "1.2.12"
     },
     {
       "archive": {
@@ -81411,23 +81511,23 @@
     },
     {
       "archive": {
-        "bytes": 576154,
-        "sha256": "1d132a84f4980b2cbb15e1c1c78728aed90f5eb81c70791ed0cf133a1211139a",
-        "sha512": "95f6ae5e7adfdb1d29f94a00fb05e1d1d8055a75230b21ba26cf79281920682c1453d9340c01c8e16e90d160b1fa1fb983e02571ed72e198b64238cad14bc607",
+        "bytes": 588869,
+        "sha256": "f8735b2c43d2e53678a994c11e914b76d9cd034b72aa7b9d59194a46b19b4de5",
+        "sha512": "21fb4b13ca6126174d44818d115e09082bdf35272865055f71768df1342ba2958626d38772efa2001f691dcb86be611bfe475dc342c17bf8d2f33b5d0bac5d89",
         "sri_verified_algorithm": "sha512"
       },
-      "archive_filename": "343f28452ba07abf6525738fc6c20b2da26a28acea5133076b4caeebdac3bf29.tgz",
-      "archive_path": "source-inputs/npm/archives/343f28452ba07abf6525738fc6c20b2da26a28acea5133076b4caeebdac3bf29.tgz",
+      "archive_filename": "f761ac08b454404b1d5e8d11c4dee2d493ee68667c73cf332d64bd3b4005747e.tgz",
+      "archive_path": "source-inputs/npm/archives/f761ac08b454404b1d5e8d11c4dee2d493ee68667c73cf332d64bd3b4005747e.tgz",
       "archive_root": "package",
       "distribution_kind": "original_registry_archive",
-      "integrity": "sha512-lfauXnrf2x0p+UoA+wXh0dgFWnUjCyG6Js95KBkgaCwUU9k0DAHI4W6Q0WCx+h+5g+Alce1y4Zi2QjjK0UvGBw==",
+      "integrity": "sha512-IftLE8phJhdNRIGNEV4JCCvfNScoZQVfcXaN8TQropWGJtOHcu+iAB9pHcuGvmEb/kddw0LBe/jS8ztdC6xdiQ==",
       "license_files": [
         {
           "archive_mode": 420,
-          "bytes": 112425,
+          "bytes": 108786,
           "kind": "file",
           "path": "package/LICENSE.md",
-          "sha256": "387dd7baa307083401a27c58c362c30832f5ba1dba84f10cc22c33401523f45c"
+          "sha256": "a47172e44a86a7e2cd1c16282341f7726ec60caafe3a6166fe3e0602005b6fa6"
         }
       ],
       "license_metadata": {
@@ -81443,14 +81543,14 @@
           "path": "node_modules/vite"
         }
       ],
-      "member_count": 36,
+      "member_count": 37,
       "members": [
         {
           "archive_mode": 420,
-          "bytes": 112425,
+          "bytes": 108786,
           "kind": "file",
           "path": "package/LICENSE.md",
-          "sha256": "387dd7baa307083401a27c58c362c30832f5ba1dba84f10cc22c33401523f45c"
+          "sha256": "a47172e44a86a7e2cd1c16282341f7726ec60caafe3a6166fe3e0602005b6fa6"
         },
         {
           "archive_mode": 420,
@@ -81468,10 +81568,10 @@
         },
         {
           "archive_mode": 493,
-          "bytes": 2574,
+          "bytes": 2995,
           "kind": "file",
           "path": "package/bin/vite.js",
-          "sha256": "fa03478846d229651a3c6aa64833ba2c6cbf580a798b92bd8f47c7480bafb5d8"
+          "sha256": "de5833362e640673962f16e255bf8738d4380a68601b9af26217eee4e1bac36d"
         },
         {
           "archive_mode": 420,
@@ -81482,17 +81582,17 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 57121,
+          "bytes": 52961,
           "kind": "file",
           "path": "package/dist/client/bundledDevClient.mjs",
-          "sha256": "329d0276d28a23884b37893c05f26a231e7b1aa1a93b5e7cde1616185370ddf3"
+          "sha256": "3652c5a9b6331a066d4fce30484af6bbd1e15b6787dd7a22311abc170b2701e8"
         },
         {
           "archive_mode": 420,
-          "bytes": 38554,
+          "bytes": 42082,
           "kind": "file",
           "path": "package/dist/client/client.mjs",
-          "sha256": "e6966602a62362a410659d82ead11d8ea7ed5319518164031f046307389e73f6"
+          "sha256": "3bd7dc2d098394522f751e10ba0fb215bd5ceb238b24aed9d47c9196cd26aafd"
         },
         {
           "archive_mode": 420,
@@ -81503,10 +81603,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 205745,
+          "bytes": 205735,
           "kind": "file",
           "path": "package/dist/node/chunks/build.js",
-          "sha256": "4e8edc800e959e306451e2edb7358610ac974260e07c8bc2734ec4e12e84af05"
+          "sha256": "87e95ae2d7bfdf02d1965eacbad333933cebed8361676b3dac7016883ba0b1ad"
         },
         {
           "archive_mode": 420,
@@ -81517,10 +81617,10 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 11710,
+          "bytes": 11704,
           "kind": "file",
           "path": "package/dist/node/chunks/lib.js",
-          "sha256": "c854873f947dcb83074adadc962a6f1bf975c86e66d46cc563016be4ef8cac2c"
+          "sha256": "5cc4a65cc1147399f73ff4e5b2056179d67b25a3b94c28337004ee8f901def2d"
         },
         {
           "archive_mode": 420,
@@ -81531,38 +81631,38 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 1360035,
+          "bytes": 1390850,
           "kind": "file",
           "path": "package/dist/node/chunks/node.js",
-          "sha256": "2c452d31c8ff4bf131e9e9b874037c9ac9bf2ad57b06cb9158cc2e6dab860cc0"
+          "sha256": "dab5039168ce4526f98058d84e31bf79eeed8eba558a9a27db570df893326364"
         },
         {
           "archive_mode": 420,
           "bytes": 18320,
           "kind": "file",
           "path": "package/dist/node/chunks/postcss-import.js",
-          "sha256": "a4aadcba200c670fbdc17aaa5e1ba9583fa42eaa01492288ccb6bf59bafe8cc3"
+          "sha256": "22b6144b0fbdfbad8952b6fe49d62a156494c0348cb0e9e68cb55b5a3797a792"
         },
         {
           "archive_mode": 420,
-          "bytes": 29852,
+          "bytes": 30099,
           "kind": "file",
           "path": "package/dist/node/cli.js",
-          "sha256": "fd745b95a376305469b25f47f5e49a60829a90444d9a466b7fcaf3bca806f4b4"
+          "sha256": "74ad623b5e5a1fb012ff4caaf324733c19aa69cc79d95297232769598a065eec"
         },
         {
           "archive_mode": 420,
-          "bytes": 165103,
+          "bytes": 165362,
           "kind": "file",
           "path": "package/dist/node/index.d.ts",
-          "sha256": "b0d00966e18eb7d205f31e4766dba87631e14bc121c5bef41bc70dad3c39a902"
+          "sha256": "cc38b68a2a40ce8ff1e99cf252e7125f473efd0d5003ad2c8c327ea02bce9ac5"
         },
         {
           "archive_mode": 420,
           "bytes": 2670,
           "kind": "file",
           "path": "package/dist/node/index.js",
-          "sha256": "c7ea52906f843318d7971209ce62bd24bab60590275e8f415c5564fa35cb82dc"
+          "sha256": "f109fff88512ed5cf39503b7a4b2a1de1c95bff333cb1d3635454558e3bfefc7"
         },
         {
           "archive_mode": 420,
@@ -81580,17 +81680,17 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 11364,
+          "bytes": 11395,
           "kind": "file",
           "path": "package/dist/node/module-runner.d.ts",
-          "sha256": "046271de66ae07ca543f79eba0de19f342b78e759b597929159b2392e0a7ac87"
+          "sha256": "3fafe0701843a521a1eac9803ad685e81107f34dd3e5792845ca7578ba52a307"
         },
         {
           "archive_mode": 420,
-          "bytes": 54483,
+          "bytes": 54878,
           "kind": "file",
           "path": "package/dist/node/module-runner.js",
-          "sha256": "c9515eb9c6c77d5212c581b7c9ec45caa3a909e7da3b57b3405546df10a10b92"
+          "sha256": "0b6df403996272f89e9d4f9e57047a5b192683ad756fa8cb24ac1c3643637dcd"
         },
         {
           "archive_mode": 420,
@@ -81608,24 +81708,24 @@
         },
         {
           "archive_mode": 420,
-          "bytes": 5093,
+          "bytes": 5081,
           "kind": "file",
           "path": "package/package.json",
-          "sha256": "957f44e8e8cad72131365571a2b619977462327068eaf05bfa276689f2361d78"
+          "sha256": "260a0a7a96a35e1b657480014c0f3b592b70061e42099edefc8fe97972f05fd4"
         },
         {
           "archive_mode": 420,
-          "bytes": 2028,
+          "bytes": 2142,
           "kind": "file",
           "path": "package/types/customEvent.d.ts",
-          "sha256": "98580d6ed68c9cee7f956685abbb6502d70bd92f48175ac807ae6c5e254fadc6"
+          "sha256": "5ef1bf71c773ca3df07f0c8c126af004a8e7310a7373ba4f049e7d3fb1b21921"
         },
         {
           "archive_mode": 420,
-          "bytes": 1790,
+          "bytes": 1873,
           "kind": "file",
           "path": "package/types/hmrPayload.d.ts",
-          "sha256": "64ccfe7dcbcad9b8a661a042ecb2309e41b9ab957f7b8cd070b05583a7821a13"
+          "sha256": "24c010698f5f7a0f1c216b963994d09ecfef77d7d5b4116b248068287ddb5964"
         },
         {
           "archive_mode": 420,
@@ -81660,7 +81760,14 @@
           "bytes": 1420,
           "kind": "file",
           "path": "package/types/internal/cssPreprocessorOptions.d.ts",
-          "sha256": "960bd764c62ac43edc24eaa2af958a4b4f1fa5d27df5237e176d0143b36a39c6"
+          "sha256": "d8a62a1763683460cfc7c6d66214859909d3f91f34b6e9009aa9443b241f08c0"
+        },
+        {
+          "archive_mode": 420,
+          "bytes": 363,
+          "kind": "file",
+          "path": "package/types/internal/devtoolsOptions.d.ts",
+          "sha256": "1f97a93af87366e65131932b6f5173b8eebfb7c3a61aa32626cc348b51c77b80"
         },
         {
           "archive_mode": 420,
@@ -81698,10 +81805,10 @@
           "sha256": "e67cbea16f1994af89efd700542dbf3828a46a52b29e4d67e801bd7869dc103c"
         }
       ],
-      "members_sha256": "7e1ee06714269c1448d14b1f02babdade625548da42dbee5f12cd27eb2f56b12",
+      "members_sha256": "08da30210a0c501cd5cb635ea982357c70f5ef4fbcb196b60cc3902060e54057",
       "name": "vite",
       "native_binary_files": [],
-      "package_json_sha256": "957f44e8e8cad72131365571a2b619977462327068eaf05bfa276689f2361d78",
+      "package_json_sha256": "260a0a7a96a35e1b657480014c0f3b592b70061e42099edefc8fe97972f05fd4",
       "provenance_metadata": {
         "homepage": "https://vite.dev",
         "repository": {
@@ -81710,11 +81817,11 @@
           "url": "git+https://github.com/vitejs/vite.git"
         }
       },
-      "resolved": "file:../../../source-inputs/npm/archives/343f28452ba07abf6525738fc6c20b2da26a28acea5133076b4caeebdac3bf29.tgz",
+      "resolved": "file:../../../source-inputs/npm/archives/f761ac08b454404b1d5e8d11c4dee2d493ee68667c73cf332d64bd3b4005747e.tgz",
       "upstream_original_sri_recomputed": true,
       "upstream_pin": {
-        "archive_filename": "343f28452ba07abf6525738fc6c20b2da26a28acea5133076b4caeebdac3bf29.tgz",
-        "integrity": "sha512-lfauXnrf2x0p+UoA+wXh0dgFWnUjCyG6Js95KBkgaCwUU9k0DAHI4W6Q0WCx+h+5g+Alce1y4Zi2QjjK0UvGBw==",
+        "archive_filename": "f761ac08b454404b1d5e8d11c4dee2d493ee68667c73cf332d64bd3b4005747e.tgz",
+        "integrity": "sha512-IftLE8phJhdNRIGNEV4JCCvfNScoZQVfcXaN8TQropWGJtOHcu+iAB9pHcuGvmEb/kddw0LBe/jS8ztdC6xdiQ==",
         "lock_paths": [
           "node_modules/vite"
         ],
@@ -81726,10 +81833,10 @@
           }
         ],
         "name": "vite",
-        "resolved": "https://registry.npmjs.org/vite/-/vite-8.2.4.tgz",
-        "version": "8.2.4"
+        "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.4.tgz",
+        "version": "8.3.4"
       },
-      "version": "8.2.4"
+      "version": "8.3.4"
     },
     {
       "archive": {
@@ -89031,7 +89138,7 @@
         }
       },
       "provenance_path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.provenance.json",
-      "provenance_sha256": "5f8c3105b441f84b562ae03979f421f1a085200c5f0337433abe7f882570401b",
+      "provenance_sha256": "edc84632093efd955b11352b9c5252f169682bdd6e17cfc0172599af24225620",
       "resolved": "file:../../../source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.tgz",
       "upstream_original_sri_recomputed": false,
       "upstream_pin": {
@@ -89241,7 +89348,7 @@
   "provenance_signatures_verified": false,
   "schema": "rootlight.npm-local-archive-bundle/1",
   "source_scope": "retained npm distributions only; preferred native, WASI and bundled transitive sources remain unproven",
-  "upstream_lockfile_sha256": "fc43220b2212fc53fb566083fe836971ed8bbc72b79c8c30fcd2a1709a673dee",
+  "upstream_lockfile_sha256": "cb7ae1a32580c301e2c0cadd985ae0c658fec61fc8ed3dd929104dc1c8b81dfc",
   "upstream_original_sri_recomputed": false,
   "verification_scope": "exact local lock projection and every retained original or declared modified distribution"
 }

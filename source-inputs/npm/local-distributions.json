@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.npm-local-distributions/1",
-  "upstream_lock_sha256": "fc43220b2212fc53fb566083fe836971ed8bbc72b79c8c30fcd2a1709a673dee",
+  "upstream_lock_sha256": "cb7ae1a32580c301e2c0cadd985ae0c658fec61fc8ed3dd929104dc1c8b81dfc",
   "variants": [
     {
       "name": "zod",
@@ -8,7 +8,7 @@
       "archive_path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.tgz",
       "archive_sha256": "560989a9728a3dcd3baaa867be5ee23a5457eadf375a814557f0528a34093f5a",
       "provenance_path": "source-inputs/npm/local-distributions/zod-4.4.3-fixture-sanitized.provenance.json",
-      "provenance_sha256": "5f8c3105b441f84b562ae03979f421f1a085200c5f0337433abe7f882570401b"
+      "provenance_sha256": "edc84632093efd955b11352b9c5252f169682bdd6e17cfc0172599af24225620"
     }
   ]
 }
