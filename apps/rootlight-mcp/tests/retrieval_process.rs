@@ -5172,12 +5172,13 @@ impl RetrievalFixture {
         extra_sources: &[(&str, impl AsRef<[u8]>)],
         layout: FixtureLayout,
     ) -> Self {
-        Self::spawn_with_sources_and_prepare(extra_sources, layout, |_| {})
+        Self::spawn_with_sources_and_prepare(extra_sources, layout, "auto", |_| {})
     }
 
     fn spawn_with_sources_and_prepare(
         extra_sources: &[(&str, impl AsRef<[u8]>)],
         layout: FixtureLayout,
+        initial_mode: &str,
         prepare: impl FnOnce(&Path),
     ) -> Self {
         let root = process_support::private_process_tempdir("rl-retrieval-");
@@ -5235,7 +5236,7 @@ impl RetrievalFixture {
         let mut daemon = DaemonProcess::spawn(&daemon_binary, &state_dir, &runtime_dir);
         daemon.wait_until_ready(&runtime_dir);
         let mut mcp = McpProcess::spawn(&state_dir, &runtime_dir);
-        let arguments = json!({"root": repository_root, "mode": "auto", "detached": false});
+        let arguments = json!({"root": repository_root, "mode": initial_mode, "detached": false});
         let index = process_support::retry_transient_busy("index", |attempt_id| {
             mcp.call(attempt_id, "repo.index", arguments.clone())
         });
@@ -5348,9 +5349,13 @@ impl RetrievalFixture {
     }
 }
 
-fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str) {
-    if index["result"]["structuredContent"]["data"]["state"] == "published" {
-        return;
+fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str) -> String {
+    let data = &index["result"]["structuredContent"]["data"];
+    if data["state"] == "published" {
+        return data["published_generation"]
+            .as_str()
+            .expect("published index returns a generation identity")
+            .to_owned();
     }
     for attempt in 0..30 {
         let status = mcp.call(
@@ -5359,8 +5364,14 @@ fn wait_for_publication(mcp: &mut McpProcess, index: &Value, operation_id: &str)
             json!({"operation_id": operation_id, "wait_ms": 1_000}),
         );
         assert_success(&status, "operation.status");
-        match status["result"]["structuredContent"]["data"]["operation"]["state"].as_str() {
-            Some("published") => return,
+        let data = &status["result"]["structuredContent"]["data"];
+        match data["operation"]["state"].as_str() {
+            Some("published") => {
+                return data["published_generation"]
+                    .as_str()
+                    .expect("published operation returns a generation identity")
+                    .to_owned();
+            }
             Some("failed" | "cancelled") => {
                 panic!("fixture indexing terminated without publication: {status:#}")
             }

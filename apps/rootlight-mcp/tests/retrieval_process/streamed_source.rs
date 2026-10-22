@@ -24,12 +24,33 @@ fn record(response: &Value) {
     }
 }
 
+fn replace_live_sources_and_restart(fixture: &mut RetrievalFixture) {
+    fixture.mcp.finish();
+    fixture.daemon.finish();
+    fs::write(
+        fixture._root.path().join("repository/raw-small.rs"),
+        b"changed live bytes",
+    )
+    .unwrap();
+    fs::write(
+        fixture._root.path().join("repository/stream-large.rs"),
+        b"different live bytes",
+    )
+    .unwrap();
+    let state_dir = fixture._root.path().join("state");
+    let runtime_dir = fixture._root.path().join("runtime");
+    fixture.daemon = DaemonProcess::spawn(&ensure_daemon_binary(), &state_dir, &runtime_dir);
+    fixture.daemon.wait_until_ready(&runtime_dir);
+    fixture.mcp = McpProcess::spawn(&state_dir, &runtime_dir);
+}
+
 #[test]
 fn oversized_source_default_reads_and_literal_pages_cross_real_process_boundaries() {
     let mut expected_hash = None;
     let mut fixture = RetrievalFixture::spawn_with_sources_and_prepare(
         &[] as &[(&str, &[u8])],
         FixtureLayout::Data,
+        "deep",
         |root| {
             fs::write(root.join("raw-small.rs"), RAW).unwrap();
             let mut file = fs::File::create(root.join("stream-large.rs")).unwrap();
@@ -142,11 +163,54 @@ fn oversized_source_default_reads_and_literal_pages_cross_real_process_boundarie
     );
     assert_eq!(raw_find_error["failure_stage"]["value"], "admission");
     assert!(raw_find_error.get("limit").is_none());
-    fs::write(
-        fixture._root.path().join("repository/raw-small.rs"),
-        b"changed live bytes",
-    )
-    .unwrap();
+    // Stop both processes before editing so only the original and final source
+    // states can publish under the default two-generation retention policy.
+    replace_live_sources_and_restart(&mut fixture);
+    let arguments = json!({"root": fixture._root.path().join("repository"),
+        "mode": "deep", "detached": false});
+    let indexed = process_support::retry_transient_busy("streamed-reindex", |id| {
+        fixture.mcp.call(id, "repo.index", arguments.clone())
+    });
+    record(&indexed);
+    assert_success(&indexed, "repo.index");
+    let data = &indexed["result"]["structuredContent"]["data"];
+    assert_eq!(data["repository_id"], fixture.repository_id);
+    let operation_id = data["operation_id"].as_str().unwrap();
+    let replacement_generation = wait_for_publication(&mut fixture.mcp, &indexed, operation_id);
+    assert_ne!(replacement_generation, full.generation().to_string());
+    for (path, expected, original) in [
+        ("raw-small.rs", b"changed live bytes".as_slice(), &raw),
+        ("stream-large.rs", b"different live bytes".as_slice(), &full),
+    ] {
+        let located = fixture.standalone(
+            &format!("streamed-replacement-{path}"),
+            "code.locate",
+            json!({"query":path, "search_modes":["path"], "kinds":["file"],
+                "scope":{"paths":[path]}, "response_profile":"evidence"}),
+        );
+        record(&located);
+        assert_success(&located, "code.locate");
+        let matches = located["result"]["structuredContent"]["data"]["matches"]
+            .as_array()
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0]["symbol_id"].is_null());
+        let replacement: SourceRef =
+            serde_json::from_value(matches[0]["source_ref"].clone()).unwrap();
+        assert_eq!(replacement.repository(), original.repository());
+        assert_eq!(replacement.generation().to_string(), replacement_generation);
+        assert_ne!(replacement.generation(), original.generation());
+        assert_eq!(replacement.span().file(), original.span().file());
+        assert_eq!(replacement.span().start_byte(), 0);
+        assert_eq!(
+            replacement.span().end_byte(),
+            u64::try_from(expected.len()).unwrap()
+        );
+        assert_eq!(
+            replacement.content_hash(),
+            rootlight_ids::content_hash(expected)
+        );
+    }
     let raw_bytes = fixture.standalone_version(
         "raw-exact-bytes",
         "source.read",
@@ -159,11 +223,6 @@ fn oversized_source_default_reads_and_literal_pages_cross_real_process_boundarie
     let raw_chunk = &raw_bytes["result"]["structuredContent"]["data"]["chunks"][0];
     assert_eq!(raw_chunk["source_ref"], json!(raw));
     assert_exact_base64(RAW, raw_chunk["content"].as_str().unwrap());
-    fs::write(
-        fixture._root.path().join("repository/stream-large.rs"),
-        b"different live bytes",
-    )
-    .unwrap();
     let tail = SourceRef::new(
         full.repository(),
         full.generation(),
