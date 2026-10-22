@@ -1261,6 +1261,7 @@ fn exercise_install_lifecycle(
         &install_root,
         &candidate_manifest.version,
         &candidate_manifest.source_revision,
+        &options.output.with_extension("mcp-vertical"),
     )?;
     let recovered_status = recover_update(&install_root)?;
     if recovered_status != active_status {

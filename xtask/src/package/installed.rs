@@ -82,6 +82,7 @@ pub(super) fn exercise(
     install_root: &Path,
     candidate_version: &str,
     source_revision: &str,
+    vertical_evidence_dir: &Path,
 ) -> Result<InstalledReleaseEvidence, PackageError> {
     verify_cli_source_revision(
         &installed_binary(install_root, "rootlight"),
@@ -89,19 +90,43 @@ pub(super) fn exercise(
     )?;
     let windows_first_health = exercise_windows_first_health(install_root)?;
     let mcp_initialize = exercise_mcp_initialize(install_root, candidate_version)?;
-    let vertical_sandbox = private_tempdir("rootlight-installed-vertical-")?;
-    let vertical_options = crate::mcp_vertical::Options::new(
-        install_root.join("current/bin"),
-        vertical_sandbox.path().join("evidence"),
-    );
-    let mcp_vertical = crate::mcp_vertical::check(&vertical_options)
-        .map_err(PackageError::InstalledMcpVertical)?;
+    let mcp_vertical = exercise_mcp_vertical(install_root, vertical_evidence_dir)?;
     Ok(InstalledReleaseEvidence {
         windows_first_health,
         mcp_initialize,
         lazy_payload_handoff_observed: cfg!(windows).then_some(true),
         mcp_vertical,
     })
+}
+
+fn exercise_mcp_vertical(
+    install_root: &Path,
+    evidence_dir: &Path,
+) -> Result<crate::mcp_vertical::CheckEvidence, PackageError> {
+    let parent = evidence_dir
+        .parent()
+        .ok_or_else(|| PackageError::InvalidInput {
+            path: evidence_dir.to_path_buf(),
+            detail: "vertical evidence output has no parent directory".to_owned(),
+        })?;
+    super::prepare_output_dir(parent)?;
+    // Keep synthetic evidence outside the temporary installation on failure.
+    // Reserve a new directory so the vertical gate cannot reset prior evidence.
+    std::fs::create_dir(evidence_dir).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            PackageError::OutputExists(evidence_dir.to_path_buf())
+        } else {
+            PackageError::InputIo {
+                path: evidence_dir.to_path_buf(),
+                error,
+            }
+        }
+    })?;
+    let options = crate::mcp_vertical::Options::new(
+        install_root.join("current/bin"),
+        evidence_dir.to_path_buf(),
+    );
+    crate::mcp_vertical::check(&options).map_err(PackageError::InstalledMcpVertical)
 }
 
 pub(super) fn verify_cli_source_revision(
@@ -1265,6 +1290,71 @@ mod tests {
     use super::*;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn vertical_failure_evidence_survives_install_cleanup_without_private_paths() {
+        let evidence = tempfile::tempdir().expect("evidence directory exists");
+        let output = evidence.path().join("package.lifecycle.json");
+        let vertical_evidence = output.with_extension("mcp-vertical");
+        let install_root;
+        {
+            let installation = private_tempdir("rootlight-installed-vertical-test-")
+                .expect("temporary installation exists");
+            install_root = installation.path().join("private-installation");
+            std::fs::create_dir(&install_root).expect("installation root exists");
+            let result = exercise_mcp_vertical(&install_root, &vertical_evidence);
+            assert!(matches!(
+                result,
+                Err(PackageError::InstalledMcpVertical(
+                    crate::mcp_vertical::VerticalError::MissingBinary(ref binary)
+                )) if *binary == installed_binary(&install_root, "rootlight-daemon")
+            ));
+            assert!(vertical_evidence.join("failure.json").is_file());
+            assert!(!output.exists());
+        }
+        assert!(!install_root.exists());
+        let bytes = std::fs::read(vertical_evidence.join("failure.json"))
+            .expect("failure evidence survives installation cleanup");
+        assert!(bytes.len() < 512);
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-installation"));
+        let value: Value = serde_json::from_slice(&bytes).expect("failure evidence is JSON");
+        assert_eq!(value["schema_version"], "1.0");
+        assert_eq!(value["run_status"], "failed");
+        assert_eq!(value["error_category"], "missing_binary");
+        assert_eq!(value["transcript_path"], "transcript.jsonl");
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert_eq!(
+            std::fs::read_dir(&vertical_evidence)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            [std::ffi::OsString::from("failure.json")]
+        );
+    }
+
+    #[test]
+    fn vertical_gate_preserves_existing_evidence_and_refuses_file_collisions() {
+        let evidence = tempfile::tempdir().expect("evidence directory exists");
+        let install_root = evidence.path().join("missing-installation");
+        let directory = evidence.path().join("existing-evidence");
+        std::fs::create_dir(&directory).expect("prior evidence directory exists");
+        let receipt = directory.join("failure.json");
+        std::fs::write(&receipt, b"prior immutable evidence").expect("prior receipt writes");
+        let file = evidence.path().join("existing-file");
+        std::fs::write(&file, b"prior immutable file").expect("prior file writes");
+        for destination in [&directory, &file] {
+            assert!(matches!(
+                exercise_mcp_vertical(&install_root, destination),
+                Err(PackageError::OutputExists(ref existing)) if existing == destination
+            ));
+        }
+        assert_eq!(
+            std::fs::read(&receipt).unwrap(),
+            b"prior immutable evidence"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"prior immutable file");
+        assert!(!install_root.exists());
+    }
 
     #[test]
     fn nearest_rank_uses_the_release_contract_definition() {
