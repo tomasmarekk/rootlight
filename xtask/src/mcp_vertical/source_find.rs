@@ -949,8 +949,8 @@ fn storage_failures(
             None,
         )?;
         let mut daemon = SupervisedDaemon::spawn(daemon_binary, &environment)?;
-        // The pinned request must trigger deferred validation of this damaged
-        // generation before the daemon can finish its recovery state.
+        // Reach the daemon during deferred validation. The pinned request may
+        // observe rejection or an already authenticated republication.
         wait_until_requestable(&paths, &mut daemon)?;
         let (mut process, catalog, _) = open_session(
             "literal-storage-fault",
@@ -1014,15 +1014,29 @@ fn storage_failures(
                 "recovered predecessor scan did not complete",
             ));
         }
-        let status = wait_until_storage_predecessor(
-            state,
+        // Force the same valid early publication that the startup watcher may
+        // complete before a client can observe the restored predecessor.
+        if state == "corrupt_persisted_state" {
+            let early_publication = index_repository_deep(
+                &format!("literal.{state}.early-republication"),
+                &mut process,
+                &catalog,
+                transcript,
+                &root,
+            )?;
+            verify_storage_republication_receipt(&index, &early_publication)?;
+            wait_until_journal_idle(&paths.operation_journal_path())?;
+        }
+        let status = call_tool(
+            &format!("literal.{state}.verified-predecessor-status"),
             &mut process,
             &catalog,
             transcript,
-            &index,
-            &base,
+            "repo.status",
+            json!({"repository":{"repository_id":index.repository},"response_profile":"compact"}),
         )?;
-        record_storage_trace(
+        require_tool_success(&status, "repo.status")?;
+        let observed = record_storage_trace(
             storage_trace,
             state,
             "after_verified_predecessor_status",
@@ -1030,17 +1044,9 @@ fn storage_failures(
             &manifest,
             Some(&status.structured),
         )?;
-        if status.structured["data"]["publication_state"] != "published"
-            || status.structured["data"]["repository_state"] != "ready"
-            || status.structured["data"]["resolved_generation"] != base.generation
-            || status.structured["data"]["active_generation"]["generation_id"] != base.generation
-        {
-            return Err(VerticalError::Invariant(
-                "storage recovery did not restore its verified predecessor",
-            ));
-        }
-        // Restore quarantines an invalid payload and selects its verified parent;
-        // only an explicit index request can publish the current authored source.
+        verify_storage_recovery_observation(&before, &altered, &observed, &index)?;
+        // A watcher may already have republished the authored head. The attached
+        // operation must still confirm that exact generation and its new custody.
         let republication = index_repository_deep(
             &format!("literal.{state}.republication"),
             &mut process,
@@ -1328,55 +1334,15 @@ fn head_activation<'a>(
     Ok(record)
 }
 
-fn wait_until_storage_predecessor(
-    state: &str,
-    process: &mut McpProcess,
-    catalog: &ToolCatalog,
-    transcript: &mut TranscriptWriter,
+fn verify_storage_recovery_observation(
+    before: &Value,
+    altered: &Value,
+    observed: &Value,
     index: &IndexReceipt,
-    base: &IndexReceipt,
-) -> Result<ToolOutcome, VerticalError> {
-    let deadline = Instant::now()
-        .checked_add(REQUEST_TIMEOUT)
-        .ok_or(VerticalError::Clock)?;
-    let mut attempt = 1_u64;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(VerticalError::RequestTimedOut);
-        }
-        let status = call_tool(
-            &format!("literal.{state}.predecessor-status-{attempt}"),
-            process,
-            catalog,
-            transcript,
-            "repo.status",
-            json!({"repository":{"repository_id":index.repository},"response_profile":"compact"}),
-        )?;
-        require_tool_success(&status, "repo.status")?;
-        if Instant::now() >= deadline {
-            return Err(VerticalError::RequestTimedOut);
-        }
-        if storage_predecessor_is_active(
-            &status.structured,
-            &index.repository,
-            &index.generation,
-            &base.generation,
-        )? {
-            return Ok(status);
-        }
-        attempt = attempt.saturating_add(1);
-        thread::sleep(POLL_INTERVAL);
-    }
-}
-
-fn storage_predecessor_is_active(
-    status: &Value,
-    repository: &str,
-    head: &str,
-    predecessor: &str,
-) -> Result<bool, VerticalError> {
+) -> Result<(), VerticalError> {
+    let status = &observed["response"];
     let data = &status["data"];
-    if status["repository"]["repository_id"] != repository
+    if status["repository"]["repository_id"] != index.repository
         || data["publication_state"] != "published"
         || data["repository_state"] != "ready"
     {
@@ -1384,21 +1350,25 @@ fn storage_predecessor_is_active(
             "storage recovery status did not retain its repository and publication",
         ));
     }
+    let predecessor = index
+        .parent_generation
+        .as_deref()
+        .ok_or(VerticalError::Invariant(
+            "storage recovery fixture lacks its verified predecessor",
+        ))?;
     let active = &data["active_generation"];
     if data["resolved_generation"] == predecessor && active["generation_id"] == predecessor {
-        return Ok(true);
+        return Ok(());
     }
-    // Source-only reads can precede semantic recovery's atomic pointer update.
-    // Only the known stale head may remain visible until that update completes.
-    if data["resolved_generation"] == head
-        && active["generation_id"] == head
-        && active["parent_generation"] == predecessor
-        && active["semantic_freshness"] == "stale"
+    // The dirty startup watcher can replace the transient predecessor before
+    // status is sampled. An unchanged ID alone cannot prove that replacement.
+    if data["resolved_generation"] == index.generation
+        && active["generation_id"] == index.generation
     {
-        return Ok(false);
+        return verify_storage_recovery(before, altered, observed, index);
     }
     Err(VerticalError::Invariant(
-        "storage recovery status did not select its verified predecessor",
+        "storage recovery status did not select its predecessor or authenticated republication",
     ))
 }
 
@@ -1794,70 +1764,8 @@ mod tests {
         assert!(verify(&foreign).is_err());
     }
 
-    #[test]
-    fn storage_predecessor_status_requires_a_fresh_exact_fallback() {
-        use serde_json::{Value, json};
-
-        let classify = |status: &Value| {
-            super::storage_predecessor_is_active(status, "repository", "head", "predecessor")
-        };
-        let captured = json!({
-            "repository": {"repository_id": "repository"},
-            "data": {
-                "publication_state": "published",
-                "repository_state": "ready",
-                "resolved_generation": "head",
-                "active_generation": {
-                    "generation_id": "head",
-                    "parent_generation": "predecessor",
-                    "semantic_freshness": "stale"
-                }
-            }
-        });
-        assert!(!classify(&captured).unwrap());
-        let source_only_page = json!({
-            "repository": {"repository_id": "repository"},
-            "generation": "predecessor",
-            "data": {"stop": "end_of_source", "matches": []}
-        });
-        assert!(classify(&source_only_page).is_err());
-        assert!(
-            !classify(&captured).unwrap(),
-            "a source-only predecessor read cannot update a captured status"
-        );
-        let mut fresh = captured.clone();
-        fresh["data"]["resolved_generation"] = json!("predecessor");
-        fresh["data"]["active_generation"]["generation_id"] = json!("predecessor");
-        fresh["data"]["active_generation"]["parent_generation"] = Value::Null;
-        fresh["data"]["active_generation"]["semantic_freshness"] = json!("current");
-        assert!(classify(&fresh).unwrap());
-        for mutation in 0..9 {
-            let mut candidate = captured.clone();
-            match mutation {
-                0 => candidate["repository"]["repository_id"] = json!("foreign"),
-                1 => candidate["data"]["publication_state"] = json!("retained"),
-                2 => candidate["data"]["repository_state"] = json!("indexing"),
-                3 => candidate["data"]["resolved_generation"] = json!("predecessor"),
-                4 => candidate["data"]["active_generation"]["generation_id"] = json!("foreign"),
-                5 => candidate["data"]["active_generation"]["parent_generation"] = json!("foreign"),
-                6 => {
-                    candidate["data"]["active_generation"]["semantic_freshness"] = json!("current")
-                }
-                7 => candidate["data"]["active_generation"] = Value::Null,
-                8 => candidate["data"]["resolved_generation"] = Value::Null,
-                _ => unreachable!(),
-            }
-            assert!(classify(&candidate).is_err(), "mutation {mutation}");
-        }
-        let mut foreign = fresh;
-        foreign["repository"]["repository_id"] = json!("foreign");
-        assert!(classify(&foreign).is_err());
-    }
-
-    #[test]
-    fn storage_recovery_requires_quarantine_predecessor_identity_and_new_publication() {
-        use serde_json::{Value, json};
-        let index = super::IndexReceipt {
+    fn storage_index_receipt() -> super::IndexReceipt {
+        super::IndexReceipt {
             repository: rootlight_ids::RepositoryId::from_bytes([1; 16]).to_string(),
             generation: rootlight_ids::GenerationId::from_bytes([2; 20]).to_string(),
             parent_generation: Some(rootlight_ids::GenerationId::from_bytes([3; 20]).to_string()),
@@ -1876,7 +1784,82 @@ mod tests {
                 peak_rss_available: false,
                 durable_written_bytes_reported: true,
             },
+        }
+    }
+
+    #[test]
+    fn storage_recovery_observation_rejects_unproven_head_and_foreign_status() {
+        use serde_json::{Value, json};
+
+        let index = storage_index_receipt();
+        let verify = |status: &Value| {
+            super::verify_storage_recovery_observation(
+                &Value::Null,
+                &Value::Null,
+                &json!({"response":status}),
+                &index,
+            )
         };
+        let captured = json!({
+            "repository": {"repository_id": index.repository},
+            "data": {
+                "publication_state": "published",
+                "repository_state": "ready",
+                "resolved_generation": index.generation,
+                "active_generation": {
+                    "generation_id": index.generation,
+                    "parent_generation": index.parent_generation,
+                    "semantic_freshness": "stale"
+                }
+            }
+        });
+        assert!(
+            verify(&captured).is_err(),
+            "a head ID needs publication proof"
+        );
+        let source_only_page = json!({
+            "repository": {"repository_id": index.repository},
+            "generation": index.parent_generation,
+            "data": {"stop": "end_of_source", "matches": []}
+        });
+        assert!(verify(&source_only_page).is_err());
+        assert!(
+            verify(&captured).is_err(),
+            "a source-only predecessor read cannot update a captured status"
+        );
+        let mut fresh = captured.clone();
+        fresh["data"]["resolved_generation"] = json!(index.parent_generation);
+        fresh["data"]["active_generation"]["generation_id"] = json!(index.parent_generation);
+        fresh["data"]["active_generation"]["parent_generation"] = Value::Null;
+        fresh["data"]["active_generation"]["semantic_freshness"] = json!("current");
+        verify(&fresh).unwrap();
+        for mutation in 0..9 {
+            let mut candidate = captured.clone();
+            match mutation {
+                0 => candidate["repository"]["repository_id"] = json!("foreign"),
+                1 => candidate["data"]["publication_state"] = json!("retained"),
+                2 => candidate["data"]["repository_state"] = json!("indexing"),
+                3 => candidate["data"]["resolved_generation"] = json!(index.parent_generation),
+                4 => candidate["data"]["active_generation"]["generation_id"] = json!("foreign"),
+                5 => candidate["data"]["active_generation"]["parent_generation"] = json!("foreign"),
+                6 => {
+                    candidate["data"]["active_generation"]["semantic_freshness"] = json!("current")
+                }
+                7 => candidate["data"]["active_generation"] = Value::Null,
+                8 => candidate["data"]["resolved_generation"] = Value::Null,
+                _ => unreachable!(),
+            }
+            assert!(verify(&candidate).is_err(), "mutation {mutation}");
+        }
+        let mut foreign = fresh;
+        foreign["repository"]["repository_id"] = json!("foreign");
+        assert!(verify(&foreign).is_err());
+    }
+
+    #[test]
+    fn storage_recovery_requires_quarantine_predecessor_identity_and_new_publication() {
+        use serde_json::{Value, json};
+        let index = storage_index_receipt();
         let publication = || super::IndexReceipt {
             repository: index.repository.clone(),
             generation: index.generation.clone(),
@@ -1960,12 +1943,32 @@ mod tests {
                 index.repository, index.generation
             ));
             recovered["quarantine_manifests"] = json!([invalid]);
-            recovered["response"] = json!({"data":{"publication_state":"published","repository_state":"ready",
+            recovered["response"] = json!({"repository":{"repository_id":index.repository},
+                "data":{"publication_state":"published","repository_state":"ready",
                 "resolved_generation":index.generation,"active_generation":{"generation_id":index.generation,
                     "parent_generation":index.parent_generation},"logical_snapshot":{"hash":"logical-hash"}}});
             let verify =
                 |after: &Value| super::verify_storage_recovery(&before, &altered, after, &index);
             verify(&recovered).unwrap();
+            let observe = |after: &Value| {
+                super::verify_storage_recovery_observation(&before, &altered, after, &index)
+            };
+            observe(&recovered).unwrap();
+            let mut parent_active = altered.clone();
+            parent_active["response"] = recovered["response"].clone();
+            parent_active["response"]["data"]["resolved_generation"] =
+                json!(index.parent_generation);
+            parent_active["response"]["data"]["active_generation"]["generation_id"] =
+                json!(index.parent_generation);
+            parent_active["response"]["data"]["active_generation"]["parent_generation"] =
+                Value::Null;
+            observe(&parent_active).unwrap();
+            for freshness in ["stale", "current"] {
+                let mut published = recovered.clone();
+                published["response"]["data"]["active_generation"]["semantic_freshness"] =
+                    json!(freshness);
+                observe(&published).unwrap();
+            }
             for (pointer, value) in [
                 ("/quarantine_manifests", json!([])),
                 ("/quarantine_manifests/0/bytes", json!([0])),
@@ -1996,6 +1999,7 @@ mod tests {
                 let mut counterexample = recovered.clone();
                 *counterexample.pointer_mut(pointer).unwrap() = value;
                 assert!(verify(&counterexample).is_err(), "{state}: {pointer}");
+                assert!(observe(&counterexample).is_err(), "{state}: {pointer}");
             }
             let mut duplicate = recovered.clone();
             duplicate["repository_manifests"]
@@ -2003,12 +2007,32 @@ mod tests {
                 .unwrap()
                 .push(head.clone());
             assert!(verify(&duplicate).is_err());
+            assert!(observe(&duplicate).is_err());
+            for (directory, generation, sequence) in [
+                ("activation-foreign", "foreign-generation", 4),
+                ("activation-tie", index.generation.as_str(), 3),
+                ("activation-3", index.generation.as_str(), 4),
+            ] {
+                let mut ambiguous = recovered.clone();
+                ambiguous["repository_manifests"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(record(
+                        directory,
+                        "activation.json",
+                        json!({"generation":generation,"global_activation_sequence":sequence,
+                            "operation":{"operation":"foreign-operation"}}),
+                    ));
+                assert!(observe(&ambiguous).is_err(), "{state}: {directory}");
+            }
             let mut identical_valid = recovered.clone();
             identical_valid["repository_manifests"][0] = head.clone();
             verify(&identical_valid).unwrap();
+            observe(&identical_valid).unwrap();
             let mut reused_invalid = recovered;
             reused_invalid["repository_manifests"][0] = altered["repository_manifests"][0].clone();
             assert!(verify(&reused_invalid).is_err());
+            assert!(observe(&reused_invalid).is_err());
         }
     }
 
