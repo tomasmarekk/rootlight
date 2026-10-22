@@ -2935,7 +2935,9 @@ fn sequential_signature_batch_snapshot() -> (GenerationSnapshot, FakeSearch, u64
 fn locate_signature_batches_reserve_sequential_scratch_once() {
     let (snapshot, search, maximum_workspace) = sequential_signature_batch_snapshot();
     let service = QueryService::new(&snapshot, &search).unwrap();
-    let budget = QueryBudget::new();
+    // This allocation regression spans 19 batches; allow the admitted duration
+    // ceiling so shared CI load does not turn it into an interactive latency test.
+    let budget = QueryBudget::new().with_max_duration(Duration::from_secs(10));
     assert!(maximum_workspace < budget.max_memory_bytes());
     assert!(19 * 2 * maximum_workspace > budget.max_memory_bytes());
     let plan = |offset, budget| {
