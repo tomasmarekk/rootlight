@@ -271,5 +271,69 @@ class InstalledWebSmokeTests(unittest.TestCase):
                     installed_web.validated_archive_members(package)
 
 
+    def test_archive_admits_members_through_product_update_limit(self) -> None:
+        for size in (256 * 1024 * 1024 + 1, 512 * 1024 * 1024):
+            with self.subTest(bytes=size):
+                member = zipfile.ZipInfo("bin/payload")
+                member.file_size = size
+                package = mock.Mock(spec=zipfile.ZipFile)
+                package.infolist.return_value = [member]
+
+                self.assertEqual(
+                    installed_web.validated_archive_members(package), [member]
+                )
+                package.open.assert_not_called()
+
+    def test_archive_rejects_members_above_product_update_limit(self) -> None:
+        member = zipfile.ZipInfo("bin/payload")
+        member.file_size = 512 * 1024 * 1024 + 1
+        package = mock.Mock(spec=zipfile.ZipFile)
+        package.infolist.return_value = [member]
+
+        with self.assertRaisesRegex(ValueError, "unsafe entry"):
+            installed_web.validated_archive_members(package)
+        package.open.assert_not_called()
+
+    def test_archive_retains_aggregate_byte_limit(self) -> None:
+        members = [zipfile.ZipInfo("bin/first"), zipfile.ZipInfo("bin/second")]
+        for member in members:
+            member.file_size = 512 * 1024 * 1024
+        package = mock.Mock(spec=zipfile.ZipFile)
+        package.infolist.return_value = members
+
+        self.assertEqual(installed_web.validated_archive_members(package), members)
+        extra = zipfile.ZipInfo("share/extra")
+        extra.file_size = 1
+        package.infolist.return_value = members + [extra]
+        with self.assertRaisesRegex(ValueError, "total-byte limit"):
+            installed_web.validated_archive_members(package)
+        package.open.assert_not_called()
+
+    def test_archive_retains_path_type_duplicate_and_count_guards(self) -> None:
+        symlink = zipfile.ZipInfo("bin/link")
+        symlink.external_attr = 0o120777 << 16
+        invalid_members = []
+        for name in ("", "../outside", "/absolute", "bin\\payload"):
+            member = zipfile.ZipInfo("placeholder")
+            member.filename = name
+            invalid_members.append([member])
+        invalid_members += [
+            [symlink],
+            [zipfile.ZipInfo("duplicate"), zipfile.ZipInfo("duplicate")],
+        ]
+        package = mock.Mock(spec=zipfile.ZipFile)
+        for members in invalid_members:
+            with self.subTest(names=[member.filename for member in members]):
+                package.infolist.return_value = members
+                with self.assertRaisesRegex(ValueError, "unsafe entry"):
+                    installed_web.validated_archive_members(package)
+        for count in (0, 2049):
+            with self.subTest(entries=count):
+                package.infolist.return_value = [zipfile.ZipInfo("entry")] * count
+                with self.assertRaisesRegex(ValueError, "entry count"):
+                    installed_web.validated_archive_members(package)
+        package.open.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

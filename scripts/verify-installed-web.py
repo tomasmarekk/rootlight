@@ -37,7 +37,8 @@ WEB_URL = re.compile(
     r"#bootstrap=([A-Za-z0-9_-]{43})\r?\n$"
 )
 MAX_ARCHIVE_ENTRIES = 2_048
-MAX_ARCHIVE_FILE_BYTES = 256 * 1024 * 1024
+# Match the production updater member policy in rootlight-client/src/update/filesystem.rs.
+MAX_ARCHIVE_FILE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_HTTP_BYTES = 1024 * 1024
 START_TIMEOUT_SECONDS = 30.0
