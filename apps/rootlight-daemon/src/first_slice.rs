@@ -30246,8 +30246,11 @@ mod tests {
         let index_daemon = daemon.clone();
         let root = fixture.path().to_string_lossy().into_owned();
         let retry_root = root.clone();
+        // The failure contract begins at the commit boundary. Use the ordinary
+        // request allowance for admission and observing that boundary.
+        let publication_wait = Duration::from_secs(30);
         let index = thread::spawn(move || {
-            execute_with_timeout(
+            execute_with_timeout_duration(
                 &index_daemon,
                 FirstSliceIpcRequest::RepositoryIndex(daemon::RepositoryIndexRequest {
                     schema_version: Some(schema_version()),
@@ -30256,10 +30259,11 @@ mod tests {
                     detached: true,
                     mode: daemon::RepositoryIndexMode::RepositoryIndexStructural as i32,
                 }),
+                publication_wait,
             )
         });
         reached_receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(publication_wait)
             .expect("index reaches the commit boundary");
         release_sender.send(()).expect("commit attempt resumes");
         let accepted = index
@@ -31090,7 +31094,15 @@ mod tests {
         daemon: &FirstSliceDaemon,
         request: FirstSliceIpcRequest,
     ) -> Result<FirstSliceIpcResponse, PublicError> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        execute_with_timeout_duration(daemon, request, Duration::from_secs(5))
+    }
+
+    fn execute_with_timeout_duration(
+        daemon: &FirstSliceDaemon,
+        request: FirstSliceIpcRequest,
+        timeout: Duration,
+    ) -> Result<FirstSliceIpcResponse, PublicError> {
+        let deadline = Instant::now() + timeout;
         let context = FirstSliceIpcContext {
             client_instance_id: rootlight_operations::ClientInstanceId::from_bytes([7; 16]),
             selected_protocol_minor: 5,
@@ -31105,8 +31117,7 @@ mod tests {
             .expect("runtime builds");
         runtime
             .block_on(async {
-                tokio::time::timeout(Duration::from_secs(5), daemon.dispatch(request, context))
-                    .await
+                tokio::time::timeout(timeout, daemon.dispatch(request, context)).await
             })
             .expect("work-lane request completes within its deadline")
     }
