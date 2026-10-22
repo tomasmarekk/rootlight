@@ -186,6 +186,11 @@ impl FirstSliceProjectAnalyzer for RustProjectAnalyzer {
 
 /// Creates a bounded Deep fixture service using genuine parser and project output.
 pub(super) fn service(state: &Path, cancellation: &Cancellation) -> FirstSliceService {
+    // SQLite's no-follow open rejects ancestor aliases such as macOS's `/var`.
+    // Resolve the existing fixture-owned parent before deriving durable paths.
+    let state = state
+        .canonicalize()
+        .expect("real project fixture state parent canonicalizes");
     let paths = RuntimePaths::new(state.join("state"), state.join("runtime"))
         .expect("real project fixture runtime paths are valid");
     paths

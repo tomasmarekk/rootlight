@@ -1521,6 +1521,76 @@ fn architecture_overview_reports_an_honest_file_granularity_result_for_a_known_f
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn deep_project_fixture_indexes_through_a_state_parent_alias() {
+    let fixture = fixture(BEFORE);
+    let state = TempDir::new().expect("project fixture state exists");
+    let state_root = fs::canonicalize(state.path()).expect("fixture state root canonicalizes");
+    let alias_owner = TempDir::new().expect("state alias parent exists");
+    let alias = fs::canonicalize(alias_owner.path())
+        .expect("state alias parent canonicalizes")
+        .join("state-alias");
+    std::os::unix::fs::symlink(&state_root, &alias).expect("owned state alias is created");
+    assert!(
+        fs::symlink_metadata(&alias)
+            .expect("owned alias metadata is readable")
+            .file_type()
+            .is_symlink()
+    );
+    let cancellation = deadline();
+    let mut service = real_project_fixture::service(&alias, &cancellation);
+    let indexed = service
+        .index_repository_with_mode(
+            fixture.path(),
+            rootlight_service::FirstSliceIndexMode::Deep,
+            &cancellation,
+        )
+        .expect("Deep fixture indexes through its owned state parent alias");
+    assert_eq!(
+        service.active_generation_for(indexed.repository),
+        Some(indexed.generation)
+    );
+    let located = service
+        .code_locate(
+            indexed.generation,
+            "answer".to_owned(),
+            LocateMode::Exact,
+            8,
+            0,
+            &cancellation,
+        )
+        .expect("Deep fixture symbol locates");
+    assert_symbol_and_source_hits(&located.data.hits);
+    let symbol = located.data.hits[0]
+        .symbol
+        .expect("Deep fixture retains the parsed symbol");
+    let reference = located.data.hits[1]
+        .source
+        .clone()
+        .expect("Deep fixture retains whole-file source evidence");
+    assert_eq!(reference.repository(), indexed.repository);
+    assert_eq!(reference.generation(), indexed.generation);
+    assert_eq!(reference.content_hash(), content_hash(BEFORE.as_bytes()));
+    assert_eq!(reference.span().start_byte(), 0);
+    assert_eq!(
+        reference.span().end_byte(),
+        u64::try_from(BEFORE.len()).expect("bounded fixture length fits u64")
+    );
+    let source = service
+        .source_read(indexed.generation, vec![reference.clone()], &cancellation)
+        .expect("Deep fixture source snapshot reads");
+    assert_eq!(source.data.generation, indexed.generation);
+    assert_eq!(source.data.chunks.len(), 1);
+    assert_eq!(source.data.chunks[0].reference, reference);
+    assert_eq!(source.data.chunks[0].path, "src/lib.rs");
+    assert_eq!(source.data.chunks[0].bytes, BEFORE.as_bytes());
+    let explained = service
+        .symbol_explain(indexed.generation, symbol, &cancellation)
+        .expect("Deep fixture parsed symbol explains");
+    assert_eq!(explained.data.entity.id, symbol);
+}
+
 #[test]
 fn tests_select_returns_a_direct_rust_test() {
     let source = "pub fn callee() -> u32 {\n    42\n}\n\npub fn caller() -> u32 {\n    callee()\n}\n\n#[test]\nfn caller_works() {\n    let actual = caller();\n    assert_eq!(actual, 42);\n}\n";
