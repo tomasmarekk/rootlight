@@ -120,7 +120,9 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Retained compatibility interval from the former polling scheduler.
 pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 /// Default orderly shutdown grace period.
-pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+///
+/// Leaves headroom for cancelled durable workers to drain within one shared deadline.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// Hard maximum simultaneous negotiated connection count.
 pub const MAX_CONNECTION_LIMIT: u32 = 4_096;
 /// Hard maximum capacity of the high-priority control lane.
@@ -18003,6 +18005,7 @@ mod tests {
         );
         assert_eq!(limits.operation_workers(), DEFAULT_OPERATION_WORKERS);
         assert_eq!(limits.operation_workers(), 4);
+        assert_eq!(limits.shutdown_grace(), Duration::from_secs(30));
         assert!(limits.client_connection_limit() <= limits.connection_limit());
         assert!(limits.client_operation_limit() <= limits.operation_queue_limit());
     }

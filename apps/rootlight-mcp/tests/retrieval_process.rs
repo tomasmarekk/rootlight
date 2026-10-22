@@ -31,6 +31,8 @@ use serde_json::{Map, Value, json};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+// Let the daemon finish its thirty-second durable drain before the harness fails.
+const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(40);
 const RETRIEVAL_SOURCE: &str = "\
 pub fn matrix_target_alpha(value: usize) -> usize {
     matrix_target_beta(value).saturating_add(1)
@@ -5486,7 +5488,7 @@ impl DaemonProcess {
         self.input.take();
         let status = wait_for_exit(
             self.child.as_mut().expect("daemon child is retained"),
-            SHUTDOWN_TIMEOUT,
+            DAEMON_SHUTDOWN_TIMEOUT,
         );
         let stderr = fs::read_to_string(&self.stderr_path)
             .unwrap_or_else(|error| format!("<daemon stderr unavailable: {error}>"));
