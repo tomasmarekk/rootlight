@@ -18559,19 +18559,36 @@ mod tests {
                 .env(STARTUP_CHILD_ROOT_ENV, root)
                 .stdin(StdioMode::Null)
                 .stdout(StdioMode::Null)
-                .stderr(StdioMode::Null);
+                .stderr(StdioMode::Piped);
         let mut child = spawn_coordinated_process(command, false).expect("cleanup child starts");
+        let mut stderr = child
+            .child
+            .take_stderr()
+            .expect("cleanup child stderr is piped");
+        let diagnostic_reader = std::thread::spawn(move || {
+            let mut diagnostic = Vec::new();
+            // Drain the pipe so a setup panic cannot block before its exit is observed.
+            let result = stderr
+                .by_ref()
+                .take(64 * 1024)
+                .read_to_end(&mut diagnostic)
+                .and_then(|_| io::copy(&mut stderr, &mut io::sink()).map(|_| ()));
+            (result, diagnostic)
+        });
         let marker_deadline = Instant::now()
             .checked_add(Duration::from_secs(5))
             .expect("marker deadline is representable");
         while !marker.is_file() {
-            assert!(
-                child
-                    .try_wait()
-                    .expect("cleanup child status reads")
-                    .is_none(),
-                "cleanup child exited before acquiring its proof lock"
-            );
+            let status = child.try_wait().expect("cleanup child status reads");
+            if let Some(status) = status {
+                let (result, bytes) = diagnostic_reader
+                    .join()
+                    .expect("cleanup child stderr reader joins after exit");
+                panic!(
+                    "cleanup child exited before acquiring its proof lock: {status}; stderr read: {result:?}; stderr (first 65536 bytes): {}",
+                    String::from_utf8_lossy(&bytes),
+                );
+            }
             assert!(
                 Instant::now() < marker_deadline,
                 "cleanup child did not acquire its proof lock"
@@ -18579,6 +18596,23 @@ mod tests {
             std::thread::sleep(START_POLL_INTERVAL);
         }
         (child, child_paths)
+    }
+
+    #[test]
+    fn cleanup_child_failure_reports_status_and_setup_error() {
+        let temporary = tempfile::tempdir().expect("temporary directory is available");
+        let blocked = temporary.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").expect("blocking file writes");
+        let failure = std::panic::catch_unwind(|| spawn_cleanup_child(&blocked))
+            .expect_err("child directory setup must fail");
+        let diagnostic = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .expect("setup failure has a panic diagnostic");
+        assert!(diagnostic.contains("cleanup child exited before acquiring its proof lock:"));
+        assert!(diagnostic.contains("stderr (first 65536 bytes): "));
+        assert!(diagnostic.contains("cleanup child runtime paths are private"));
     }
 
     #[test]
