@@ -375,7 +375,8 @@ class RustSourceBundleTests(unittest.TestCase):
 
     def export_project(self, source: Path, inventory: list[tuple[str, bool]],
                        destination: Path | None = None, *,
-                       derive_cargo_members: bool = False) -> tuple[Path, dict]:
+                       derive_cargo_members: bool = False, archive: Path | None = None,
+                       remove_staging_after_archive: bool = False) -> tuple[Path, dict]:
         destination = destination or self.root / "portable-project"
         empty_home = self.root / "empty-cargo-home"
         empty_home.mkdir(exist_ok=True)
@@ -392,8 +393,11 @@ class RustSourceBundleTests(unittest.TestCase):
             patch.dict(os.environ, {"CARGO_HOME": str(empty_home)}), \
             (contextlib.nullcontext() if derive_cargo_members else
              patch.object(bundle, "materialize_archive", side_effect=AssertionError("export must not unpack"))):
+            lifecycle = ({"archive": archive,
+                          "remove_staging_after_archive": remove_staging_after_archive}
+                         if archive is not None or remove_staging_after_archive else {})
             manifest = bundle.create_bundle(source, destination, allow_network=False,
-                                            derive_cargo_members=derive_cargo_members)
+                                            derive_cargo_members=derive_cargo_members, **lifecycle)
             self.assertEqual(run.call_count, 1)
             self.assertEqual(run.call_args.args[0], ["git", "diff", "--quiet", "HEAD", "--"])
         self.assertEqual(list(empty_home.iterdir()), [])
@@ -953,6 +957,184 @@ class RustSourceBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already exists"):
             bundle.create_bundle(self.root, destination, allow_network=False)
         self.assertEqual(sentinel.read_bytes(), b"existing data")
+
+    def test_archive_lifecycle_default_keeps_verified_staging(self) -> None:
+        source, inventory = self.create_checkout()
+        archive = self.root / "retained.tar.gz"
+        exported, manifest = self.export_project(source, inventory, archive=archive)
+        self.assertEqual(bundle.verify_project_bundle(exported), manifest)
+        self.assertTrue(archive.is_file())
+
+    def test_archive_lifecycle_removes_only_fresh_copy_and_restores_exact_sources(self) -> None:
+        source, inventory = self.create_checkout()
+        original = {name: bundle.digest(source / name) for name, _mode in inventory}
+        archive = self.root / "portable.tar.gz"
+        exported, manifest = self.export_project(
+            source, inventory, archive=archive, remove_staging_after_archive=True,
+        )
+        self.assertFalse(exported.exists())
+        self.assertEqual({name: bundle.digest(source / name) for name, _mode in inventory}, original)
+        restored = self.root / "restored"
+        restored.mkdir()
+        with tarfile.open(archive) as transport:
+            transport.extractall(restored, filter="data")
+        self.assertEqual(bundle.verify_project_bundle(restored / "rootlight"), manifest)
+        self.assertEqual({name: bundle.digest(restored / "rootlight" / name)
+                          for name, _mode in inventory}, original)
+
+    def test_archive_lifecycle_requires_external_archive_and_fresh_canonical_destination(self) -> None:
+        existing = self.root / "existing-stage"
+        existing.mkdir()
+        sentinel = existing / "retain"
+        sentinel.write_bytes(b"existing data")
+        cases = (
+            (self.root / "absent", None, "requires --archive"),
+            (existing, self.root / "existing.tar.gz", "already exists"),
+            (self.root / "inside", self.root / "inside/transport.tar.gz", "outside"),
+            (self.root / "part/../alias", self.root / "alias.tar.gz", "canonical"),
+        )
+        for destination, archive, message in cases:
+            with self.subTest(destination=destination, archive=archive), \
+                    patch.object(bundle, "tracked_files", side_effect=AssertionError), \
+                    self.assertRaisesRegex(ValueError, message):
+                bundle.create_bundle(self.root, destination, allow_network=False,
+                                     archive=archive, remove_staging_after_archive=True)
+        self.assertEqual(sentinel.read_bytes(), b"existing data")
+        self.assertFalse((self.root / "inside").exists())
+        self.assertFalse((self.root / "part").exists())
+
+    def test_archive_lifecycle_verify_only_never_removes_an_existing_tree(self) -> None:
+        arguments = ["prepare_rust_source_bundle.py", "--destination", str(self.root),
+                     "--archive", str(self.root.parent / "unused.tar.gz"),
+                     "--verify-only", "--remove-staging-after-archive"]
+        errors = io.StringIO()
+        with patch("sys.argv", arguments), contextlib.redirect_stderr(errors), \
+                patch.object(bundle, "verify_project_bundle", side_effect=AssertionError), \
+                self.assertRaises(SystemExit) as failure:
+            bundle.main()
+        self.assertEqual(failure.exception.code, 1)
+        self.assertIn("fresh export", errors.getvalue())
+        self.assertTrue(self.root.is_dir())
+
+    def test_archive_lifecycle_cli_publishes_archive_before_removing_fresh_staging(self) -> None:
+        source, inventory = self.create_checkout()
+        destination, archive = self.root / "cli-stage", self.root / "cli.tar.gz"
+        arguments = ["prepare_rust_source_bundle.py", "--root", str(source),
+                     "--destination", str(destination), "--archive", str(archive),
+                     "--remove-staging-after-archive"]
+        output = io.StringIO()
+        with patch("sys.argv", arguments), contextlib.redirect_stdout(output), \
+                patch.object(bundle, "tracked_files", return_value=inventory), \
+                patch.object(bundle.subprocess, "check_output", return_value="a" * 40 + "\n"), \
+                patch.object(bundle.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
+            bundle.main()
+        self.assertEqual(json.loads(output.getvalue())["status"], "verified")
+        self.assertFalse(destination.exists())
+        with tarfile.open(archive) as transport:
+            self.assertIn("rootlight/" + bundle.MANIFEST_PATH, transport.getnames())
+        self.assertTrue((source / "Cargo.lock").is_file())
+
+    def test_archive_lifecycle_failed_archive_keeps_verified_staging(self) -> None:
+        source, inventory = self.create_checkout()
+        exported, archive = self.root / "failed-stage", self.root / "failed.tar.gz"
+        with patch.object(bundle, "archive_bundle", side_effect=OSError("archive write failed")), \
+                self.assertRaisesRegex(OSError, "archive write failed"):
+            self.export_project(source, inventory, exported, archive=archive,
+                                remove_staging_after_archive=True)
+        self.assertEqual(bundle.verify_project_bundle(exported)["schema"],
+                         "rootlight.rust-source-bundle/1")
+        self.assertFalse(archive.exists())
+
+    def test_archive_lifecycle_replaced_staging_root_is_preserved(self) -> None:
+        source, inventory = self.create_checkout()
+        exported, moved = self.root / "swapped-stage", self.root / "original-stage"
+        archive = self.root / "swapped.tar.gz"
+        write_archive = bundle.archive_bundle
+
+        def replace_after_archive(root, output):
+            receipt = write_archive(root, output)
+            root.rename(moved)
+            root.mkdir()
+            (root / "foreign").write_bytes(b"retain replacement")
+            return receipt
+
+        with patch.object(bundle, "archive_bundle", side_effect=replace_after_archive), \
+                self.assertRaisesRegex(ValueError, "staging.*changed"):
+            self.export_project(source, inventory, exported, archive=archive,
+                                remove_staging_after_archive=True)
+        self.assertEqual((exported / "foreign").read_bytes(), b"retain replacement")
+        self.assertEqual(bundle.verify_project_bundle(moved)["schema"],
+                         "rootlight.rust-source-bundle/1")
+        self.assertTrue(archive.is_file())
+
+    def test_archive_lifecycle_changed_archive_and_extra_staging_entries_prevent_removal(self) -> None:
+        write_archive = bundle.archive_bundle
+        for index, change_archive in enumerate((False, True)):
+            source, inventory = self.create_checkout(f"late-change-{index}")
+            exported, archive = self.root / f"late-stage-{index}", self.root / f"late-{index}.tar.gz"
+
+            def change_after_archive(root, output):
+                receipt = write_archive(root, output)
+                if change_archive:
+                    output.rename(output.with_suffix(".original"))
+                    output.write_bytes(b"foreign archive")
+                else:
+                    (root / "foreign").write_bytes(b"foreign source")
+                return receipt
+
+            with self.subTest(change_archive=change_archive), \
+                    patch.object(bundle, "archive_bundle", side_effect=change_after_archive), \
+                    self.assertRaisesRegex(ValueError, "staging.*changed|archive.*changed"):
+                self.export_project(source, inventory, exported, archive=archive,
+                                    remove_staging_after_archive=True)
+            self.assertTrue((exported / bundle.MANIFEST_PATH).is_file())
+            self.assertTrue(archive.is_file())
+
+    def test_archive_lifecycle_linked_paths_refuse_before_export(self) -> None:
+        destination, archive = self.root / "linked-stage", self.root / "linked.tar.gz"
+        for link in (destination, archive, destination.parent):
+            with self.subTest(link=link), \
+                    patch.object(bundle, "linked_path", side_effect=lambda path: path == link), \
+                    patch.object(bundle, "tracked_files", side_effect=AssertionError), \
+                    self.assertRaisesRegex(ValueError, "canonical"):
+                bundle.create_bundle(self.root, destination, allow_network=False,
+                                     archive=archive, remove_staging_after_archive=True)
+        self.assertFalse(destination.exists())
+
+    def test_archive_lifecycle_late_hardlink_is_never_removed(self) -> None:
+        source, inventory = self.create_checkout()
+        exported, archive = self.root / "hardlinked-stage", self.root / "hardlinked.tar.gz"
+        original = (source / "Cargo.lock").read_bytes()
+        write_archive = bundle.archive_bundle
+
+        def link_after_archive(root, output):
+            receipt = write_archive(root, output)
+            target = root / "Cargo.lock"
+            target.unlink()
+            os.link(source / "Cargo.lock", target)
+            return receipt
+
+        with patch.object(bundle, "archive_bundle", side_effect=link_after_archive), \
+                self.assertRaisesRegex(ValueError, "link or nonordinary"):
+            self.export_project(source, inventory, exported, archive=archive,
+                                remove_staging_after_archive=True)
+        self.assertEqual((source / "Cargo.lock").read_bytes(), original)
+        self.assertEqual((exported / "Cargo.lock").read_bytes(), original)
+        self.assertEqual((exported / "Cargo.lock").stat().st_ino,
+                         (source / "Cargo.lock").stat().st_ino)
+        self.assertTrue(archive.is_file())
+
+    def test_archive_lifecycle_removal_error_propagates_without_permission_bypass(self) -> None:
+        source, inventory = self.create_checkout()
+        exported, archive = self.root / "locked-stage", self.root / "locked.tar.gz"
+        with patch.object(bundle.shutil, "rmtree", side_effect=PermissionError("retained lock")) as remove, \
+                self.assertRaisesRegex(PermissionError, "retained lock"):
+            self.export_project(source, inventory, exported, archive=archive,
+                                remove_staging_after_archive=True)
+        remove.assert_called_once_with(exported)
+        self.assertEqual(bundle.verify_project_bundle(exported)["schema"],
+                         "rootlight.rust-source-bundle/1")
+        self.assertTrue(archive.is_file())
 
     def test_absent_producer_requires_explicit_null_evidence_and_false_verified_flag(self) -> None:
         project, pristine = self.create_project()

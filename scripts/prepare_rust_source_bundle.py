@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -503,7 +504,8 @@ def regular_source(root: Path, name: str) -> Path:
 
 
 def create_bundle(root: Path, destination: Path, *, allow_network: bool,
-                  derive_cargo_members: bool = False) -> dict:
+                  derive_cargo_members: bool = False, archive: Path | None = None,
+                  remove_staging_after_archive: bool = False) -> dict:
     """Copy tracked project and verified dependency sources into a fresh export.
 
     Args:
@@ -514,6 +516,9 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool,
         allow_network: Retained CLI/API compatibility flag; true is rejected.
         derive_cargo_members: Explicitly derive untracked published Cargo members
             from versioned archives in a temporary tree, never in the checkout.
+        archive: Optional reproducible archive of the verified fresh export.
+        remove_staging_after_archive: Retire only this invocation's fresh export
+            after closing its external archive; preserve the checkout and archive.
 
     Returns:
         Whole-project manifest after exact allowlist and archive verification.
@@ -526,15 +531,68 @@ def create_bundle(root: Path, destination: Path, *, allow_network: bool,
 
     No dependency home is consulted and no Cargo, npm or network command runs.
     """
+    destination = destination.absolute()
+    if remove_staging_after_archive:
+        if archive is None:
+            raise ValueError("staging removal requires --archive")
+        archive = archive.absolute()
+        for path in (destination, archive):
+            if (".." in path.parts or path.resolve() != path
+                or any(linked_path(parent) for parent in (path, *path.parents))):
+                raise ValueError("staging removal requires canonical paths without links")
+        if archive.is_relative_to(destination):
+            raise ValueError("archive must be outside the staging directory")
+        if archive.exists():
+            raise ValueError("archive already exists; choose a fresh file")
     staging = (tempfile.TemporaryDirectory(prefix="rootlight-cargo-export-")
                if derive_cargo_members else nullcontext(None))
     with staging as directory:
-        return _create_bundle(root, destination, allow_network=allow_network,
-                              cargo_stage=Path(directory) if directory is not None else None)
+        manifest, created_identity = _create_bundle(
+            root, destination, allow_network=allow_network,
+            cargo_stage=Path(directory) if directory is not None else None,
+        )
+    if archive is not None:
+        before = _staging_inventory(destination, created_identity) if remove_staging_after_archive else None
+        archive_identity = archive_bundle(destination, archive)
+        if remove_staging_after_archive:
+            if _staging_inventory(destination, created_identity) != before:
+                raise ValueError("staging contents changed during archiving; preserving staging")
+            if (archive.resolve() != archive
+                or any(linked_path(parent) for parent in (archive, *archive.parents))
+                or _ordinary_identity(archive) != archive_identity):
+                raise ValueError("archive changed after creation; preserving staging")
+            shutil.rmtree(destination)
+    return manifest
+
+
+def _ordinary_identity(path: Path) -> tuple:
+    metadata = path.lstat()
+    if (linked_path(path) or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode))
+        or not metadata.st_ino or (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1)):
+        raise ValueError("staging or archive contains a link or nonordinary entry")
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+            metadata.st_size, metadata.st_mtime_ns, getattr(metadata, "st_file_attributes", 0))
+
+
+def _staging_inventory(root: Path, created_identity: tuple[int, int]) -> dict[Path, tuple]:
+    if (root.resolve() != root
+        or any(linked_path(parent) for parent in (root, *root.parents))
+        or _ordinary_identity(root)[:2] != created_identity):
+        raise ValueError("staging directory identity changed; preserving staging")
+    pending, inventory = [root], {}
+    while pending:
+        directory = pending.pop()
+        inventory[directory] = _ordinary_identity(directory)
+        for path in directory.iterdir():
+            identity = _ordinary_identity(path)
+            inventory[path] = identity
+            if stat.S_ISDIR(identity[2]):
+                pending.append(path)
+    return inventory
 
 
 def _create_bundle(root: Path, destination: Path, *, allow_network: bool,
-                   cargo_stage: Path | None) -> dict:
+                   cargo_stage: Path | None) -> tuple[dict, tuple[int, int]]:
     if allow_network:
         raise ValueError("--allow-network is inappropriate for export; prepare versioned sources separately")
     root, destination = root.absolute(), destination.absolute()
@@ -604,6 +662,8 @@ def _create_bundle(root: Path, destination: Path, *, allow_network: bool,
     if tree_status not in (0, 1):
         raise ValueError("cannot attribute working-tree sources to the recorded revision")
     destination.mkdir(parents=True)
+    created = destination.lstat()
+    created_identity = (created.st_dev, created.st_ino)
     for name in sorted(source_directories | {NPM_ORIGINAL_ARCHIVES, NPM_LOCAL_DISTRIBUTIONS}):
         (destination / relative_path(name)).mkdir(parents=True, exist_ok=True)
     source_files = []
@@ -674,7 +734,7 @@ def _create_bundle(root: Path, destination: Path, *, allow_network: bool,
         encoding="utf-8", newline="\n",
     )
     verify_project_bundle(destination)
-    return manifest
+    return manifest, created_identity
 
 
 def verify_project_bundle(root: Path) -> dict:
@@ -785,12 +845,13 @@ def verify_project_bundle(root: Path) -> dict:
     return manifest
 
 
-def archive_bundle(root: Path, archive: Path) -> None:
-    """Write reproducible transport bytes without host ownership or timestamps."""
+def archive_bundle(root: Path, archive: Path) -> tuple:
+    """Write reproducible transport bytes and return the closed ordinary file identity."""
     manifest = verify_project_bundle(root)
     empty_directories = manifest.get("source_input_empty_directories", {})
     files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
     with archive.open("xb") as output:
+        created = os.fstat(output.fileno())
         with gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as tar:
                 for relative in sorted(files | set(empty_directories)):
@@ -804,6 +865,10 @@ def archive_bundle(root: Path, archive: Path) -> None:
                     info.mode = (0o644 if relative == MANIFEST_PATH else manifest["file_modes"][relative])
                     with path.open("rb") as stream:
                         tar.addfile(info, stream)
+    identity = _ordinary_identity(archive)
+    if identity[:2] != (created.st_dev, created.st_ino):
+        raise ValueError("archive identity changed during creation")
+    return identity
 
 
 def main() -> None:
@@ -816,17 +881,26 @@ def main() -> None:
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--derive-cargo-members-from-archives", action="store_true",
                         help="derive only untracked published Cargo members in a fresh export")
+    parser.add_argument("--remove-staging-after-archive", action="store_true",
+                        help="remove only this invocation's fresh export after closing its external archive")
     arguments = parser.parse_args()
     try:
         if arguments.allow_network:
             raise ValueError("--allow-network is inappropriate for export; prepare versioned sources separately")
+        if arguments.remove_staging_after_archive and arguments.verify_only:
+            raise ValueError("staging removal requires a fresh export, not --verify-only")
         destination = arguments.destination.absolute()
-        manifest = (verify_project_bundle(destination) if arguments.verify_only else
-                    create_bundle(arguments.root.absolute(), destination,
-                                  allow_network=arguments.allow_network,
-                                  derive_cargo_members=arguments.derive_cargo_members_from_archives))
-        if arguments.archive:
-            archive_bundle(destination, arguments.archive.absolute())
+        if arguments.verify_only:
+            manifest = verify_project_bundle(destination)
+            if arguments.archive:
+                archive_bundle(destination, arguments.archive.absolute())
+        else:
+            manifest = create_bundle(
+                arguments.root.absolute(), destination, allow_network=arguments.allow_network,
+                derive_cargo_members=arguments.derive_cargo_members_from_archives,
+                archive=arguments.archive.absolute() if arguments.archive else None,
+                remove_staging_after_archive=arguments.remove_staging_after_archive,
+            )
         print(json.dumps({"schema": manifest["schema"],
                           "project_source_count": len(manifest["project_sources"]),
                           "status": "verified"}, sort_keys=True))

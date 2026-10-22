@@ -7,6 +7,11 @@ export CARGO_NET_OFFLINE=true
 export CARGO_HTTP_TIMEOUT=1
 export CARGO_NET_RETRY=0
 export PYTHONDONTWRITEBYTECODE=1
+# sudo can discard the workflow environment; keep cold-build artifacts bounded
+# without changing the restored sources, runtime admission or test selection.
+export CARGO_PROFILE_DEV_DEBUG=0
+export CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_INCREMENTAL=0
 
 run_xtask() {
     cargo run --locked --offline --quiet --package xtask -- "$@"

@@ -26,7 +26,7 @@ jobs:
   fast:
     name: fast / pinned / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -360,7 +360,7 @@ jobs:
   msrv:
     name: msrv / 1.90.0 / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       RUSTUP_TOOLCHAIN: "1.90.0"
     steps:
@@ -393,7 +393,7 @@ jobs:
   current-stable:
     name: current stable / linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
@@ -424,9 +424,9 @@ jobs:
   platform:
     name: platform / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Cold Windows builds and the complete process suite exceed 75 minutes.
-    # Intel macOS exceeds 90 before finishing service tests and native grammars.
-    timeout-minutes: ${{ matrix.os == 'windows-2025' && 120 || matrix.os == 'macos-15-intel' && 150 || 75 }}
+    # Cold builds and complete preservation lifecycles need room before the
+    # remaining grammar and scale checks; keep product deadlines independent.
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 150 || 120 }}
     strategy:
       fail-fast: false
       matrix:
@@ -996,23 +996,58 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup show active-toolchain
+      - name: Release unrelated hosted-runner SDK space
+        run: |
+          if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux || \
+                "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
+            printf 'offline SDK cleanup requires a GitHub-hosted Linux runner\n' >&2
+            exit 1
+          fi
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          # Independent source trees and empty Cargo caches must coexist;
+          # mobile and .NET SDKs are unrelated to this Linux Rust gate.
+          for sdk in /usr/local/lib/android /usr/share/dotnet; do
+            if [[ ! -e "$sdk" && ! -L "$sdk" ]]; then
+              printf 'unused SDK is absent: %s\n' "$sdk"
+              continue
+            fi
+            if [[ -L "$sdk" || ! -d "$sdk" || "$(realpath -- "$sdk")" != "$sdk" ]]; then
+              printf 'unused SDK root is not an ordinary canonical directory: %s\n' "$sdk" >&2
+              exit 1
+            fi
+            sudo du -sx -B1 -- "$sdk"
+            sudo rm -r -- "$sdk"
+            if [[ -e "$sdk" || -L "$sdk" ]]; then
+              printf 'unused SDK root remains after removal: %s\n' "$sdk" >&2
+              exit 1
+            fi
+          done
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
       - name: Restore authenticated producer source metadata
         run: python3 -B scripts/restore_lightning_source_inputs.py --project . --restore-file-modes
       - name: Export complete versioned Rust sources without acquisition
-        run: bash scripts/prepare-offline.sh
+        run: |
+          bash scripts/prepare-offline.sh --remove-staging-after-archive
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          du -sx -B1 -- target/rust-source-bundle
       - name: Restore portable sources and create empty build caches
         run: |
           mkdir "$RUNNER_TEMP/rootlight-restored-rust-sources"
           tar -xzf target/rust-source-bundle/rootlight-rust-sources.tar.gz \
             -C "$RUNNER_TEMP/rootlight-restored-rust-sources"
           mkdir "$RUNNER_TEMP/rootlight-empty-cargo" "$RUNNER_TEMP/rootlight-empty-target"
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          du -sx -B1 -- "$RUNNER_TEMP/rootlight-restored-rust-sources"
       - name: Build and test restored sources after kernel-enforced egress denial
         run: |
           cd "$RUNNER_TEMP/rootlight-restored-rust-sources/rootlight"
+          df -B1 . "$RUNNER_TEMP"
           sudo RUNNER_HOME="$HOME" RUNNER_PATH="$PATH" \
             RUNNER_CARGO_HOME="$RUNNER_TEMP/rootlight-empty-cargo" \
             RUNNER_TARGET_DIR="$RUNNER_TEMP/rootlight-empty-target" \
             bash scripts/run-in-network-namespace.sh scripts/run-offline-tests.sh
+          df -B1 . "$RUNNER_TEMP"
+          du -sx -B1 -- "$RUNNER_TEMP/rootlight-empty-target"
       - name: Upload reviewed Rust source bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
