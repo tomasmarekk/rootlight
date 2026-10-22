@@ -144,10 +144,12 @@ const MAX_SYMBOL_RELATION_SAMPLES: usize = 250;
 const REQUEST_IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SUPPORT_ARCHIVE_BYTES: usize = 768 * 1024;
 const MAX_SUPPORT_ENTRY_BYTES: usize = 128 * 1024;
-// Release launchers enforce the installed-product startup SLO. Debug payloads
-// remain bounded but need headroom for unoptimized CI and local test builds.
+// The three-second startup SLO measures responsiveness, not whether a cold
+// daemon is allowed to finish adapter identity and durable service setup.
+#[cfg(any(not(debug_assertions), test))]
+const COORDINATED_RELEASE_START_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(not(debug_assertions))]
-const COORDINATED_INITIAL_START_TIMEOUT: Duration = Duration::from_secs(3);
+const COORDINATED_INITIAL_START_TIMEOUT: Duration = COORDINATED_RELEASE_START_TIMEOUT;
 #[cfg(debug_assertions)]
 const COORDINATED_INITIAL_START_TIMEOUT: Duration = Duration::from_secs(30);
 const COORDINATED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -7727,8 +7729,17 @@ struct StartupDeadlines {
 
 impl StartupDeadlines {
     fn new(started_at: Instant) -> Result<Self, ClientError> {
+        Self::with_initial_timeout(started_at, COORDINATED_INITIAL_START_TIMEOUT)
+    }
+
+    fn with_initial_timeout(
+        started_at: Instant,
+        initial_timeout: Duration,
+    ) -> Result<Self, ClientError> {
         Ok(Self {
-            initial: initial_start_deadline(started_at)?,
+            initial: started_at
+                .checked_add(initial_timeout)
+                .ok_or(ClientError::InvalidRequestTimeout)?,
             recovery: None,
         })
     }
@@ -7769,6 +7780,7 @@ impl StartupDeadlines {
     }
 }
 
+#[cfg(test)]
 fn initial_start_deadline(started_at: Instant) -> Result<Instant, ClientError> {
     started_at
         .checked_add(COORDINATED_INITIAL_START_TIMEOUT)
@@ -18889,11 +18901,7 @@ mod tests {
 
     #[test]
     fn coordinated_deadlines_match_clean_start_and_recovery_contracts() {
-        let expected_initial = if cfg!(debug_assertions) {
-            Duration::from_secs(30)
-        } else {
-            Duration::from_secs(3)
-        };
+        let expected_initial = Duration::from_secs(30);
         assert_eq!(COORDINATED_INITIAL_START_TIMEOUT, expected_initial);
         assert_eq!(
             STARTUP_ACTIVE_GENERATION_RESTORE_TIMEOUT,
@@ -18948,6 +18956,78 @@ mod tests {
             .expect("ready probe remains valid"),
             StartupProbeAction::Ready(_)
         ));
+    }
+
+    #[test]
+    fn release_cold_start_can_finish_after_the_responsiveness_slo() {
+        let started_at = Instant::now();
+        let deadlines =
+            StartupDeadlines::with_initial_timeout(started_at, COORDINATED_RELEASE_START_TIMEOUT)
+                .expect("release startup deadline is representable");
+        assert!(matches!(
+            classify_startup_probe(
+                Ok(ProbeOutcome::Unavailable),
+                true,
+                started_at + Duration::from_secs(4),
+                deadlines,
+                StartupReadiness::RequireReady,
+            )
+            .expect("a child still initializing before its announcement remains observable"),
+            StartupProbeAction::Continue
+        ));
+        let ready = ReadyDaemon {
+            client: Client::new(test_endpoint("release-cold-ready"), [7; 16], [8; 16]),
+            identity: ReadyDaemonIdentity {
+                pid: 42,
+                instance_nonce: [8; 16],
+            },
+        };
+        let action = classify_startup_probe(
+            Ok(ProbeOutcome::Ready(ready)),
+            false,
+            started_at + Duration::from_secs(5),
+            deadlines,
+            StartupReadiness::RequireReady,
+        )
+        .expect("authenticated readiness after the announcement remains valid");
+        let StartupProbeAction::Ready(ready) = action else {
+            panic!("the initialized daemon is admitted");
+        };
+        assert_eq!(ready.identity.pid, 42);
+        assert_eq!(ready.identity.instance_nonce, [8; 16]);
+    }
+
+    #[test]
+    fn release_cold_start_still_refuses_an_unavailable_child_at_thirty_seconds() {
+        let started_at = Instant::now();
+        let deadlines =
+            StartupDeadlines::with_initial_timeout(started_at, COORDINATED_RELEASE_START_TIMEOUT)
+                .expect("release startup deadline is representable");
+        assert_eq!(deadlines.initial - started_at, Duration::from_secs(30));
+        for pending_announcement in [false, true] {
+            assert!(matches!(
+                classify_startup_probe(
+                    Ok(ProbeOutcome::Unavailable),
+                    pending_announcement,
+                    started_at + Duration::from_millis(29_999),
+                    deadlines,
+                    StartupReadiness::RequireReady,
+                )
+                .expect("the cold-start allowance has not expired"),
+                StartupProbeAction::Continue
+            ));
+            assert!(matches!(
+                classify_startup_probe(
+                    Ok(ProbeOutcome::Unavailable),
+                    pending_announcement,
+                    started_at + Duration::from_secs(30),
+                    deadlines,
+                    StartupReadiness::RequireReady,
+                )
+                .expect("the cold-start deadline remains enforced"),
+                StartupProbeAction::TimedOut
+            ));
+        }
     }
 
     #[test]
