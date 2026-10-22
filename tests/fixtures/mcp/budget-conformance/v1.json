@@ -1,6 +1,6 @@
 {
   "schema": "rootlight.mcp-budget-conformance/1",
-  "source_revision": "740cce0f869b7565492447f8c768236f22de22af",
+  "source_revision": "3523a345f9f6e0f010e00e1c4af0a62ab9a9e8d9",
   "tools": [
     {
       "tool": "repo.index",
@@ -551,7 +551,7 @@
   "source_proofs": [
     {
       "file": "crates/rootlight-agent/src/policy.rs",
-      "sha256": "4cd50bdc1c9ad50949d9d33da153824c340cd827530338060401d77dd6c7add2",
+      "sha256": "120d70076b666149f883f2aab2b8f1b02f47e8786c2c51d67e9fa42ac6d623af",
       "symbols": [
         "every_dimension_accepts_below_and_exact_but_rejects_one_above",
         "child_limits_never_exceed_parent_tool_or_local_caps"
@@ -568,7 +568,7 @@
     },
     {
       "file": "apps/rootlight-mcp/src/executor/tests.rs",
-      "sha256": "58a583f075e51d3e22db0e59476d50c02cfc737e18b6ffe7652d9d67537e1c35",
+      "sha256": "433314e3c7663b35cf713adcdef0382774778592792b7a436a92eb0ddc10f3c2",
       "symbols": [
         "analytical_budget_lowers_every_public_resource_dimension",
         "omitted_analytical_budget_transports_the_complete_server_ceiling",
@@ -614,10 +614,10 @@
       "asset_sha256": "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     },
     "input_schema": "rootlight.mcp-budget-conformance-input/1",
-    "input_sha256": "6353cf35fcee3ffb6122de07ddbbd52a44424260061f54f78621288c1b33e5fa",
+    "input_sha256": "3da5a68f2b060ade4884950f5c51f413059a1cbdb63787c5ab080ccaab2ca12e",
     "serialized_bytes": 13554,
     "deterministic_estimated_tokens": 3389,
-    "actual_tokens": 3071,
+    "actual_tokens": 3081,
     "normalization": "none_exact_utf8",
     "framing": "canonical_compact_json_without_accounting_measurement"
   },
