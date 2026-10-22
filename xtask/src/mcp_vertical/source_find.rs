@@ -887,6 +887,18 @@ fn storage_failures(
                 "storage-fault baseline did not complete its source scan",
             ));
         }
+        // Exercise a valid same-generation activation before the fault as well
+        // as the startup watcher's possible republication after recovery.
+        if state == "corrupt_persisted_state" {
+            let reactivation = index_repository_deep(
+                &format!("literal.{state}.baseline-reactivation"),
+                &mut process,
+                &catalog,
+                transcript,
+                &root,
+            )?;
+            verify_storage_republication_receipt(&index, &reactivation)?;
+        }
         stop_mcp(&mut process, "literal storage baseline MCP stderr")?;
         assert_private_source_absent(
             "literal storage baseline daemon stderr",
@@ -1548,21 +1560,44 @@ fn verify_storage_recovery(
             "logical sidecar did not authenticate the expected recovery inputs",
         ));
     }
-    let previous = head_activation(before, &index.generation, Some(&index.operation))?;
+    let previous = head_activation(before, &index.generation, None)?;
+    let activations = |snapshot: &Value| -> Vec<Value> {
+        snapshot["repository_manifests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|record| record["name"] == "activation.json")
+            .cloned()
+            .collect()
+    };
+    let baseline_activations = activations(before);
+    let mut requested = baseline_activations
+        .iter()
+        .filter(|record| record["value"]["operation"]["operation"] == index.operation);
+    if requested
+        .next()
+        .is_none_or(|record| record["value"]["generation"] != index.generation)
+        || requested.next().is_some()
+        || baseline_activations != activations(altered)
+    {
+        return Err(VerticalError::Invariant(
+            "storage fault did not conserve its requested publication and activation baseline",
+        ));
+    }
     let published = head_activation(recovered, &index.generation, None)?;
     let old_sequence = previous["value"]["global_activation_sequence"]
         .as_u64()
         .ok_or(VerticalError::Invariant(
             "old activation omitted its publication sequence",
         ))?;
-    if previous["value"]["operation"]["operation"] != index.operation
-        || published["value"]["operation"]["operation"]
-            .as_str()
-            .is_none_or(|operation| operation.is_empty() || operation == index.operation)
-        || published["value"]["global_activation_sequence"]
-            .as_u64()
-            .is_none_or(|sequence| sequence <= old_sequence)
-        || published["directory"] == previous["directory"]
+    // A watcher can reactivate the requested generation before the daemon stops.
+    // Recovery must advance beyond every operation in that frozen fault baseline.
+    if baseline_activations.iter().any(|record| {
+        record["value"]["operation"]["operation"] == published["value"]["operation"]["operation"]
+            || record["directory"] == published["directory"]
+    }) || published["value"]["global_activation_sequence"]
+        .as_u64()
+        .is_none_or(|sequence| sequence <= old_sequence)
     {
         return Err(VerticalError::Invariant(
             "recovery reused the rejected head's activation operation",
@@ -2029,6 +2064,78 @@ mod tests {
             identical_valid["repository_manifests"][0] = head.clone();
             verify(&identical_valid).unwrap();
             observe(&identical_valid).unwrap();
+            // The live source edit can be reactivated by the watcher before
+            // shutdown. Recovery must advance beyond that actual fault baseline.
+            let watcher = record(
+                "activation-3",
+                "activation.json",
+                json!({"generation":index.generation,"global_activation_sequence":3,
+                    "operation":{"operation":"baseline-watcher-operation"}}),
+            );
+            let mut watched_before = before.clone();
+            watched_before["repository_manifests"]
+                .as_array_mut()
+                .unwrap()
+                .push(watcher.clone());
+            let mut watched_altered = altered.clone();
+            watched_altered["repository_manifests"]
+                .as_array_mut()
+                .unwrap()
+                .push(watcher);
+            let mut watched_recovered = recovered.clone();
+            watched_recovered["repository_manifests"][3] = record(
+                "activation-4",
+                "activation.json",
+                json!({"generation":index.generation,"global_activation_sequence":4,
+                    "operation":{"operation":"recovery-operation"}}),
+            );
+            let verify_watched = |before: &Value, altered: &Value, after: &Value| {
+                super::verify_storage_recovery(before, altered, after, &index)
+            };
+            verify_watched(&watched_before, &watched_altered, &watched_recovered).unwrap();
+            for (pointer, value) in [
+                (
+                    "/repository_manifests/3/value/operation/operation",
+                    json!("baseline-watcher-operation"),
+                ),
+                (
+                    "/repository_manifests/3/value/operation/operation",
+                    json!(index.operation),
+                ),
+                (
+                    "/repository_manifests/3/value/global_activation_sequence",
+                    json!(3),
+                ),
+                ("/repository_manifests/3/directory", json!("activation-3")),
+            ] {
+                let mut invalid = watched_recovered.clone();
+                *invalid.pointer_mut(pointer).unwrap() = value;
+                assert!(verify_watched(&watched_before, &watched_altered, &invalid).is_err());
+            }
+            for pointer in [
+                "/repository_manifests/3/value/operation/operation",
+                "/repository_manifests/3/value/generation",
+            ] {
+                let mut invalid = watched_before.clone();
+                *invalid.pointer_mut(pointer).unwrap() = json!("foreign-identity");
+                let mut invalid_altered = watched_altered.clone();
+                *invalid_altered.pointer_mut(pointer).unwrap() = json!("foreign-identity");
+                assert!(verify_watched(&invalid, &invalid_altered, &watched_recovered).is_err());
+            }
+            let mut duplicate_request = watched_before.clone();
+            duplicate_request["repository_manifests"][4]["value"]["operation"]["operation"] =
+                json!(index.operation);
+            let mut duplicate_altered = watched_altered.clone();
+            duplicate_altered["repository_manifests"][4]["value"]["operation"]["operation"] =
+                json!(index.operation);
+            assert!(
+                verify_watched(&duplicate_request, &duplicate_altered, &watched_recovered).is_err()
+            );
+            let mut altered_activation = watched_altered.clone();
+            altered_activation["repository_manifests"][4]["hash"] = json!("changed-activation");
+            assert!(
+                verify_watched(&watched_before, &altered_activation, &watched_recovered).is_err()
+            );
             let mut reused_invalid = recovered;
             reused_invalid["repository_manifests"][0] = altered["repository_manifests"][0].clone();
             assert!(verify(&reused_invalid).is_err());
