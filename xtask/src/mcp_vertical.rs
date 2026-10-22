@@ -5152,19 +5152,50 @@ impl McpProcess {
     ) -> Result<Exchange, VerticalError> {
         let started = Instant::now();
         self.write(request)?;
-        let response_bytes = match self.output.recv_timeout(REQUEST_TIMEOUT) {
-            Ok(OutputEvent::Line(line)) => line,
-            Ok(OutputEvent::Eof) => return Err(VerticalError::UnexpectedChildEof),
-            Ok(OutputEvent::TooLarge) => return Err(VerticalError::McpOutputTooLarge),
-            Ok(OutputEvent::Io(source)) => {
-                return Err(VerticalError::Io {
-                    action: "read MCP stdout",
-                    source,
-                });
+        self.receive_exchange(
+            transcript,
+            label,
+            request,
+            expected_id,
+            started,
+            REQUEST_TIMEOUT,
+        )
+    }
+
+    fn receive_exchange(
+        &self,
+        transcript: &mut TranscriptWriter,
+        label: String,
+        request: &[u8],
+        expected_id: Option<u64>,
+        started: Instant,
+        timeout: Duration,
+    ) -> Result<Exchange, VerticalError> {
+        let received = match self.output.recv_timeout(timeout) {
+            Ok(OutputEvent::Line(line)) => Ok(line),
+            Ok(OutputEvent::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(VerticalError::UnexpectedChildEof)
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => return Err(VerticalError::RequestTimedOut),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(VerticalError::UnexpectedChildEof);
+            Ok(OutputEvent::TooLarge) => Err(VerticalError::McpOutputTooLarge),
+            Ok(OutputEvent::Io(source)) => Err(VerticalError::Io {
+                action: "read MCP stdout",
+                source,
+            }),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(VerticalError::RequestTimedOut),
+        };
+        let response_bytes = match received {
+            Ok(line) => line,
+            Err(error) => {
+                // The request reached the child even when no response arrived.
+                transcript.record(
+                    self.session,
+                    label,
+                    request,
+                    None,
+                    started.elapsed(),
+                    request_method_is_tool_call(request),
+                )?;
+                return Err(error);
             }
         };
         let elapsed = started.elapsed();
@@ -7874,6 +7905,176 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn failed_mcp_receive_retains_each_sent_request_without_a_response() {
+        let temporary = tempfile::tempdir().expect("temporary transcript directory");
+        let path = temporary.path().join("transcript.jsonl");
+        let mut transcript = super::TranscriptWriter::create(&path).expect("transcript writer");
+        let private_root = temporary.path().join("repository").display().to_string();
+        let mut request_lengths = Vec::new();
+        for case in 0..5 {
+            let (sender, output) = std::sync::mpsc::sync_channel(1);
+            let sender = match case {
+                0 => Some(sender),
+                1 => {
+                    drop(sender);
+                    None
+                }
+                _ => {
+                    let event = match case {
+                        2 => super::OutputEvent::Eof,
+                        3 => super::OutputEvent::TooLarge,
+                        4 => super::OutputEvent::Io(std::io::Error::other("injected read failure")),
+                        _ => unreachable!(),
+                    };
+                    assert!(sender.send(event).is_ok(), "preloaded receive failure");
+                    Some(sender)
+                }
+            };
+            let process = super::McpProcess {
+                session: "receive-failure",
+                child: None,
+                stdin: None,
+                output,
+                stdout_reader: None,
+                stderr_reader: None,
+                next_request_id: 1,
+            };
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": 70 + case,
+                "method": "tools/call",
+                "params": {"name": "repo.index", "arguments": {"root": private_root}}
+            });
+            let mut bytes = serde_json::to_vec(&request).expect("request bytes");
+            bytes.push(b'\n');
+            request_lengths.push(bytes.len());
+            let result = process.receive_exchange(
+                &mut transcript,
+                format!("failed-receive-{case}"),
+                &bytes,
+                Some(70 + case),
+                std::time::Instant::now(),
+                Duration::ZERO,
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("injected receive failure unexpectedly succeeded"),
+            };
+            assert!(matches!(
+                (case, error),
+                (0, VerticalError::RequestTimedOut)
+                    | (1 | 2, VerticalError::UnexpectedChildEof)
+                    | (3, VerticalError::McpOutputTooLarge)
+                    | (
+                        4,
+                        VerticalError::Io {
+                            action: "read MCP stdout",
+                            ..
+                        }
+                    )
+            ));
+            drop(sender);
+        }
+        let result = transcript
+            .finish()
+            .expect("finish failed exchange transcript");
+        assert_eq!(result.total_messages, 5);
+        assert_eq!(result.total_tool_calls, 5);
+        assert_eq!(result.measurements.len(), 5);
+        let text = std::fs::read_to_string(&path).expect("failed exchange transcript");
+        let entries = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("transcript row"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 5);
+        for (case, entry) in entries.iter().enumerate() {
+            assert_eq!(entry["sequence"], case + 1);
+            assert_eq!(entry["session"], "receive-failure");
+            assert_eq!(entry["label"], format!("failed-receive-{case}"));
+            assert_eq!(entry["request_json"]["id"], 70 + case);
+            assert_eq!(
+                entry["request_json"]["params"]["arguments"]["root"],
+                "<isolated-repository-root>"
+            );
+            assert!(entry.get("response_json").is_none());
+            assert_eq!(entry["request_bytes"], request_lengths[case]);
+            assert_eq!(entry["response_bytes"], 0);
+            assert_eq!(entry["response_estimated_tokens"], 0);
+            let accounting = &result.measurements[case].workflow_token_accounting;
+            accounting
+                .validate()
+                .expect("failed exchange token accounting");
+            accounting
+                .request
+                .verify_input(
+                    entry["request_text"]
+                        .as_str()
+                        .expect("redacted request")
+                        .as_bytes(),
+                )
+                .expect("token input uses the redacted request");
+            accounting
+                .response
+                .verify_input(b"")
+                .expect("absent response input");
+            accounting
+                .source
+                .verify_input(b"")
+                .expect("absent source input");
+        }
+    }
+
+    #[test]
+    fn successful_mcp_receive_records_exactly_one_exchange() {
+        let temporary = tempfile::tempdir().expect("temporary transcript directory");
+        let path = temporary.path().join("transcript.jsonl");
+        let mut transcript = super::TranscriptWriter::create(&path).expect("transcript writer");
+        let (sender, output) = std::sync::mpsc::sync_channel(1);
+        let response = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n";
+        assert!(
+            sender
+                .send(super::OutputEvent::Line(response.to_vec()))
+                .is_ok(),
+            "preloaded response"
+        );
+        let process = super::McpProcess {
+            session: "receive-success",
+            child: None,
+            stdin: None,
+            output,
+            stdout_reader: None,
+            stderr_reader: None,
+            next_request_id: 1,
+        };
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\"}\n";
+        let exchange = process
+            .receive_exchange(
+                &mut transcript,
+                "successful-receive".to_owned(),
+                request,
+                Some(7),
+                std::time::Instant::now(),
+                Duration::ZERO,
+            )
+            .expect("matching response");
+        assert_eq!(exchange.response["id"], 7);
+        let result = transcript
+            .finish()
+            .expect("finish successful exchange transcript");
+        assert_eq!(result.total_messages, 1);
+        assert_eq!(result.total_tool_calls, 0);
+        assert_eq!(result.measurements.len(), 1);
+        let text = std::fs::read_to_string(path).expect("successful exchange transcript");
+        assert_eq!(text.lines().count(), 1);
+        let entry: serde_json::Value = serde_json::from_str(&text).expect("transcript row");
+        assert_eq!(entry["label"], "successful-receive");
+        assert_eq!(entry["request_json"]["id"], 7);
+        assert_eq!(entry["response_json"], exchange.response);
+        assert_eq!(entry["request_bytes"], request.len());
+        assert_eq!(entry["response_bytes"], response.len());
     }
 
     #[test]
