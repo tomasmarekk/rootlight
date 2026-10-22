@@ -7,7 +7,7 @@ use rootlight_runtime::RuntimePaths;
 use rootlight_source::{SourceEncoding, SourceReadOptions};
 use tempfile::TempDir;
 
-use super::*;
+use super::{tests::durable_test_tempdir, *};
 
 thread_local! {
     static CEILING: Cell<Option<u64>> = const { Cell::new(None) };
@@ -82,8 +82,8 @@ fn authored(file: usize) -> Vec<u8> {
 }
 
 fn fixture() -> (TempDir, TempDir, RuntimePaths) {
-    let storage = tempfile::tempdir().unwrap();
-    let root = tempfile::tempdir().unwrap();
+    let storage = durable_test_tempdir();
+    let root = durable_test_tempdir();
     for file in 0..64 {
         fs::write(
             root.path().join(format!("member_{file:02}.rs")),
@@ -559,8 +559,8 @@ struct SourceMember {
 }
 
 fn write_members(members: &[SourceMember]) -> (TempDir, TempDir, RuntimePaths) {
-    let storage = tempfile::tempdir().unwrap();
-    let root = tempfile::tempdir().unwrap();
+    let storage = durable_test_tempdir();
+    let root = durable_test_tempdir();
     for member in members {
         fs::write(root.path().join(&member.path), &member.bytes).unwrap();
     }

@@ -29742,7 +29742,7 @@ mod tests {
         ));
     }
 
-    fn durable_test_tempdir() -> TempDir {
+    pub(super) fn durable_test_tempdir() -> TempDir {
         #[cfg(target_os = "macos")]
         {
             // Avoid the default `/var` alias rejected by repository-root VFS checks.

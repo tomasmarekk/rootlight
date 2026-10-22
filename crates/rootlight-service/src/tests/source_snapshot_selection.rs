@@ -313,8 +313,8 @@ fn reduced_selector_cap_and_cancel_keep_existing_typed_errors() {
 
 #[test]
 fn shed_durable_miss_hydrates_only_selected_file_without_installing_a_cache() {
-    let root = tempfile::tempdir().unwrap();
-    let storage = tempfile::tempdir().unwrap();
+    let root = super::durable_test_tempdir();
+    let storage = super::durable_test_tempdir();
     let paths = rootlight_runtime::RuntimePaths::new(
         storage.path().join("state"),
         storage.path().join("runtime"),

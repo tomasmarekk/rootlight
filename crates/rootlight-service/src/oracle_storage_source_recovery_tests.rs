@@ -80,8 +80,8 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let storage = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let storage = crate::tests::durable_test_tempdir();
+        let root = crate::tests::durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
             .unwrap();
         paths.prepare_owner().unwrap();
