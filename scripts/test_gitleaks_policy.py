@@ -7,6 +7,7 @@ must leave unrelated values and paths detectable, including within vendored file
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -33,6 +35,8 @@ NATIVE_CLOSURE = (
     "lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/native-source-closure.json"
 )
 GRAMMAR_LOCK = "adapters/grammars.lock"
+FLUX_ROOT = "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11"
+HCL_ROOT = "third_party/tree-sitter-hcl-1.2.0"
 YARN_NONASCII_DOC = (
     "source-inputs/producer-dependencies/"
     "lightningcss-1d680fa14e9a089c92dc0929f869d6757ae91c30/yarn-originals/packages/"
@@ -165,6 +169,230 @@ class GitleaksPolicyTests(unittest.TestCase):
                 authenticated_values = {manifest["package"], *manifest["files"].values()}
                 self.assertTrue(set(digests).issubset(authenticated_values),
                                 "checksum exception must name an authenticated published digest")
+
+    def test_additional_cargo_digest_exceptions_match_original_archive_members(self) -> None:
+        exceptions = self.cargo_digest_exceptions()
+        for package in ("quote-1.0.42", "regex-automata-0.4.13", "syn-2.0.111"):
+            name = f"source-inputs/cargo/{package}/.cargo-checksum.json"
+            manifest = json.loads((ROOT / name).read_bytes())
+            archive = ROOT / "source-inputs/crates" / f"{package}.crate"
+            self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), manifest["package"])
+            with tarfile.open(archive, "r:gz") as original:
+                for digest in exceptions[name]:
+                    members = [member for member, value in manifest["files"].items()
+                               if value == digest]
+                    self.assertTrue(members, "exception must identify a published member")
+                    for member in members:
+                        source = original.extractfile(f"{package}/{member}")
+                        self.assertIsNotNone(source)
+                        content = source.read()
+                        self.assertEqual(hashlib.sha256(content).hexdigest(), digest)
+                        self.assertEqual((ROOT / Path(name).parent / member).read_bytes(), content)
+
+    def grammar_inventory_exceptions(self) -> dict[str, bytes]:
+        """Bind literal inventory exceptions to the reviewed source bytes they identify."""
+        policy = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+        result = {}
+        prefix = "Published grammar inventory member digests: "
+        for rule in policy["allowlists"]:
+            if not rule.get("description", "").startswith(prefix):
+                continue
+            package = rule["description"][len(prefix):]
+            name = f"third_party/{package}/SOURCE-INVENTORY.json"
+            self.assertNotIn(name, result)
+            self.assertEqual(rule["paths"], ["^" + re.escape(name).replace(r"\-", "-") + "$"])
+            self.assertEqual(rule["targetRules"], ["generic-api-key"])
+            self.assertEqual(rule["condition"], "AND")
+            self.assertEqual(rule["regexTarget"], "secret")
+            inventory = json.loads((ROOT / name).read_bytes())
+            fixtures = []
+            self.assertTrue(rule["regexes"])
+            for expression in rule["regexes"]:
+                self.assertRegex(expression, r"\A\^[a-f0-9]{64}\$\Z")
+                digest = expression[1:-1]
+                members = [member for member, value in inventory["files"].items()
+                           if value == digest]
+                self.assertTrue(members, "exception must identify reviewed source members")
+                for member in members:
+                    source = ROOT / Path(name).parent / member
+                    self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest)
+                fixtures.append(f'api_key = "{digest}"\n')
+            result[name] = "".join(fixtures).encode()
+        self.assertEqual(len(result), 2)
+        return result
+
+    def test_grammar_inventory_digest_exceptions_are_exact_and_path_bound(self) -> None:
+        fixtures = self.grammar_inventory_exceptions()
+        unknown = hashlib.sha256(b"rootlight unrelated grammar metadata credential").hexdigest()
+        credential = f'api_key = "{unknown}"\n'.encode()
+        credential += b"token = 'glpat-" + b"0123456789" + b"abcdefghijkl'\n"
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                self.assertFalse(self.scan(fixtures, mode))
+                self.assertFalse(self.scan({name: (ROOT / name).read_bytes()
+                                            for name in fixtures}, mode))
+                findings = self.scan({name: credential for name in fixtures}, mode)
+                detected = {(row["File"], row["RuleID"]) for row in findings}
+                for name in fixtures:
+                    self.assertIn((name, "generic-api-key"), detected)
+                    self.assertIn((name, "gitlab-pat"), detected)
+                relocated = {"relocated/" + name: content for name, content in fixtures.items()}
+                findings = self.scan(relocated, mode)
+                self.assertEqual({row["File"] for row in findings
+                                  if row["RuleID"] == "generic-api-key"}, set(relocated))
+
+    def grammar_source_digest_exceptions(self) -> bytes:
+        """Require every lock digest exception to identify an exact retained member."""
+        policy = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+        rules = [rule for rule in policy["allowlists"]
+                 if rule.get("description") == "Published grammar source member digests"]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule["paths"], [r"^adapters/grammars\.lock$"])
+        self.assertEqual(rule["targetRules"], ["generic-api-key"])
+        self.assertEqual(rule["condition"], "AND")
+        self.assertEqual(rule["regexTarget"], "secret")
+        lock = tomllib.loads((ROOT / GRAMMAR_LOCK).read_text(encoding="utf-8"))
+        fixtures = []
+        self.assertTrue(rule["regexes"])
+        self.assertEqual(len(set(rule["regexes"])), len(rule["regexes"]))
+        for expression in rule["regexes"]:
+            self.assertRegex(expression, r"\A\^[a-f0-9]{64}\$\Z")
+            digest = expression[1:-1]
+            members = []
+            for grammar in lock["grammars"]:
+                vendor = grammar.get("vendored", {})
+                for member, value in vendor.get("files", {}).items():
+                    if value == digest:
+                        source = ROOT / Path(vendor["manifest_path"]).parent / member
+                        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest)
+                        members.append(source)
+            self.assertTrue(members, "exception must identify retained source bytes")
+            fixtures.append(f'api_key = "{digest}"\n')
+        return "".join(fixtures).encode()
+
+    def test_grammar_source_digest_exceptions_are_exact_and_path_bound(self) -> None:
+        fixture = self.grammar_source_digest_exceptions()
+        unknown = hashlib.sha256(b"rootlight unrelated grammar source credential").hexdigest()
+        credential = f'api_key = "{unknown}"\n'.encode()
+        credential += b"token = 'glpat-" + b"0123456789" + b"abcdefghijkl'\n"
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                self.assertFalse(self.scan({GRAMMAR_LOCK: fixture}, mode))
+                self.assertFalse(self.scan({GRAMMAR_LOCK: (ROOT / GRAMMAR_LOCK).read_bytes()}, mode))
+                findings = self.scan({GRAMMAR_LOCK: credential}, mode)
+                self.assertIn("generic-api-key", {row["RuleID"] for row in findings})
+                self.assertIn("gitlab-pat", {row["RuleID"] for row in findings})
+                findings = self.scan({"relocated/" + GRAMMAR_LOCK: fixture}, mode)
+                self.assertIn("generic-api-key", {row["RuleID"] for row in findings})
+
+    def reviewed_fixture_exceptions(self) -> dict[str, tuple[str, bytes]]:
+        """Authenticate exact source matches without granting a path-wide exception."""
+        policy = tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+        prefix = "Published reviewed fixture match: "
+        result = {}
+        flux = json.loads((ROOT / FLUX_ROOT / "UPSTREAM_MANIFEST.json").read_bytes())
+        hcl = json.loads((ROOT / HCL_ROOT / "SOURCE-INVENTORY.json").read_bytes())["files"]
+        hcl_provenance = json.loads((ROOT / HCL_ROOT / "SOURCE-PROVENANCE.json").read_bytes())
+        archive = ROOT / HCL_ROOT / hcl_provenance["archive"]["path"]
+        self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(),
+                         hcl_provenance["archive"]["sha256"])
+        with tarfile.open(archive, "r:gz") as original:
+            for rule in policy["allowlists"]:
+                if not rule.get("description", "").startswith(prefix):
+                    continue
+                name = rule["description"][len(prefix):]
+                self.assertNotIn(name, result)
+                self.assertEqual(rule["paths"], ["^" + re.escape(name).replace(r"\-", "-") + "$"])
+                self.assertEqual(len(rule["targetRules"]), 1)
+                self.assertIn(rule["targetRules"][0],
+                              {"generic-api-key", "hashicorp-tf-password", "private-key"})
+                self.assertEqual(rule["condition"], "AND")
+                self.assertEqual(rule["regexTarget"], "match")
+                content = (ROOT / name).read_bytes()
+                if name.startswith(FLUX_ROOT + "/upstream/"):
+                    member = name[len(FLUX_ROOT + "/upstream/"):]
+                    records = [row for row in flux if row["path"] == member]
+                    self.assertEqual(len(records), 1)
+                    record = records[0]
+                    git_blob = b"blob " + str(len(content)).encode() + b"\0" + content
+                    self.assertEqual(hashlib.sha1(git_blob).hexdigest(), record["git_blob_sha1"])
+                else:
+                    self.assertTrue(name.startswith(HCL_ROOT + "/upstream/example/"))
+                    member = name[len(HCL_ROOT + "/"):]
+                    records = [row for row in hcl if row["path"] == member]
+                    self.assertEqual(len(records), 1)
+                    record = records[0]
+                    suffix = "/" + member[len("upstream/"):]
+                    members = [row for row in original.getmembers()
+                               if row.name.endswith(suffix)]
+                    self.assertEqual(len(members), 1)
+                    archived = original.extractfile(members[0])
+                    self.assertIsNotNone(archived)
+                    self.assertEqual(archived.read(), content)
+                self.assertEqual(len(content), record["bytes"])
+                self.assertEqual(hashlib.sha256(content).hexdigest(), record["sha256"])
+                self.assertTrue(rule["regexes"])
+                for expression in rule["regexes"]:
+                    self.assertTrue(expression.startswith("^") and expression.endswith("$"))
+                    matches = list(re.finditer(expression[1:-1], content.decode("utf-8")))
+                    self.assertTrue(matches, "fixture exception must match authenticated source")
+                    for match in matches:
+                        literal = re.escape(match.group()).replace("\\\n", r"\n")
+                        self.assertEqual(expression, "^" + literal + "$")
+                result[name] = (rule["targetRules"][0], content)
+        self.assertEqual(len(result), 21)
+        return result
+
+    def test_reviewed_fixture_matches_scan_clean_in_both_modes(self) -> None:
+        fixtures = {name: content for name, (_, content)
+                    in self.reviewed_fixture_exceptions().items()}
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                self.assertFalse(self.scan(fixtures, mode))
+
+    def test_reviewed_fixture_exceptions_preserve_new_credentials_and_path_boundaries(self) -> None:
+        fixtures = self.reviewed_fixture_exceptions()
+        digest = hashlib.sha256(b"rootlight unrelated upstream fixture credential").hexdigest()
+        generic = f'api_key = "{digest}"\n'.encode()
+        password = f'password = "{digest[:16]}"\n'.encode()
+        seed = hashlib.sha256(b"rootlight unrelated fixture private key").digest()
+        encoded = base64.b64encode(bytes.fromhex("302e020100300506032b657004220420") + seed)
+        private_key = b"-----BEGIN " + b"PRIVATE KEY-----\n" + encoded
+        private_key += b"\n-----END " + b"PRIVATE KEY-----\n"
+        typed = b"token = 'glpat-" + b"0123456789" + b"abcdefghijkl'\n"
+        samples = {"generic-api-key": generic, "hashicorp-tf-password": password,
+                   "private-key": private_key}
+        for mode in ("dir", "git"):
+            with self.subTest(mode=mode):
+                findings = self.scan({name: samples[rule] + typed
+                                      for name, (rule, _) in fixtures.items()}, mode)
+                detected = {(row["File"], row["RuleID"]) for row in findings}
+                for name, (rule, _) in fixtures.items():
+                    self.assertIn((name, rule), detected)
+                    self.assertIn((name, "gitlab-pat"), detected)
+                relocated = {"relocated/" + name: content
+                             for name, (_, content) in fixtures.items()}
+                findings = self.scan(relocated, mode)
+                detected = {(row["File"], row["RuleID"]) for row in findings}
+                for name, (rule, _) in fixtures.items():
+                    self.assertIn(("relocated/" + name, rule), detected)
+
+    def test_opaque_flux_literals_are_confined_to_local_demo_and_mock_consumers(self) -> None:
+        script = ROOT / FLUX_ROOT / "upstream/stdlib/contrib/RohanSreerama5/naiveBayesClassifier/script.py"
+        tree = ast.parse(script.read_bytes())
+        clients = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Name) and node.func.id == "InfluxDBClient"]
+        self.assertEqual(len(clients), 1)
+        urls = [keyword.value for keyword in clients[0].keywords if keyword.arg == "url"]
+        self.assertEqual(len(urls), 1)
+        self.assertIsInstance(urls[0], ast.Constant)
+        self.assertEqual(urls[0].value, "http://localhost:8086")
+        webex = ROOT / FLUX_ROOT / "upstream/stdlib/contrib/sranka/webexteams/webexteams_test.go"
+        source = webex.read_text(encoding="utf-8")
+        for statement in ("url := s.URL //", "ts := httptest.NewServer(", "s.URL = ts.URL",
+                          'if req.Authorization != ("Bearer " + token)'):
+            self.assertIn(statement, source)
 
     def test_historical_checksums_are_hash_bound_and_required(self) -> None:
         original = json.loads((ROOT / HISTORICAL).read_bytes())

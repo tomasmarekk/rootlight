@@ -2310,3 +2310,326 @@ regexes = [
   '''^token":\ "sha512\-DqGhF5IKoBl8WNf8C1gu8q0xZSInh9j1kJJMqT3a94w1JzVaBU4EXOSMrz9yDqMT0xt3selp83fuFMQ0uzv6qA=="$''',
   '''^token":\ "sha512\-agE4QfB2Lkp9uICn7BAqoscw4SZP9kTE2hxiFI3jBPmXJfdqiahTbUuKGsMoN2GtqL9AxhYioAcVvgsb1HvRbA=="$''',
 ]
+
+[[allowlists]]
+description = "Published Cargo digests: quote-1.0.42"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/quote-1\.0\.42/\.cargo-checksum\.json$''']
+regexes = [
+  '''^5bd52437ed5764ae2b5d84843b23f29497ad0361f3ee3cfda621a4b91c70ef1c$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: regex-automata-0.4.13"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/regex-automata-0\.4\.13/\.cargo-checksum\.json$''']
+regexes = [
+  '''^bd4862275c52f94c6f6737bf174c97e3de30f8075ca23f43c129c72a0d0afed7$''',
+  '''^c6ddbca1177c377a42bac1e19e79dc8c840a7a0af2042e6c3c08e46ba1a288fe$''',
+]
+
+[[allowlists]]
+description = "Published Cargo digests: syn-2.0.111"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^source-inputs/cargo/syn-2\.0\.111/\.cargo-checksum\.json$''']
+regexes = [
+  '''^3a5882d0b3aefbf56ca5d08c28c117e25ac2327eadf7242202d906b2ddb2232e$''',
+  '''^55f1ad3ba0edc43ae7b65a6fa6dc13fc1a99053d6300187a4cc48572b8f451f3$''',
+  '''^c30b921a96739c9334ec2bdd06552729891e0251b9d8fbdf0b8f5cc897babee5$''',
+]
+
+[[allowlists]]
+description = "Published grammar inventory member digests: tree-sitter-coffeescript-1.0.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^third_party/tree-sitter-coffeescript-1\.0\.0/SOURCE-INVENTORY\.json$''']
+regexes = [
+  '''^7316ae365b1f598761a8291e8983a22ad8bf576e24fc2a075efcce7a098b4da2$''',
+  '''^e1a1135a88960b5d0af7015003253831f3d5cfbca8b599dd2bca4001f616a3e0$''',
+]
+
+[[allowlists]]
+description = "Published grammar inventory member digests: tree-sitter-gsed-0.4.0"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^third_party/tree-sitter-gsed-0\.4\.0/SOURCE-INVENTORY\.json$''']
+regexes = [
+  '''^20172d982af5a508b773f6fa39cc934fc50d5f17acadad4b69c579a78381a76e$''',
+]
+
+[[allowlists]]
+description = "Published grammar source member digests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^adapters/grammars\.lock$''']
+regexes = [
+  '''^0202e1f7909d48cf127fd67b3b7ad87b1ee43e2338a90a75fe1a426c528f1513$''',
+  '''^0b3192917f36b8447407adb4e17005ff3ec63e791d5fb169f195a2ed995a751a$''',
+  '''^0e60780e057e581a9df989fbb2c7d9c9ffe1ccbcaaa15904e5d0af4540dbbb70$''',
+  '''^0e87ea5c14f7dcc9edbfa07399cf687fdaaca708828d424d77aa55e432dde9e3$''',
+  '''^0f31b06ca4b0ab81760a3b0a17c93066a9d7630f264eb40a6bbddf722f320ba1$''',
+  '''^1b61902d6ebba726800ca82b39df00e8522b3db804027879df4f54d294840fff$''',
+  '''^1d96f33a67b38114e1b1d58a633d61c6f516b76cbc9cd48f329230b30c9f61c9$''',
+  '''^20172d982af5a508b773f6fa39cc934fc50d5f17acadad4b69c579a78381a76e$''',
+  '''^22b799df1b2224f22259ef4a99e66c774cb5d3746e1505e1f320eb975d8c1abf$''',
+  '''^2a2af8ee32f1c4c65873fb7fa235b1e36768bd11169c11ca2fd5178ba2c3aabb$''',
+  '''^32c40227a2b532ee560369c2cf75c67f64142254ce16ca53a724e4ef68d0920b$''',
+  '''^33b47d8786a995fa405a10f899b705ec1651d59157033cccbee1fb904744d491$''',
+  '''^3504be81f8e7d38bec882a8fbbe5bcea31641e80ef992746ab3a40a7c40fe6cb$''',
+  '''^35b86315cac1e7c8caf157c6adf12d25bb58fba2fd4e766b43613046fcb67893$''',
+  '''^37806a3586447ea81193dd2b2efcbf9d1d29ae37e4f10010dc850b6424e05c9e$''',
+  '''^4045ffc8d58120896a92d65c9d597f821375479ae6a5fc859fb6f4c5e0e7885c$''',
+  '''^6bbacd6bd18baca4fa08960828b766c6959ffb5682b1bd7bf60b996c99208820$''',
+  '''^7316ae365b1f598761a8291e8983a22ad8bf576e24fc2a075efcce7a098b4da2$''',
+  '''^77f7d8b54d6140143ef758bfa1d5739bfb283a4d7f557d391dd5cae38c47ec33$''',
+  '''^7e2c2d101fd94cef02158ae5286f01064fefca3d8298cdfbf0fd70c375214444$''',
+  '''^805453c795258e1ef3fc162c0326147efab8c235fa04df82f03ffbd288384747$''',
+  '''^8bfe9b0cbf727680fb667a53e715e64c75c209096b00e0e5b09bb3f55b62fc32$''',
+  '''^93e5daa807f857e233dda780b367ae7a46ff2ca42faf259617dee0c153b36121$''',
+  '''^94a13691989e915d3e7cbebe7df75c21691e1a8e0a7dfcf259d0b82eac303b55$''',
+  '''^97e8debb4ad1ddde9e95de4e0b13b6a458d60865334b2600bc4064e02867ed3b$''',
+  '''^99626f6d90dee35af5e2d825f2dfe325328c5a1d7a3f0350e48687d67f987b74$''',
+  '''^99d1bbfc3980610530a6407fc494bff05864db49b84f9b63313d870a189f3a37$''',
+  '''^a26367819ecfb435635b9e7efdfe10d4f5416ad825fb94c4fcdacb9ab84f3798$''',
+  '''^affecd505d13f6a646d2f843e9ae2bec066a744de9fce69979dbb19a4e1d241d$''',
+  '''^b0732f08444a3c9f7cce6a19017c823bdacbfd0af03ce0fc0b206908ca562c92$''',
+  '''^b0eacaa21138fa29f06d74946d66017e79684f27fee91b0288745b33d2a03839$''',
+  '''^b3b5f10afec310b8fa594c4c898454dd20bd3a0cbf2490b020ad211d99b4f84c$''',
+  '''^b58ab34db45a9b0f097f5dd549e375fd3e2e9355d0ef20e27ff8cbecc76ec247$''',
+  '''^b87c1367d54eba4c0bfb409af4595308c8bd4c28ff7e506b179ee655f0c77844$''',
+  '''^bf53080571485933fb47715e11e1d83132e52b2442bd8559874c17efd1457300$''',
+  '''^c73a9c7d0cad7d9fb7852cabd6d4fcc1b5f7030b5f061cae3dfe11ef40f683ea$''',
+  '''^c81a7b4d9c60a45532656e0e9805074ea3a922052ab22fc0c4045ec8a5ed1050$''',
+  '''^c8e1fafa365552fcb8049225c667965db0c049bd4cb73d7d177c7ce1811dce1f$''',
+  '''^cefde62d6d773164c8a6108420d35327d5b8fac695b6b35bbd5741ff370aa44f$''',
+  '''^db3b6e758d100d59b8382dd557eca848962d7eea8adbc2ed7f8ec7f93cd84915$''',
+  '''^e1a1135a88960b5d0af7015003253831f3d5cfbca8b599dd2bca4001f616a3e0$''',
+  '''^f5eb0539e4c0850d7fefbbde142fd07c1893e925d14640531028ceefc0319294$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/contrib/RohanSreerama5/naiveBayesClassifier/script.py"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/contrib/RohanSreerama5/naiveBayesClassifier/script\.py$''']
+regexes = [
+  '''^token\ =\ "UQrVJ9uAC8CZbT79IgegEsvyEb5G\-aj7lRfyOeGPeQwKIZTwSVFse93DVdBRsXWRZFpJbRbUC8pxN6Np8diPFQ=="$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/contrib/sranka/webexteams/webexteams_test.go"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/contrib/sranka/webexteams/webexteams_test\.go$''']
+regexes = [
+  '''^token\ :=\ "YjcwN2ZjYTgtMDMzYi00NTE5LWJjMjMtN2U4Y2E4MWI0NTk3Y2FjZmMyZWQtNzg3_PE93_ed3fff69\-a996\-4e21\-b5af\-0dc3ad437459"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/influxdata/influxdb/influxdb.flux"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/influxdata/influxdb/influxdb\.flux$''']
+regexes = [
+  '''^token:\ "mYSuP3rSecR37t0k3N"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/pushbullet/pushbullet.flux"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/pushbullet/pushbullet\.flux$''']
+regexes = [
+  '''^token:\ "mY5up3Rs3Cre7T0k3n"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/slack/slack.flux"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/slack/slack\.flux$''']
+regexes = [
+  '''^token:\ "mY5uP3rSeCr37T0kEN"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/sql/sql.flux"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/upstream/stdlib/sql/sql\.flux$''']
+regexes = [
+  '''^credentials=eyJ0eXBlIjoiYXV0\.\.\.$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/coreos/coreos%tectonic-installer%platforms%metal%variables.tf"
+targetRules = ["private-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/coreos/coreos%tectonic-installer%platforms%metal%variables\.tf$''']
+regexes = [
+  '''^\-\-\-\-\-BEGIN\ RSA\ PRIVATE\ KEY\-\-\-\-\-\nMIIEpQIBAAKCAQEAr8S7x/tAS6W\+aRW3X833OvNfxXjUJAiRkUV85Raln7tqVcTG\n\.\.\.\nPikk0rvNVB/vrPeVjAdGY9TJC/vpz3om92DRDmUifu8rCFxIHE0GrQ0=\n\-\-\-\-\-END\ RSA\ PRIVATE\ KEY\-\-\-\-\-$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/hashicorp/hashicorp%boundary-reference-architecturedeployment%docker_cts%compose%boundary.hcl"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/hashicorp/hashicorp%boundary-reference-architecturedeployment%docker_cts%compose%boundary\.hcl$''']
+regexes = [
+  '''^key\ =\ "8fZBjCUfN0TzjEGLQldGY4\+iE9AkOvCfjh7\+p0GtRBQ="$''',
+  '''^key\ =\ "sP1fnF5Xz85RrXyELHFeZg9Ad2qt4Z4bgNHVGtD6ung="$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/hashicorp/hashicorp%boundary-reference-architecturedeployment%docker_cts%compose%cts%config.hcl"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/hashicorp/hashicorp%boundary-reference-architecturedeployment%docker_cts%compose%cts%config\.hcl$''']
+regexes = [
+  '''^key\ =\ "8fZBjCUfN0TzjEGLQldGY4\+iE9AkOvCfjh7\+p0GtRBQ="$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/hashicorp/hashicorp%boundary-reference-architecturedeployment%docker_cts%terraform%main.tf"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/hashicorp/hashicorp%boundary-reference-architecturedeployment%docker_cts%terraform%main\.tf$''']
+regexes = [
+  '''^key\ =\ "8fZBjCUfN0TzjEGLQldGY4\+iE9AkOvCfjh7\+p0GtRBQ="$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/hashicorp/hashicorp%terraform-provider-googleworkspaceexamples%resources%googleworkspace_group_member%resource.tf"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/hashicorp/hashicorp%terraform-provider-googleworkspaceexamples%resources%googleworkspace_group_member%resource\.tf$''']
+regexes = [
+  '''^password\ \ \ \ \ \ =\ "34819d7beeabb9260a5c854bc85b3e44"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/hashicorp/hashicorp%terraform-provider-googleworkspaceexamples%resources%googleworkspace_role_assignment%resource.tf"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/hashicorp/hashicorp%terraform-provider-googleworkspaceexamples%resources%googleworkspace_role_assignment%resource\.tf$''']
+regexes = [
+  '''^password\ \ \ \ \ \ =\ "34819d7beeabb9260a5c854bc85b3e44"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/hashicorp/hashicorp%terraform-provider-googleworkspaceexamples%resources%googleworkspace_user%resource.tf"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/hashicorp/hashicorp%terraform-provider-googleworkspaceexamples%resources%googleworkspace_user%resource\.tf$''']
+regexes = [
+  '''^password\ \ \ \ \ \ =\ "34819d7beeabb9260a5c854bc85b3e44"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%dbcs-instance-classic%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%dbcs-instance-classic%main\.tf$''']
+regexes = [
+  '''^admin_password\ \ \ \ \ =\ "Pa55_Word"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%dbcs-instance-oci%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%dbcs-instance-oci%main\.tf$''']
+regexes = [
+  '''^admin_password\ \ \ \ \ =\ "Pa55_Word"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%full-db-jcs-oci%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%full-db-jcs-oci%main\.tf$''']
+regexes = [
+  '''^password\ =\ "Weblogic_1"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%full-dbcs-jcs-otd-classic%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%full-dbcs-jcs-otd-classic%main\.tf$''']
+regexes = [
+  '''^admin_password\ \ \ \ \ =\ "Pa55_Word"$''',
+  '''^password\ =\ "Weblogic_1"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%jcs-instance-classic%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%jcs-instance-classic%main\.tf$''']
+regexes = [
+  '''^password\ =\ "Pa55_Word"$''',
+  '''^password\ =\ "Weblogic_1"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%jcs-instance-oci%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%jcs-instance-oci%main\.tf$''']
+regexes = [
+  '''^password\ =\ "Pa55_Word"$''',
+  '''^password\ =\ "Weblogic_1"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%mysqlcs-instance-classic%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%mysqlcs-instance-classic%main\.tf$''']
+regexes = [
+  '''^em_agent_password\ =\ "Pa55_Word"$''',
+  '''^em_password\ \ \ \ \ \ \ =\ "Pa55_Word"$''',
+  '''^mysql_password\ =\ "Pa55_Word"$''',
+]
+
+[[allowlists]]
+description = "Published reviewed fixture match: third_party/tree-sitter-hcl-1.2.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%mysqlcs-instance-oci%main.tf"
+targetRules = ["hashicorp-tf-password"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''^third_party/tree-sitter-hcl-1\.2\.0/upstream/example/real_world_stuff/oracle/oracle%terraform-examples%examples%oraclepaas%mysqlcs-instance-oci%main\.tf$''']
+regexes = [
+  '''^em_agent_password\ =\ "Pa55_Word"$''',
+  '''^em_password\ \ \ \ \ \ \ =\ "Pa55_Word"$''',
+  '''^mysql_password\ =\ "Pa55_Word"$''',
+]
