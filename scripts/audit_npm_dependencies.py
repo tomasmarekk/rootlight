@@ -12,6 +12,8 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import verify_local_npm_sources as frontend
@@ -19,6 +21,8 @@ import verify_lightning_security_sources as native
 
 ENDPOINT = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk"
 MAX_RESPONSE = 16 * 1024 * 1024
+MAX_ATTEMPTS = 3
+RETRYABLE_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
 def package_inventory(project: Path) -> dict[str, list[str]]:
@@ -49,14 +53,30 @@ def query_advisories(inventory: dict[str, list[str]]) -> dict:
 
     The response map supplies each package identity; an optional record name
     must agree with it. Every severity fails, with no suppression list.
-    HTTP failures and bounded JSON validation failures propagate to the caller.
+    Transient transport failures permit at most three identical requests.
+    Permanent HTTP failures and bounded validation failures propagate directly.
     """
     payload = json.dumps(inventory, sort_keys=True).encode()
     request = Request(ENDPOINT, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    with urlopen(request, timeout=60) as response:
-        if response.geturl() != ENDPOINT:
-            raise ValueError("npm advisory endpoint redirected")
-        contents = response.read(MAX_RESPONSE + 1)
+    # The bulk query is read-only; retry only its unchanged full-pin payload.
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=60) as response:
+                if response.geturl() != ENDPOINT:
+                    raise ValueError("npm advisory endpoint redirected")
+                contents = response.read(MAX_RESPONSE + 1)
+            break
+        except HTTPError as error:
+            retryable = error.code in RETRYABLE_HTTP_STATUS and error.geturl() == ENDPOINT
+            error.close()
+            if not retryable or attempt + 1 == MAX_ATTEMPTS:
+                raise
+        except (TimeoutError, ConnectionError, URLError) as error:
+            reason = error.reason if isinstance(error, URLError) else error
+            if not isinstance(reason, (TimeoutError, ConnectionError)) or attempt + 1 == MAX_ATTEMPTS:
+                raise
+        print(f"npm advisory transport retry {attempt + 2}/{MAX_ATTEMPTS}", file=sys.stderr)
+        time.sleep(attempt + 1)
     if len(contents) > MAX_RESPONSE:
         raise ValueError("npm advisory response exceeds limit")
     result = json.loads(contents)
