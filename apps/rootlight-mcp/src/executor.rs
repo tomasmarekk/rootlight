@@ -9770,10 +9770,14 @@ fn serialize_catalog_success(
     output: CatalogEnvelope<RepoListData>,
     started_at: Instant,
 ) -> Result<Map<String, Value>, ToolExecutionError> {
-    serialize_measured_success(
+    // Catalog requests use the transport deadline, without a caller analytical
+    // time budget. Preserve inclusive wall usage and every output/resource
+    // ceiling without applying the analytical execution-time ceiling.
+    serialize_measured_success_with_duration(
         output,
         started_at,
         BudgetLimits::server_ceiling(),
+        false,
         |output| &mut output.usage,
     )
 }
@@ -9840,7 +9844,12 @@ fn serialize_measured_repo_status_success<T>(
 where
     T: Serialize,
 {
-    serialize_measured_success(output, started_at, limits, |output| &mut output.usage)
+    // Status rejects caller budgets and uses the ordinary transport deadline.
+    // Preserve inclusive latency telemetry without an analytical deadline;
+    // every resource and output limit remains enforced.
+    serialize_measured_success_with_duration(output, started_at, limits, false, |output| {
+        &mut output.usage
+    })
 }
 
 fn serialize_measured_batch_success(

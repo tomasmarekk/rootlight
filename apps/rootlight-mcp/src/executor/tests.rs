@@ -8539,6 +8539,65 @@ async fn repo_list_empty_catalog_is_a_success_with_exact_accounting() {
     assert!(!String::from_utf8_lossy(&serialized).contains("/Users/"));
 }
 
+#[test]
+fn repo_list_transport_wait_preserves_elapsed_and_resource_limits() {
+    let output = CatalogEnvelope {
+        schema_version: RepoListSchemaVersion::V2_0,
+        snapshot_id: CatalogSnapshotId::parse("catalog1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .expect("test snapshot identity is valid"),
+        data: RepoListData {
+            repositories: vec![
+                map_catalog_entry(catalog_entry(1, "catalog elapsed fixture")).unwrap(),
+            ],
+            total_count: 1,
+            explanation: None,
+        },
+        truncated: false,
+        next_cursor: RequiredNullable(None),
+        usage: UsageSummary {
+            rows: 1,
+            edges: 0,
+            source_bytes: 0,
+            json_bytes: 0,
+            estimated_tokens: 0,
+            wall_time_ms: 0,
+            cache_status: CacheStatus::NotApplicable,
+            trace_id: "catalog-page".to_owned(),
+        },
+        warnings: Vec::new(),
+        trust: TrustClassification::UntrustedRepositoryData,
+    };
+    let limits = BudgetLimits::server_ceiling();
+    let elapsed = Duration::from_millis(limits.maximums().time_ms + 1);
+    let started = Instant::now().checked_sub(elapsed).unwrap();
+    let response = serialize_catalog_success(output.clone(), started)
+        .expect("catalog transport waiting is not an analytical execution deadline");
+    let serialized = serde_json::to_vec(&Value::Object(response.clone())).unwrap();
+    assert_eq!(
+        response["data"]["repositories"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(response["data"]["total_count"], 1);
+    assert_eq!(response["usage"]["rows"], 1);
+    assert!(
+        response["usage"]["wall_time_ms"].as_u64().unwrap()
+            >= u64::try_from(elapsed.as_millis()).unwrap()
+    );
+    assert_eq!(response["usage"]["json_bytes"], serialized.len());
+    assert_eq!(
+        response["usage"]["estimated_tokens"],
+        rootlight_mcp_contract::accounting::estimate_tokens(serialized.len())
+    );
+    assert!(
+        serialize_measured_success(output.clone(), started, limits, |value| &mut value.usage)
+            .is_err(),
+        "budget-bearing analytical responses retain their existing time ceiling"
+    );
+    let mut over_limit = output;
+    over_limit.usage.rows = limits.maximums().rows + 1;
+    assert!(serialize_catalog_success(over_limit, Instant::now()).is_err());
+}
+
 #[tokio::test]
 async fn repo_list_exact_page_boundary_has_no_continuation() {
     let entries = (1..=2)
@@ -9375,6 +9434,49 @@ async fn executor_maps_malformed_argument_types_to_type_mismatch() {
         ErrorCode::TypeMismatch,
         "argument decoding failures are client-correctable, not internal"
     );
+}
+
+#[tokio::test]
+async fn repo_status_transport_wait_preserves_elapsed_and_resource_limits() {
+    let harness = Harness::new(FakeOutcome::RepositoryStatus(Ok(
+        repository_status_response(),
+    )));
+    let output: RepoStatusOutput = decode(
+        execute(
+            &harness.executor,
+            VerticalTool::RepoStatus,
+            json!({"repository": {"repository_id": repository()}}),
+        )
+        .await
+        .expect("repository status maps before elapsed transport accounting"),
+    );
+    let RepoStatusOutput::Success(output) = output else {
+        panic!("expected repository status success");
+    };
+    let limits = BudgetLimits::server_ceiling();
+    let elapsed = Duration::from_millis(limits.maximums().time_ms + 1);
+    let started = Instant::now().checked_sub(elapsed).unwrap();
+    let response = serialize_measured_repo_status_success(output.clone(), started, limits)
+        .expect("repository status transport waiting is not an analytical execution deadline");
+    let serialized = serde_json::to_vec(&Value::Object(response.clone())).unwrap();
+    assert_eq!(response["data"]["resolved_generation"], json!(generation()));
+    assert!(
+        response["usage"]["wall_time_ms"].as_u64().unwrap()
+            >= u64::try_from(elapsed.as_millis()).unwrap()
+    );
+    assert_eq!(response["usage"]["json_bytes"], serialized.len());
+    assert_eq!(
+        response["usage"]["estimated_tokens"],
+        rootlight_mcp_contract::accounting::estimate_tokens(serialized.len())
+    );
+    assert!(
+        serialize_measured_success(output.clone(), started, limits, |value| &mut value.usage)
+            .is_err(),
+        "budget-bearing analytical responses retain their existing time ceiling"
+    );
+    let mut over_limit = output;
+    over_limit.usage.rows = limits.maximums().rows + 1;
+    assert!(serialize_measured_repo_status_success(over_limit, Instant::now(), limits).is_err());
 }
 
 #[tokio::test]
