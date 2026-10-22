@@ -511,6 +511,20 @@ fn verify_record(
     expected: &[u8],
     cancellation: &rootlight_cancel::Cancellation,
 ) -> Result<(), ProcessError> {
+    verify_record_with_status_probe(stdout, child, expected, cancellation, |child| {
+        child
+            .try_wait()
+            .map_err(|source| ProcessError::io("query adapter launcher", source))
+    })
+}
+
+fn verify_record_with_status_probe(
+    stdout: &mut ChildStdout,
+    child: &mut StdChild,
+    expected: &[u8],
+    cancellation: &rootlight_cancel::Cancellation,
+    mut status_probe: impl FnMut(&mut StdChild) -> Result<Option<ExitStatus>, ProcessError>,
+) -> Result<(), ProcessError> {
     use std::os::fd::AsFd as _;
 
     let original = nix::fcntl::fcntl(stdout.as_fd(), nix::fcntl::FcntlArg::F_GETFL)
@@ -525,6 +539,7 @@ fn verify_record(
     let deadline = Instant::now() + LAUNCHER_READY_TIMEOUT;
     let mut observed = vec![0_u8; expected.len()];
     let mut offset = 0;
+    let mut exited = false;
     while offset < observed.len() {
         cancellation.check()?;
         match stdout.read(&mut observed[offset..]) {
@@ -535,19 +550,22 @@ fn verify_record(
             }
             Ok(read) => offset += read,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if child
-                    .try_wait()
-                    .map_err(|source| ProcessError::io("query adapter launcher", source))?
-                    .is_some()
-                {
+                if exited {
                     return Err(ProcessError::InvalidInput(
                         "isolated adapter launcher exited before verification".to_owned(),
                     ));
                 }
+                let status = status_probe(child)?;
                 if Instant::now() >= deadline {
                     return Err(ProcessError::Deadline {
                         operation: "verify isolated adapter launcher",
                     });
+                }
+                if status.is_some() {
+                    // The record can arrive between the empty read and exit observation.
+                    // Drain only the remaining record; an exit alone proves no readiness.
+                    exited = true;
+                    continue;
                 }
                 thread::sleep(PROCESS_POLL_INTERVAL);
             }
@@ -1583,6 +1601,91 @@ mod tests {
             !workspace.exists(),
             "cancelled launcher retains its staged workspace"
         );
+    }
+
+    fn verify_record_written_before_exit_probe(
+        record: &[u8],
+        cancel_after_exit: bool,
+    ) -> (Result<(), ProcessError>, usize) {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("IFS= read -r gate; printf '%s' \"$1\"")
+            .arg("ready-fixture")
+            .arg(std::str::from_utf8(record).expect("fixture record is UTF-8"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("fixture launcher starts");
+        let mut stdout = child.stdout.take().expect("fixture stdout exists");
+        let cancellation = rootlight_cancel::Cancellation::new();
+        let mut probes = 0;
+        let result = verify_record_with_status_probe(
+            &mut stdout,
+            &mut child,
+            LAUNCHER_READY_RECORD,
+            &cancellation,
+            |child| {
+                probes += 1;
+                let mut stdin = child.stdin.take().ok_or_else(|| {
+                    ProcessError::InvalidInput("fixture input pipe is missing".to_owned())
+                })?;
+                stdin
+                    .write_all(b"go\n")
+                    .map_err(|error| ProcessError::io("release fixture launcher", error))?;
+                drop(stdin);
+                let deadline = Instant::now() + LAUNCHER_READY_TIMEOUT;
+                loop {
+                    if let Some(status) = child
+                        .try_wait()
+                        .map_err(|error| ProcessError::io("query fixture launcher", error))?
+                    {
+                        if cancel_after_exit {
+                            cancellation.cancel(rootlight_cancel::CancellationReason::Shutdown);
+                        }
+                        return Ok(Some(status));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(ProcessError::Deadline {
+                            operation: "wait for fixture launcher exit",
+                        });
+                    }
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                }
+            },
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        (result, probes)
+    }
+
+    #[test]
+    fn launcher_record_buffered_between_empty_read_and_exit_is_verified() {
+        let (result, probes) =
+            verify_record_written_before_exit_probe(LAUNCHER_READY_RECORD, false);
+        assert_eq!(probes, 1, "the empty pipe must precede record publication");
+        result.expect("the exact buffered record still proves readiness after child exit");
+    }
+
+    #[test]
+    fn exited_launcher_cannot_prove_a_missing_partial_or_wrong_record() {
+        for record in [
+            b"".as_slice(),
+            &LAUNCHER_READY_RECORD[..LAUNCHER_READY_RECORD.len() - 1],
+            b"rootlight-native-isolated/2\n".as_slice(),
+        ] {
+            let (result, probes) = verify_record_written_before_exit_probe(record, false);
+            assert_eq!(probes, 1, "exit must follow the initial empty read");
+            assert!(matches!(result, Err(ProcessError::InvalidInput(_))));
+        }
+    }
+
+    #[test]
+    fn buffered_launcher_record_does_not_bypass_cancellation_after_exit() {
+        let (result, probes) = verify_record_written_before_exit_probe(LAUNCHER_READY_RECORD, true);
+        assert_eq!(probes, 1);
+        assert!(matches!(result, Err(ProcessError::Cancelled(cancelled))
+            if cancelled.reason() == rootlight_cancel::CancellationReason::Shutdown));
     }
 
     #[test]
