@@ -574,6 +574,7 @@ jobs:
           path: |
             artifacts/vertical-slice/${{ matrix.os }}/summary.json
             artifacts/vertical-slice/${{ matrix.os }}/transcript.jsonl
+            artifacts/vertical-slice/${{ matrix.os }}/source-find-storage.jsonl
             artifacts/vertical-slice/${{ matrix.os }}/failure.json
           if-no-files-found: warn
           retention-days: 7
