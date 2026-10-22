@@ -104,20 +104,35 @@ function readSelection() {
 function verifyDerivedArtifact() {
   const artifact = selection.value.artifact;
   const filename = artifact.path;
-  requireSelection(filenameKey(path.resolve(filename)) === filenameKey(filename) &&
-    filenameKey(fs.realpathSync(filename)) === filenameKey(filename), "derived path has an alias or linked ancestor");
-  const before = fs.lstatSync(filename, { bigint: true });
-  requireSelection(before.isFile() && !before.isSymbolicLink() && before.nlink === 1n &&
-    before.size === BigInt(artifact.bytes), "derived artifact is not an ordinary unlinked file");
-  const descriptor = fs.openSync(filename, "r");
+  requireSelection(filenameKey(path.resolve(filename)) === filenameKey(filename), "derived path has an alias");
+  // Inspect the opened object before reading; a pathname check cannot prevent
+  // substitution with a FIFO or a larger file at the open boundary.
+  const descriptor = fs.openSync(filename,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
   try {
     const opened = fs.fstatSync(descriptor, { bigint: true });
-    const bytes = fs.readFileSync(descriptor);
+    const initialPath = fs.lstatSync(filename, { bigint: true });
+    const identity = ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"];
+    requireSelection(opened.isFile() && opened.nlink === 1n && opened.size === BigInt(artifact.bytes) &&
+      initialPath.isFile() && !initialPath.isSymbolicLink() &&
+      identity.every((key) => initialPath[key] === opened[key]) &&
+      filenameKey(fs.realpathSync(filename)) === filenameKey(filename),
+      "derived artifact is not the expected ordinary unlinked file");
+    const digest = crypto.createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    while (offset < artifact.bytes) {
+      const count = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, artifact.bytes - offset), offset);
+      requireSelection(count > 0, "derived artifact changed while it was read");
+      digest.update(buffer.subarray(0, count));
+      offset += count;
+    }
+    const extra = fs.readSync(descriptor, buffer, 0, 1, offset);
     const after = fs.fstatSync(descriptor, { bigint: true });
     const pathname = fs.lstatSync(filename, { bigint: true });
-    const identity = ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"];
-    requireSelection([opened, after, pathname].every((stat) => identity.every((key) => stat[key] === before[key])) &&
-      bytes.length === artifact.bytes && crypto.createHash("sha256").update(bytes).digest("hex") === artifact.sha256,
+    requireSelection(extra === 0 &&
+      [after, pathname].every((stat) => identity.every((key) => stat[key] === opened[key])) &&
+      filenameKey(fs.realpathSync(filename)) === filenameKey(filename) && digest.digest("hex") === artifact.sha256,
       "derived artifact changed");
   } finally {
     fs.closeSync(descriptor);
