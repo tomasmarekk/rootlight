@@ -17,6 +17,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # Keep disk available for storage admission tests without changing runtime checks.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   fast:
@@ -37,7 +41,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-fast-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-debug-v1
+          key: rootlight-ci-fast-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-devtest0-inc0-v2
       - name: Fetch locked dependencies
         run: cargo fetch --locked
       - name: Format
@@ -374,7 +378,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-msrv-${{ runner.os }}-${{ runner.arch }}-1.90.0-${{ hashFiles('Cargo.lock') }}-all-features-debug-v1
+          key: rootlight-ci-msrv-${{ runner.os }}-${{ runner.arch }}-1.90.0-${{ hashFiles('Cargo.lock') }}-all-features-devtest0-inc0-v2
       - name: MSRV quality suite
         run: |
           cargo check --workspace --all-targets --all-features --locked
@@ -410,7 +414,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-current-stable-${{ runner.os }}-${{ runner.arch }}-${{ steps.current-stable-toolchain.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}-all-features-debug-v1
+          key: rootlight-ci-current-stable-${{ runner.os }}-${{ runner.arch }}-${{ steps.current-stable-toolchain.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}-all-features-devtest0-inc0-v2
       - name: Current-stable quality canary
         run: |
           cargo check --workspace --all-targets --all-features --locked
@@ -446,7 +450,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-platform-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-debug-v1
+          key: rootlight-ci-platform-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-devtest0-inc0-v2
       # Saving the full Windows target exceeded the job budget after all checks passed.
       - name: Restore exact Windows platform build inputs
         if: runner.os == 'Windows'
@@ -456,7 +460,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-platform-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-debug-v1
+          key: rootlight-ci-platform-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-all-features-devtest0-inc0-v2
       - name: Compile the native Seatbelt profile
         if: runner.os == 'macOS'
         shell: bash
@@ -519,7 +523,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-daemon-lifecycle-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-debug-v1
+          key: rootlight-ci-daemon-lifecycle-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-devtest0-inc0-v2
       - name: Build lifecycle binaries
         shell: bash
         run: cargo build --locked --package rootlight --package rootlight-daemon --package xtask
@@ -555,7 +559,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-vertical-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-debug-v1
+          key: rootlight-ci-vertical-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-devtest0-inc0-v2
       - name: Build vertical-slice binaries
         shell: bash
         run: cargo build --locked --package rootlight-daemon --package rootlight-mcp --package xtask
@@ -612,7 +616,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-durability-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-debug-v1
+          key: rootlight-ci-durability-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-devtest0-inc0-v2
       # Saving the Intel Mac target exceeded the job budget after all checks passed.
       - name: Restore exact Intel Mac durability build inputs
         if: matrix.platform == 'macos-x86_64'
@@ -622,7 +626,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rootlight-ci-durability-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-debug-v1
+          key: rootlight-ci-durability-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-devtest0-inc0-v2
       - name: Exercise private storage and crash recovery
         shell: bash
         env:
