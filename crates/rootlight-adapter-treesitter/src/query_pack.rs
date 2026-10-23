@@ -47,6 +47,7 @@ mod dart;
 mod deferred_tests;
 mod ecmascript;
 mod eiffel;
+mod eiffel_formal_reads;
 mod elixir;
 mod fish;
 mod fortran;
@@ -768,16 +769,18 @@ impl QueryPack {
             .map(|name| StructuralRole::from_capture_name(name).ok_or(family))
             .collect::<Result<Vec<_>, _>>()?;
         for pattern in 0..identity_query.pattern_count() {
-            // Nix certifies only some variable uses. Both scans visit references;
-            // identity retention admits only the ones paired with native targets.
-            let has_nix_reference = family == GrammarFamily::Nix
-                && identity_query
-                    .capture_quantifiers(pattern)
-                    .iter()
-                    .zip(&roles_by_capture)
-                    .any(|(quantifier, role)| {
-                        *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Reference
-                    });
+            // Nix and Eiffel certify only some variable uses. Both scans visit
+            // references; identity retention admits only native-certified targets.
+            let has_source_certified_reference =
+                matches!(family, GrammarFamily::Nix | GrammarFamily::Eiffel)
+                    && identity_query
+                        .capture_quantifiers(pattern)
+                        .iter()
+                        .zip(&roles_by_capture)
+                        .any(|(quantifier, role)| {
+                            *quantifier != CaptureQuantifier::Zero
+                                && *role == StructuralRole::Reference
+                        });
             let has_identity_capture = identity_query
                 .capture_quantifiers(pattern)
                 .iter()
@@ -792,7 +795,7 @@ impl QueryPack {
                 });
             if has_identity_capture {
                 optional_query.disable_pattern(pattern);
-            } else if !has_nix_reference {
+            } else if !has_source_certified_reference {
                 identity_query.disable_pattern(pattern);
             }
         }
@@ -996,6 +999,10 @@ impl QueryPack {
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "nix.identifier")
+                    || (family == GrammarFamily::Eiffel
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "eiffel.identifier")
                     || (family == GrammarFamily::Idris
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1506,6 +1513,13 @@ impl QueryPack {
         let mut v_captures = v::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut rust_captures = rust::CaptureCache::default();
         let mut eiffel_captures = eiffel::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut eiffel_formal_reads = eiffel_formal_reads::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.captures.min(limits.body_nodes),
+            complete_file_input && input.family == GrammarFamily::Eiffel,
+            input.cancellation,
+        )?;
         let mut ocaml_captures = ocaml::CaptureCache::new(limits.captures.min(limits.body_nodes))
             .with_complete_context(matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()));
@@ -2229,13 +2243,28 @@ impl QueryPack {
                     continue;
                 }
                 if input.family == GrammarFamily::Eiffel {
-                    let candidate = eiffel::candidate(
-                        capture.node,
-                        role,
-                        input.source,
-                        input.cancellation,
-                        &mut eiffel_captures,
-                    )?;
+                    let candidate = if let Some(candidate) =
+                        eiffel_formal_reads.candidate(capture.node, role, input.cancellation)?
+                    {
+                        Some(candidate)
+                    } else {
+                        eiffel::candidate(
+                            capture.node,
+                            role,
+                            input.source,
+                            input.cancellation,
+                            &mut eiffel_captures,
+                        )?
+                    };
+                    if eiffel_formal_reads.exhausted() {
+                        refusal = Some(IdentityRefusal::checked_helper(
+                            RefusalOrigin::EiffelFormalReads,
+                            eiffel_formal_reads.initial_work(),
+                            eiffel_formal_reads.remaining_work(),
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
                     if eiffel_captures.exhausted() {
                         refusal = Some(IdentityRefusal::helper(RefusalOrigin::EiffelCaptures));
                         limit = Some(QueryLimit::Capture);

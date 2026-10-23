@@ -1,0 +1,14 @@
+{
+  "upstream_repository": "https://github.com/gobo-eiffel/gobo",
+  "revision": "56bafe976a1922ebc1030613489b05533841862e",
+  "upstream_path": "library/kernel/src/basic/kl_boolean_routines.e",
+  "license": "MIT",
+  "source_bytes": 1177,
+  "source_sha256": "d9608f6f07c59895f641ae8eaa99b6113c09e056e0399bb6a54c19c01d1d319d",
+  "upstream_git_blob_bytes": 1128,
+  "upstream_git_blob_sha256": "1ab70a376ce6f053677c3f3040797ceaea9c9d03c1353705641038eb69073451",
+  "checkout_transport": "The original corpus checkout has 49 CRLF line endings; replacing CRLF with LF yields the exact pinned upstream Git blob",
+  "license_sha256": "f7a2972065ba799c548d261689333c3e423f19d72c955fb10d7acbdacfce91f8",
+  "preservation": "Complete original physical UTF-8 source including BOM and 49 CRLF lines; no reduction or Eiffel execution",
+  "semantic_scope": "Static written formal receiver Read; inherited feature dispatch, runtime evaluation and broader alias binding remain unassessed"
+}

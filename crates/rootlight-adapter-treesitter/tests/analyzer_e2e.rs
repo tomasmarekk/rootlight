@@ -86,6 +86,8 @@ mod ecmascript_imports;
 mod ecmascript_native;
 #[path = "analyzer_e2e/ecmascript_references.rs"]
 mod ecmascript_references;
+#[path = "analyzer_e2e/eiffel_formal_receivers.rs"]
+mod eiffel_formal_receivers;
 #[path = "analyzer_e2e/eiffel_native.rs"]
 mod eiffel_native;
 #[path = "analyzer_e2e/glsl_native.rs"]

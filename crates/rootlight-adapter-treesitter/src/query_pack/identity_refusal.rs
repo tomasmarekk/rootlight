@@ -30,6 +30,7 @@ pub(crate) enum RefusalOrigin {
     PowerShellFormals,
     DockerCaptures,
     EiffelCaptures,
+    EiffelFormalReads,
     FishCaptures,
     FsharpCaptures,
     GdscriptCaptures,
@@ -104,6 +105,7 @@ impl RefusalOrigin {
             Self::PowerShellFormals => "query-identity-powershell-formals-limit",
             Self::DockerCaptures => "query-identity-dockerfile-captures-limit",
             Self::EiffelCaptures => "query-identity-eiffel-captures-limit",
+            Self::EiffelFormalReads => "query-identity-eiffel-formal-reads-limit",
             Self::FishCaptures => "query-identity-fish-captures-limit",
             Self::FsharpCaptures => "query-identity-fsharp-captures-limit",
             Self::GdscriptCaptures => "query-identity-gdscript-captures-limit",
@@ -176,6 +178,7 @@ impl RefusalOrigin {
                 | "query-identity-powershell-formals-limit"
                 | "query-identity-dockerfile-captures-limit"
                 | "query-identity-eiffel-captures-limit"
+                | "query-identity-eiffel-formal-reads-limit"
                 | "query-identity-fish-captures-limit"
                 | "query-identity-fsharp-captures-limit"
                 | "query-identity-gdscript-captures-limit"

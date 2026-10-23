@@ -31,6 +31,7 @@ mod d;
 mod dockerfile;
 mod dockerfile_env;
 mod eiffel;
+mod eiffel_formal_reads;
 mod elixir;
 mod embedded;
 mod embedded_rust;
@@ -781,6 +782,7 @@ fn required_syntax_fact_count_from_output(
     let mut haxe_read_ends = HashMap::new();
     let mut flux_read_ends = HashMap::new();
     let nix_read_ends = nix_formal_reads::read_ends(facts, cancellation)?;
+    let eiffel_read_ends = eiffel_formal_reads::read_ends(facts, cancellation)?;
     let mut coq_notation_ends = HashMap::new();
     let mut ring_read_ends = HashMap::new();
     let mut fsharp_implementation_ranges = Vec::new();
@@ -933,6 +935,8 @@ fn required_syntax_fact_count_from_output(
             || typescript_const::required(fact)
             || (nix_formal_reads::reference(fact)
                 && nix_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte())))
+            || (eiffel_formal_reads::reference(fact)
+                && eiffel_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte())))
             || less::required(fact)
             || prolog_calls::required(fact)
             || is_patch_documentary_fact(fact)
@@ -1323,6 +1327,11 @@ fn preflight_lowering_limits(
     } else {
         HashMap::new()
     };
+    let eiffel_read_ends = if request.language().as_str() == "eiffel" {
+        eiffel_formal_reads::read_ends(parse_output.facts(), cancellation)?
+    } else {
+        HashMap::new()
+    };
     let coq_notation_ends = if request.language().as_str() == "coq" {
         coq::notation_ends(parse_output.facts(), cancellation)?
     } else {
@@ -1567,6 +1576,16 @@ fn preflight_lowering_limits(
         if occurrence_role(fact).is_some() {
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
+            if request.language().as_str() == "eiffel"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() == CoverageStatus::Complete
+                && eiffel_formal_reads::reference(fact)
+                && eiffel_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte()))
+            {
+                occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                account_string(&mut string_bytes, eiffel_formal_reads::READ.len(), limits)?;
+            }
             if request.language().as_str() == "nix"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() == CoverageStatus::Complete
@@ -3681,6 +3700,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let eiffel_reads = if self.request.language().as_str() == "eiffel"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            Some(eiffel_formal_reads::ReadTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         let nix_reads = if self.request.language().as_str() == "nix"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
@@ -5522,6 +5563,25 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("coq-written-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
+                }
+                if let Some(reads) = &eiffel_reads
+                    && let Some(symbol) = reads.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    let mut read = occurrence.clone();
+                    read.role = OccurrenceRole::Read;
+                    read.target = OccurrenceTarget::Resolved { symbol };
+                    read.syntax_kind.clear();
+                    read.syntax_kind.push_str(eiffel_formal_reads::READ);
+                    read.id = derive_occurrence_record_id(&read)
+                        .map_err(|_| provider_failure("eiffel-formal-read-identity"))?;
+                    let relation = lexical_reference_relation(&read, symbol)?;
+                    relations.insert(relation.id, relation);
+                    occurrences.insert(read.id, read);
                 }
                 if let Some(bindings) = &nix_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?

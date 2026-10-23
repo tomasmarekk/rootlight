@@ -1,0 +1,3 @@
+# Original corpus fixtures and licenses retain physical source bytes.
+# Repository-wide normalization would change the pinned CRLF offsets.
+* -text whitespace=-blank-at-eof,cr-at-eol

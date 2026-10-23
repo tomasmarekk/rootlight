@@ -1,5 +1,6 @@
 ; Native owner proofs preserve names independently from unproved runtime binding.
-(source_file) @root @module
+(source_file) @root @module @signature
+(identifier) @signature
 (class_declaration) @declaration @definition @signature
 (new_feature) @declaration @definition @signature
 (formal_generic (class_name) @declaration @definition @signature)
