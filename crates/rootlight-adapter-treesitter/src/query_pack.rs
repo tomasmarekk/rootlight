@@ -22,6 +22,7 @@ mod ada;
 mod apex;
 mod assembly;
 mod bash;
+mod bash_calls;
 pub(crate) mod c;
 mod c_calls;
 mod c_formal_reads;
@@ -986,6 +987,10 @@ impl QueryPack {
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "lean.formal_body")
+                    || (family == GrammarFamily::Bash
+                        && candidate.required
+                        && candidate.role == StructuralRole::Call
+                        && candidate.syntax == "bash.direct_wrapper_call")
                     || candidate.role.belongs_to_identity_closure()
                     || (family == GrammarFamily::Nix
                         && candidate.required
@@ -1134,6 +1139,9 @@ impl QueryPack {
                         || (family == GrammarFamily::C
                             && candidate.required
                             && matches!(candidate.syntax, "c.block" | "c.for"))
+                        || (family == GrammarFamily::Bash
+                            && candidate.required
+                            && candidate.syntax == "bash.direct_wrapper_body")
                         || matches!(
                             family,
                             GrammarFamily::Json
@@ -1384,6 +1392,8 @@ impl QueryPack {
         let mut typescript_calls =
             typescript_calls::CaptureCache::new(input.source, limits.body_nodes);
         let mut c_calls = c_calls::CaptureCache::new(input.source, limits.body_nodes);
+        let mut bash_calls =
+            bash_calls::CaptureCache::new(input.source, limits.captures, complete_file_input);
         let mut bash_reads = bash::CaptureCache::new(input.source, limits.body_nodes);
         let mut haxe_captures = haxe::CaptureCache::new(
             input.source,
@@ -3232,6 +3242,22 @@ impl QueryPack {
                         continue;
                     }
                 }
+                if input.family == GrammarFamily::Bash {
+                    let keep = bash_calls.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if bash_calls.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::BashCalls));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::Bash && role == StructuralRole::Reference {
                     if let Some(syntax) = bash_reads.syntax(capture.node, input.cancellation)? {
                         candidate.syntax = syntax;
@@ -3660,6 +3686,11 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Signature
+            if family == GrammarFamily::Bash && capture.node.kind() == "command" =>
+        {
+            "bash.direct_wrapper_context"
+        }
         StructuralRole::Signature
             if matches!(
                 family,

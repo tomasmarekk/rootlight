@@ -52,6 +52,8 @@ mod astro_native;
 mod bash_bindings;
 #[path = "analyzer_e2e/bash_module_references.rs"]
 mod bash_module_references;
+#[path = "analyzer_e2e/bash_written_calls.rs"]
+mod bash_written_calls;
 #[path = "analyzer_e2e/broad_residuals.rs"]
 mod broad_residuals;
 #[path = "analyzer_e2e/capnp_native.rs"]

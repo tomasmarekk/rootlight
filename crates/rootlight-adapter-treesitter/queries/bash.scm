@@ -9,6 +9,8 @@
 (for_statement variable: (variable_name) @declaration @definition)
 (declaration_command (variable_name) @declaration @definition)
 (command) @call
+; The separate identity pattern must not consume unrelated optional calls.
+(command) @call @signature
 (command name: (command_name (word) @call_name))
 [(variable_name) (special_variable_name)] @reference
 (comment) @comment

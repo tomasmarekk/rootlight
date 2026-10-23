@@ -1427,6 +1427,10 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("bash.direct_wrapper") {
+        // A complete command span is evidence, never an identifier projection.
+        return None;
+    }
     if label.starts_with("typescript.const_") {
         return (language == "typescript"
             && fact.kind() == SyntaxFactKind::Occurrence
@@ -4216,6 +4220,43 @@ mod typescript_const_name_tests {
                 admitted,
                 "{language} {label} {name:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod bash_wrapper_name_contract {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn whole_shell_command_certificates_never_supply_generic_name_authority() {
+        for language in ["bash", "other"] {
+            for kind in [
+                SyntaxFactKind::Occurrence,
+                SyntaxFactKind::Signature,
+                SyntaxFactKind::Declaration,
+            ] {
+                for label in [
+                    "bash.direct_wrapper_call.call",
+                    "bash.direct_wrapper_context.signature",
+                    "bash.direct_wrapper_call.extra",
+                ] {
+                    let fact = SyntaxFact::new(
+                        1,
+                        None,
+                        kind,
+                        SourceSpan::new(FileId::from_bytes([3; 20]), 0, 6).unwrap(),
+                        0,
+                        SyntaxKindLabel::new(label).unwrap(),
+                    );
+                    assert!(
+                        structural_captured_name_for_fact(language, &fact, "target", 6).is_none()
+                    );
+                }
+            }
         }
     }
 }

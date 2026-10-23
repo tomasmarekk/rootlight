@@ -1513,6 +1513,11 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    if occurrence.syntax_kind.starts_with("bash.direct_wrapper")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     if occurrence.syntax_kind.starts_with("idris.")
         && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
     {
@@ -4311,3 +4316,7 @@ mod typescript_const_fence_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "engine/bash_source_tests.rs"]
+mod bash_source_tests;

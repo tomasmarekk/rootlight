@@ -10,6 +10,7 @@ mod apex;
 mod apex_calls;
 mod astro_reads;
 mod bash;
+mod bash_calls;
 mod c_calls;
 mod c_formal_reads;
 mod c_variables;
@@ -923,6 +924,7 @@ fn required_syntax_fact_count_from_output(
             || mojo_members::required(fact)
             || glsl_bindings::required(fact)
             || go_calls::required(fact)
+            || bash_calls::required(fact)
             || go_calls::package_candidate(fact)
             || php_this_calls::required(fact)
             || go_call_formals::certified_reference(fact)
@@ -1647,6 +1649,11 @@ fn preflight_lowering_limits(
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
                 && php_this_calls::required(fact);
+            let bash_call = request.language().as_str() == "bash"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && fact.kind() == SyntaxFactKind::Occurrence
+                && fact.syntax_kind().as_str() == bash_calls::CALL;
             let go_proof = request.language().as_str() == "go"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -1666,6 +1673,7 @@ fn preflight_lowering_limits(
                 || mojo_call
                 || sml_call
                 || glsl_call
+                || bash_call
                 || go_call
                 || php_call
                 || (ocaml_certificate && ocaml_bindings::call(fact))
@@ -1807,6 +1815,7 @@ fn preflight_lowering_limits(
                         && sml_formals::required(fact))
                     || ocaml_certificate
                     || glsl_proof
+                    || bash_call
                     || go_proof
                     || php_call
                     || scss_call
@@ -3600,6 +3609,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let bash_calls = if self.request.language().as_str() == "bash"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+        {
+            Some(bash_calls::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let bash_reads = if self.request.language().as_str() == "bash"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
@@ -4460,6 +4494,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .map(|bindings| bindings.owner(fact, &materialized, cancellation))
                     .transpose()?
                     .flatten();
+                let bash_call_owner = bash_calls
+                    .as_ref()
+                    .map(|bindings| bindings.owner(fact, &materialized, cancellation))
+                    .transpose()?
+                    .flatten();
                 let go_call_owner = go_calls
                     .as_ref()
                     .map(|bindings| bindings.owner(fact, &materialized, cancellation))
@@ -4470,8 +4509,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .map(|bindings| bindings.owner(fact, &materialized, cancellation))
                     .transpose()?
                     .flatten();
-                let enclosing_entity =
-                    php_call_owner.or(go_call_owner).or(glsl_owner).or_else(|| {
+                let enclosing_entity = php_call_owner
+                    .or(bash_call_owner)
+                    .or(go_call_owner)
+                    .or(glsl_owner)
+                    .or_else(|| {
                         entity_plan
                             .nearest_entity_ancestor
                             .get(&fact.local_id())
@@ -4502,7 +4544,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                 }
-                if resolution_text.is_none() {
+                // A written shell command has no generic name authority. Keep
+                // its fenced label for the independent source-proof consumer.
+                if resolution_text.is_none() && fact.syntax_kind().as_str() != bash_calls::CALL {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
                     occurrence.syntax_kind = format!(
@@ -4925,6 +4969,23 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("php-written-call-occurrence-identity"))?;
                     let relation =
                         php_this_calls::relation(&occurrence, owner, symbol, cancellation)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &bash_calls
+                    && let Some(owner) = enclosing_entity
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        Some(owner),
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("bash-wrapper-call-occurrence-identity"))?;
+                    let relation = bash_calls::relation(&occurrence, owner, symbol, cancellation)?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &go_calls
@@ -11339,6 +11400,13 @@ fn structural_resolution_text<'a>(
             maximum_name_bytes,
         );
     }
+    if fact
+        .syntax_kind()
+        .as_str()
+        .starts_with("bash.direct_wrapper")
+    {
+        return None;
+    }
     if fact.syntax_kind().as_str().starts_with("typescript.jsx_")
         || fact.syntax_kind().as_str().starts_with("javascript.jsx_")
     {
@@ -12539,6 +12607,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
             | "c.variable_target.signature"
             | "nix.formal_clean_file.signature"
             | "nix.formal_read_target.signature"
+            | "bash.direct_wrapper_context.signature"
     ) {
         return false;
     }
@@ -13090,6 +13159,10 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.kind() == SyntaxFactKind::Occurrence && fact.syntax_kind().as_str() == bash_calls::CALL
+    {
+        return Some("bash-written-wrapper-binding-unavailable");
+    }
     if thinkscript::required(fact) {
         return Some(thinkscript::GAP);
     }
