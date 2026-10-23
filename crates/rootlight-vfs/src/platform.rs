@@ -286,6 +286,43 @@ impl<'parent> PrivateDirectory<'parent> {
         )
     }
 
+    /// Streams an exact range from a private regular file of the expected length.
+    ///
+    /// The visitor receives original file offsets and nonempty chunks of at most
+    /// 64 KiB. Bytes outside `range` are not read. Empty ranges still authenticate
+    /// the retained file handle, owner policy, single-link count and stable exact
+    /// file length, but invoke no visitor. The returned count is the range length.
+    ///
+    /// Visitor output remains provisional until success, including after the last
+    /// range byte. The caller must authenticate the complete selected content;
+    /// this method does not verify content hashes or bytes outside the range.
+    ///
+    /// # Errors
+    /// Rejects invalid or overflowing bounds, a different file length, name or
+    /// ownership policy failures, cancellation, visitor failures and I/O errors.
+    pub fn read_file_range_streamed_cancellable(
+        &self,
+        name: &OsStr,
+        expected_file_bytes: u64,
+        range: std::ops::Range<u64>,
+        cancellation: &Cancellation,
+        visitor: impl FnMut(u64, &[u8]) -> Result<(), PlatformError>,
+    ) -> Result<u64, PlatformError> {
+        let name = PrivateName::parse(name)?;
+        os::read_file_range_streamed_with_check(
+            self.inner(),
+            &name,
+            expected_file_bytes,
+            range,
+            || {
+                cancellation
+                    .check()
+                    .map_err(|cancelled| PlatformError::Cancelled(cancelled.reason()))
+            },
+            visitor,
+        )
+    }
+
     /// Returns the exact identity captured from the retained directory handle.
     #[must_use]
     pub fn identity(&self) -> PlatformFileIdentity {
@@ -962,6 +999,314 @@ mod tests {
         assert_eq!(length, u64::try_from(payload.len()).unwrap());
         assert!(calls >= 3);
         assert_eq!(staged, payload);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_preserves_exact_offsets_and_boundaries() {
+        let payload: Vec<_> = (0..os::PRIVATE_FILE_READ_CHUNK_BYTES * 2 + 17)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
+        let length = u64::try_from(payload.len()).unwrap();
+        let (_temporary, directory) = private_payload(&payload);
+        for range in [0..length, 1..65537, 65535..length, 0..0, length..length] {
+            let mut staged = Vec::new();
+            let count = directory
+                .read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    length,
+                    range.clone(),
+                    &Cancellation::new(),
+                    |offset, chunk| {
+                        assert_eq!(offset, range.start + u64::try_from(staged.len()).unwrap());
+                        assert!(!chunk.is_empty());
+                        assert!(chunk.len() <= os::PRIVATE_FILE_READ_CHUNK_BYTES);
+                        staged.extend_from_slice(chunk);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(count, range.end - range.start);
+            assert_eq!(
+                staged,
+                payload[usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap()]
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_rejects_invalid_bounds_and_wrong_lengths() {
+        let (_temporary, directory) = private_payload(b"payload");
+        let reversed = std::ops::Range { start: 2, end: 1 };
+        for (length, range) in [(7, reversed), (7, 0..8), (7, u64::MAX..u64::MAX)] {
+            assert!(matches!(
+                directory.read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    length,
+                    range,
+                    &Cancellation::new(),
+                    |_, _| panic!("invalid bounds precede all visitor calls"),
+                ),
+                Err(PlatformError::ResourceLimit)
+            ));
+        }
+        for length in [6, 8] {
+            assert!(matches!(
+                directory.read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    length,
+                    1..2,
+                    &Cancellation::new(),
+                    |_, _| panic!("the complete pack length is checked before the range"),
+                ),
+                Err(PlatformError::SecurityPolicy)
+            ));
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_empty_reads_still_authenticate_the_file() {
+        let (_temporary, directory) = private_payload(b"");
+        assert_eq!(
+            directory
+                .read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    0,
+                    0..0,
+                    &Cancellation::new(),
+                    |_, _| panic!("empty ranges have no visitor calls"),
+                )
+                .unwrap(),
+            0
+        );
+        let _child = directory.create_directory(OsStr::new("folder")).unwrap();
+        for name in ["missing", "folder", "../payload"] {
+            assert!(
+                directory
+                    .read_file_range_streamed_cancellable(
+                        OsStr::new(name),
+                        0,
+                        0..0,
+                        &Cancellation::new(),
+                        |_, _| panic!("a non-file cannot produce a valid empty range"),
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_cancellation_withholds_complete_or_partial_reads() {
+        let payload = vec![7; os::PRIVATE_FILE_READ_CHUNK_BYTES * 2];
+        let length = u64::try_from(payload.len()).unwrap();
+        let (_temporary, directory) = private_payload(&payload);
+        let cancelled = Cancellation::new();
+        cancelled.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            directory.read_file_range_streamed_cancellable(
+                OsStr::new("payload"),
+                length,
+                0..length,
+                &cancelled,
+                |_, _| panic!("pre-cancelled reads produce no visitor output"),
+            ),
+            Err(PlatformError::Cancelled(CancellationReason::ClientRequest))
+        ));
+        for end in [1, length] {
+            let cancellation = Cancellation::new();
+            let mut calls = 0;
+            assert!(matches!(
+                directory.read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    length,
+                    0..end,
+                    &cancellation,
+                    |_, _| {
+                        calls += 1;
+                        cancellation.cancel(CancellationReason::ClientRequest);
+                        Ok(())
+                    },
+                ),
+                Err(PlatformError::Cancelled(CancellationReason::ClientRequest))
+            ));
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_propagates_visitor_failures() {
+        let (_temporary, directory) = private_payload(b"payload");
+        assert!(matches!(
+            directory.read_file_range_streamed_cancellable(
+                OsStr::new("payload"),
+                7,
+                2..5,
+                &Cancellation::new(),
+                |_, _| Err(PlatformError::Io {
+                    operation: "range_visitor_rejected",
+                    source: io::Error::other("provisional output was rejected"),
+                }),
+            ),
+            Err(PlatformError::Io {
+                operation: "range_visitor_rejected",
+                ..
+            })
+        ));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_rechecks_link_count_after_the_last_byte() {
+        for link_before_read in [true, false] {
+            let (temporary, directory) = private_payload(b"payload");
+            let path = temporary.path().join("staging/payload");
+            let alias = temporary.path().join("staging/alias");
+            if link_before_read {
+                std::fs::hard_link(&path, &alias).unwrap();
+            }
+            let mut calls = 0;
+            assert!(matches!(
+                directory.read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    7,
+                    2..3,
+                    &Cancellation::new(),
+                    |_, _| {
+                        calls += 1;
+                        if !link_before_read {
+                            std::fs::hard_link(&path, &alias).unwrap();
+                        }
+                        Ok(())
+                    },
+                ),
+                Err(PlatformError::SecurityPolicy)
+            ));
+            assert_eq!(calls, usize::from(!link_before_read));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_private_range_rejects_length_changes_outside_its_selected_bytes() {
+        for length in [6, 8] {
+            let (temporary, directory) = private_payload(b"payload");
+            let path = temporary.path().join("staging/payload");
+            assert!(matches!(
+                directory.read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    7,
+                    0..1,
+                    &Cancellation::new(),
+                    |_, _| {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .unwrap()
+                            .set_len(length)
+                            .unwrap();
+                        Ok(())
+                    },
+                ),
+                Err(PlatformError::SecurityPolicy)
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_private_range_rejects_symlinks_and_nonprivate_modes() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let (temporary, directory) = private_payload(b"payload");
+        let path = temporary.path().join("staging/payload");
+        symlink("payload", temporary.path().join("staging/alias")).unwrap();
+        assert!(
+            directory
+                .read_file_range_streamed_cancellable(
+                    OsStr::new("alias"),
+                    7,
+                    0..1,
+                    &Cancellation::new(),
+                    |_, _| panic!("symlink ranges are refused"),
+                )
+                .is_err()
+        );
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(matches!(
+            directory.read_file_range_streamed_cancellable(
+                OsStr::new("payload"),
+                7,
+                0..1,
+                &Cancellation::new(),
+                |_, _| panic!("nonprivate ranges are refused"),
+            ),
+            Err(PlatformError::SecurityPolicy)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn streamed_private_range_checks_windows_dacl_before_and_after_visiting() {
+        for change_before_read in [true, false] {
+            let (temporary, directory) = private_payload(b"payload");
+            let path = temporary.path().join("staging/payload");
+            if change_before_read {
+                set_test_file_dacl(&path, "D:P(A;;FA;;;WD)");
+            }
+            let mut calls = 0;
+            assert!(matches!(
+                directory.read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    7,
+                    2..3,
+                    &Cancellation::new(),
+                    |_, _| {
+                        calls += 1;
+                        if !change_before_read {
+                            set_test_file_dacl(&path, "D:P(A;;FA;;;WD)");
+                        }
+                        Ok(())
+                    },
+                ),
+                Err(PlatformError::SecurityPolicy)
+            ));
+            assert_eq!(calls, usize::from(!change_before_read));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn streamed_private_range_keeps_windows_write_sharing_disabled() {
+        use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let (temporary, directory) = private_payload(b"payload");
+        let path = temporary.path().join("staging/payload");
+        assert_eq!(
+            directory
+                .read_file_range_streamed_cancellable(
+                    OsStr::new("payload"),
+                    7,
+                    2..3,
+                    &Cancellation::new(),
+                    |_, _| {
+                        let error = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .unwrap_err();
+                        assert_eq!(
+                            error.raw_os_error(),
+                            Some(i32::try_from(ERROR_SHARING_VIOLATION.0).unwrap())
+                        );
+                        Ok(())
+                    },
+                )
+                .unwrap(),
+            1
+        );
     }
 
     #[cfg(any(unix, windows))]

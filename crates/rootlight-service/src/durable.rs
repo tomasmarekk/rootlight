@@ -11101,6 +11101,118 @@ mod tests {
         }
     }
 
+    #[test]
+    fn streamed_source_packs_authenticate_the_complete_selected_file() {
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let fixture = durable_test_tempdir();
+        let payload = vec![b'x'; 128 * 1024 + 17];
+        fs::write(fixture.path().join("selected.txt"), &payload).unwrap();
+        for ordinal in 0..15 {
+            fs::write(
+                fixture.path().join(format!("neighbor-{ordinal:02}.txt")),
+                format!("independent neighbor {ordinal}\n"),
+            )
+            .unwrap();
+        }
+        let cancellation = Cancellation::new();
+        let receipt = {
+            let mut service =
+                FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
+            service
+                .index_rust_fixture(fixture.path(), &cancellation)
+                .unwrap()
+        };
+        let directory = paths
+            .state_dir()
+            .join(DURABLE_DIRECTORY)
+            .join(REPOSITORIES_DIRECTORY)
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string());
+        let manifest: DurableGenerationManifest =
+            serde_json::from_slice(&fs::read(directory.join(MANIFEST_FILENAME)).unwrap()).unwrap();
+        assert!(matches!(
+            source_authority::manifest_source_layout(&manifest),
+            Ok(DurableSourceLayout::Packed(_))
+        ));
+        let catalog = open_test_catalog(paths.state_dir(), 2).unwrap();
+        let generations = catalog.restore_active(&cancellation).unwrap();
+        let file = generations[0]
+            .verified
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "selected.txt")
+            .unwrap();
+        let mut observed = Vec::new();
+        assert_eq!(
+            catalog
+                .visit_source(
+                    file,
+                    file.byte_length,
+                    &cancellation,
+                    &mut |offset, bytes| {
+                        assert_eq!(offset, u64::try_from(observed.len()).unwrap());
+                        observed.extend_from_slice(bytes);
+                        Ok(())
+                    }
+                )
+                .unwrap(),
+            file.byte_length
+        );
+        assert_eq!(observed, payload);
+
+        let sources = directory.join(SOURCES_DIRECTORY);
+        let index: DurablePackedSourceIndex =
+            rmp_serde::from_slice(&fs::read(sources.join(SOURCE_PACK_INDEX_FILENAME)).unwrap())
+                .unwrap();
+        let entry = index
+            .entries
+            .iter()
+            .find(|entry| entry.file == file.id)
+            .unwrap();
+        let pack_path = sources.join(source_pack_name(entry.pack));
+        let original_pack = fs::read(&pack_path).unwrap();
+        let tail = usize::try_from(entry.offset + entry.bytes - 1).unwrap();
+        let mut corrupted = original_pack.clone();
+        corrupted[tail] ^= 1;
+        fs::write(&pack_path, corrupted).unwrap();
+        let mut provisional_prefix = None;
+        assert_eq!(
+            catalog.visit_source(
+                file,
+                file.byte_length,
+                &cancellation,
+                &mut |offset, bytes| {
+                    if offset == 0 {
+                        provisional_prefix = bytes.first().copied();
+                    }
+                    Ok(())
+                }
+            ),
+            Err(FirstSliceError::CatalogCorrupt)
+        );
+        assert_eq!(provisional_prefix, payload.first().copied());
+
+        for grow in [false, true] {
+            let mut changed = original_pack.clone();
+            if grow {
+                changed.push(0);
+            } else {
+                changed.pop().unwrap();
+            }
+            fs::write(&pack_path, changed).unwrap();
+            assert_eq!(
+                catalog.visit_source(file, file.byte_length, &cancellation, &mut |_, _| panic!(
+                    "the exact pack length precedes source delivery"
+                ),),
+                Err(FirstSliceError::CatalogCorrupt)
+            );
+        }
+    }
+
     fn assert_packed_generation_restores_exact_content(file_count: usize) {
         let storage = durable_test_tempdir();
         let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
@@ -11159,6 +11271,23 @@ mod tests {
                 source.content(),
                 fs::read(fixture.path().join(&file.path)).expect("fixture reads")
             );
+            let mut streamed = Vec::new();
+            assert_eq!(
+                catalog
+                    .visit_source(
+                        file,
+                        file.byte_length,
+                        &cancellation,
+                        &mut |offset, bytes| {
+                            assert_eq!(offset, u64::try_from(streamed.len()).unwrap());
+                            streamed.extend_from_slice(bytes);
+                            Ok(())
+                        }
+                    )
+                    .unwrap(),
+                file.byte_length
+            );
+            assert_eq!(streamed, source.content());
         }
         let file = generation
             .verified

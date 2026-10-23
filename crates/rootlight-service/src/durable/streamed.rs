@@ -387,37 +387,28 @@ impl DurableCatalog {
                 let mut hash = blake3::Hasher::new();
                 let actual = reader
                     .sources
-                    .read_file_streamed_cancellable(
+                    .read_file_range_streamed_cancellable(
                         OsStr::new(&source_pack_name(entry.pack)),
                         pack_bytes,
+                        entry.offset..end,
                         cancellation,
                         |offset, bytes| {
-                            let chunk_end = offset
+                            if entry.offset.checked_add(consumed) != Some(offset) {
+                                return Err(PlatformError::SecurityPolicy);
+                            }
+                            hash.update(bytes);
+                            visitor(consumed, bytes)?;
+                            consumed = consumed
                                 .checked_add(
                                     u64::try_from(bytes.len())
                                         .map_err(|_| PlatformError::ResourceLimit)?,
                                 )
                                 .ok_or(PlatformError::ResourceLimit)?;
-                            let start = offset.max(entry.offset);
-                            let stop = chunk_end.min(end);
-                            if start < stop {
-                                let from = usize::try_from(start - offset)
-                                    .map_err(|_| PlatformError::ResourceLimit)?;
-                                let to = usize::try_from(stop - offset)
-                                    .map_err(|_| PlatformError::ResourceLimit)?;
-                                let selected =
-                                    bytes.get(from..to).ok_or(PlatformError::SecurityPolicy)?;
-                                hash.update(selected);
-                                visitor(consumed, selected)?;
-                                consumed = consumed
-                                    .checked_add(stop - start)
-                                    .ok_or(PlatformError::ResourceLimit)?;
-                            }
                             Ok(())
                         },
                     )
                     .map_err(map_private_read_error)?;
-                if actual != pack_bytes
+                if actual != file.byte_length
                     || consumed != file.byte_length
                     || ContentHash::from_bytes(*hash.finalize().as_bytes()) != file.content_hash
                 {

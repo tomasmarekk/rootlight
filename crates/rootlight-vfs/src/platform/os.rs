@@ -368,6 +368,114 @@ pub(super) fn read_file_streamed_with_check(
     }
 }
 
+pub(super) fn read_file_range_streamed_with_check(
+    parent: &Directory,
+    name: &PrivateName,
+    expected_file_bytes: u64,
+    range: std::ops::Range<u64>,
+    mut check: impl FnMut() -> Result<(), PlatformError>,
+    mut visitor: impl FnMut(u64, &[u8]) -> Result<(), PlatformError>,
+) -> Result<u64, PlatformError> {
+    check()?;
+    require_support()?;
+    let selected_bytes = range
+        .end
+        .checked_sub(range.start)
+        .filter(|_| range.end <= expected_file_bytes)
+        .ok_or(PlatformError::ResourceLimit)?;
+    #[cfg(any(unix, windows))]
+    {
+        use std::io::{Seek as _, SeekFrom};
+
+        let parent = directory_handle(parent)?;
+        validate_private_directory(parent)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            };
+
+            options
+                .access_mode(FILE_GENERIC_READ.0)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0);
+        }
+        let mut file = parent
+            .open_with(Path::new(&name.0), &options)
+            .map_err(|source| platform_io("open_file", source))?;
+        #[cfg(windows)]
+        verify_private_windows_dacl(&file)?;
+        #[cfg(target_os = "macos")]
+        verify_no_macos_extended_acl(&file)?;
+        let before = file
+            .metadata()
+            .map_err(|source| platform_io("inspect_file", source))?;
+        let identity = validate_private_file_metadata(&before)?;
+        if before.len() != expected_file_bytes {
+            return Err(PlatformError::SecurityPolicy);
+        }
+        check()?;
+        if file
+            .seek(SeekFrom::Start(range.start))
+            .map_err(|source| platform_io("seek_file", source))?
+            != range.start
+        {
+            return Err(PlatformError::SecurityPolicy);
+        }
+        let mut offset = range.start;
+        let mut buffer = [0_u8; PRIVATE_FILE_READ_CHUNK_BYTES];
+        while offset < range.end {
+            check()?;
+            let request = usize::try_from(
+                (range.end - offset)
+                    .min(u64::try_from(buffer.len()).map_err(|_| PlatformError::ResourceLimit)?),
+            )
+            .map_err(|_| PlatformError::ResourceLimit)?;
+            let read = file
+                .read(&mut buffer[..request])
+                .map_err(|source| platform_io("read_file", source))?;
+            if read == 0 {
+                return Err(PlatformError::SecurityPolicy);
+            }
+            let next = offset
+                .checked_add(u64::try_from(read).map_err(|_| PlatformError::ResourceLimit)?)
+                .filter(|next| *next <= range.end)
+                .ok_or(PlatformError::ResourceLimit)?;
+            visitor(offset, &buffer[..read])?;
+            offset = next;
+        }
+        check()?;
+        #[cfg(windows)]
+        verify_private_windows_dacl(&file)?;
+        #[cfg(target_os = "macos")]
+        verify_no_macos_extended_acl(&file)?;
+        let after = file
+            .metadata()
+            .map_err(|source| platform_io("inspect_file", source))?;
+        if validate_private_file_metadata(&after)? != identity || after.len() != expected_file_bytes
+        {
+            return Err(PlatformError::SecurityPolicy);
+        }
+        check()?;
+        Ok(selected_bytes)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (
+            parent,
+            name,
+            expected_file_bytes,
+            range,
+            selected_bytes,
+            check,
+            visitor,
+        );
+        Err(PlatformError::UnsupportedPlatform)
+    }
+}
+
 pub(crate) fn read_file_bounded(
     parent: &Directory,
     name: &PrivateName,
