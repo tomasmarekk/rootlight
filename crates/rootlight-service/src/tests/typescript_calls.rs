@@ -95,8 +95,14 @@ fn typescript_module_call_survives_merge_query_and_exact_source_read() {
 const WRITTEN_VALUE_ORIGINAL: &[u8] =
     include_bytes!("../../tests/fixtures/typescript_value_uses/annotation-tests.ts");
 
-#[test]
-fn typescript_complete_original_definitions_source_and_unknown_callable_targets_remain_exact() {
+fn typescript_complete_original_value_probe(
+    role: OccurrenceRole,
+    start: u64,
+    end: u64,
+    name: &str,
+    definition_start: u64,
+    definition_end: u64,
+) {
     assert_eq!(WRITTEN_VALUE_ORIGINAL.len(), 856);
     assert_eq!(
         WRITTEN_VALUE_ORIGINAL
@@ -205,6 +211,59 @@ fn typescript_complete_original_definitions_source_and_unknown_callable_targets_
         .unwrap();
     assert_eq!(full_read.data.chunks.len(), 1);
     assert_eq!(full_read.data.chunks[0].bytes, WRITTEN_VALUE_ORIGINAL);
+    let target = definition(name, definition_start, definition_end);
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == role
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == end
+                && site.target == (OccurrenceTarget::Resolved { symbol: target })
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "exact local {role:?} {name}@{start}..{end}");
+    let site = sites[0];
+    assert_eq!(site.source.repository(), receipt.repository);
+    assert_eq!(site.source.generation(), receipt.generation);
+    assert_eq!(
+        site.source.content_hash(),
+        content_hash(WRITTEN_VALUE_ORIGINAL)
+    );
+    assert_eq!(site.source.span().file(), file.id);
+    assert_eq!(site.evidence.source.as_ref(), Some(&site.source));
+    let read = service
+        .source_read_with_options_and_budget(
+            receipt.generation,
+            vec![site.source.clone()],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        read.data.chunks[0].bytes,
+        &WRITTEN_VALUE_ORIGINAL[usize::try_from(start).unwrap()..usize::try_from(end).unwrap()]
+    );
+}
+
+#[test]
+fn typescript_complete_original_callee_name_references_local_variable_without_callable_claim() {
+    typescript_complete_original_value_probe(
+        OccurrenceRole::Reference,
+        538,
+        555,
+        "validateTestSuite",
+        160,
+        177,
+    );
+}
+
+#[test]
+fn typescript_complete_original_argument_reads_its_block_const_binding() {
+    typescript_complete_original_value_probe(OccurrenceRole::Read, 556, 561, "suite", 490, 495);
 }
 
 #[test]
@@ -275,4 +334,300 @@ fn typescript_complete_original_native_value_use_context_is_reported() {
         "{}",
         serde_json::json!({"schema":"typescript-complete-original-native-value-context/1","bytes":856,"coverage":format!("{:?}",parsed.report().coverage().status()),"facts":rows})
     );
+}
+
+fn const_value_document(raw: &[u8]) -> rootlight_ir::NormalizedIrDocument {
+    let fixture = TempDir::new().unwrap();
+    fs::write(fixture.path().join("written.ts"), raw).unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(fixture.path(), &deadline())
+        .unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let file = document
+        .files
+        .iter()
+        .find(|file| file.language == "typescript")
+        .unwrap();
+    let full = rootlight_ir::SourceRef::new(
+        receipt.repository,
+        receipt.generation,
+        rootlight_ir::SourceSpan::new(file.id, 0, u64::try_from(raw.len()).unwrap()).unwrap(),
+        content_hash(raw),
+        None,
+    );
+    let read = service
+        .source_read_with_options_and_budget(
+            receipt.generation,
+            vec![full],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0)
+                .with_encoding(SourceEncoding::Bytes),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks.len(), 1);
+    assert_eq!(read.data.chunks[0].bytes, raw);
+    document.clone()
+}
+
+#[test]
+fn typescript_const_value_reads_keep_lexical_reference_and_no_callable_target() {
+    for source in [
+        "const value = 1; const output = consume(value);",
+        "const value = 1; if (true) { const output = consume(value); }",
+        "// const value = ignored;\nconst value = 'value'; const output = consume(value);",
+    ] {
+        let document = const_value_document(source.as_bytes());
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte()
+                        == u64::try_from(source.rfind("const value =").unwrap() + 6).unwrap()
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = definition.target else {
+            panic!("const owns its source definition")
+        };
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.id == symbol && entity.kind == EntityKind::Variable)
+        );
+        let start = u64::try_from(source.rfind("value").unwrap()).unwrap();
+        let mut ids = BTreeSet::new();
+        for role in [OccurrenceRole::Reference, OccurrenceRole::Read] {
+            let rows: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == role
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == start + 5
+                        && site.target == (OccurrenceTarget::Resolved { symbol })
+                })
+                .collect();
+            assert_eq!(rows.len(), 1, "{source} {role:?}");
+            assert!(ids.insert(rows[0].id));
+            assert_eq!(
+                rows[0].source.content_hash(),
+                content_hash(source.as_bytes())
+            );
+            assert!(document.relations.iter().any(|edge| edge.predicate
+                == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(rows[0].id)
+                && edge.object == RelationEndpoint::Entity(symbol)
+                && edge.evidence.source.as_ref() == Some(&rows[0].source)));
+        }
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Calls
+                    && edge.object == RelationEndpoint::Entity(symbol))
+        );
+    }
+}
+
+#[test]
+fn typescript_const_proof_refuses_rebinding_shadowing_and_unmodeled_value_positions() {
+    for source in [
+        "let value = 1; const output = consume(value);",
+        "var value = 1; const output = consume(value);",
+        "const value = 1; { const value = 2; const output = consume(value); }",
+        "const value = 1; value = 2; const output = consume(value);",
+        "const value = 1; value++; const output = consume(value);",
+        "const value = 1; for (value of source) {} const output = consume(value);",
+        "const value = 1; function other(value:unknown){} const output = consume(value);",
+        "const value = 1; const output = (() => value);",
+        "const value = 1; const output = receiver.consume(value);",
+        "const value = 1; const output = consume?.(value);",
+        "const value = 1; const output = consume({value});",
+        "const value = 1; const output = consume(value.member);",
+        "const value = 1; const output = consume(value[index]);",
+        "const value = 1; eval('value = 2'); const output = consume(value);",
+        r"const value = 1; const val\u0075e = 2; const output = consume(value);",
+        "const value = 1; const output = consume(value, value = 2);",
+        "const output = consume(value); const value = 1;",
+        "const value = consume(value);",
+        "{ const value = 1; } const output = consume(value);",
+        "const value = 1, other = 2; const output = consume(value);",
+        "const value: number = 1; const output = consume(value);",
+        "const value = 1; const output = consume(value;",
+    ] {
+        let document = const_value_document(source.as_bytes());
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Read
+                    && site.syntax_kind == "typescript.const_value_read.read"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn typescript_renamed_const_callee_and_argument_keep_variables_and_exact_relations() {
+    let source = "const apply = factory; const sample = payload; const report = apply(sample);";
+    let document = const_value_document(source.as_bytes());
+    for (name, role) in [
+        ("apply", OccurrenceRole::Reference),
+        ("sample", OccurrenceRole::Read),
+    ] {
+        let definition_start = u64::try_from(source.find(name).unwrap()).unwrap();
+        let use_start = u64::try_from(source.rfind(name).unwrap()).unwrap();
+        let width = u64::try_from(name.len()).unwrap();
+        let definition = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == definition_start
+                    && site.source.span().end_byte() == definition_start + width
+            })
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = definition.target else {
+            panic!("const owns its exact definition")
+        };
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(entity.kind, EntityKind::Variable);
+        assert_eq!(entity.canonical_name, name);
+        let uses: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == role
+                    && site.source.span().start_byte() == use_start
+                    && site.source.span().end_byte() == use_start + width
+                    && site.target == OccurrenceTarget::Resolved { symbol }
+            })
+            .collect();
+        assert_eq!(uses.len(), 1, "{name} {role:?}");
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(uses[0].id)
+                && edge.object == RelationEndpoint::Entity(symbol)
+                && edge.evidence.source.as_ref() == Some(&uses[0].source)
+        }));
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::Calls
+                && edge.object == RelationEndpoint::Entity(symbol)
+        }));
+    }
+}
+
+#[test]
+fn typescript_complete_original_const_uses_preserve_four_physical_encodings_and_noop() {
+    let text = std::str::from_utf8(WRITTEN_VALUE_ORIGINAL).unwrap();
+    for encoding in [0, 1, 2, 3] {
+        let (raw, bom, width) = match encoding {
+            0 => (WRITTEN_VALUE_ORIGINAL.to_vec(), 0, 1),
+            1 => (
+                [b"\xef\xbb\xbf".as_slice(), WRITTEN_VALUE_ORIGINAL].concat(),
+                3,
+                1,
+            ),
+            2 | 3 => {
+                let mut bytes = if encoding == 2 {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                };
+                for unit in text.encode_utf16() {
+                    bytes.extend(if encoding == 2 {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+                (bytes, 2, 2)
+            }
+            _ => unreachable!(),
+        };
+        let fixture = TempDir::new().unwrap();
+        fs::write(fixture.path().join("original.ts"), &raw).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let first = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let document = service
+            .loaded_generation_snapshot(first.generation)
+            .unwrap()
+            .document()
+            .clone();
+        for (start, end, definition_start, definition_end) in
+            [(538, 555, 160, 177), (556, 561, 490, 495)]
+        {
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().start_byte() == bom + width * definition_start
+                        && site.source.span().end_byte() == bom + width * definition_end
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1, "encoding {encoding}");
+            let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+                panic!("definition resolves")
+            };
+            for role in [OccurrenceRole::Reference, OccurrenceRole::Read] {
+                let rows: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == role
+                            && site.source.span().start_byte() == bom + width * start
+                            && site.source.span().end_byte() == bom + width * end
+                            && site.target == (OccurrenceTarget::Resolved { symbol })
+                    })
+                    .collect();
+                assert_eq!(rows.len(), 1, "encoding {encoding} {role:?}");
+                assert_eq!(rows[0].source.content_hash(), content_hash(&raw));
+                assert_eq!(rows[0].source.repository(), first.repository);
+                assert_eq!(rows[0].source.generation(), first.generation);
+                let read = service
+                    .source_read_with_options_and_budget(
+                        first.generation,
+                        vec![rows[0].source.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(SourceEncoding::Bytes),
+                        FirstSliceBudget::default(),
+                        &deadline(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    read.data.chunks[0].bytes,
+                    raw[usize::try_from(bom + width * start).unwrap()
+                        ..usize::try_from(bom + width * end).unwrap()]
+                );
+            }
+        }
+        let second = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(second.generation, first.generation);
+        assert_eq!(
+            service
+                .loaded_generation_snapshot(second.generation)
+                .unwrap()
+                .document(),
+            &document
+        );
+    }
 }

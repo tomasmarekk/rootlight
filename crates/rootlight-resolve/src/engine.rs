@@ -1548,6 +1548,8 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | "python.module_read.reference"
             | "python.module_binding_unavailable.reference"
             | "python.module_call_unavailable.call"
+            | "typescript.const_value.reference"
+            | "typescript.const_value_read.read"
             | "astro.template_binding_read.reference"
             | "astro.template_value_read.read"
             | "java.setter_parameter.reference"
@@ -4251,3 +4253,61 @@ mod agda_rhs_source_tests {
 
 #[cfg(test)]
 mod thinkscript_tests;
+
+#[cfg(test)]
+mod typescript_const_fence_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn unproved_const_reference_and_read_never_borrow_a_generic_spelling_target() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"value");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 5).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([4; 20]);
+        for (role, syntax) in [
+            (
+                OccurrenceRole::Reference,
+                "typescript.const_value.reference",
+            ),
+            (OccurrenceRole::Read, "typescript.const_value_read.read"),
+        ] {
+            let mut site = OccurrenceRecord {
+                id: FactId::from_bytes([5; 20]),
+                repository,
+                generation,
+                file,
+                source: source.clone(),
+                role,
+                enclosing: None,
+                target: OccurrenceTarget::Unresolved { text_hash: hash },
+                syntactic_text_hash: hash,
+                syntax_kind: syntax.to_owned(),
+                provenance: FactId::from_bytes([6; 20]),
+                confidence: Confidence::new(1000).unwrap(),
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(resolvable_occurrence(&site));
+        }
+    }
+}

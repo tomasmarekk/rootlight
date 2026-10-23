@@ -1,6 +1,8 @@
 ; Reviewed Tier C/D structural evidence for the pinned TypeScript grammar.
 ; Captures remain syntax-only and do not promote structural names to deep facts.
 
+; The required program carrier supplies only source-certified const uses.
+(program) @signature
 (program) @root @module
 
 [

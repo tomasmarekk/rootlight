@@ -1427,6 +1427,21 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("typescript.const_") {
+        return (language == "typescript"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "typescript.const_value.reference"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')))
+        .then_some(Cow::Borrowed(text));
+    }
     if label.starts_with("python.module_read") {
         return (language == "python"
             && fact.kind() == SyntaxFactKind::Occurrence
@@ -4092,6 +4107,114 @@ mod python_module_read_name_tests {
             assert!(
                 structural_captured_name_for_fact("python", &fact(kind, label), "total", 5)
                     .is_none()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod typescript_const_name_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn const_reference_names_have_closed_label_role_language_and_raw_identifier_guards() {
+        for (language, role, label, name, maximum, admitted) in [
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value.reference",
+                "$value2",
+                32,
+                true,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value.reference",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Signature,
+                "typescript.const_value.reference",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_other.reference",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value_read.read",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value.reference",
+                "value",
+                4,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value.reference",
+                "",
+                32,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value.reference",
+                "value.member",
+                32,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value.reference",
+                "value\0",
+                32,
+                false,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "typescript.const_value.reference",
+                "val\\u0075e",
+                32,
+                false,
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                role,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 7).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact(language, &fact, name, maximum).is_some(),
+                admitted,
+                "{language} {label} {name:?}"
             );
         }
     }

@@ -68,6 +68,7 @@ pub(crate) enum RefusalOrigin {
     SchemeCaptures,
     SmlCaptures,
     TypescriptCalls,
+    TypescriptConst,
     VCaptures,
     VhdlCaptures,
     WatCaptures,
@@ -140,6 +141,7 @@ impl RefusalOrigin {
             Self::SchemeCaptures => "query-identity-scheme-captures-limit",
             Self::SmlCaptures => "query-identity-sml-captures-limit",
             Self::TypescriptCalls => "query-identity-typescript-calls-limit",
+            Self::TypescriptConst => "query-identity-typescript-const-value-limit",
             Self::VCaptures => "query-identity-v-captures-limit",
             Self::VhdlCaptures => "query-identity-vhdl-captures-limit",
             Self::WatCaptures => "query-identity-wat-captures-limit",
@@ -210,6 +212,7 @@ impl RefusalOrigin {
                 | "query-identity-scheme-captures-limit"
                 | "query-identity-sml-captures-limit"
                 | "query-identity-typescript-calls-limit"
+                | "query-identity-typescript-const-value-limit"
                 | "query-identity-v-captures-limit"
                 | "query-identity-vhdl-captures-limit"
                 | "query-identity-wat-captures-limit"

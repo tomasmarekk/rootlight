@@ -24,6 +24,14 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         grammar.as_bytes(),
     ])
     .unwrap();
+    let predecessor_const_parser = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        b"rootlight.first-slice.treesitter-structural/330",
+        grammar.as_bytes(),
+    ])
+    .unwrap();
     let current = InputSnapshot::new(
         [
             InputFingerprint::new(
@@ -92,6 +100,16 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
     );
 
     for (changed_key, predecessor, expected) in [
+        (
+            adapter_key,
+            predecessor_const_parser,
+            ArtifactDecisionKind::Rebuild,
+        ),
+        (
+            InputKey::ResolverVersion,
+            content_hash(b"rootlight.first-slice.resolve/141"),
+            ArtifactDecisionKind::Reuse,
+        ),
         (
             adapter_key,
             predecessor_parser,
@@ -865,7 +883,7 @@ fn go_function_value_references_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/329"
+        b"rootlight.first-slice.treesitter-structural/331"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -883,7 +901,7 @@ fn complete_native_query_captures_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/329"
+        b"rootlight.first-slice.treesitter-structural/331"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -915,7 +933,30 @@ fn written_native_semantics_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/329"
+        b"rootlight.first-slice.treesitter-structural/331"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
+}
+
+#[test]
+fn typescript_const_proofs_invalidate_preceding_parser_and_resolver_identity() {
+    let grammar = first_slice_grammar_revision_hash().unwrap();
+    let previous = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        b"rootlight.first-slice.treesitter-structural/330",
+        grammar.as_bytes(),
+    ])
+    .unwrap();
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/331"
+    );
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/142");
+    assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
+    assert_ne!(
+        content_hash(RESOLVER_BINARY_SEED),
+        content_hash(b"rootlight.first-slice.resolve/141")
+    );
 }

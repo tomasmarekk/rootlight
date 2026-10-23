@@ -115,6 +115,7 @@ mod sql;
 mod sql_admission;
 mod thrift;
 mod typescript_calls;
+mod typescript_const;
 mod v;
 pub(super) mod vba;
 mod vba_calls;
@@ -1004,6 +1005,10 @@ impl QueryPack {
                             candidate.syntax,
                             "sed.written_branch" | "sed.unproved_branch"
                         ))
+                    || (family == GrammarFamily::TypeScript
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "typescript.const_value")
                     || (family == GrammarFamily::Python
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1370,6 +1375,12 @@ impl QueryPack {
         let mut clojure_captures =
             clojure::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut racket_captures = racket::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut typescript_const = typescript_const::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
         let mut typescript_calls =
             typescript_calls::CaptureCache::new(input.source, limits.body_nodes);
         let mut c_calls = c_calls::CaptureCache::new(input.source, limits.body_nodes);
@@ -2810,6 +2821,22 @@ impl QueryPack {
                 {
                     continue;
                 }
+                if input.family == GrammarFamily::TypeScript
+                    && role == StructuralRole::Signature
+                    && capture.node.kind() == "program"
+                {
+                    for candidate in
+                        typescript_const.candidates(capture.node, role, input.cancellation)?
+                    {
+                        retain(candidate)?;
+                    }
+                    if typescript_const.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::TypescriptConst));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    continue;
+                }
                 let candidate = if input.family == GrammarFamily::Protobuf {
                     protobuf::candidate(capture.node, role, input.source, input.cancellation)
                 } else if input.family == GrammarFamily::Thrift {
@@ -3211,6 +3238,19 @@ impl QueryPack {
                     }
                     if bash_reads.exhausted() {
                         refusal = Some(IdentityRefusal::helper(RefusalOrigin::BashReads));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                }
+                if input.family == GrammarFamily::TypeScript {
+                    typescript_const.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if typescript_const.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::TypescriptConst));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }

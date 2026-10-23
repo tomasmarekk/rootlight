@@ -94,6 +94,7 @@ mod thinkscript;
 mod thrift;
 mod toml;
 mod typescript_calls;
+mod typescript_const;
 mod v;
 mod vhdl;
 mod wolfram;
@@ -927,6 +928,7 @@ fn required_syntax_fact_count_from_output(
             || go_call_formals::certified_reference(fact)
             || ocaml_bindings::required(fact)
             || astro_reads::required(fact)
+            || typescript_const::required(fact)
             || (nix_formal_reads::reference(fact)
                 && nix_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte())))
             || less::required(fact)
@@ -1573,6 +1575,20 @@ fn preflight_lowering_limits(
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
                 account_string(&mut string_bytes, nix_formal_reads::READ.len(), limits)?;
             }
+            if request.language().as_str() == "typescript"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && typescript_const::required(fact)
+            {
+                // Preserve the Reference and its relation beside a distinct Read facet.
+                occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                account_string(
+                    &mut string_bytes,
+                    "typescript.const_value_read.read".len(),
+                    limits,
+                )?;
+            }
             if request.language().as_str() == "astro"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -1725,6 +1741,10 @@ fn preflight_lowering_limits(
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && (go_call_formals::certified_reference(fact)
                             || go_calls::package_candidate(fact)))
+                    || (request.language().as_str() == "typescript"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && typescript_const::required(fact))
                     || (request.language().as_str() == "astro"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -2910,6 +2930,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 &materialized,
                 &facts_by_id,
                 self.full_source,
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let typescript_const = if self.request.language().as_str() == "typescript"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(typescript_const::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
                 |span| self.coordinates.physical(span),
                 cancellation,
             )?)
@@ -4510,6 +4545,30 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("agda-rhs-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &typescript_const
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("typescript-const-reference-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                    let mut read = occurrence.clone();
+                    read.role = OccurrenceRole::Read;
+                    read.syntax_kind.clear();
+                    read.syntax_kind
+                        .push_str("typescript.const_value_read.read");
+                    read.id = derive_occurrence_record_id(&read)
+                        .map_err(|_| provider_failure("typescript-const-read-identity"))?;
+                    let relation = lexical_reference_relation(&read, symbol)?;
+                    relations.insert(relation.id, relation);
+                    occurrences.insert(read.id, read);
                 }
                 if let Some(reads) = &astro_reads
                     && let Some(symbol) = reads.resolve(
@@ -10150,6 +10209,14 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
             "c-formal-proof-is-limited-to-direct-arguments-in-a-single-clean-call-statement",
         ));
     }
+    if fact.kind() == SyntaxFactKind::Signature
+        && fact.syntax_kind().as_str() == "typescript.const_clean_file.signature"
+    {
+        return Some((
+            FactDomain::Relations,
+            "typescript-const-proof-is-limited-to-unique-local-bindings-in-ordinary-call-initializers-not-runtime-values-or-calls",
+        ));
+    }
     if php_this_calls::metadata(fact) {
         return Some((
             FactDomain::Relations,
@@ -11264,6 +11331,14 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    if fact.syntax_kind().as_str().starts_with("typescript.const_") {
+        return rootlight_adapter_sdk::structural_captured_name_for_fact(
+            language,
+            fact,
+            text,
+            maximum_name_bytes,
+        );
+    }
     if fact.syntax_kind().as_str().starts_with("typescript.jsx_")
         || fact.syntax_kind().as_str().starts_with("javascript.jsx_")
     {
@@ -12431,7 +12506,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
     if fact.syntax_kind().as_str().starts_with("qsharp.") {
         return qsharp::signature(fact);
     }
-    if sed::metadata(fact) || idris::metadata(fact) {
+    if sed::metadata(fact) || idris::metadata(fact) || typescript_const::metadata(fact) {
         return false;
     }
     if python_variables::metadata(fact)
@@ -13187,6 +13262,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
         )
     {
         return Some("ring-native-formal-binding-unavailable");
+    }
+    if typescript_const::required(fact) {
+        return Some("typescript-native-const-value-binding-unavailable");
     }
     if python_module_reads::required(fact) {
         return Some("python-native-module-rhs-binding-unavailable");
