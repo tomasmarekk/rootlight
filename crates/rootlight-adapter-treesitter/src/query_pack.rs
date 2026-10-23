@@ -67,6 +67,7 @@ mod hlsl;
 pub(crate) mod identity_refusal;
 #[cfg(test)]
 mod identity_refusal_tests;
+mod nix_formal_reads;
 mod php_this_calls;
 pub use identity_refusal::NativeIdentityRefusalDetails;
 use identity_refusal::{IdentityRefusal, RefusalOrigin};
@@ -765,6 +766,16 @@ impl QueryPack {
             .map(|name| StructuralRole::from_capture_name(name).ok_or(family))
             .collect::<Result<Vec<_>, _>>()?;
         for pattern in 0..identity_query.pattern_count() {
+            // Nix certifies only some variable uses. Both scans visit references;
+            // identity retention admits only the ones paired with native targets.
+            let has_nix_reference = family == GrammarFamily::Nix
+                && identity_query
+                    .capture_quantifiers(pattern)
+                    .iter()
+                    .zip(&roles_by_capture)
+                    .any(|(quantifier, role)| {
+                        *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Reference
+                    });
             let has_identity_capture = identity_query
                 .capture_quantifiers(pattern)
                 .iter()
@@ -779,7 +790,7 @@ impl QueryPack {
                 });
             if has_identity_capture {
                 optional_query.disable_pattern(pattern);
-            } else {
+            } else if !has_nix_reference {
                 identity_query.disable_pattern(pattern);
             }
         }
@@ -975,6 +986,10 @@ impl QueryPack {
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "lean.formal_body")
                     || candidate.role.belongs_to_identity_closure()
+                    || (family == GrammarFamily::Nix
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "nix.identifier")
                     || (family == GrammarFamily::Idris
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1266,6 +1281,12 @@ impl QueryPack {
             limits.captures.min(limits.body_nodes),
             matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
+        let mut nix_formal_reads = nix_formal_reads::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
         );
         let mut cpp_const_formals = cpp_const_formals::CaptureCache::new(
             input.source,
@@ -2944,6 +2965,26 @@ impl QueryPack {
                     break 'query;
                 }
                 let mut candidate = candidate;
+                if input.family == GrammarFamily::Nix {
+                    let keep = nix_formal_reads.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if nix_formal_reads.exhausted() {
+                        refusal = Some(IdentityRefusal::checked_helper(
+                            RefusalOrigin::NixFormalReads,
+                            nix_formal_reads.initial_work(),
+                            nix_formal_reads.remaining_work(),
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if !keep {
+                        continue;
+                    }
+                }
                 canonicalize_file_root_preamble(
                     &mut candidate,
                     capture.node,

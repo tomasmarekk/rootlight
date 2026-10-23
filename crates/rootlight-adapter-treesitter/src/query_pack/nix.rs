@@ -248,6 +248,9 @@ pub(super) fn expression_node<'tree>(
 }
 
 pub(super) fn signature_range(node: Node<'_>) -> Option<std::ops::Range<usize>> {
+    if matches!(node.kind(), "source_code" | "variable_expression") {
+        return Some(node.byte_range());
+    }
     let function = if node.kind() == "binding" {
         function_value(node)?
     } else {

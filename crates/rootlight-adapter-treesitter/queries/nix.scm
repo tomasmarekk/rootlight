@@ -1,6 +1,7 @@
 ; Nix authored bindings and source expressions, never evaluated package attributes.
 ; Native selectors preserve quoted paths and separate parameters from ordinary reads.
 (source_code) @root @module
+(source_code) @signature
 (binding) @declaration @definition @signature
 (binding expression: (_) @expression)
 (binding attrpath: (attrpath attr: (_) @definition_part))
@@ -16,6 +17,7 @@
 (apply_expression) @call
 (apply_expression function: (variable_expression) @call_name)
 (variable_expression) @reference
+(variable_expression) @signature
 (select_expression) @scope
 (select_expression expression: (_) @expression)
 (select_expression attrpath: (attrpath attr: (_) @reference))

@@ -63,6 +63,7 @@ mod modelica;
 mod mojo;
 mod mojo_members;
 mod nim;
+mod nix_formal_reads;
 mod nix_paths;
 mod ocaml_bindings;
 mod perl;
@@ -777,6 +778,7 @@ fn required_syntax_fact_count_from_output(
     let mut declarations = Vec::new();
     let mut haxe_read_ends = HashMap::new();
     let mut flux_read_ends = HashMap::new();
+    let nix_read_ends = nix_formal_reads::read_ends(facts, cancellation)?;
     let mut coq_notation_ends = HashMap::new();
     let mut ring_read_ends = HashMap::new();
     let mut fsharp_implementation_ranges = Vec::new();
@@ -925,6 +927,8 @@ fn required_syntax_fact_count_from_output(
             || go_call_formals::certified_reference(fact)
             || ocaml_bindings::required(fact)
             || astro_reads::required(fact)
+            || (nix_formal_reads::reference(fact)
+                && nix_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte())))
             || less::required(fact)
             || prolog_calls::required(fact)
             || is_patch_documentary_fact(fact)
@@ -1310,6 +1314,11 @@ fn preflight_lowering_limits(
     } else {
         HashMap::new()
     };
+    let nix_read_ends = if request.language().as_str() == "nix" {
+        nix_formal_reads::read_ends(parse_output.facts(), cancellation)?
+    } else {
+        HashMap::new()
+    };
     let coq_notation_ends = if request.language().as_str() == "coq" {
         coq::notation_ends(parse_output.facts(), cancellation)?
     } else {
@@ -1554,6 +1563,16 @@ fn preflight_lowering_limits(
         if occurrence_role(fact).is_some() {
             occurrence_candidates = checked_add(occurrence_candidates, 1)?;
             account_string(&mut string_bytes, fact.syntax_kind().as_str().len(), limits)?;
+            if request.language().as_str() == "nix"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() == CoverageStatus::Complete
+                && nix_formal_reads::reference(fact)
+                && nix_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte()))
+            {
+                occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                account_string(&mut string_bytes, nix_formal_reads::READ.len(), limits)?;
+            }
             if request.language().as_str() == "astro"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3593,6 +3612,25 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let nix_reads = if self.request.language().as_str() == "nix"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+        {
+            Some(nix_formal_reads::ReadTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+
         let perl_bindings = if self.parse_output.report().coverage().status()
             == CoverageStatus::Complete
             && self
@@ -5373,6 +5411,25 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
+                    if let Some(reads) = &nix_reads
+                        && reads.permits(
+                            fact,
+                            self.coordinates.physical(fact.span())?,
+                            &occurrence,
+                            symbol,
+                            cancellation,
+                        )?
+                    {
+                        let mut read = occurrence.clone();
+                        read.role = OccurrenceRole::Read;
+                        read.syntax_kind.clear();
+                        read.syntax_kind.push_str(nix_formal_reads::READ);
+                        read.id = derive_occurrence_record_id(&read)
+                            .map_err(|_| provider_failure("nix-formal-read-identity"))?;
+                        let relation = lexical_reference_relation(&read, symbol)?;
+                        relations.insert(relation.id, relation);
+                        occurrences.insert(read.id, read);
+                    }
                 }
                 if let Some(bindings) = &perl_bindings
                     && let Some(symbol) = bindings.resolve(fact, text, cancellation)?
@@ -12405,6 +12462,8 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
             | "c.formal_binding_context.signature"
             | "c.variable_file_context.signature"
             | "c.variable_target.signature"
+            | "nix.formal_clean_file.signature"
+            | "nix.formal_read_target.signature"
     ) {
         return false;
     }

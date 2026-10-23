@@ -1278,6 +1278,297 @@ fn nix_complete_original_retains_outer_formal_reference_through_anonymous_captur
 }
 
 #[test]
+fn nix_complete_original_exposes_captured_formal_read_beside_its_reference() {
+    captured_original(OccurrenceRole::Read);
+}
+
+#[test]
+fn nix_formal_reads_keep_renamed_capture_and_exclude_shadowing_variable_or_dynamic_name() {
+    for (source, parameter) in [
+        ("{ renamed }: (inner: renamed)", true),
+        ("{ renamed }: let renamed = 1; in renamed", false),
+        ("with unknown; missing", false),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        let name = if parameter || source.contains("renamed") {
+            "renamed"
+        } else {
+            "missing"
+        };
+        let start = source.rfind(name).unwrap();
+        let reads: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Read
+                    && site.source.span().start_byte() == start as u64
+                    && site.source.span().end_byte() == (start + name.len()) as u64
+            })
+            .collect();
+        assert_eq!(reads.len(), usize::from(parameter), "{source}");
+        if parameter {
+            let OccurrenceTarget::Resolved { symbol } = reads[0].target else {
+                panic!("read resolves")
+            };
+            assert!(
+                document
+                    .entities
+                    .iter()
+                    .any(|entity| entity.id == symbol && entity.kind == EntityKind::Parameter)
+            );
+            assert_eq!(reads[0].syntax_kind, "nix.formal_read.read");
+        }
+    }
+}
+
+#[test]
+fn nix_formal_read_facets_require_value_use_and_the_actual_lexical_parameter() {
+    for (source, expected) in [
+        ("renamed: (inner: renamed)", true),
+        ("{ renamed }: with unknown; renamed", true),
+        ("{ renamed }: \"${renamed}\"", true),
+        ("{ renamed }: ''${renamed}''", true),
+        ("{ renamed }: rec { renamed = 1; result = renamed; }", false),
+        (
+            "{ renamed }: rec { ${unknown} = 1; result = renamed; }",
+            true,
+        ),
+        ("{ renamed }: let renamed.${unknown} = 1; in renamed", false),
+        (
+            "{ renamed }: rec { __overrides = unknown; result = renamed; }",
+            false,
+        ),
+        ("{ renamed }: object.renamed", false),
+        ("renamed: renamed 1", false),
+        ("renamed: (renamed) 1", false),
+        ("{ renamed, renamed }: renamed", false),
+        ("{ renamed }: renamed +", false),
+        ("renamed: \"renamed\"", false),
+        ("renamed: 1 # renamed", false),
+    ] {
+        let result = output(source);
+        let start = u64::try_from(source.rfind("renamed").unwrap()).unwrap();
+        let reads = result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Read && site.source.span().start_byte() == start
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), usize::from(expected), "{source}");
+        if let Some(read) = reads.first() {
+            assert_eq!(read.syntax_kind, "nix.formal_read.read");
+            assert!(result.document().occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.syntax_kind == "nix.identifier.reference"
+                    && site.source == read.source
+                    && site.target == read.target
+                    && site.id != read.id
+            }));
+        }
+    }
+}
+
+#[test]
+fn nix_formal_required_fact_accounting_preserves_the_native_certificate_pair() {
+    let native = Arc::new(provider());
+    let frontend = analyzer(&native, NIX);
+    let fixture = Fixture::new(NIX, b"value: (inner: value)");
+    let budget = limits();
+    let input = request(&fixture.snapshot, &fixture.source, NIX, &budget);
+    let (_, artifact) = frontend
+        .analyze_and_capture(
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let required = artifact.required_syntax_fact_count(&deadline()).unwrap();
+    assert_eq!(
+        required,
+        native
+            .required_syntax_fact_count(&input.to_parse_request(), &deadline())
+            .unwrap()
+    );
+    let exact = limits_with_syntax_records(required);
+    let exact_input = request(&fixture.snapshot, &fixture.source, NIX, &exact);
+    let (_, exact_artifact) = frontend
+        .analyze_and_capture(
+            &exact_input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        exact_artifact
+            .required_syntax_fact_count(&deadline())
+            .unwrap(),
+        required
+    );
+    let too_small = limits_with_syntax_records(required - 1);
+    let rejected = frontend.analyze_and_capture(
+        &request(&fixture.snapshot, &fixture.source, NIX, &too_small),
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    );
+    assert!(
+        matches!(rejected, Err(AdapterError::Sink(SinkError::StreamLimit {
+        resource: ResourceKind::RequiredSyntaxFacts, observed, limit,
+    })) if observed == required && limit == required - 1)
+    );
+    assert_nix_artifact_replay("value: (inner: value)");
+}
+
+#[test]
+fn nix_formal_read_selects_the_nearest_same_named_parameter() {
+    let source = "{ renamed }: ({ renamed }: renamed)";
+    let result = output(source);
+    let document = result.document();
+    let definition_start = u64::try_from(source.rfind("{ renamed").unwrap() + 2).unwrap();
+    let definition = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.source.span().start_byte() == definition_start
+        })
+        .unwrap();
+    let read_start = u64::try_from(source.rfind("renamed").unwrap()).unwrap();
+    let read = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Read && site.source.span().start_byte() == read_start
+        })
+        .unwrap();
+    assert_eq!(read.target, definition.target);
+    assert_nix_artifact_replay(source);
+}
+
+#[test]
+fn nix_formal_clean_envelope_preserves_actual_native_file_ancestry() {
+    let native = provider();
+    let budget = limits();
+    for source in [
+        "value: (inner: value)",
+        "{ renamed }: (inner: renamed)",
+        "{ renamed }: ({ renamed }: renamed)",
+    ] {
+        let fixture = Fixture::new(NIX, source.as_bytes());
+        let input = request(&fixture.snapshot, &fixture.source, NIX, &budget);
+        let parsed = rootlight_adapter_sdk::execute_parse(
+            &native,
+            &input.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+        let clean = parsed
+            .facts()
+            .iter()
+            .find(|fact| fact.syntax_kind().as_str() == "nix.formal_clean_file.signature")
+            .unwrap();
+        assert_eq!(clean.span(), fixture.source.span());
+        let mut parent = clean.parent();
+        for _ in 0..parsed.facts().len() {
+            let Some(id) = parent else { break };
+            let fact = parsed
+                .facts()
+                .iter()
+                .find(|fact| fact.local_id() == id)
+                .unwrap();
+            println!(
+                "nix clean envelope source={source:?} parent={} kind={:?} label={} span={:?}",
+                fact.local_id(),
+                fact.kind(),
+                fact.syntax_kind().as_str(),
+                fact.span()
+            );
+            assert_eq!(fact.span(), clean.span());
+            parent = fact.parent();
+        }
+        assert_eq!(parent, None);
+    }
+}
+
+#[test]
+fn nix_formal_dual_facets_obey_occurrence_relation_and_total_record_limits() {
+    let native = Arc::new(provider());
+    let frontend = analyzer(&native, NIX);
+    let fixture = Fixture::new(NIX, b"value: (inner: value)");
+    let base = limits();
+    let run = |ir| {
+        let budget = AnalysisLimits::new(
+            base.max_source_bytes(),
+            base.max_syntax_nodes(),
+            base.max_syntax_depth(),
+            base.max_embedded_ranges(),
+            base.max_reported_memory_bytes(),
+            base.syntax_stream().clone(),
+            base.ir_stream().clone(),
+            ir,
+        )
+        .unwrap();
+        execute_analysis(
+            &frontend,
+            &request(&fixture.snapshot, &fixture.source, NIX, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+    };
+    let baseline = run(IrLimits::default()).unwrap();
+    assert_eq!(
+        baseline
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Read)
+            .count(),
+        1
+    );
+    for dimension in 0..3 {
+        let make = |bound| {
+            let mut ir = IrLimits::default();
+            match dimension {
+                0 => ir.max_occurrences = bound,
+                1 => ir.max_relations = bound,
+                _ => ir.max_total_records = bound,
+            }
+            ir
+        };
+        let mut low = 0;
+        let mut high = 4096;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match run(make(middle)) {
+                Ok(result) => {
+                    assert_eq!(result.document(), baseline.document());
+                    high = middle;
+                }
+                Err(AdapterError::Sink(SinkError::StreamLimit {
+                    resource: ResourceKind::Records,
+                    ..
+                })) => low = middle + 1,
+                Err(error) => panic!("unexpected capacity result: {error:?}"),
+            }
+        }
+        assert!(low > 0);
+        assert_eq!(run(make(low)).unwrap().document(), baseline.document());
+        assert!(
+            matches!(run(make(low - 1)), Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records, observed, limit,
+        })) if observed > limit && limit == low - 1)
+        );
+    }
+}
+
+#[test]
 fn nix_complete_original_native_capture_ancestry_is_reported() {
     let native = provider();
     let fixture = Fixture::new(NIX, CAPTURED_FORMAL_ORIGINAL);
@@ -1291,6 +1582,16 @@ fn nix_complete_original_native_capture_ancestry_is_reported() {
     )
     .unwrap();
     let mut selected = std::collections::BTreeSet::new();
+    for fact in parsed.facts().iter().filter(|fact| {
+        matches!(
+            fact.syntax_kind().as_str(),
+            "nix.formal_clean_file.signature"
+                | "nix.formal_read_target.signature"
+                | "nix.function_header.signature"
+        )
+    }) {
+        selected.insert(fact.local_id());
+    }
     for (start, end) in [(194, 201), (317, 324)] {
         let facts: Vec<_> = parsed
             .facts()
