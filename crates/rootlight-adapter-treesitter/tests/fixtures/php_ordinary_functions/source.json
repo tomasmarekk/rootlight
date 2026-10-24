@@ -1,0 +1,21 @@
+{
+  "repository": "https://github.com/cahyadsn/wilayah",
+  "revision": "0801aecad01dc5e28dffcd3b2a22105f8884b9a2",
+  "path": "apps/inc/geo_helpers.php",
+  "git_blob": "c25c16d24bb64d0383fbd610a65f6a7b0f0774e6",
+  "checkout_correspondence": "verified_git_lf_to_physical_crlf_checkout",
+  "physical_bytes": 875,
+  "sha256": "53438be31ce144b3f782d79ce6096acf090916bbf7867f6f20f65e45c499dd5d",
+  "crlf": 23,
+  "lf": 23,
+  "license": {
+    "path": "LICENSE",
+    "physical_bytes": 1092,
+    "sha256": "e869c6776b57cea89a55c7d485b16ec1e063d74ab1d9d1a6d54deb499ebd2269",
+    "git_blob": "c812985f6f0a93d60e6d8bd2918acaeda4feb6e9",
+    "crlf": 21,
+    "lf": 21,
+    "checkout_correspondence": "verified_git_lf_to_physical_crlf_checkout"
+  },
+  "scope": "Complete original source and complete upstream license, without newline conversion; diagnostic evidence is not whole-language qualification."
+}

@@ -2940,7 +2940,8 @@ fn remove_shadowed_candidates(
     // are redundant. Nix inherit instead both defines an attribute and reads an
     // outer binding or a source-set field. Perl's written package name also
     // carries unresolved package-context evidence; these roles must survive
-    // independently with the same span.
+    // independently with the same span. A PHP formal's prior variable Reference
+    // likewise remains distinct from its newly admitted written Definition.
     cancellation.check()?;
     let mut group_start = 0usize;
     let mut write = 0usize;
@@ -2974,7 +2975,10 @@ fn remove_shadowed_candidates(
                 && candidate.role == StructuralRole::Reference
                 && !matches!(
                     candidate.syntax,
-                    "nix.inherited_name" | "nix.inherited_attribute" | "perl.package_context"
+                    "nix.inherited_name"
+                        | "nix.inherited_attribute"
+                        | "perl.package_context"
+                        | "php.ordinary_unproved_variable"
                 )
                 || has_documentation && candidate.role == StructuralRole::Comment)
             {

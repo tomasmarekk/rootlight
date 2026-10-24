@@ -71,6 +71,7 @@ pub(crate) mod identity_refusal;
 #[cfg(test)]
 mod identity_refusal_tests;
 mod nix_formal_reads;
+mod php_ordinary;
 mod php_this_calls;
 pub use identity_refusal::NativeIdentityRefusalDetails;
 use identity_refusal::{IdentityRefusal, RefusalOrigin};
@@ -779,6 +780,7 @@ impl QueryPack {
                     | GrammarFamily::Eiffel
                     | GrammarFamily::Cpp
                     | GrammarFamily::Cuda
+                    | GrammarFamily::Php
             ) && identity_query
                 .capture_quantifiers(pattern)
                 .iter()
@@ -786,16 +788,17 @@ impl QueryPack {
                 .any(|(quantifier, role)| {
                     *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Reference
                 });
-            // A certified guarded use retains its existing native Call separately
+            // A source-certified use retains its existing native Call separately
             // from the companion Reference, including at the exact fact floor.
-            let has_source_certified_call = family == GrammarFamily::Python
-                && identity_query
-                    .capture_quantifiers(pattern)
-                    .iter()
-                    .zip(&roles_by_capture)
-                    .any(|(quantifier, role)| {
-                        *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Call
-                    });
+            let has_source_certified_call =
+                matches!(family, GrammarFamily::Python | GrammarFamily::Php)
+                    && identity_query
+                        .capture_quantifiers(pattern)
+                        .iter()
+                        .zip(&roles_by_capture)
+                        .any(|(quantifier, role)| {
+                            *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Call
+                        });
             let has_identity_capture = identity_query
                 .capture_quantifiers(pattern)
                 .iter()
@@ -1082,8 +1085,14 @@ impl QueryPack {
                         ))
                     || (family == GrammarFamily::Php
                         && candidate.required
-                        && candidate.role == StructuralRole::Reference
-                        && candidate.syntax == "php.this_method")
+                        && matches!(
+                            candidate.role,
+                            StructuralRole::Reference | StructuralRole::Call
+                        )
+                        && matches!(
+                            candidate.syntax,
+                            "php.this_method" | "php.ordinary_formal" | "php.name" | "php.call"
+                        ))
                     || (family == GrammarFamily::Go
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1182,6 +1191,7 @@ impl QueryPack {
                         || (family == GrammarFamily::Bash
                             && candidate.required
                             && candidate.syntax == "bash.direct_wrapper_body")
+                        || (family == GrammarFamily::Php && candidate.required)
                         || matches!(
                             family,
                             GrammarFamily::Json
@@ -1327,6 +1337,13 @@ impl QueryPack {
             limits.captures.min(limits.body_nodes),
             matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
+        let mut php_ordinary = php_ordinary::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input
+                && matches!(input.tree.included_ranges().as_slice(), [range]
+                if range.end_byte > input.source.len()),
         );
         let mut php_this_calls = php_this_calls::CaptureCache::new(
             input.source,
@@ -3286,6 +3303,21 @@ impl QueryPack {
                     if keep == Some(false) {
                         continue;
                     }
+                    let keep = php_ordinary.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if php_ordinary.exhausted() {
+                        refusal =
+                            Some(IdentityRefusal::helper(RefusalOrigin::PhpOrdinaryFunctions));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if keep == Some(false) {
+                        continue;
+                    }
                 }
                 if input.family == GrammarFamily::Go {
                     let keep = match go_calls.refine(
@@ -5237,6 +5269,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Php, "trait_declaration") => Some("php.trait"),
         (GrammarFamily::Php, "enum_declaration") => Some("php.enum"),
         (GrammarFamily::Php, "function_definition") => Some("php.function"),
+        (GrammarFamily::Php, "function_call_expression") => Some("php.function_call"),
         (GrammarFamily::Php, "method_declaration") => Some("php.method"),
         (GrammarFamily::Php, "property_declaration") => Some("php.property"),
         (GrammarFamily::Php, "const_declaration") => Some("php.constant"),

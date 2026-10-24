@@ -1,7 +1,7 @@
-//! Parser-independent syntax-fact lowering into normalized IR.
+//! Lower syntax facts into normalized IR with bounded current-source certificates.
 //!
-//! The analyzer injects a `ParseProvider` and never observes native Tree-sitter
-//! types, so extraction can evolve independently from stable IR construction.
+//! Portable facts retain their common contract. Selected lexical proofs reconstruct
+//! native syntax independently before admitting new source bindings.
 
 mod ada;
 mod agda;
@@ -70,6 +70,7 @@ mod nix_formal_reads;
 mod nix_paths;
 mod ocaml_bindings;
 mod perl;
+mod php_ordinary;
 mod php_this_calls;
 mod pony;
 mod powershell_formals;
@@ -120,10 +121,11 @@ use rootlight_adapter_sdk::{
     ParseProvider, ProducerDescriptor, RequestError, ResourceKind, ResourceUsage,
     RustBindingLookup, RustBindings, SinkError, StreamEnd, StreamUsage, SyntaxFact, SyntaxFactKind,
     derive_structural_occurrence_identity as source_occurrence_identity, execute_analysis,
-    execute_parse, structural_entity_classification_gap, structural_entity_kind,
-    structural_entity_kind_from_source, structural_preprocessor_context_gaps,
-    structural_signature_is_preprocessor_context, structural_syntax_fact_order,
-    structural_type_member_kind,
+    execute_parse, structural_entity_classification_gap,
+    structural_entity_kind as portable_entity_kind,
+    structural_entity_kind_from_source as portable_entity_kind_from_source,
+    structural_preprocessor_context_gaps, structural_signature_is_preprocessor_context,
+    structural_syntax_fact_order, structural_type_member_kind,
 };
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{
@@ -789,6 +791,7 @@ fn required_syntax_fact_count_from_output(
     let nix_read_ends = nix_formal_reads::read_ends(facts, cancellation)?;
     let eiffel_read_ends = eiffel_formal_reads::read_ends(facts, cancellation)?;
     let cuda_ends = cuda::ends(facts, cuda_accounting_work, cancellation)?;
+    let php_requirements = php_ordinary::Requirements::new(facts, cancellation)?;
     let mut coq_notation_ends = HashMap::new();
     let mut ring_read_ends = HashMap::new();
     let mut fsharp_implementation_ranges = Vec::new();
@@ -945,6 +948,7 @@ fn required_syntax_fact_count_from_output(
             || bash_calls::required(fact)
             || go_calls::package_candidate(fact)
             || php_this_calls::required(fact)
+            || php_requirements.required(fact)
             || go_call_formals::certified_reference(fact)
             || ocaml_bindings::required(fact)
             || astro_reads::required(fact)
@@ -1347,6 +1351,7 @@ fn preflight_lowering_limits(
     } else {
         HashMap::new()
     };
+    let php_requirements = php_ordinary::Requirements::new(parse_output.facts(), cancellation)?;
     let nix_read_ends = if request.language().as_str() == "nix" {
         nix_formal_reads::read_ends(parse_output.facts(), cancellation)?
     } else {
@@ -1640,6 +1645,23 @@ fn preflight_lowering_limits(
                     field_relation_derivations = checked_add(field_relation_derivations, 3)?;
                 }
             }
+            if request.language().as_str() == "php"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && php_requirements.call_name(fact)
+            {
+                occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                skipped_candidates = checked_add(skipped_candidates, 1)?;
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+                account_string(&mut string_bytes, php_ordinary::CALL.len(), limits)?;
+                account_string(&mut string_bytes, php_ordinary::GAP.len(), limits)?;
+            }
             if request.language().as_str() == "nix"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() == CoverageStatus::Complete
@@ -1663,6 +1685,13 @@ fn preflight_lowering_limits(
                     "typescript.const_value_read.read".len(),
                     limits,
                 )?;
+            }
+            if request.language().as_str() == "php"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && fact.syntax_kind().as_str() == "php.ordinary_formal.reference"
+            {
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
             }
             if request.language().as_str() == "astro"
                 && request.included_ranges().is_empty()
@@ -3567,6 +3596,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let php_ordinary = if self.request.language().as_str() == "php" {
+            Some(entity_plan.php_ordinary.targets(
+                &materialized,
+                &file,
+                self.full_source,
+                provenance_id,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let go_calls = if self.request.language().as_str() == "go"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -5171,6 +5211,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation =
                         glsl_bindings::relation(&occurrence, owner, symbol, cancellation)?;
                     relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &php_ordinary {
+                    if let Some(symbol) = bindings.formal(fact, &occurrence, text, cancellation)? {
+                        occurrence.target = OccurrenceTarget::Resolved { symbol };
+                        occurrence.id = derive_occurrence_record_id(&occurrence)
+                            .map_err(|_| provider_failure("php-ordinary-formal-identity"))?;
+                        let relation = lexical_reference_relation(&occurrence, symbol)?;
+                        relations.insert(relation.id, relation);
+                    }
+                    if let Some((call, edge)) =
+                        bindings.call(fact, &occurrence, text, cancellation)?
+                    {
+                        let gap = self.skipped_region(
+                            fact.span(),
+                            FactDomain::Relations,
+                            SkippedRegionReason::UnsupportedConstruct,
+                            php_ordinary::GAP,
+                            provenance_id,
+                        )?;
+                        insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
+                        relations.insert(edge.id, edge);
+                        occurrences.insert(call.id, call);
+                    }
                 }
                 if let Some(bindings) = &php_this_calls
                     && let Some(owner) = enclosing_entity
@@ -7181,6 +7244,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
         cancellation: &Cancellation,
         total_string_bytes: &mut usize,
     ) -> Result<EntityPlan, AdapterError> {
+        let php_ordinary = if self.request.language().as_str() == "php"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            php_ordinary::Plan::new(
+                self.coordinates.facts(),
+                self.full_source,
+                self.source_text.as_bytes(),
+                self.request.source().bytes(),
+                self.request.limits().max_syntax_nodes(),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?
+        } else {
+            php_ordinary::Plan::default()
+        };
         let thinkscript_source_admitted = self.request.language().as_str() != "thinkscript"
             || (self.request.included_ranges().is_empty()
                 && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -7948,6 +8027,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
                 continue;
             }
+            if structural_entity_kind(fact) == Some(EntityKind::Parameter)
+                && (self.language_for_fact(fact) == "php"
+                    || fact.syntax_kind().as_str().starts_with("php.ordinary_"))
+                && !php_ordinary.admits_parameter(fact)
+            {
+                nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
+                continue;
+            }
             let declaration_text = self.text_for_span(fact.span())?;
             if structural_entity_classification_gap(fact).is_some() {
                 // Unknown owners must not turn nested declarations into apparent
@@ -8688,6 +8776,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
         });
         Ok(EntityPlan {
+            php_ordinary,
             json_schema,
             rust_bindings,
             haskell_annotations,
@@ -9337,6 +9426,7 @@ struct AssociatedCaptures<'a> {
 }
 
 struct EntityPlan {
+    php_ordinary: php_ordinary::Plan,
     json_schema: json_schema::Plan,
     rust_bindings: embedded_rust::Plan,
     haskell_annotations: HashMap<u64, HaskellAnnotation>,
@@ -12857,6 +12947,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
         || glsl_bindings::metadata(fact)
         || ocaml_bindings::metadata(fact)
         || php_this_calls::metadata(fact)
+        || php_ordinary::metadata(fact)
     {
         return false;
     }
@@ -13433,7 +13524,29 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
     .then_some("vba-automatic-instantiation-semantics-unavailable")
 }
 
+// Only this lowering path owns the independent ordinary PHP admission plan.
+fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.kind() == SyntaxFactKind::Declaration
+        && fact.syntax_kind().as_str() == "php.ordinary_parameter.declaration"
+    {
+        Some(EntityKind::Parameter)
+    } else {
+        portable_entity_kind(fact)
+    }
+}
+
+fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("php.ordinary_") {
+        structural_entity_kind(fact)
+    } else {
+        portable_entity_kind_from_source(fact, text)
+    }
+}
+
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.syntax_kind().as_str().starts_with("php.ordinary_") {
+        return Some("php-written-formal-scope-unavailable");
+    }
     if fact.kind() == SyntaxFactKind::Occurrence && fact.syntax_kind().as_str() == bash_calls::CALL
     {
         return Some("bash-written-wrapper-binding-unavailable");

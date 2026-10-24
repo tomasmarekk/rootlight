@@ -273,6 +273,11 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             _ => None,
         };
     }
+    // Ordinary PHP parameters require a current-source owner proof available
+    // only in native lowering; portable label classification cannot admit them.
+    if label.starts_with("php.ordinary_") {
+        return None;
+    }
     if jsx::owns(label) {
         return jsx::entity_kind(fact);
     }
@@ -4459,3 +4464,7 @@ mod python_module_function_name_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "structural/php_ordinary_contract_tests.rs"]
+mod php_ordinary_contract_tests;

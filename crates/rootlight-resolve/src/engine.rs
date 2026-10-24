@@ -1513,6 +1513,11 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    if occurrence.syntax_kind.starts_with("php.ordinary_")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     if occurrence.syntax_kind.starts_with("bash.direct_wrapper")
         && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
     {
@@ -4114,6 +4119,9 @@ mod php_written_call_fence_tests {
             "php.unproven_this_method.reference",
             "php.unproven_this_method.call",
             "php.unproven_this_method.call_name",
+            "php.ordinary_formal.reference",
+            "php.ordinary_unproved_variable.reference",
+            "php.ordinary_function_call.call",
         ] {
             let mut site = OccurrenceRecord {
                 id: FactId::from_bytes([4; 20]),

@@ -1090,6 +1090,11 @@ fn definition_owner(
         if let Some(kind) = structural_entity_kind(owner) {
             return Some((owner.local_id(), kind));
         }
+        if owner.kind() == SyntaxFactKind::Declaration
+            && owner.syntax_kind().as_str().starts_with("php.ordinary_")
+        {
+            return None;
+        }
         parent = owner.parent();
     }
     None
@@ -4481,6 +4486,14 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             };
         }
         if self.analyzer.language == SemanticProjectLanguage::Php
+            && occurrence.syntax_kind.starts_with("php.ordinary_")
+        {
+            return ResolutionCandidates {
+                symbols: Vec::new(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Php
             && (occurrence.syntax_kind.starts_with("php.this_method.")
                 || occurrence
                     .syntax_kind
@@ -6205,6 +6218,14 @@ fn formal_binding_context_metadata(
             SemanticProjectLanguage::Java,
             "java-formal-binding-proof-is-limited-to-single-assignment-setters",
         )),
+        "php.ordinary_clean_file.signature"
+        | "php.ordinary_function_context.signature"
+        | "php.ordinary_formal_target.signature"
+        | "php.ordinary_call_target.signature"
+        | "php.ordinary_call_context.signature" => Some((
+            SemanticProjectLanguage::Php,
+            "php-ordinary-source-proof-requires-current-physical-file-and-native-owner-joins",
+        )),
         "php.this_class_context.signature" | "php.this_method_context.signature" => Some((
             SemanticProjectLanguage::Php,
             "php-written-method-proof-does-not-select-a-runtime-implementation",
@@ -7803,5 +7824,93 @@ mod python_module_assignment_metadata_tests {
         assert!(!python_module_target_unavailable(
             "python.parameter_body.reference"
         ));
+    }
+}
+
+// Project adapters preserve native-only PHP proof boundaries and ordinary headers.
+// These controls do not execute PHP or infer a runtime environment.
+
+#[cfg(test)]
+mod php_ordinary_scope_contract_tests {
+    use super::*;
+
+    fn raw(local: u64, parent: Option<u64>, kind: SyntaxFactKind, label: &str) -> SyntaxFact {
+        SyntaxFact::new(
+            local,
+            parent,
+            kind,
+            SourceSpan::new(rootlight_ids::FileId::from_bytes([1; 20]), 0, 4).unwrap(),
+            0,
+            rootlight_adapter_sdk::SyntaxKindLabel::new(label).unwrap(),
+        )
+    }
+
+    #[test]
+    fn native_only_formal_definitions_are_opaque_to_project_callable_scheduling() {
+        let function = raw(
+            1,
+            None,
+            SyntaxFactKind::Declaration,
+            "php.function.declaration",
+        );
+        let parameter = raw(
+            2,
+            Some(1),
+            SyntaxFactKind::Declaration,
+            "php.ordinary_parameter.declaration",
+        );
+        let formal_name = raw(
+            3,
+            Some(2),
+            SyntaxFactKind::Occurrence,
+            "php.variable_name.definition",
+        );
+        let function_name = raw(
+            4,
+            Some(1),
+            SyntaxFactKind::Occurrence,
+            "php.name.definition",
+        );
+        let facts = BTreeMap::from([
+            (1, &function),
+            (2, &parameter),
+            (3, &formal_name),
+            (4, &function_name),
+        ]);
+        assert_eq!(definition_owner(&formal_name, &facts), None);
+        assert_eq!(
+            definition_owner(&function_name, &facts),
+            Some((1, EntityKind::Function))
+        );
+        for label in [
+            "php.ordinary_clean_file.signature",
+            "php.ordinary_function_context.signature",
+            "php.ordinary_formal_target.signature",
+            "php.ordinary_call_target.signature",
+            "php.ordinary_call_context.signature",
+        ] {
+            let marker = raw(5, Some(1), SyntaxFactKind::Signature, label);
+            assert!(!is_symbol_signature_fact(&marker));
+            assert_eq!(
+                formal_binding_context_metadata(&marker).unwrap().0,
+                SemanticProjectLanguage::Php
+            );
+        }
+        let header = raw(
+            6,
+            Some(1),
+            SyntaxFactKind::Signature,
+            "php.parameters.signature",
+        );
+        assert!(is_symbol_signature_fact(&header));
+        assert!(
+            formal_binding_context_metadata(&raw(
+                7,
+                Some(1),
+                SyntaxFactKind::Signature,
+                "php.ordinary_function_context.extra"
+            ))
+            .is_none()
+        );
     }
 }

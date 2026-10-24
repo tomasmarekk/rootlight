@@ -1,7 +1,7 @@
 ; Reviewed Tier D structural evidence for the pinned mixed-mode PHP grammar.
 ; Dynamic calls, framework routes, and include targets remain unresolved syntax.
 
-(program) @root
+(program) @root @signature
 (namespace_definition) @module
 
 [
@@ -36,6 +36,11 @@
 (method_declaration) @signature
 (member_call_expression name: (name) @reference @signature)
 
+(function_definition) @signature
+(function_call_expression) @signature
+(function_call_expression function: (name) @signature)
+(simple_parameter name: (variable_name) @declaration @definition)
+(variable_name) @signature
 (formal_parameters) @signature
 [(compound_statement) (declaration_list)] @scope
 [

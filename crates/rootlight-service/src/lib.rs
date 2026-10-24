@@ -948,7 +948,7 @@ const GENERATED_HEADER_MAX_LINES: usize = 64;
 // Host admission policy must requalify old whole-source fallbacks even when
 // language parsers and resolver facts retain their independent revisions.
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/4";
-const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/28";
+const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/29";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
@@ -960,8 +960,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/336";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/146";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/337";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/147";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/14";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -26819,6 +26819,7 @@ mod tests {
     mod native_identity_revision;
     mod native_identity_source_preservation;
     mod office_sources;
+    mod php_ordinary_functions;
     mod php_written_calls;
     mod prepared_artifacts;
     mod pug_source_preservation;
@@ -43158,6 +43159,16 @@ mod tests {
         for (changed_key, previous, expected_decision) in [
             (
                 adapter_key,
+                previous_parser(b"rootlight.first-slice.treesitter-structural/336"),
+                ArtifactDecisionKind::Rebuild,
+            ),
+            (
+                InputKey::ResolverVersion,
+                content_hash(b"rootlight.first-slice.resolve/146"),
+                ArtifactDecisionKind::Reuse,
+            ),
+            (
+                adapter_key,
                 previous_parser(b"rootlight.first-slice.treesitter-structural/335"),
                 ArtifactDecisionKind::Rebuild,
             ),
@@ -43361,6 +43372,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/291",
             b"rootlight.first-slice.treesitter-structural/329",
             b"rootlight.first-slice.treesitter-structural/334",
+            b"rootlight.first-slice.treesitter-structural/336",
             b"rootlight.first-slice.treesitter-structural/335",
         ] {
             let previous_parser = hash_static_components(&[
@@ -43398,6 +43410,7 @@ mod tests {
             b"rootlight.first-slice.resolve/121",
             b"rootlight.first-slice.resolve/122",
             b"rootlight.first-slice.resolve/144",
+            b"rootlight.first-slice.resolve/146",
             b"rootlight.first-slice.resolve/145",
         ] {
             let previous_resolver = hash_static_components(&[
