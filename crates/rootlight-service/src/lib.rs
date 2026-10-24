@@ -14,8 +14,13 @@ mod fresh_projection_capacity;
 #[path = "tests/fresh_projection_capacity.rs"]
 mod fresh_projection_capacity_tests;
 #[cfg(test)]
+#[path = "oracle_restore_preservation/policy_tests.rs"]
+mod oracle_restore_policy_tests;
+mod oracle_restore_preservation;
+#[cfg(test)]
 mod oracle_storage_source_recovery_tests;
 mod projection_profile;
+mod resolver_restore_undo;
 pub use aggregate_source_recovery::{
     AggregateCapacityFailure, FirstSliceSourceRecovery, FirstSliceTextSearchCoverage,
 };
@@ -940,7 +945,9 @@ const MAX_REPOSITORY_PATH_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_RANDOM_ID_ATTEMPTS: usize = 8;
 const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
-const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/3";
+// Host admission policy must requalify old whole-source fallbacks even when
+// language parsers and resolver facts retain their independent revisions.
+const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/4";
 const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/28";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
@@ -3216,6 +3223,7 @@ enum UnsupportedSourceDisposition {
     AdmissionResourceBounded,
     ParserSizeLimit,
     AggregateFileCapacity,
+    DurableRestoreCapacity,
     IntrinsicIdentityWorkLimit {
         observed: usize,
         limit: usize,
@@ -10038,11 +10046,18 @@ impl FirstSliceService {
                 && derived.inputs.is_empty() && derived.native_projects.is_empty()
                 && !file_claims.iter().any(|claim| claim.path.rsplit_once('.')
                     .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("vbp")));
+            // Custom resource policies retain their original admission order.
+            let ordinary_restore = ordinary_capacity && self.durable.is_some()
+                && self.generation_budget == GenerationBudget::default()
+                && self.analysis_limits == analysis_limits(self.analysis_limits.max_source_bytes())?
+                && derived.supports_ordinary_restore_floor()
+                && oracle_restore_preservation::scope_supported(file_claims, &sources);
             let mut file_capacity = if ordinary_capacity {
                 aggregate_file_preservation::Reservation::new(
                     repository, generation, &sources, &source_languages, &native_unavailable,
                     self.analysis_limits.ir(), &mut reserved_memory_bytes,
                     &mut memory_reservation, self.durable.is_some(), cancellation,
+                    ordinary_restore.then_some(self.generation_budget),
                 )?
             } else { None };
             let mut document = NormalizedIrDocument::empty(repository, generation);
@@ -10050,6 +10065,23 @@ impl FirstSliceService {
                 SourcePreflight,
                 generation_admission::GenerationAdmission::new(reserved_memory_bytes)
             )?;
+            let restore_context = GenerationContext::new(cancellation, self.generation_budget);
+            let restore_oversized = manifest.coverage.excluded.get("oversized").copied().unwrap_or(0);
+            let restore_host_floor = if ordinary_restore
+                && let Some(capacity) = &mut file_capacity
+                && capacity.oracle_ready() {
+                let first = file_claims.first().ok_or(FirstSliceError::Identity)?.file;
+                let floor = oracle_restore_preservation::host_floor(repository, generation, first, restore_oversized)?;
+                match capacity.reserve_host_floor(&floor, self.analysis_limits.ir(), cancellation) {
+                    Ok(()) => {
+                        output_admission.admit_document(&floor, &mut memory_reservation,
+                            self.durable.is_some(), cancellation)?;
+                        Some(floor)
+                    }
+                    Err(FirstSliceError::AggregateCapacity(_) | FirstSliceError::ResourceLimit { .. }) => None,
+                    Err(error) => return Err(error.into()),
+                }
+            } else { None };
             let mut append_state = DocumentAppendState::from_document(&document)?;
             append_state.optional_metadata = Some(optional_extension_metadata::Cache::default());
             append_state.aggregate_recovery = recovery_enabled;
@@ -10095,6 +10127,25 @@ impl FirstSliceService {
                     }),
                 )?;
             }
+            // Unsupported physical metadata has already been committed. Measure
+            // it once, then reserve every remaining owned physical file floor.
+            let mut restore_capacity = if let Some(host) = &restore_host_floor {
+                let metadata = GenerationMetadata::new(repository, generation, parent, manifest_hash,
+                    self.config.hash(), provider_set_hash).map_err(|_| FirstSliceError::Identity)?;
+                let value = oracle_restore_preservation::Reservation::new(metadata, &manifest.inputs,
+                    file_claims, &sources, &source_languages,
+                    file_capacity.as_mut().ok_or(FirstSliceError::Identity)?, &document, host,
+                    &restore_context, cancellation, &mut |bytes| {
+                        output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                            self.durable.is_some(), cancellation)
+                    })?;
+                if value.is_none() {
+                    file_capacity.as_mut().ok_or(FirstSliceError::Identity)?
+                        .release_host_floor(host, self.analysis_limits.ir(), cancellation)?;
+                }
+                value
+            } else { None };
+            drop(restore_host_floor);
             let mut structural_documents = BTreeMap::<String, Vec<NormalizedIrDocument>>::new();
             let mut streamed_fallback_anchors = BTreeMap::new();
             let mut parsed_files = 0usize;
@@ -10124,10 +10175,17 @@ impl FirstSliceService {
                                     self.durable.is_some(), cancellation)
                             },
                         )?;
+                        let restore_preview = if let Some(capacity) = &mut restore_capacity {
+                            Some(capacity.preview(&document, &prepared, snapshot.file(), &restore_context,
+                                cancellation, &mut |bytes| output_admission.admit_known_bytes(bytes,
+                                    &mut memory_reservation, self.durable.is_some(), cancellation))?)
+                        } else { None };
                         prepared_artifacts.admit_document(&mut output_admission, &prepared.source,
                             &mut memory_reservation, self.durable.is_some(), cancellation)?;
                         commit_prepared_document_append(&mut document, prepared, self.analysis_limits.ir(),
                             &mut append_state, cancellation)?;
+                        oracle_restore_preservation::commit_preview(restore_preview);
+                        if let Some(capacity) = &mut restore_capacity { capacity.consume(snapshot.file(), cancellation)?; }
                         continue;
                     }
                     prepared_artifacts.admit_document(
@@ -10365,13 +10423,28 @@ impl FirstSliceService {
                     )?)
                 } else { None };
                 let (deferred_document, prepared_append) = if let Some(capacity) = &mut file_capacity {
-                    let (prepared, replaced) = capacity.choose(
+                    let (mut prepared, mut replaced) = capacity.choose(
                         &document, &append_state, input, language, file_document,
                         self.analysis_limits.ir(), cancellation, &mut |bytes| {
                             output_admission.admit_known_bytes(bytes, &mut memory_reservation,
                                 self.durable.is_some(), cancellation)
                         },
                     )?;
+                    if !replaced && let Some(restore) = &mut restore_capacity
+                        && let Some(cause) = restore.refusal(&document, &prepared, snapshot.file(),
+                            &restore_context, cancellation, &mut |bytes| output_admission.admit_known_bytes(
+                                bytes, &mut memory_reservation, self.durable.is_some(), cancellation))? {
+                        // Dispose the rejected append owner before allocating its
+                        // exact-source replacement; the accepted prefix is untouched.
+                        drop(prepared);
+                        let detail = cause.detail(snapshot.file())?;
+                        prepared = capacity.replace_for_restore(&document, &append_state, input,
+                            language, &detail, self.analysis_limits.ir(), cancellation, &mut |bytes| {
+                                output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                                    self.durable.is_some(), cancellation)
+                            })?;
+                        replaced = true;
+                    }
                     if replaced {
                         if let Some(chunk) = &normalized { profile_discarded_chunk(chunk); }
                         normalized = None;
@@ -10383,6 +10456,12 @@ impl FirstSliceService {
                     }
                     (None, Some(prepared))
                 } else { (Some(file_document), None) };
+                let restore_preview = if let (Some(restore), Some(prepared)) =
+                    (&mut restore_capacity, prepared_append.as_ref()) {
+                    Some(restore.preview(&document, prepared, snapshot.file(), &restore_context,
+                        cancellation, &mut |bytes| output_admission.admit_known_bytes(bytes,
+                            &mut memory_reservation, self.durable.is_some(), cancellation))?)
+                } else { None };
                 let file_document = prepared_append.as_ref().map(|prepared| &prepared.source)
                     .or(deferred_document.as_ref()).ok_or(FirstSliceError::Identity)?;
                 let profile = AnalysisProfileGuard::begin(
@@ -10488,7 +10567,10 @@ impl FirstSliceService {
                 if let Some(prepared) = prepared_append {
                     commit_prepared_document_append(&mut document, prepared, self.analysis_limits.ir(),
                         &mut append_state, cancellation)?;
+                    oracle_restore_preservation::commit_preview(restore_preview);
+                    if let Some(capacity) = &mut restore_capacity { capacity.consume(snapshot.file(), cancellation)?; }
                 } else {
+                    if restore_preview.is_some() { return Err(FirstSliceError::Identity.into()); }
                 let file_document = deferred_document.ok_or(FirstSliceError::Identity)?;
                 if project_adapter_supports_language(language) {
                     let language_documents = structural_documents.entry(language.clone()).or_default();
@@ -10571,6 +10653,11 @@ impl FirstSliceService {
                 }
             }
             if let Some(capacity) = &file_capacity { capacity.finish()?; }
+            #[cfg(test)]
+            if let Some(capacity) = &mut restore_capacity {
+                capacity.verify_current_prefix(&document, &restore_context, cancellation)?;
+            }
+            let mut restore_final = restore_capacity.map(oracle_restore_preservation::Reservation::finish).transpose()?;
             let structurally_examined_files = files_examined
                 .checked_add(preflight_files)
                 .ok_or(FirstSliceError::Limits)?
@@ -10712,11 +10799,19 @@ impl FirstSliceService {
             };
             let mut document = if native_unavailable.is_empty()
                 && !file_capacity.as_ref().is_some_and(|capacity| capacity.unavailable()) {
-                apply_bounded_resolution_with_native_projects(
-                    document, resolution_limits,
-                    ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
-                    &classic_sources, &derived.native_projects, cancellation,
-                )?
+                if let Some(restore) = &mut restore_final {
+                    restore.resolve(document, resolution_limits, self.analysis_limits.ir(),
+                        &self.extensions, &restore_context, cancellation, &mut |bytes| {
+                            output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                                self.durable.is_some(), cancellation)
+                        })?
+                } else {
+                    apply_bounded_resolution_with_native_projects(
+                        document, resolution_limits,
+                        ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
+                        &classic_sources, &derived.native_projects, cancellation,
+                    )?
+                }
             } else {
                 // Missing declarations can compete with any cross-file candidate.
                 // Native source-certified facts survive without guessing targets.
@@ -10726,6 +10821,11 @@ impl FirstSliceService {
             // Project fallback may discard parser mappings. Container dependencies
             // are generation facts and must survive every structural fallback.
             derived.append_evidence(&mut document, self.analysis_limits.ir(), cancellation)?;
+            if let Some(restore) = &mut restore_final {
+                document = restore.prepare_final(document, self.analysis_limits.ir(), &self.extensions,
+                    &restore_context, cancellation, &mut |bytes| output_admission.admit_known_bytes(
+                        bytes, &mut memory_reservation, self.durable.is_some(), cancellation))?;
+            }
             let normalized_facts = normalized_record_count(&document)?;
             // Count only rebound records that remain exact after project
             // composition and resolution; replaced candidates are rebuilt work.
@@ -11090,6 +11190,7 @@ impl FirstSliceService {
                 cancellation,
             )?;
             if let (Some(prepared), Some(plan)) = (durable.as_ref(), oracle_restore_plan) {
+                if let Some(restore) = &restore_final { restore.verify_written(prepared, plan)?; }
                 let observed = prepared.oracle_restore_memory_bytes(plan, indexed_files, !verified.snapshot().source_files().is_empty())?;
                 if let Some(cause) = aggregate_source_recovery::DurableRestoreCapacity::from_sealed_plan(observed) {
                     check_cancellation(cancellation)?;
@@ -16424,7 +16525,8 @@ impl FirstSliceService {
                     document.skipped_regions.iter().find_map(|gap| {
                         (gap.source.span().file() == file.id
                             && gap.reason == SkippedRegionReason::ResourceLimit
-                            && gap.detail.starts_with("aggregate-file-capacity: "))
+                            && (gap.detail.starts_with("aggregate-file-capacity: ")
+                                || gap.detail.starts_with("durable-restore-capacity: ")))
                         .then_some(FirstSliceSourceCoverageReason::ResourceBounded)
                     })
                 });
@@ -19109,8 +19211,16 @@ fn grammar_binary_digest(descriptor: &GrammarDescriptor) -> Result<ContentHash, 
 
 fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
     let parser = first_slice_parser_provider_hash()?;
+    let policy_seed = PROVIDER_SET_SEED;
+    #[cfg(test)]
+    let policy_seed = if oracle_restore_policy_tests::PREDECESSOR_POLICY.with(std::cell::Cell::get)
+    {
+        b"rootlight.first-slice.providers/3".as_slice()
+    } else {
+        policy_seed
+    };
     hash_static_components(&[
-        PROVIDER_SET_SEED,
+        policy_seed,
         parser.as_bytes(),
         DISCOVERY_MANIFEST_VERSION.as_bytes(),
         RESOLVER_PROVIDER_VERSION.as_bytes(),
@@ -19997,6 +20107,11 @@ fn unsupported_source_document(
             "combined structural capacity prevented this file's analysis; exact original source remains available",
             SkippedRegionReason::ResourceLimit,
         ),
+        UnsupportedSourceDisposition::DurableRestoreCapacity => (
+            "durable-restore-capacity",
+            "combined durable restore capacity prevented this file's analysis; exact original source remains available",
+            SkippedRegionReason::ResourceLimit,
+        ),
         UnsupportedSourceDisposition::ParserSizeLimit => (
             "source-parser-snapshot-size-limit",
             "streamed source remains available for exact reads and literal matching but parser memory limits prevent structural analysis and lexical vocabulary projection",
@@ -20067,7 +20182,11 @@ fn unsupported_source_document(
             0,
             0,
         ),
-        if input.disposition == UnsupportedSourceDisposition::AggregateFileCapacity {
+        if matches!(
+            input.disposition,
+            UnsupportedSourceDisposition::AggregateFileCapacity
+                | UnsupportedSourceDisposition::DurableRestoreCapacity
+        ) {
             (IrFactDomain::Diagnostics, CoverageStatus::Unknown, 0, 0, 0)
         } else {
             (IrFactDomain::Diagnostics, CoverageStatus::Complete, 1, 1, 0)
@@ -20111,7 +20230,11 @@ fn unsupported_source_document(
         skipped.id = derive_skipped_region_id(&skipped).map_err(|_| FirstSliceError::Identity)?;
         document.skipped_regions.push(skipped);
     }
-    if input.disposition != UnsupportedSourceDisposition::AggregateFileCapacity {
+    if !matches!(
+        input.disposition,
+        UnsupportedSourceDisposition::AggregateFileCapacity
+            | UnsupportedSourceDisposition::DurableRestoreCapacity
+    ) {
         let mut diagnostic = DiagnosticRecord {
             id: FactId::from_bytes([0; 20]),
             repository,
@@ -40052,7 +40175,12 @@ mod tests {
                         SkippedRegionReason::ResourceLimit,
                         FirstSliceSourceCoverageReason::ResourceBounded,
                     ),
-                    UnsupportedSourceDisposition::ParserSizeLimit => (
+                    UnsupportedSourceDisposition::DurableRestoreCapacity => (
+                        "durable-restore-capacity",
+                        SkippedRegionReason::ResourceLimit,
+                        FirstSliceSourceCoverageReason::ResourceBounded,
+                    ),
+        UnsupportedSourceDisposition::ParserSizeLimit => (
                         "source-parser-snapshot-size-limit",
                         SkippedRegionReason::ResourceLimit,
                         FirstSliceSourceCoverageReason::ResourceBounded,

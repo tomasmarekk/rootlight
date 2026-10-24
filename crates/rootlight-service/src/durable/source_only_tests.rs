@@ -52,7 +52,7 @@ fn source_authority_manifest_versions_and_required_descriptor_are_closed() {
         let manifest: DurableGenerationManifest = serde_json::from_value(value).unwrap();
         assert!(source_authority::manifest_source_layout(&manifest).is_err());
     }
-    for bytes in [0, MAX_SOURCE_FILE_CATALOG_BYTES + 1] {
+    for bytes in [0, crate::source_generation::MAX_SOURCE_AUTHORITY_BYTES + 1] {
         let mut value = original.clone();
         value["source_authority"]["bytes"] = bytes.into();
         let manifest: DurableGenerationManifest = serde_json::from_value(value).unwrap();
@@ -955,4 +955,75 @@ fn active_source_parent_must_match_verified_v5_recipe_for_cold_and_cached_contex
             .loaded_generation_snapshot(first.generation)
             .is_err()
     );
+}
+
+#[test]
+fn source_authority_quote_admits_exact_remaining_capacity_and_refuses_one_byte_less() {
+    let (_storage, _fixture, paths, receipt, reference, _) = source_only_reopen_fixture();
+    let (service, _deferred) =
+        FirstSliceService::open_durable_deferred(2, paths.state_dir()).unwrap();
+    let cancellation = Cancellation::new();
+    let (encoded, _) = service
+        .durable
+        .as_ref()
+        .unwrap()
+        .source_authority_descriptor(receipt.repository, receipt.generation, &cancellation)
+        .unwrap()
+        .unwrap();
+    let quote = crate::source_generation::source_authority_memory_bytes(encoded).unwrap();
+    let pressure = crate::RestoredMemoryReservation::new(
+        Arc::clone(&service.generation_cache),
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - quote + 1,
+        true,
+    )
+    .unwrap();
+    assert!(matches!(
+        service.source_only_lease(receipt.generation, &cancellation),
+        Err(FirstSliceError::GenerationMemoryLimit { .. })
+    ));
+    assert!(
+        !service
+            .source_authorities
+            .lock()
+            .unwrap()
+            .contains_key(&receipt.generation)
+    );
+    drop(pressure);
+    let pressure = crate::RestoredMemoryReservation::new(
+        Arc::clone(&service.generation_cache),
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - quote,
+        true,
+    )
+    .unwrap();
+    let lease = service
+        .source_only_lease(receipt.generation, &cancellation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        lease
+            .authority
+            .find_file(reference.span().file())
+            .unwrap()
+            .content_hash,
+        reference.content_hash()
+    );
+    assert_eq!(
+        service
+            .generation_cache
+            .lock()
+            .unwrap()
+            .reserved_memory_bytes()
+            .unwrap(),
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+    );
+    assert!(
+        !service
+            .generation_cache
+            .lock()
+            .unwrap()
+            .generations
+            .is_loaded(receipt.generation)
+    );
+    drop(pressure);
+    drop(lease);
 }

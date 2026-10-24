@@ -34,6 +34,25 @@ pub(super) struct PreparedSources {
     references: Vec<references::DeclaredReference>,
 }
 
+#[cfg(test)]
+#[test]
+fn future_container_warning_without_virtual_inputs_excludes_ordinary_restore_floor() {
+    let mut prepared = PreparedSources::default();
+    assert!(prepared.supports_ordinary_restore_floor());
+    prepared.issues.push((
+        FileId::from_bytes([0x63; 20]),
+        "container extraction refused".to_owned(),
+    ));
+    assert!(prepared.inputs.is_empty());
+    assert!(!prepared.supports_ordinary_restore_floor());
+    prepared.issues.clear();
+    prepared.origins.push((
+        FileId::from_bytes([0x64; 20]),
+        FileId::from_bytes([0x65; 20]),
+    ));
+    assert!(!prepared.supports_ordinary_restore_floor());
+}
+
 struct Budget {
     work: usize,
     bytes: usize,
@@ -104,6 +123,20 @@ pub(super) fn prepare(
 }
 
 impl PreparedSources {
+    /// Requires the ordinary physical owner to have no future container facts.
+    /// Failed extraction can retain issues without producing virtual inputs;
+    /// those warnings still need their existing wider atomic owner.
+    pub(super) fn supports_ordinary_restore_floor(&self) -> bool {
+        self.inputs.is_empty()
+            && self.fingerprints.is_empty()
+            && self.origins.is_empty()
+            && self.native_vba_modules.is_empty()
+            && self.incomplete_native_contexts.is_empty()
+            && self.native_projects.is_empty()
+            && self.issues.is_empty()
+            && self.references.is_empty()
+    }
+
     pub(super) fn source_origins(&self) -> &[(FileId, FileId)] {
         &self.origins
     }

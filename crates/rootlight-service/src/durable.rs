@@ -1,5 +1,6 @@
 //! Crash-safe generation publication and restoration for the first-slice service.
 
+pub(super) mod restore_envelope;
 #[path = "durable/source_authority.rs"]
 mod source_authority;
 
@@ -7811,6 +7812,19 @@ fn parse_activation_name(name: &str) -> Option<(u64, GenerationId)> {
     let sequence = sequence.parse().ok()?;
     let generation = GenerationId::from_str(generation).ok()?;
     Some((sequence, generation))
+}
+
+#[cfg(test)]
+pub(super) fn with_restore_test_ceiling<T>(limit: u64, operation: impl FnOnce() -> T) -> T {
+    restore_capacity_tests::with_ceiling(limit, operation)
+}
+
+#[cfg(test)]
+pub(super) fn restore_policy_predecessor_fixture() -> (Vec<u8>, u64) {
+    (
+        restore_capacity_tests::source(),
+        restore_capacity_tests::measured_ceiling(),
+    )
 }
 
 #[cfg(test)]

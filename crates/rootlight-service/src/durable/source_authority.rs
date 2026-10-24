@@ -2,6 +2,7 @@
 //! Legacy generations retain their original complete recovery requirements.
 
 use super::*;
+use crate::current_cancellation;
 use rootlight_ir::SourceMappingKind;
 use rootlight_source::{SourceAuthorityError, VerifiedSourceAuthority};
 use rootlight_storage::{GenerationContractVersion, GenerationResource};
@@ -10,31 +11,89 @@ use std::io::Write;
 const SCHEMA: &str = "rootlight.source-authority/1";
 
 const FILENAME: &str = "source-authority.json";
-const MAX_BYTES: u64 = MAX_SOURCE_FILE_CATALOG_BYTES;
+const MAX_BYTES: u64 = crate::source_generation::MAX_SOURCE_AUTHORITY_BYTES;
 
 struct AuthorityWriter<W> {
     inner: W,
     bytes: u64,
     digest: blake3::Hasher,
+    maximum_bytes: u64,
+    failure: Option<FirstSliceError>,
+}
+
+impl<W> AuthorityWriter<W> {
+    fn new(inner: W, maximum_bytes: u64) -> Self {
+        Self {
+            inner,
+            bytes: 0,
+            digest: blake3::Hasher::new(),
+            maximum_bytes,
+            failure: None,
+        }
+    }
+
+    fn fail(&mut self, error: FirstSliceError) -> std::io::Error {
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+        std::io::Error::other("source authority write failed")
+    }
+
+    fn serialization_error(
+        &mut self,
+        error: SourceAuthorityError,
+        cancellation: &Cancellation,
+    ) -> FirstSliceError {
+        if let Err(error) = check_cancellation(cancellation) {
+            return error;
+        }
+        self.failure
+            .take()
+            .unwrap_or_else(|| authority_error(error, cancellation))
+    }
 }
 
 impl<W: std::io::Write> std::io::Write for AuthorityWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let increment =
+            u64::try_from(bytes.len()).map_err(|_| self.fail(FirstSliceError::Limits))?;
         let end = self
             .bytes
-            .checked_add(bytes.len() as u64)
-            .filter(|end| *end <= MAX_BYTES)
-            .ok_or_else(|| {
-                std::io::Error::other("source authority exceeds its bounded envelope")
-            })?;
-        self.inner.write_all(bytes)?;
+            .checked_add(increment)
+            .ok_or_else(|| self.fail(FirstSliceError::Limits))?;
+        if end > self.maximum_bytes {
+            let observed = crate::source_generation::source_authority_memory_bytes(end)
+                .map_err(|error| self.fail(error))?;
+            let limit = crate::source_generation::source_authority_memory_bytes(self.maximum_bytes)
+                .map_err(|error| self.fail(error))?;
+            return Err(self.fail(FirstSliceError::ResourceLimit {
+                resource: crate::FirstSliceResource::MemoryBytes,
+                observed,
+                limit,
+            }));
+        }
+        self.inner
+            .write_all(bytes)
+            .map_err(|_| self.fail(FirstSliceError::Catalog))?;
         self.digest.update(bytes);
         self.bytes = end;
         Ok(bytes.len())
     }
+
     fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
+        self.inner
+            .flush()
+            .map_err(|_| self.fail(FirstSliceError::Catalog))
     }
+}
+
+fn export_for_write<W: Write>(
+    generation: &IdentityVerifiedGeneration,
+    writer: &mut AuthorityWriter<W>,
+    context: &GenerationContext<'_>,
+) -> Result<(), FirstSliceError> {
+    export_source_authority(generation, writer, context)
+        .map_err(|error| writer.serialization_error(error, context.cancellation()))
 }
 
 pub(super) fn manifest_source_layout(
@@ -65,11 +124,7 @@ pub(super) fn validate_for_verified(
     if bytes.len() as u64 != descriptor.bytes || content_hash_bytes(&bytes) != descriptor.digest {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    let mut expected = AuthorityWriter {
-        inner: std::io::sink(),
-        bytes: 0,
-        digest: blake3::Hasher::new(),
-    };
+    let mut expected = AuthorityWriter::new(std::io::sink(), MAX_BYTES);
     let context = GenerationContext::new(cancellation, GenerationBudget::default());
     export_source_authority(generation, &mut expected, &context)
         .map_err(|error| authority_error(error, cancellation))?;
@@ -117,14 +172,9 @@ impl DurablePreparedGeneration {
             .staging()
             .create_file(OsStr::new(FILENAME))
             .map_err(|_| FirstSliceError::Catalog)?;
-        let mut writer = AuthorityWriter {
-            inner: BufWriter::new(&mut file),
-            bytes: 0,
-            digest: blake3::Hasher::new(),
-        };
+        let mut writer = AuthorityWriter::new(BufWriter::new(&mut file), MAX_BYTES);
         let context = GenerationContext::new(cancellation, GenerationBudget::default());
-        export_source_authority(generation, &mut writer, &context)
-            .map_err(|error| authority_error(error, cancellation))?;
+        export_for_write(generation, &mut writer, &context)?;
         writer.flush().map_err(|_| FirstSliceError::Catalog)?;
         let value = DurableSidecarDescriptor {
             bytes: writer.bytes,
@@ -479,10 +529,10 @@ pub(super) fn export_source_authority(
                 "inconsistent source path or evidence",
             ));
         }
-        seq.serialize_element(&Entry {
-            claim,
-            language: file.language.clone(),
-            encoding: file.encoding.clone(),
+        seq.serialize_element(&EntryRef {
+            claim: &claim,
+            language: &file.language,
+            encoding: &file.encoding,
             generated: file.generated,
             provenance: file.provenance,
             source,
@@ -512,11 +562,6 @@ pub(super) fn export_source_authority(
     }
     impl Serialize for Export<'_, '_> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            let mut row = serializer.serialize_struct("SourceAuthority", 5)?;
-            row.serialize_field("schema", SCHEMA)?;
-            row.serialize_field("metadata", &Metadata::from(self.generation.metadata()))?;
-            row.serialize_field("files", &Files(self))?;
-            row.serialize_field("origins", &Origins(self))?;
             let mut envelopes = self
                 .generation
                 .document()
@@ -533,8 +578,13 @@ pub(super) fn export_source_authority(
             if envelopes.next().is_some() {
                 return Err(serde::ser::Error::custom("duplicate source recovery cause"));
             }
-            row.serialize_field("recovery", &recovery)?;
-            row.end()
+            serialize_authority_row(
+                serializer,
+                self.generation.metadata(),
+                &Files(self),
+                &Origins(self),
+                &recovery,
+            )
         }
     }
     context.check()?;
@@ -547,6 +597,110 @@ pub(super) fn export_source_authority(
     );
     context.check()?;
     result.map_err(|_| SourceAuthorityError::Encoding)
+}
+
+#[derive(Serialize)]
+struct EntryRef<'a> {
+    claim: &'a FileIdentityClaim,
+    language: &'a str,
+    encoding: &'a str,
+    generated: bool,
+    provenance: FactId,
+    source: SourceRef,
+}
+
+fn serialize_authority_row<S: serde::Serializer>(
+    serializer: S,
+    metadata: GenerationMetadata,
+    files: &impl Serialize,
+    origins: &impl Serialize,
+    recovery: &Option<rootlight_ir::AggregateSourceRecovery>,
+) -> Result<S::Ok, S::Error> {
+    let mut row = serializer.serialize_struct("SourceAuthority", 5)?;
+    row.serialize_field("schema", SCHEMA)?;
+    row.serialize_field("metadata", &Metadata::from(metadata))?;
+    row.serialize_field("files", files)?;
+    row.serialize_field("origins", origins)?;
+    row.serialize_field("recovery", recovery)?;
+    row.end()
+}
+
+pub(super) const fn maximum_bytes() -> u64 {
+    MAX_BYTES
+}
+
+pub(super) fn prospective_ordinary_bytes(
+    metadata: GenerationMetadata,
+    sources: &[super::restore_envelope::Source<'_>],
+    cancellation: &Cancellation,
+) -> Result<u64, FirstSliceError> {
+    struct Prospective<'a> {
+        metadata: GenerationMetadata,
+        sources: &'a [super::restore_envelope::Source<'a>],
+        cancellation: &'a Cancellation,
+    }
+    struct Files<'a>(&'a Prospective<'a>);
+    impl Serialize for Files<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut sequence = serializer.serialize_seq(Some(self.0.sources.len()))?;
+            for source in self.0.sources {
+                self.0
+                    .cancellation
+                    .check()
+                    .map_err(serde::ser::Error::custom)?;
+                let span = SourceSpan::new(source.claim.file, 0, source.claim.byte_length)
+                    .map_err(serde::ser::Error::custom)?;
+                let hint = rootlight_ir::LineRange::new(u64::MAX, u64::MAX)
+                    .map_err(serde::ser::Error::custom)?;
+                // IDs have a fixed encoded width. A maximum-width optional hint
+                // bounds ordinary whole-file evidence even when a producer adds
+                // presentation lines; these model rows are never persisted.
+                let row = EntryRef {
+                    claim: source.claim,
+                    language: source.language,
+                    encoding: source.encoding,
+                    generated: source.generated,
+                    provenance: FactId::from_bytes([0; 20]),
+                    source: SourceRef::new(
+                        self.0.metadata.repository(),
+                        self.0.metadata.generation(),
+                        span,
+                        source.claim.content_hash,
+                        Some(hint),
+                    ),
+                };
+                sequence.serialize_element(&row)?;
+            }
+            sequence.end()
+        }
+    }
+    impl Serialize for Prospective<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serialize_authority_row(
+                serializer,
+                self.metadata,
+                &Files(self),
+                &Vec::<(SourceRef, SourceRef)>::new(),
+                &None,
+            )
+        }
+    }
+    check_cancellation(cancellation)?;
+    let mut writer = super::restore_envelope::Counter::new(cancellation);
+    if serde_json::to_writer(
+        &mut writer,
+        &Prospective {
+            metadata,
+            sources,
+            cancellation,
+        },
+    )
+    .is_err()
+    {
+        return Err(current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits));
+    }
+    check_cancellation(cancellation)?;
+    Ok(writer.bytes)
 }
 
 fn required_nullable<'de, D: serde::Deserializer<'de>, T: serde::Deserialize<'de>>(
@@ -642,5 +796,134 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn authority_encoded_ceiling_tracks_the_existing_complete_source_lease_quote() {
+        use crate::source_generation::{MAX_SOURCE_AUTHORITY_BYTES, source_authority_memory_bytes};
+        assert_eq!(MAX_BYTES, MAX_SOURCE_AUTHORITY_BYTES);
+        assert_eq!(MAX_BYTES, 1_069_547_520);
+        assert!(
+            source_authority_memory_bytes(MAX_BYTES).unwrap()
+                > source_authority_memory_bytes(MAX_SOURCE_FILE_CATALOG_BYTES).unwrap()
+        );
+        assert_eq!(
+            source_authority_memory_bytes(MAX_BYTES).unwrap(),
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        );
+        assert!(
+            source_authority_memory_bytes(MAX_BYTES + 1).unwrap()
+                > MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        );
+        assert!(matches!(
+            source_authority_memory_bytes(u64::MAX),
+            Err(FirstSliceError::Limits)
+        ));
+    }
+
+    #[test]
+    fn valid_v1_authority_uses_exact_bounded_writer_admission_and_preserves_wire_bytes() {
+        let (_storage, _fixture, paths, receipt, _, _) =
+            super::super::source_only_tests::source_only_reopen_fixture();
+        let directory = paths
+            .state_dir()
+            .join("first-slice/repositories")
+            .join(receipt.repository.to_string())
+            .join(receipt.generation.to_string());
+        let original = std::fs::read(directory.join(FILENAME)).unwrap();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = rootlight_catalog::OracleReader::open_in(&directory, &context)
+            .unwrap()
+            .read_verified(&context)
+            .unwrap();
+        let exact = u64::try_from(original.len()).unwrap();
+        let mut accepted = AuthorityWriter::new(Vec::new(), exact);
+        export_for_write(&verified, &mut accepted, &context).unwrap();
+        assert_eq!(accepted.bytes, exact);
+        assert_eq!(accepted.inner, original);
+        assert_eq!(
+            ContentHash::from_bytes(*accepted.digest.finalize().as_bytes()),
+            content_hash_bytes(&original)
+        );
+
+        let mut refused = AuthorityWriter::new(Vec::new(), exact - 1);
+        assert!(
+            matches!(export_for_write(&verified, &mut refused, &context),
+            Err(FirstSliceError::ResourceLimit { resource: crate::FirstSliceResource::MemoryBytes, observed, limit })
+                if observed > limit && limit == crate::source_generation::source_authority_memory_bytes(exact - 1).unwrap())
+        );
+        assert!(refused.bytes < exact);
+        assert!(original.starts_with(&refused.inner));
+        assert_eq!(std::fs::read(directory.join(FILENAME)).unwrap(), original);
+        assert!(
+            restore_authority(
+                &original,
+                receipt.repository,
+                receipt.generation,
+                receipt.parent,
+                &context
+            )
+            .is_ok()
+        );
+
+        let cancelled = Cancellation::with_deadline(std::time::Instant::now());
+        let cancelled_context = GenerationContext::new(&cancelled, GenerationBudget::default());
+        let mut untouched = AuthorityWriter::new(Vec::new(), 0);
+        assert!(matches!(
+            export_for_write(&verified, &mut untouched, &cancelled_context),
+            Err(FirstSliceError::Cancelled(_))
+        ));
+        assert!(untouched.inner.is_empty());
+    }
+
+    #[test]
+    fn authority_writer_preserves_io_and_arithmetic_failures_as_strict_errors() {
+        struct FailedOutput;
+        impl Write for FailedOutput {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected output refusal"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let cancellation = Cancellation::new();
+        let mut io = AuthorityWriter::new(FailedOutput, MAX_BYTES);
+        assert!(io.write_all(b"x").is_err());
+        assert!(matches!(
+            io.serialization_error(SourceAuthorityError::Encoding, &cancellation),
+            FirstSliceError::Catalog
+        ));
+        assert_eq!(io.bytes, 0);
+        let mut overflow = AuthorityWriter::new(Vec::new(), MAX_BYTES);
+        overflow.bytes = u64::MAX;
+        assert!(overflow.write_all(b"x").is_err());
+        assert!(matches!(
+            overflow.serialization_error(SourceAuthorityError::Encoding, &cancellation),
+            FirstSliceError::Limits
+        ));
+        assert!(overflow.inner.is_empty());
+
+        let mut first = AuthorityWriter::new(Vec::new(), 0);
+        assert!(first.write_all(b"x").is_err());
+        first.bytes = u64::MAX;
+        assert!(first.write_all(b"x").is_err());
+        assert!(matches!(
+            first.serialization_error(SourceAuthorityError::Encoding, &cancellation),
+            FirstSliceError::ResourceLimit {
+                resource: crate::FirstSliceResource::MemoryBytes,
+                ..
+            }
+        ));
+        assert!(first.inner.is_empty());
+        let mut cancelled = AuthorityWriter::new(Vec::new(), 0);
+        assert!(cancelled.write_all(b"x").is_err());
+        let deadline = Cancellation::with_deadline(std::time::Instant::now());
+        assert!(matches!(
+            cancelled.serialization_error(SourceAuthorityError::Encoding, &deadline),
+            FirstSliceError::Cancelled(_)
+        ));
+        assert!(cancelled.inner.is_empty());
     }
 }

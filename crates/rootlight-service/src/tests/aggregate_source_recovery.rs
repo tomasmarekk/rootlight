@@ -1866,6 +1866,7 @@ fn reserved_optional_heavy_append_preserves_the_healthy_native_baseline() {
         &mut memory,
         false,
         &deadline(),
+        None,
     )
     .unwrap()
     .unwrap();

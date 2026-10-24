@@ -660,7 +660,7 @@ pub(crate) fn oracle_read_memory_plan(
     })
 }
 
-fn tree_node_bytes<K, V>() -> Result<u64, CatalogError> {
+pub(crate) fn tree_node_bytes<K, V>() -> Result<u64, CatalogError> {
     const SLOTS: usize = 11;
     std::mem::size_of::<K>()
         .checked_add(std::mem::size_of::<V>())

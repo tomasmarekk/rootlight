@@ -111,7 +111,7 @@ fn canonical_test_root(directory: &TempDir) -> PathBuf {
     fs::canonicalize(directory.path()).expect("temporary root canonicalizes")
 }
 
-fn fixture_documents() -> (
+pub(super) fn fixture_documents() -> (
     rootlight_ir::NormalizedIrDocument,
     rootlight_ir::NormalizedIrDocument,
 ) {
@@ -228,7 +228,7 @@ fn metadata(document: &rootlight_ir::NormalizedIrDocument) -> GenerationMetadata
     .expect("fixture metadata is valid")
 }
 
-fn snapshot(document: rootlight_ir::NormalizedIrDocument) -> GenerationSnapshot {
+pub(super) fn snapshot(document: rootlight_ir::NormalizedIrDocument) -> GenerationSnapshot {
     GenerationSnapshot::new(
         metadata(&document),
         document,

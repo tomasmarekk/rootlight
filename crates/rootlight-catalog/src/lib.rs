@@ -8,9 +8,11 @@
 
 mod codec;
 mod indexed_read;
+mod layout_census;
 mod read;
 mod schema;
 mod write;
+pub use layout_census::{OracleLayoutCensus, OracleLayoutFragment, OracleLayoutPreview};
 
 #[cfg(test)]
 extern crate self as rootlight_catalog;

@@ -4,6 +4,7 @@
 //! classification is preserved; provider failures never enter this decision.
 
 use super::*;
+use rootlight_catalog::{OracleLayoutFragment, OracleReadAdmissionError};
 
 const EXPLANATION_BYTES: usize = 109;
 
@@ -67,6 +68,7 @@ impl RawMetadataWitness {
 struct Entry {
     file: FileId,
     minimum: Option<IrDocumentUsage>,
+    oracle: Option<OracleLayoutFragment>,
     degradable: bool,
 }
 
@@ -75,6 +77,16 @@ pub(super) struct Reservation {
     next: usize,
     remaining: IrDocumentUsage,
     unavailable: bool,
+    oracle_workspace: u64,
+    oracle_bytes: u64,
+    oracle_requested: bool,
+}
+
+struct FloorPlanning {
+    budget: Option<GenerationBudget>,
+    workspace: u64,
+    retained: u64,
+    failed: bool,
 }
 
 fn standalone(input: &RustSourceInput) -> bool {
@@ -83,12 +95,51 @@ fn standalone(input: &RustSourceInput) -> bool {
     input.origins.is_empty()
 }
 
-fn disposition(
+pub(super) fn disposition(
     repository: RepositoryId,
     generation: GenerationId,
     input: &RustSourceInput,
     language: &str,
     explanation: &str,
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
+    source_disposition(
+        repository,
+        generation,
+        input,
+        language,
+        explanation,
+        UnsupportedSourceDisposition::AggregateFileCapacity,
+        cancellation,
+    )
+}
+
+pub(super) fn durable_disposition(
+    repository: RepositoryId,
+    generation: GenerationId,
+    input: &RustSourceInput,
+    language: &str,
+    explanation: &str,
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
+    source_disposition(
+        repository,
+        generation,
+        input,
+        language,
+        explanation,
+        UnsupportedSourceDisposition::DurableRestoreCapacity,
+        cancellation,
+    )
+}
+
+fn source_disposition(
+    repository: RepositoryId,
+    generation: GenerationId,
+    input: &RustSourceInput,
+    language: &str,
+    explanation: &str,
+    disposition: UnsupportedSourceDisposition,
     cancellation: &Cancellation,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
     check_cancellation(cancellation)?;
@@ -111,12 +162,17 @@ fn disposition(
             language: fallible_copy_string(language)?,
             encoding: fallible_copy_string(&input.encoding)?,
             generated: input.generated,
-            disposition: UnsupportedSourceDisposition::AggregateFileCapacity,
+            disposition,
         },
     )?;
     for gap in &mut document.skipped_regions {
         check_cancellation(cancellation)?;
-        gap.detail = format!("aggregate-file-capacity: {explanation}");
+        let code = match disposition {
+            UnsupportedSourceDisposition::AggregateFileCapacity => "aggregate-file-capacity",
+            UnsupportedSourceDisposition::DurableRestoreCapacity => "durable-restore-capacity",
+            _ => return Err(FirstSliceError::Identity),
+        };
+        gap.detail = format!("{code}: {explanation}");
         gap.id = derive_skipped_region_id(gap).map_err(|_| FirstSliceError::Identity)?;
     }
     Ok(document)
@@ -144,6 +200,57 @@ fn checked_combination(
         })
 }
 
+fn capture_oracle_floor(
+    model: &NormalizedIrDocument,
+    planning: &mut FloorPlanning,
+    reserved_bytes: &mut u64,
+    memory: &mut GenerationMemoryReservation,
+    durable: bool,
+    cancellation: &Cancellation,
+) -> Result<Option<OracleLayoutFragment>, FirstSliceError> {
+    let Some(budget) = planning.budget else {
+        return Ok(None);
+    };
+    if model.files.len() != 1 || !model.source_mappings.is_empty() {
+        return Ok(None);
+    }
+    let context = GenerationContext::new(cancellation, budget);
+    let measured =
+        OracleLayoutFragment::measure(model, planning.retained, &context, &mut |absolute| {
+            if absolute > planning.workspace {
+                let added = absolute - planning.workspace;
+                let requested = reserved_bytes
+                    .checked_add(added)
+                    .ok_or(FirstSliceError::Limits)?;
+                memory.resize(requested, PendingGenerationMemory::Staged, durable)?;
+                *reserved_bytes = requested;
+                planning.workspace = absolute;
+            }
+            Ok(())
+        })
+        .map_err(|error| match error {
+            OracleReadAdmissionError::Catalog(error) => map_catalog_error(&error, cancellation),
+            OracleReadAdmissionError::Admission(error) => error,
+        });
+    match measured {
+        Ok(fragment) => {
+            planning.retained = planning
+                .retained
+                .checked_add(
+                    fragment
+                        .retained_bytes()
+                        .map_err(|error| map_catalog_error(&error, cancellation))?,
+                )
+                .ok_or(FirstSliceError::Limits)?;
+            Ok(Some(fragment))
+        }
+        Err(error) => {
+            planning.failed = true;
+            Err(error)
+        }
+    }
+}
+
 impl Reservation {
     #[expect(
         clippy::too_many_arguments,
@@ -160,8 +267,15 @@ impl Reservation {
         memory: &mut GenerationMemoryReservation,
         durable: bool,
         cancellation: &Cancellation,
+        oracle_budget: Option<GenerationBudget>,
     ) -> Result<Option<Self>, FirstSliceError> {
         let previous = *reserved_bytes;
+        let mut oracle = FloorPlanning {
+            budget: oracle_budget,
+            workspace: 0,
+            retained: 0,
+            failed: false,
+        };
         match Self::prepare(
             repository,
             generation,
@@ -173,8 +287,17 @@ impl Reservation {
             memory,
             durable,
             cancellation,
+            &mut oracle,
         ) {
             Ok(value) => Ok(Some(value)),
+            Err(error) if oracle.failed => Err(error),
+            Err(error @ FirstSliceError::GenerationMemoryLimit { .. })
+                if oracle.budget.is_some() =>
+            {
+                // Prospective ownership adds this table before a catalog callback
+                // can mark its failure. Host refusal remains strict from that point.
+                Err(error)
+            }
             Err(
                 FirstSliceError::ResourceLimit { .. }
                 | FirstSliceError::AggregateCapacity(_)
@@ -206,6 +329,7 @@ impl Reservation {
         memory: &mut GenerationMemoryReservation,
         durable: bool,
         cancellation: &Cancellation,
+        oracle: &mut FloorPlanning,
     ) -> Result<Self, FirstSliceError> {
         check_cancellation(cancellation)?;
         let table_bytes = sources
@@ -238,6 +362,7 @@ impl Reservation {
             check_cancellation(cancellation)?;
             let native = native_unavailable.get(&input.snapshot.file());
             let degradable = standalone(input) && native.is_none();
+            let mut oracle_floor = None;
             let minimum = if degradable || native.is_some() {
                 let language = languages
                     .get(&input.snapshot.file())
@@ -253,6 +378,15 @@ impl Reservation {
                         limits,
                         cancellation,
                     )?
+                } else if oracle.budget.is_some() {
+                    durable_disposition(
+                        repository,
+                        generation,
+                        input,
+                        language,
+                        &model_explanation,
+                        cancellation,
+                    )?
                 } else {
                     disposition(
                         repository,
@@ -263,6 +397,17 @@ impl Reservation {
                         cancellation,
                     )?
                 };
+                // Borrow the same already-built minimum before optional warning
+                // trimming. The catalog owns only fixed keys; a second model
+                // document and its strings are never materialized.
+                oracle_floor = capture_oracle_floor(
+                    &model,
+                    oracle,
+                    reserved_bytes,
+                    memory,
+                    durable,
+                    cancellation,
+                )?;
                 // The existing append planner may aggregate native warnings.
                 // Reserve their mandatory source/gap records, not optional warnings.
                 if native.is_some() {
@@ -305,6 +450,7 @@ impl Reservation {
             entries.push(Entry {
                 file: input.snapshot.file(),
                 minimum,
+                oracle: oracle_floor,
                 degradable,
             });
         }
@@ -313,7 +459,36 @@ impl Reservation {
             next: 0,
             remaining,
             unavailable: false,
+            oracle_workspace: oracle.workspace,
+            oracle_bytes: oracle.retained,
+            oracle_requested: oracle.budget.is_some(),
         })
+    }
+
+    pub(super) fn oracle_ready(&self) -> bool {
+        self.oracle_requested && self.entries.iter().all(|entry| entry.oracle.is_some())
+    }
+
+    pub(super) const fn oracle_workspace(&self) -> u64 {
+        self.oracle_workspace
+    }
+    pub(super) const fn oracle_bytes(&self) -> u64 {
+        self.oracle_bytes
+    }
+
+    pub(super) fn take_oracle_floor(
+        &mut self,
+        index: usize,
+        file: FileId,
+    ) -> Result<OracleLayoutFragment, FirstSliceError> {
+        let entry = self
+            .entries
+            .get_mut(index)
+            .ok_or(FirstSliceError::Identity)?;
+        if self.next != 0 || entry.file != file {
+            return Err(FirstSliceError::Identity);
+        }
+        entry.oracle.take().ok_or(FirstSliceError::Identity)
     }
 
     pub(super) fn remaining(&self) -> &IrDocumentUsage {
@@ -424,6 +599,79 @@ impl Reservation {
         Ok((prepared, replaced))
     }
 
+    pub(super) fn reserve_host_floor(
+        &mut self,
+        floor: &NormalizedIrDocument,
+        limits: &IrLimits,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        let usage = measure_append_usage(floor, limits, cancellation)?;
+        self.remaining = checked_combination(
+            self.remaining.clone(),
+            usage,
+            IrDocumentUsage::default(),
+            limits,
+            cancellation,
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn release_host_floor(
+        &mut self,
+        floor: &NormalizedIrDocument,
+        limits: &IrLimits,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        let usage = measure_append_usage(floor, limits, cancellation)?;
+        self.remaining = self
+            .remaining
+            .clone()
+            .checked_sub(usage)
+            .map_err(|error| map_ir_usage_error(error, cancellation))?;
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the original source slot was already consumed by IR admission"
+    )]
+    pub(super) fn replace_for_restore(
+        &mut self,
+        target: &NormalizedIrDocument,
+        state: &DocumentAppendState,
+        input: &RustSourceInput,
+        language: &str,
+        detail: &str,
+        limits: &IrLimits,
+        cancellation: &Cancellation,
+        admission: &mut dyn FnMut(u64) -> Result<(), FirstSliceError>,
+    ) -> Result<PreparedDocumentAppend, FirstSliceError> {
+        let index = self.next.checked_sub(1).ok_or(FirstSliceError::Identity)?;
+        let entry = self.entries.get(index).ok_or(FirstSliceError::Identity)?;
+        if entry.file != input.snapshot.file() || !entry.degradable {
+            return Err(FirstSliceError::Identity);
+        }
+        let replacement = durable_disposition(
+            target.repository,
+            target.generation,
+            input,
+            language,
+            detail,
+            cancellation,
+        )?;
+        let prepared = prepare_normalized_document_append(
+            target,
+            replacement,
+            limits,
+            state,
+            cancellation,
+            Some(admission),
+            Some(&self.remaining),
+        )?;
+        self.unavailable = true;
+        Ok(prepared)
+    }
+
     pub(super) fn finish(&self) -> Result<(), FirstSliceError> {
         (self.next == self.entries.len())
             .then_some(())
@@ -518,6 +766,7 @@ mod tests {
             &mut memory,
             false,
             &Cancellation::new(),
+            None,
         )
         .unwrap()
         .unwrap();
@@ -605,6 +854,180 @@ mod tests {
     }
 
     #[test]
+    fn prospective_floor_budget_refusal_cannot_enter_legacy_optional_planning_recovery() {
+        let repository = derive_repository(b"ordinary-floor-control").id();
+        let generation = GenerationId::from_bytes([0x68; 20]);
+        let sources = [input(repository)];
+        let languages = BTreeMap::from([(sources[0].snapshot.file(), "rust".to_owned())]);
+        let service = FirstSliceService::new(2).unwrap();
+        let mut floor =
+            ensure_generation_memory_preflight(sources[0].snapshot.metadata().length).unwrap();
+        let mut memory = service
+            .reserve_generation_memory(generation, floor, PendingGenerationMemory::Reserved)
+            .unwrap();
+        let default = GenerationBudget::default();
+        let budget = GenerationBudget::new(
+            1,
+            default.limit(GenerationResource::SourceReferences),
+            default.limit(GenerationResource::TextBytes),
+        )
+        .unwrap();
+        let failure = Reservation::new(
+            repository,
+            generation,
+            &sources,
+            &languages,
+            &BTreeMap::new(),
+            service.analysis_limits.ir(),
+            &mut floor,
+            &mut memory,
+            false,
+            &Cancellation::new(),
+            Some(budget),
+        );
+        assert!(matches!(
+            failure,
+            Err(FirstSliceError::ResourceLimit {
+                resource: FirstSliceResource::GenerationRows,
+                ..
+            })
+        ));
+        drop(failure);
+        drop(memory);
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reserved_memory_bytes()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn prospective_table_host_refusal_precedes_models_and_keeps_legacy_recovery_scoped() {
+        let repository = derive_repository(b"ordinary-floor-table-refusal").id();
+        let generation = GenerationId::from_bytes([0x6a; 20]);
+        let sources = [input(repository)];
+        let service = FirstSliceService::new(2).unwrap();
+        let mut floor = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES;
+        let mut memory = service
+            .reserve_generation_memory(generation, floor, PendingGenerationMemory::Reserved)
+            .unwrap();
+        let table_bytes = u64::try_from(size_of::<Entry>()).unwrap();
+
+        // Missing language would fail model preparation, while the tiny catalog
+        // budget would refuse its first measurement. Neither stage may be reached.
+        let default = GenerationBudget::default();
+        let budget = GenerationBudget::new(
+            1,
+            default.limit(GenerationResource::SourceReferences),
+            default.limit(GenerationResource::TextBytes),
+        )
+        .unwrap();
+        for prospective in [false, true] {
+            let result = Reservation::new(
+                repository,
+                generation,
+                &sources,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                service.analysis_limits.ir(),
+                &mut floor,
+                &mut memory,
+                false,
+                &Cancellation::new(),
+                prospective.then_some(budget),
+            );
+            match result {
+                Err(FirstSliceError::GenerationMemoryLimit {
+                    observed, limit, ..
+                }) if prospective => {
+                    assert_eq!(
+                        observed,
+                        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + table_bytes
+                    );
+                    assert_eq!(limit, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES);
+                }
+                Ok(None) if !prospective => {}
+                _ => panic!("table refusal must honor prospective ownership"),
+            }
+            assert_eq!(floor, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES);
+            let cache = service.generation_cache.lock().unwrap();
+            assert_eq!(cache.reservations.len(), 1);
+            assert_eq!(cache.reservations.get(&generation), Some(&floor));
+        }
+        drop(memory);
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reserved_memory_bytes()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn captured_minimum_transfers_fixed_keys_once_without_changing_ir_reservation() {
+        let repository = derive_repository(b"ordinary-floor-transfer").id();
+        let generation = GenerationId::from_bytes([0x69; 20]);
+        let sources = [input(repository)];
+        let file = sources[0].snapshot.file();
+        let languages = BTreeMap::from([(file, "rust".to_owned())]);
+        let service = FirstSliceService::new(2).unwrap();
+        let cancellation = Cancellation::new();
+        let mut floor =
+            ensure_generation_memory_preflight(sources[0].snapshot.metadata().length).unwrap();
+        let mut memory = service
+            .reserve_generation_memory(generation, floor, PendingGenerationMemory::Reserved)
+            .unwrap();
+        let mut reservation = Reservation::new(
+            repository,
+            generation,
+            &sources,
+            &languages,
+            &BTreeMap::new(),
+            service.analysis_limits.ir(),
+            &mut floor,
+            &mut memory,
+            false,
+            &cancellation,
+            Some(GenerationBudget::default()),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(reservation.oracle_ready());
+        assert!(reservation.oracle_workspace() >= reservation.oracle_bytes());
+        let remaining = reservation.remaining().clone();
+        assert!(matches!(
+            reservation.take_oracle_floor(0, FileId::from_bytes([0x70; 20])),
+            Err(FirstSliceError::Identity)
+        ));
+        assert!(reservation.oracle_ready());
+        let owned = reservation.take_oracle_floor(0, file).unwrap();
+        assert_eq!(owned.retained_bytes().unwrap(), reservation.oracle_bytes());
+        assert!(!reservation.oracle_ready());
+        assert!(matches!(
+            reservation.take_oracle_floor(0, file),
+            Err(FirstSliceError::Identity)
+        ));
+        assert_eq!(reservation.remaining(), &remaining);
+        drop((owned, reservation, memory));
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reserved_memory_bytes()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn cancelled_or_unavailable_minimum_releases_optional_table_before_original_pipeline() {
         let repository = derive_repository(b"aggregate-reservation-refusal").id();
         let generation = GenerationId::from_bytes([95; 20]);
@@ -630,7 +1053,8 @@ mod tests {
                 &mut floor,
                 &mut memory,
                 false,
-                &Cancellation::new()
+                &Cancellation::new(),
+                None,
             )
             .unwrap()
             .is_none()
@@ -649,7 +1073,8 @@ mod tests {
                 &mut floor,
                 &mut memory,
                 false,
-                &cancelled
+                &cancelled,
+                None,
             ),
             Err(FirstSliceError::Cancelled(
                 CancellationReason::ClientRequest

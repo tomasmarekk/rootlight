@@ -4,6 +4,24 @@
 use super::*;
 use rootlight_source::{VerifiedSourceAuthority, VerifiedSourceBacking};
 
+// The encoded ceiling admits at most one complete source metadata owner. The
+// cache still admits this quote together with all retained and pending owners.
+const SOURCE_AUTHORITY_MEMORY_FACTOR: u64 = 16;
+pub(super) const MAX_SOURCE_AUTHORITY_BYTES: u64 = (MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+    - GENERATION_MEMORY_FIXED_OVERHEAD_BYTES)
+    / SOURCE_AUTHORITY_MEMORY_FACTOR;
+
+/// Quotes the existing encoded, decoded, path and validation ownership floor.
+///
+/// # Errors
+/// Returns the unchanged arithmetic-limit error when the quote cannot fit u64.
+pub(super) fn source_authority_memory_bytes(bytes: u64) -> Result<u64, FirstSliceError> {
+    bytes
+        .checked_mul(SOURCE_AUTHORITY_MEMORY_FACTOR)
+        .and_then(|bytes| bytes.checked_add(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES))
+        .ok_or(FirstSliceError::Limits)
+}
+
 pub(super) struct SourceLease {
     pub(super) authority: VerifiedSourceAuthority,
     receipt: FirstSliceIndexReceipt,
@@ -121,10 +139,7 @@ impl FirstSliceService {
             .ok_or(FirstSliceError::CatalogCorrupt)?;
         // Encoded bytes plus canonical entries, recipe copies, path decoding and
         // tree workspace stay charged for the lease's whole lifetime.
-        let charge = bytes
-            .checked_mul(16)
-            .and_then(|bytes| bytes.checked_add(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES))
-            .ok_or(FirstSliceError::Limits)?;
+        let charge = source_authority_memory_bytes(bytes)?;
         let reserve =
             || RestoredMemoryReservation::new(Arc::clone(&self.generation_cache), charge, true);
         let reservation = match reserve() {

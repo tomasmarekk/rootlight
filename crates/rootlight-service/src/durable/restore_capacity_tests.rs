@@ -32,7 +32,7 @@ pub(super) fn admit_restore(bytes: u64) -> Result<(), FirstSliceError> {
     Ok(())
 }
 
-fn with_ceiling<T>(limit: u64, operation: impl FnOnce() -> T) -> T {
+pub(super) fn with_ceiling<T>(limit: u64, operation: impl FnOnce() -> T) -> T {
     struct Reset(Option<u64>);
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -43,7 +43,7 @@ fn with_ceiling<T>(limit: u64, operation: impl FnOnce() -> T) -> T {
     operation()
 }
 
-fn source() -> Vec<u8> {
+pub(super) fn source() -> Vec<u8> {
     let mut text = String::from("// ababa\n");
     for ordinal in 0..1024 {
         use std::fmt::Write as _;
@@ -117,7 +117,7 @@ fn force_file_catalog(service: &mut FirstSliceService) {
     service.analysis_limits = limited;
 }
 
-fn measured_ceiling() -> u64 {
+pub(super) fn measured_ceiling() -> u64 {
     let (_storage, root, paths) = fixture();
     let cancellation = Cancellation::new();
     let mut full = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();

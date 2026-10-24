@@ -20,7 +20,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 use crate::{CatalogError, CatalogErrorKind, codec, schema};
 
-const JSON_CHECKPOINT_BYTES: usize = 4 * 1024;
+pub(crate) const JSON_CHECKPOINT_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RegistryIdentity {
@@ -54,7 +54,7 @@ pub(crate) struct WritePlan<'a> {
     pub(crate) identities: BTreeSet<RegistryIdentity>,
     pub(crate) source_ordinals: Vec<&'a SourceRef>,
     pub(crate) stats: GenerationStats,
-    maximum_payload_bytes: u64,
+    pub(crate) maximum_payload_bytes: u64,
 }
 
 pub(crate) struct WrittenGeneration {
@@ -139,8 +139,83 @@ pub(crate) fn measure<'a>(
     generation: &'a GenerationSnapshot,
     context: &GenerationContext<'_>,
 ) -> Result<WritePlan<'a>, CatalogError> {
+    measure_document(generation.document(), context, None)
+}
+
+#[derive(Default)]
+pub(crate) struct AuxiliaryCensus {
+    pub(crate) source_counts: Vec<u64>,
+    pub(crate) payloads: Vec<u64>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DocumentView<'a> {
+    pub(crate) repository: RepositoryId,
+    pub(crate) generation: rootlight_ids::GenerationId,
+    pub(crate) files: &'a [rootlight_ir::FileRecord],
+    pub(crate) entities: &'a [rootlight_ir::EntityRecord],
+    pub(crate) occurrences: &'a [rootlight_ir::OccurrenceRecord],
+    pub(crate) relations: &'a [rootlight_ir::RelationRecord],
+    pub(crate) provenance: &'a [rootlight_ir::ProvenanceRecord],
+    pub(crate) source_mappings: &'a [rootlight_ir::SourceMappingRecord],
+    pub(crate) coverage_records: &'a [rootlight_ir::CoverageRecord],
+    pub(crate) skipped_regions: &'a [rootlight_ir::SkippedRegion],
+    pub(crate) diagnostics: &'a [rootlight_ir::DiagnosticRecord],
+    pub(crate) extensions: &'a [rootlight_ir::ExtensionEnvelope],
+}
+
+impl<'a> DocumentView<'a> {
+    pub(crate) fn empty(repository: RepositoryId, generation: rootlight_ids::GenerationId) -> Self {
+        Self {
+            repository,
+            generation,
+            files: &[],
+            entities: &[],
+            occurrences: &[],
+            relations: &[],
+            provenance: &[],
+            source_mappings: &[],
+            coverage_records: &[],
+            skipped_regions: &[],
+            diagnostics: &[],
+            extensions: &[],
+        }
+    }
+}
+
+impl<'a> From<&'a NormalizedIrDocument> for DocumentView<'a> {
+    fn from(document: &'a NormalizedIrDocument) -> Self {
+        Self {
+            repository: document.repository,
+            generation: document.generation,
+            files: &document.files,
+            entities: &document.entities,
+            occurrences: &document.occurrences,
+            relations: &document.relations,
+            provenance: &document.provenance,
+            source_mappings: &document.source_mappings,
+            coverage_records: &document.coverage_records,
+            skipped_regions: &document.skipped_regions,
+            diagnostics: &document.diagnostics,
+            extensions: &document.extensions,
+        }
+    }
+}
+
+pub(crate) fn measure_document<'a>(
+    document: &'a NormalizedIrDocument,
+    context: &GenerationContext<'_>,
+    auxiliary: Option<&mut AuxiliaryCensus>,
+) -> Result<WritePlan<'a>, CatalogError> {
+    measure_view(document.into(), context, auxiliary)
+}
+
+pub(crate) fn measure_view<'a>(
+    document: DocumentView<'a>,
+    context: &GenerationContext<'_>,
+    mut auxiliary: Option<&mut AuxiliaryCensus>,
+) -> Result<WritePlan<'a>, CatalogError> {
     context.check().map_err(CatalogError::control)?;
-    let document = generation.document();
     if document
         .extensions
         .iter()
@@ -150,12 +225,13 @@ pub(crate) fn measure<'a>(
             CatalogErrorKind::UnsupportedCriticalExtensions,
         ));
     }
-    let source_capacity = source_reference_inputs(document).try_fold(0_usize, |count, _| {
-        context.check().map_err(CatalogError::control)?;
-        count
-            .checked_add(1)
-            .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))
-    })?;
+    let source_capacity =
+        source_reference_inputs_view(document).try_fold(0_usize, |count, _| {
+            context.check().map_err(CatalogError::control)?;
+            count
+                .checked_add(1)
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))
+        })?;
     let mut sources = Vec::new();
     sources
         .try_reserve_exact(source_capacity)
@@ -170,21 +246,21 @@ pub(crate) fn measure<'a>(
         RegistryIdentity::Repository(document.repository),
         context,
     )?;
-    for file in &document.files {
+    for file in document.files {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(&mut identities, RegistryIdentity::File(file.id), context)?;
         collect_evidence(&file.evidence, &mut sources, &mut child_rows, context)?;
         add_text(&mut text_bytes, &file.path, context)?;
         if let Some(locator) = &file.path_locator {
             add_text(&mut text_bytes, locator.encoding().as_str(), context)?;
-            let components = serialize_json_text(locator.components(), context)?;
-            add_text(&mut text_bytes, &components, context)?;
-            maximum_payload_bytes = maximum_payload_bytes.max(usize_to_u64(components.len())?);
+            let bytes = add_serialized_text(&mut text_bytes, locator.components(), context)?;
+            record_payload(&mut auxiliary, bytes)?;
+            maximum_payload_bytes = maximum_payload_bytes.max(bytes);
         }
         add_text(&mut text_bytes, &file.language, context)?;
         add_text(&mut text_bytes, &file.encoding, context)?;
     }
-    for entity in &document.entities {
+    for entity in document.entities {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(
             &mut identities,
@@ -198,7 +274,7 @@ pub(crate) fn measure<'a>(
         add_text(&mut text_bytes, &entity.display_name, context)?;
         add_text(&mut text_bytes, &entity.qualified_name, context)?;
     }
-    for occurrence in &document.occurrences {
+    for occurrence in document.occurrences {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(
             &mut identities,
@@ -212,7 +288,7 @@ pub(crate) fn measure<'a>(
         }
         add_text(&mut text_bytes, &occurrence.syntax_kind, context)?;
     }
-    for relation in &document.relations {
+    for relation in document.relations {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(
             &mut identities,
@@ -221,7 +297,7 @@ pub(crate) fn measure<'a>(
         )?;
         collect_evidence(&relation.evidence, &mut sources, &mut child_rows, context)?;
     }
-    for provenance in &document.provenance {
+    for provenance in document.provenance {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(
             &mut identities,
@@ -252,16 +328,17 @@ pub(crate) fn measure<'a>(
         add_text(&mut text_bytes, &provenance.language, context)?;
         add_optional_text(&mut text_bytes, provenance.rule.as_deref(), context)?;
     }
-    for mapping in &document.source_mappings {
+    for mapping in document.source_mappings {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(&mut identities, RegistryIdentity::Fact(mapping.id), context)?;
         collect_source(&mapping.from, &mut sources, context)?;
         collect_source(&mapping.to, &mut sources, context)?;
         collect_opaque_evidence_source(&mapping.evidence, &mut sources, context)?;
-        maximum_payload_bytes =
-            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, mapping, context)?);
+        let bytes = add_serialized_text(&mut text_bytes, mapping, context)?;
+        record_payload(&mut auxiliary, bytes)?;
+        maximum_payload_bytes = maximum_payload_bytes.max(bytes);
     }
-    for coverage in &document.coverage_records {
+    for coverage in document.coverage_records {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(
             &mut identities,
@@ -270,15 +347,16 @@ pub(crate) fn measure<'a>(
         )?;
         collect_evidence(&coverage.evidence, &mut sources, &mut child_rows, context)?;
     }
-    for region in &document.skipped_regions {
+    for region in document.skipped_regions {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(&mut identities, RegistryIdentity::Fact(region.id), context)?;
         collect_source(&region.source, &mut sources, context)?;
         collect_opaque_evidence_source(&region.evidence, &mut sources, context)?;
-        maximum_payload_bytes =
-            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, region, context)?);
+        let bytes = add_serialized_text(&mut text_bytes, region, context)?;
+        record_payload(&mut auxiliary, bytes)?;
+        maximum_payload_bytes = maximum_payload_bytes.max(bytes);
     }
-    for diagnostic in &document.diagnostics {
+    for diagnostic in document.diagnostics {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(
             &mut identities,
@@ -289,10 +367,11 @@ pub(crate) fn measure<'a>(
             collect_source(source, &mut sources, context)?;
         }
         collect_opaque_evidence_source(&diagnostic.evidence, &mut sources, context)?;
-        maximum_payload_bytes =
-            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, diagnostic, context)?);
+        let bytes = add_serialized_text(&mut text_bytes, diagnostic, context)?;
+        record_payload(&mut auxiliary, bytes)?;
+        maximum_payload_bytes = maximum_payload_bytes.max(bytes);
     }
-    for extension in &document.extensions {
+    for extension in document.extensions {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(
             &mut identities,
@@ -300,14 +379,37 @@ pub(crate) fn measure<'a>(
             context,
         )?;
         collect_opaque_evidence_source(&extension.evidence, &mut sources, context)?;
-        maximum_payload_bytes =
-            maximum_payload_bytes.max(add_serialized_text(&mut text_bytes, extension, context)?);
+        let bytes = add_serialized_text(&mut text_bytes, extension, context)?;
+        record_payload(&mut auxiliary, bytes)?;
+        maximum_payload_bytes = maximum_payload_bytes.max(bytes);
     }
 
     if sources.len() != source_capacity {
         return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
     }
     sort_source_references(&mut sources, context)?;
+    if let Some(auxiliary) = auxiliary {
+        let mut previous = None;
+        for source in &sources {
+            context.check().map_err(CatalogError::control)?;
+            if previous == Some(*source) {
+                let count = auxiliary
+                    .source_counts
+                    .last_mut()
+                    .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+            } else {
+                auxiliary
+                    .source_counts
+                    .try_reserve(1)
+                    .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+                auxiliary.source_counts.push(1);
+                previous = Some(*source);
+            }
+        }
+    }
     sources.dedup();
     let source_count = usize_to_u64(sources.len())?;
     context
@@ -374,6 +476,20 @@ pub(crate) fn measure<'a>(
     })
 }
 
+fn record_payload(
+    auxiliary: &mut Option<&mut AuxiliaryCensus>,
+    bytes: u64,
+) -> Result<(), CatalogError> {
+    if let Some(auxiliary) = auxiliary {
+        auxiliary
+            .payloads
+            .try_reserve(1)
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+        auxiliary.payloads.push(bytes);
+    }
+    Ok(())
+}
+
 fn insert_measured_identity(
     identities: &mut BTreeSet<RegistryIdentity>,
     identity: RegistryIdentity,
@@ -430,8 +546,8 @@ fn collect_source<'a>(
 
 // Source count limits apply after deduplication. The pre-counted borrowed buffer
 // retains duplicate input references without cloning their source values.
-fn source_reference_inputs(
-    document: &rootlight_ir::NormalizedIrDocument,
+pub(crate) fn source_reference_inputs_view(
+    document: DocumentView<'_>,
 ) -> impl Iterator<Item = &SourceRef> {
     let evidence = document
         .files
@@ -583,14 +699,18 @@ fn add_optional_text(
     Ok(())
 }
 
-fn add_serialized_text(
+fn add_serialized_text<T: serde::Serialize + ?Sized>(
     bytes: &mut u64,
-    value: &impl serde::Serialize,
+    value: &T,
     context: &GenerationContext<'_>,
 ) -> Result<u64, CatalogError> {
     let before = *bytes;
     let mut writer = CheckedJsonWriter::for_encoded_text(io::sink(), before, context)?;
-    serialize_json(&mut writer, value)?;
+    // Counting needs no buffered destination: direct encoding preserves exact
+    // bytes while keeping serializer-buffer allocation out of census workspace.
+    let result = serde_json::to_writer(&mut writer, value).map_err(CatalogError::json);
+    result.map_err(|error| writer.failure().map_or(error, CatalogError::new))?;
+    context.check().map_err(CatalogError::control)?;
     *bytes = writer.total_bytes();
     bytes
         .checked_sub(before)
@@ -1310,6 +1430,11 @@ where
         .map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BUFFERED_SERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn serialize_json<T>(
     writer: &mut CheckedJsonWriter<'_, impl Write>,
     value: &T,
@@ -1319,6 +1444,8 @@ where
 {
     // Batch serializer fragments while the checked writer still enforces the
     // same byte ceiling and cancellation checkpoint on every bounded chunk.
+    #[cfg(test)]
+    BUFFERED_SERIALIZATIONS.with(|slot| slot.set(slot.get() + 1));
     let result = {
         let mut buffered = io::BufWriter::with_capacity(JSON_CHECKPOINT_BYTES, &mut *writer);
         serde_json::to_writer(&mut buffered, value)
