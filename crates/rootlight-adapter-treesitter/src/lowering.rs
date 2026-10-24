@@ -76,6 +76,7 @@ mod powershell_formals;
 mod prolog_calls;
 mod protobuf;
 mod pug;
+mod python_module_functions;
 mod python_module_reads;
 mod python_parameters;
 mod python_variables;
@@ -782,6 +783,7 @@ fn required_syntax_fact_count_from_output(
     cancellation.check()?;
     let facts = output.facts();
     let mut declarations = Vec::new();
+    let mut python_module_function_sites = HashSet::new();
     let mut haxe_read_ends = HashMap::new();
     let mut flux_read_ends = HashMap::new();
     let nix_read_ends = nix_formal_reads::read_ends(facts, cancellation)?;
@@ -797,6 +799,12 @@ fn required_syntax_fact_count_from_output(
         check_periodically(index, cancellation)?;
         if fact.kind() == SyntaxFactKind::Declaration {
             declarations.push((fact.span().start_byte(), fact.span().end_byte()));
+        }
+        if python_module_functions::required(fact) {
+            python_module_function_sites
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            python_module_function_sites.insert(fact.span());
         }
         if fact.kind() == SyntaxFactKind::Signature
             && fact.syntax_kind().as_str() == "haxe.local_read_target.signature"
@@ -927,6 +935,10 @@ fn required_syntax_fact_count_from_output(
             || c_formal_reads::certified_reference(fact)
             || c_variables::required(fact)
             || python_module_reads::required(fact)
+            || python_module_functions::required(fact)
+            || (fact.kind() == SyntaxFactKind::Occurrence
+                && fact.syntax_kind().as_str() == "python.call.call"
+                && python_module_function_sites.contains(&fact.span()))
             || mojo_members::required(fact)
             || glsl_bindings::required(fact)
             || go_calls::required(fact)
@@ -1800,7 +1812,8 @@ fn preflight_lowering_limits(
                         && request.source().source_ref().span().start_byte() == 0
                         && u64::try_from(request.source().bytes().len()).ok()
                             == Some(request.source().source_ref().span().end_byte())
-                        && python_module_reads::required(fact))
+                        && (python_module_reads::required(fact)
+                            || python_module_functions::required(fact)))
                     || (request.language().as_str() == "mojo"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3187,6 +3200,33 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 &materialized,
                 self.full_source,
                 |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let python_module_functions = if self.request.language().as_str() == "python"
+            && self.request.included_ranges().is_empty()
+            && matches!(
+                self.parse_output.report().coverage().status(),
+                CoverageStatus::Complete | CoverageStatus::Bounded
+            )
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+        {
+            Some(python_module_functions::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
                 |span| self.coordinates.physical(span),
                 cancellation,
             )?)
@@ -4814,6 +4854,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("python-module-read-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &python_module_functions
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence).map_err(|_| {
+                        provider_failure("python-module-function-occurrence-identity")
+                    })?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -13561,6 +13616,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     if typescript_const::required(fact) {
         return Some("typescript-native-const-value-binding-unavailable");
     }
+    if python_module_functions::required(fact) {
+        return Some("python-native-module-function-binding-unavailable");
+    }
     if python_module_reads::required(fact) {
         return Some("python-native-module-rhs-binding-unavailable");
     }
@@ -13911,6 +13969,9 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
     }
     if agda::signature_name(fact) {
         return Some(OccurrenceRole::Declaration);
+    }
+    if python_module_functions::required(fact) {
+        return Some(OccurrenceRole::Reference);
     }
     if c_variables::required(fact) {
         return Some(if c_variables::address(fact) {

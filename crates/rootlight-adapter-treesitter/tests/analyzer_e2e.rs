@@ -4654,3 +4654,6 @@ mod idris_native;
 
 #[path = "analyzer_e2e/cuda_admission.rs"]
 mod cuda_admission;
+
+#[path = "analyzer_e2e/python_module_function_references.rs"]
+mod python_module_function_references;

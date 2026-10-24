@@ -22,6 +22,7 @@ mod nix_bindings;
 mod perl_bindings;
 mod perl_code_values;
 mod pool;
+mod python_module_functions;
 mod query_pack;
 mod registry;
 mod runtime;

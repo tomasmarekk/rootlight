@@ -1558,6 +1558,7 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
         occurrence.syntax_kind.as_str(),
         "python.parameter_body.reference"
             | "python.module_read.reference"
+            | "python.module_function.reference"
             | "python.module_binding_unavailable.reference"
             | "python.module_call_unavailable.call"
             | "typescript.const_value.reference"
@@ -3494,6 +3495,7 @@ mod scala_formal_source_tests {
     fn ordinary_formal_labels_require_native_source_binding() {
         for label in [
             "scala.ordinary_formal.reference",
+            "python.module_function.reference",
             "scala.unproven_formal.reference",
         ] {
             let repository = RepositoryId::from_bytes([1; 16]);

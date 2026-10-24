@@ -1463,6 +1463,21 @@ pub fn structural_captured_name_for_fact<'a>(
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')))
         .then_some(Cow::Borrowed(text));
     }
+    if label.starts_with("python.module_function") {
+        return (language == "python"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "python.module_function.reference"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
     if label.starts_with("python.module_read") {
         return (language == "python"
             && fact.kind() == SyntaxFactKind::Occurrence
@@ -4373,6 +4388,73 @@ mod cuda_classification_tests {
             assert_eq!(
                 structural_entity_kind(&make(SyntaxFactKind::Declaration, label)),
                 None
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod python_module_function_name_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn certified_module_names_require_closed_language_role_label_and_complete_ascii_spelling() {
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([1; 20]), 0, 5).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let read = fact(
+            SyntaxFactKind::Occurrence,
+            "python.module_function.reference",
+        );
+        for name in ["total", "amount2", "_written"] {
+            assert_eq!(
+                structural_captured_name_for_fact("python", &read, name, name.len()).as_deref(),
+                Some(name)
+            );
+            assert!(
+                structural_captured_name_for_fact("python", &read, name, name.len() - 1).is_none()
+            );
+            assert!(structural_captured_name_for_fact("ruby", &read, name, name.len()).is_none());
+        }
+        for name in [
+            "",
+            "total\0",
+            "total extra",
+            "holder.total",
+            "λ",
+            "1total",
+            "(total)",
+        ] {
+            assert!(structural_captured_name_for_fact("python", &read, name, 128).is_none());
+        }
+        for (kind, label) in [
+            (
+                SyntaxFactKind::Signature,
+                "python.module_function.reference",
+            ),
+            (
+                SyntaxFactKind::Occurrence,
+                "python.module_function.reference.extra",
+            ),
+            (SyntaxFactKind::Occurrence, "python.module_function.call"),
+            (
+                SyntaxFactKind::Occurrence,
+                "python.module_functioning.reference",
+            ),
+        ] {
+            assert!(
+                structural_captured_name_for_fact("python", &fact(kind, label), "total", 5)
+                    .is_none()
             );
         }
     }

@@ -786,6 +786,16 @@ impl QueryPack {
                 .any(|(quantifier, role)| {
                     *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Reference
                 });
+            // A certified guarded use retains its existing native Call separately
+            // from the companion Reference, including at the exact fact floor.
+            let has_source_certified_call = family == GrammarFamily::Python
+                && identity_query
+                    .capture_quantifiers(pattern)
+                    .iter()
+                    .zip(&roles_by_capture)
+                    .any(|(quantifier, role)| {
+                        *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Call
+                    });
             let has_identity_capture = identity_query
                 .capture_quantifiers(pattern)
                 .iter()
@@ -800,7 +810,7 @@ impl QueryPack {
                 });
             if has_identity_capture {
                 optional_query.disable_pattern(pattern);
-            } else if !has_source_certified_reference {
+            } else if !has_source_certified_reference && !has_source_certified_call {
                 identity_query.disable_pattern(pattern);
             }
         }
@@ -1030,7 +1040,14 @@ impl QueryPack {
                     || (family == GrammarFamily::Python
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
-                        && candidate.syntax == "python.module_read")
+                        && matches!(
+                            candidate.syntax,
+                            "python.module_read" | "python.module_function"
+                        ))
+                    || (family == GrammarFamily::Python
+                        && candidate.required
+                        && candidate.role == StructuralRole::Call
+                        && candidate.syntax == "python.call")
                     || (family == GrammarFamily::Glsl
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1294,6 +1311,15 @@ impl QueryPack {
         let mut python_variables = python_variables::CaptureCache::new(
             input.source,
             limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
+        let mut python_module_functions = crate::python_module_functions::Cache::new(
+            input.source,
+            limits
+                .captures
+                .min(limits.body_nodes)
+                .saturating_mul(128)
+                .min(HARD_MAX_QUERY_FACTS),
             complete_file_input,
         );
         let mut python_parameter_reads = python_parameters::CaptureCache::new(
@@ -3235,6 +3261,15 @@ impl QueryPack {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
+                }
+                if input.family == GrammarFamily::Python
+                    && matches!(role, StructuralRole::Reference | StructuralRole::Call)
+                    && python_module_functions.certified(capture.node, input.cancellation)?
+                {
+                    if role == StructuralRole::Reference {
+                        candidate.syntax = "python.module_function";
+                    }
+                    candidate.required = true;
                 }
                 if input.family == GrammarFamily::Php {
                     let keep = php_this_calls.refine(
@@ -6462,5 +6497,79 @@ mod file_root_bom_tests {
             pack.extract_identity(GrammarFamily::Astro, &tree, SOURCE, 16_384, &cancel),
             Err(AdapterError::Cancelled { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod python_guarded_call_retention_tests {
+    use super::*;
+
+    #[test]
+    fn full_original_guarded_reference_and_native_call_are_distinct_required_candidates() {
+        const SOURCE: &[u8] = include_bytes!("../tests/fixtures/python_module_function/repl.py");
+        let cancel = Cancellation::new();
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Python))
+            .unwrap();
+        let tree = parser.parse(SOURCE, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::Python).unwrap();
+        let identity = pack
+            .extract_identity(GrammarFamily::Python, &tree, SOURCE, 16_384, &cancel)
+            .unwrap();
+        let wide = pack
+            .extract(
+                GrammarFamily::Python,
+                &tree,
+                SOURCE,
+                16_384,
+                16_384,
+                &cancel,
+            )
+            .unwrap();
+        for (role, syntax) in [
+            (StructuralRole::Reference, "python.module_function"),
+            (StructuralRole::Call, "python.call"),
+        ] {
+            let exact: Vec<_> = identity
+                .iter()
+                .filter(|candidate| {
+                    candidate.role == role
+                        && candidate.syntax == syntax
+                        && (candidate.start, candidate.end) == (1810, 1814)
+                })
+                .collect();
+            assert_eq!(exact.len(), 1, "one exact {role:?}");
+            assert!(exact[0].required);
+            assert!(
+                wide.candidates
+                    .iter()
+                    .any(|candidate| candidate.same_fact(*exact[0]) && candidate.required)
+            );
+        }
+        assert_eq!(
+            identity
+                .iter()
+                .filter(|candidate| candidate.role == StructuralRole::Call)
+                .count(),
+            1,
+            "other native Calls remain optional"
+        );
+        assert!(
+            wide.candidates
+                .iter()
+                .filter(|candidate| candidate.role == StructuralRole::Call)
+                .count()
+                > 1
+        );
+        assert!(
+            identity
+                .iter()
+                .all(|candidate| candidate.role != StructuralRole::Reference
+                    || candidate.syntax != "python.module_function"
+                    || (candidate.start, candidate.end) == (1810, 1814))
+        );
     }
 }
