@@ -1,0 +1,160 @@
+{
+  "package": "tree-sitter-c",
+  "version": "0.24.1",
+  "source": "https://registry.npmjs.org/tree-sitter-c/0.24.1",
+  "archive_integrity": "sha512-lkYwWN3SRecpvaeqmFKkuPNR3ZbtnvHU+4XAEEkJdrp3JfSp2pBrhXOtvfsENUneye76g889Y0ddF2DM0gEDpA==",
+  "git_head": "7fa1be1b694b6e763686793d97da01f36a0e5c12",
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 1080,
+      "sha256": "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+      "archive_mode": 420
+    },
+    {
+      "path": "README.md",
+      "bytes": 1055,
+      "sha256": "15e4e31290537d4b1c3a3babdaa21fda99835274e93beea385747fccf0362381",
+      "archive_mode": 420
+    },
+    {
+      "path": "binding.gyp",
+      "bytes": 571,
+      "sha256": "03625fee424de46e3e6c9da1d2eb0ea7a454c0133f4d1cac27f2a2ee8567be2a",
+      "archive_mode": 420
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "bytes": 565,
+      "sha256": "92863f6d7d7f845ee496d6d78b61be57ff45f72fb61e75f1d8abc758d661e203",
+      "archive_mode": 420
+    },
+    {
+      "path": "bindings/node/binding_test.js",
+      "bytes": 250,
+      "sha256": "c35f2aaec5d06fa42a4cea226fa4cb841a04a7506e70086c2ea5d9fd67d8c482",
+      "archive_mode": 420
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "bytes": 452,
+      "sha256": "5f593f781f7cb12a3dcdcab2f9c063a77b9965f537bb01c5c05958947f5ff8fd",
+      "archive_mode": 420
+    },
+    {
+      "path": "bindings/node/index.js",
+      "bytes": 450,
+      "sha256": "6156dd21a5910d4a280417093b6fe09da1e778e1930afcb51b629094f00c8909",
+      "archive_mode": 420
+    },
+    {
+      "path": "grammar.js",
+      "bytes": 38242,
+      "sha256": "f362b9fe06db321464fc77f1e5ba2ce089baec9d18f4defddb0c9ca87885e546",
+      "archive_mode": 420
+    },
+    {
+      "path": "package.json",
+      "bytes": 1280,
+      "sha256": "2ce1a96088083cd4006539032ec4c4ca40ced6e0ae410c97e211f65db26de8fe",
+      "archive_mode": 420
+    },
+    {
+      "path": "prebuilds/darwin-arm64/tree-sitter-c.node",
+      "bytes": 688792,
+      "sha256": "d9cc878467cd2bdc228c5d42e7c697f96874e36a77f49150293b82d93055a1db",
+      "archive_mode": 420
+    },
+    {
+      "path": "prebuilds/darwin-x64/tree-sitter-c.node",
+      "bytes": 639216,
+      "sha256": "b055305adab775bdaa26a764a9fff832abc8cdef944d92f07bfb132a1df39693",
+      "archive_mode": 420
+    },
+    {
+      "path": "prebuilds/linux-arm64/tree-sitter-c.node",
+      "bytes": 664360,
+      "sha256": "9324f059548d9ea342708b31697b42087826ba045e4eca8c2fb81d5095806ccc",
+      "archive_mode": 420
+    },
+    {
+      "path": "prebuilds/linux-x64/tree-sitter-c.node",
+      "bytes": 658272,
+      "sha256": "aba11d1a99c193875353feaa280cb693fe535cb4bf793e8437d81a0c9659ab92",
+      "archive_mode": 420
+    },
+    {
+      "path": "prebuilds/win32-arm64/tree-sitter-c.node",
+      "bytes": 739328,
+      "sha256": "3d18287715fe538541c07e85518b480becead8c7d73a39c447348733fe33430f",
+      "archive_mode": 420
+    },
+    {
+      "path": "prebuilds/win32-x64/tree-sitter-c.node",
+      "bytes": 744960,
+      "sha256": "6027961d1804b65bf9872daba3026078a550452520b22b1e08bf9fde73163c52",
+      "archive_mode": 420
+    },
+    {
+      "path": "queries/highlights.scm",
+      "bytes": 1432,
+      "sha256": "3378d854dda695b2b282b9468247524ed4271ef74af691033d2e36883379409c",
+      "archive_mode": 420
+    },
+    {
+      "path": "queries/tags.scm",
+      "bytes": 375,
+      "sha256": "774ca67cfe23b0e0d1d3a4f01788049a822beb1311feee72b20a595a37be1e28",
+      "archive_mode": 420
+    },
+    {
+      "path": "src/grammar.json",
+      "bytes": 237474,
+      "sha256": "d0bc53bfd8e9eff4d5e0c3ca2c8049bec2caa8a15f119807de68fd527f172368",
+      "archive_mode": 420
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 83057,
+      "sha256": "23e819ef1eefd357bb6eba844f47f8492f6a88da3e5046b06ec4acd4da8a9fd6",
+      "archive_mode": 420
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 3872063,
+      "sha256": "e1b618bc80b8983b43893f98ce1bd8a23a3ccc7d726bed6624b5c4c6c85d5e1c",
+      "archive_mode": 420
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 420
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "archive_mode": 420
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "archive_mode": 420
+    },
+    {
+      "path": "tree-sitter-c.wasm",
+      "bytes": 625918,
+      "sha256": "c852c2a85ebf2beb636aa3b0ef7f7e70458684d74f6741b20dcb296885bed9f9",
+      "archive_mode": 420
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 829,
+      "sha256": "c750191a1bc866b349bb58764ce3a53e2276fd55d4a94e4a448876f9d1266806",
+      "archive_mode": 420
+    }
+  ],
+  "upstream_execution": false
+}

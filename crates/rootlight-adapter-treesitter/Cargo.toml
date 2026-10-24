@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tree-sitter-cuda.workspace = true
 rootlight-thinkscript = { path = "../rootlight-thinkscript" }
 tree-sitter-graphql.workspace = true
 blake3.workspace = true

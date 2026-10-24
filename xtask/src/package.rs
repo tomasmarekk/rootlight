@@ -61,7 +61,11 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 67] = [
+const DISTRIBUTION_LICENSES: [&str; 71] = [
+    "tree-sitter-cuda-0.21.2-LICENSE",
+    "tree-sitter-cuda-0.21.2-Cpp-generation-LICENSE",
+    "tree-sitter-cuda-0.21.2-Cpp-gitlink-LICENSE",
+    "tree-sitter-cuda-0.21.2-C-generation-LICENSE",
     "tree-sitter-coffeescript-1.0.0-LICENSE",
     "tree-sitter-meson-1.0.0-LICENSE",
     "tree-sitter-dockerfile-0.2.0-LICENSE",
@@ -2914,5 +2918,49 @@ mod tests {
             ),
         )
         .expect("asset manifest writes");
+    }
+}
+
+#[cfg(test)]
+mod cuda_license_tests {
+    use super::*;
+
+    #[test]
+    fn cuda_distribution_keeps_each_original_generation_license() {
+        let root = workspace_root().unwrap();
+        for (name, original, expected) in [
+            (
+                "tree-sitter-cuda-0.21.2-LICENSE",
+                "LICENSE",
+                "f44d7107a33801260dc82624c91a71ebf5918b4038a0fb0e3ef60e2dd9ba1999",
+            ),
+            (
+                "tree-sitter-cuda-0.21.2-Cpp-generation-LICENSE",
+                "upstream-dependencies/cpp-generation/LICENSE",
+                "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+            ),
+            (
+                "tree-sitter-cuda-0.21.2-Cpp-gitlink-LICENSE",
+                "upstream-dependencies/cpp-gitlink/LICENSE",
+                "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+            ),
+            (
+                "tree-sitter-cuda-0.21.2-C-generation-LICENSE",
+                "upstream-dependencies/c-generation/LICENSE",
+                "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+            ),
+        ] {
+            assert!(DISTRIBUTION_LICENSES.contains(&name));
+            let bytes = fs::read(distribution_license_path(&root, name)).unwrap();
+            assert_eq!(
+                bytes,
+                fs::read(
+                    root.join("third_party/tree-sitter-cuda-0.21.2")
+                        .join(original)
+                )
+                .unwrap()
+            );
+            assert_eq!(sha256(&bytes), expected);
+        }
     }
 }

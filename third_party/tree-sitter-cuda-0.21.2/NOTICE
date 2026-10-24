@@ -1,0 +1,16 @@
+This local derivative retains all 227 authenticated upstream files and their
+published modes across the CUDA tree, its exact C++ generation dependency, the
+separate historical C++ gitlink and the published C generation package. Their
+complete source archives and original manifests remain source provenance.
+
+The original MIT grants, copyright notices and source attribution remain intact
+in upstream/LICENSE and each upstream-dependencies/*/LICENSE. The root LICENSE
+is a byte-identical copy of the CUDA upstream license. Local vendoring does not
+claim original authorship or exclusive ownership of any retained upstream work.
+
+The active scanner is a disclosed local operational derivative of CUDA's original
+raw-string scanner. Its checked status bridge and owned Rust callback host derive
+mechanically from the existing Rootlight Idris host. SCANNER.patch records the
+scanner derivative; SOURCE-PROVENANCE.json binds all current local source inputs.
+Published Node prebuilds and WebAssembly bytes in the original C package remain
+inert archive/source provenance and are never used as locally built artifacts.

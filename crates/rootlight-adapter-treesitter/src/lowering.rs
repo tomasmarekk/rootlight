@@ -26,6 +26,7 @@ mod coq_written;
 mod cpp_const_formals;
 mod crystal;
 mod csharp_formals;
+mod cuda;
 mod cue;
 mod d;
 mod dockerfile;
@@ -309,6 +310,7 @@ impl TreeSitterStructuralArtifact {
         required_syntax_fact_count_from_output(
             &self.parse_output,
             self.required_scope_profile,
+            cuda::accounting_limit(self.limits.max_syntax_nodes())?,
             cancellation,
         )
     }
@@ -774,6 +776,7 @@ impl TreeSitterStructuralArtifact {
 fn required_syntax_fact_count_from_output(
     output: &ParseOutput,
     required_scope_profile: RequiredScopeProfile,
+    cuda_accounting_work: usize,
     cancellation: &Cancellation,
 ) -> Result<usize, AdapterError> {
     cancellation.check()?;
@@ -783,6 +786,7 @@ fn required_syntax_fact_count_from_output(
     let mut flux_read_ends = HashMap::new();
     let nix_read_ends = nix_formal_reads::read_ends(facts, cancellation)?;
     let eiffel_read_ends = eiffel_formal_reads::read_ends(facts, cancellation)?;
+    let cuda_ends = cuda::ends(facts, cuda_accounting_work, cancellation)?;
     let mut coq_notation_ends = HashMap::new();
     let mut ring_read_ends = HashMap::new();
     let mut fsharp_implementation_ranges = Vec::new();
@@ -933,6 +937,10 @@ fn required_syntax_fact_count_from_output(
             || ocaml_bindings::required(fact)
             || astro_reads::required(fact)
             || typescript_const::required(fact)
+            || cuda_ends.scope_required(fact, cancellation)?
+            || (cuda::reference(fact)
+                && cuda_ends
+                    .contains_key(&(fact.span().file(), fact.span().end_byte()), cancellation)?)
             || (nix_formal_reads::reference(fact)
                 && nix_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte())))
             || (eiffel_formal_reads::reference(fact)
@@ -1317,6 +1325,11 @@ fn preflight_lowering_limits(
         limits.max_nested_items_per_record,
     )?;
 
+    let cuda_ends = cuda::ends(
+        parse_output.facts(),
+        cuda::accounting_limit(request.limits().max_syntax_nodes())?,
+        cancellation,
+    )?;
     let flux_read_ends = if request.language().as_str() == "flux" {
         flux::read_ends(parse_output.facts(), cancellation)?
     } else {
@@ -1585,6 +1598,35 @@ fn preflight_lowering_limits(
                 occurrence_candidates = checked_add(occurrence_candidates, 1)?;
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
                 account_string(&mut string_bytes, eiffel_formal_reads::READ.len(), limits)?;
+            }
+            if matches!(request.language().as_str(), "cuda" | "cpp")
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() == CoverageStatus::Complete
+                && cuda::reference(fact)
+                && let Some(facet) =
+                    cuda_ends.get(&(fact.span().file(), fact.span().end_byte()), cancellation)?
+            {
+                occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+                let is_call = *facet == cuda::Facet::Call;
+                lexical_relation_candidates =
+                    checked_add(lexical_relation_candidates, if is_call { 2 } else { 1 })?;
+                account_string(
+                    &mut string_bytes,
+                    if is_call {
+                        cuda::CALL.len()
+                    } else {
+                        cuda::READ.len()
+                    },
+                    limits,
+                )?;
+                if is_call {
+                    require_resource_limit(
+                        ResourceKind::NestedItems,
+                        3,
+                        limits.max_nested_items_per_record,
+                    )?;
+                    field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+                }
             }
             if request.language().as_str() == "nix"
                 && request.included_ranges().is_empty()
@@ -3232,6 +3274,36 @@ impl<'context, 'source> Lowering<'context, 'source> {
         };
         // A certified clean function remains usable when unrelated file recovery
         // leaves global coverage unknown; the strict context join proves only it.
+        let cuda = if matches!(self.request.language().as_str(), "cuda" | "cpp")
+            && crate::registry::native_family_for_source(
+                if self.request.language().as_str() == "cuda" {
+                    crate::GrammarFamily::Cuda
+                } else {
+                    crate::GrammarFamily::Cpp
+                },
+                self.request.source().path().as_str(),
+            ) == crate::GrammarFamily::Cuda
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            Some(cuda::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .min(200_000)
+                    .saturating_mul(64),
+                self.request.limits().max_syntax_depth(),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let cpp_const_formals = if self.request.language().as_str() == "cpp"
             && self.request.included_ranges().is_empty()
         {
@@ -4612,6 +4684,50 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         provenance_id,
                     )?;
                     insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+                }
+                if let Some(targets) = &cuda
+                    && let Some((facet, symbol)) =
+                        targets.resolve(fact, &occurrence, cancellation)?
+                {
+                    let mut added = occurrence.clone();
+                    added.target = OccurrenceTarget::Resolved { symbol };
+                    added.role = if facet == cuda::Facet::Read {
+                        OccurrenceRole::Read
+                    } else {
+                        OccurrenceRole::CallSite
+                    };
+                    added.syntax_kind.clear();
+                    added.syntax_kind.push_str(if facet == cuda::Facet::Read {
+                        cuda::READ
+                    } else {
+                        cuda::CALL
+                    });
+                    added.id = derive_occurrence_record_id(&added)
+                        .map_err(|_| provider_failure("cuda-facet-identity"))?;
+                    let relation = lexical_reference_relation(&added, symbol)?;
+                    relations.insert(relation.id, relation);
+                    if facet == cuda::Facet::Call
+                        && let Some(owner) = added.enclosing
+                    {
+                        let mut relation = lexical_reference_relation(&added, symbol)?;
+                        relation.subject = RelationEndpoint::Entity(owner);
+                        relation.predicate = RelationPredicate::Calls;
+                        relation
+                            .evidence
+                            .derivation
+                            .try_reserve_exact(3)
+                            .map_err(|_| SinkError::AllocationFailed)?;
+                        relation.evidence.derivation.extend([
+                            FactRef::Entity(owner),
+                            FactRef::Fact(added.id),
+                            FactRef::Entity(symbol),
+                        ]);
+                        relation.evidence.derivation.sort_unstable();
+                        relation.id = derive_relation_record_id(&relation)
+                            .map_err(|_| provider_failure("cuda-call-relation-identity"))?;
+                        relations.insert(relation.id, relation);
+                    }
+                    occurrences.insert(added.id, added);
                 }
                 if let Some(targets) = &thinkscript_targets
                     && let Some(symbol) = targets.resolve(fact, &occurrence, cancellation)?
@@ -12634,7 +12750,11 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
     if fact.syntax_kind().as_str().starts_with("qsharp.") {
         return qsharp::signature(fact);
     }
-    if sed::metadata(fact) || idris::metadata(fact) || typescript_const::metadata(fact) {
+    if cuda::metadata(fact)
+        || sed::metadata(fact)
+        || idris::metadata(fact)
+        || typescript_const::metadata(fact)
+    {
         return false;
     }
     if python_variables::metadata(fact)

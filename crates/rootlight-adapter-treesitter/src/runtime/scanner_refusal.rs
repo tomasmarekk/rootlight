@@ -9,6 +9,15 @@ use rootlight_ids::content_hash;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NativeScannerRefusalDetails {
+    /// Complete raw-string delimiter state exceeds sixteen scalar entries.
+    CudaStateCapacity,
+    /// Accepted external scanner steps before the next charge was declined.
+    CudaExternalWork {
+        /// Actual accepted logical steps, not total demand.
+        consumed: u64,
+        /// Finite invocation credit.
+        limit: u64,
+    },
     /// Complete token, state or uint32 indentation cannot fit the fixed scanner contract.
     IdrisStateCapacity,
     /// Actual accepted external-scanner work; total demand is unknown on refusal.
@@ -78,6 +87,12 @@ impl NativeScannerRefusalDetails {
     #[must_use]
     pub fn diagnostic(self, message: &str) -> String {
         match self {
+            Self::CudaStateCapacity => format!(
+                "{message}; origin cuda-raw-string-state; unit delimiter-scalars; limit 16; observed unknown"
+            ),
+            Self::CudaExternalWork { consumed, limit } => format!(
+                "{message}; origin cuda-external-scanner; unit accepted-external-scanner-logical-steps; limit {limit}; consumed {consumed}; demanded unknown; remaining-demand unknown; next charge declined"
+            ),
             Self::LeanScannerCapacity => format!(
                 "{message}; origin lean-external-scanner-fixed-capacity; limits state-entries-510-or-comment-depth-1024-or-raw-hashes-1024; observed unknown"
             ),
@@ -131,6 +146,8 @@ impl NativeScannerRefusalDetails {
 
     pub(super) fn error(self) -> AdapterError {
         provider_failure(match self {
+            Self::CudaStateCapacity => "cuda-scanner-capacity",
+            Self::CudaExternalWork { .. } => "cuda-scanner-work-limit",
             Self::LeanScannerCapacity => "lean-scanner-capacity",
             Self::LeanExternalWork { .. } => "lean-scanner-work-limit",
             Self::IdrisStateCapacity => "idris-scanner-capacity",
@@ -183,7 +200,7 @@ impl NativeScannerRefusal {
     #[must_use]
     pub fn recognizes_error(error: &AdapterError) -> bool {
         matches!(error, AdapterError::ProviderFailed { code } if matches!(
-            code.as_str(), "idris-scanner-capacity" | "idris-scanner-work-limit" | "lean-scanner-capacity" | "lean-scanner-work-limit" | "sed-scanner-capacity" | "sed-scanner-work-limit" | "wolfram-scanner-capacity" | "wolfram-scanner-work-limit" | "pug-scanner-capacity" | "pug-scanner-work-limit" | "dockerfile-scanner-capacity" | "dockerfile-scanner-unsupported-marker"
+            code.as_str(), "cuda-scanner-capacity" | "cuda-scanner-work-limit" | "idris-scanner-capacity" | "idris-scanner-work-limit" | "lean-scanner-capacity" | "lean-scanner-work-limit" | "sed-scanner-capacity" | "sed-scanner-work-limit" | "wolfram-scanner-capacity" | "wolfram-scanner-work-limit" | "pug-scanner-capacity" | "pug-scanner-work-limit" | "dockerfile-scanner-capacity" | "dockerfile-scanner-unsupported-marker"
                 | "coffeescript-scanner-capacity" | "coffeescript-scanner-nul-unavailable"
                 | "coffeescript-scanner-indentation-unavailable" | "coffeescript-scanner-work-limit"))
     }
@@ -258,7 +275,15 @@ impl TreeSitterProvider {
         cancellation.check()?;
         if !matches!(
             request.language().as_str(),
-            "dockerfile" | "coffeescript" | "pug" | "wolfram" | "sed" | "idris" | "lean"
+            "cuda"
+                | "cpp"
+                | "dockerfile"
+                | "coffeescript"
+                | "pug"
+                | "wolfram"
+                | "sed"
+                | "idris"
+                | "lean"
         ) || !request.included_ranges().is_empty()
             || request.native_vba_module().is_some()
         {

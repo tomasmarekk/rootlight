@@ -101,6 +101,8 @@ pub enum GrammarFamily {
     C,
     /// C++ grammar.
     Cpp,
+    /// CUDA written source and the native parser for explicit C++ .cuh headers.
+    Cuda,
     /// C# grammar.
     CSharp,
     /// Kotlin grammar.
@@ -309,7 +311,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(100);
+        let mut descriptors = Vec::with_capacity(101);
         for family in [
             GrammarFamily::Idris,
             GrammarFamily::Sed,
@@ -355,6 +357,7 @@ impl GrammarRegistry {
             GrammarFamily::TypeScript,
             GrammarFamily::C,
             GrammarFamily::Cpp,
+            GrammarFamily::Cuda,
             GrammarFamily::CSharp,
             GrammarFamily::Kotlin,
             GrammarFamily::Php,
@@ -490,6 +493,13 @@ pub enum RegistryError {
 }
 
 pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> GrammarFamily {
+    if family == GrammarFamily::Cpp
+        && path
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("cuh"))
+    {
+        return GrammarFamily::Cuda;
+    }
     if family == GrammarFamily::TypeScript
         && path
             .rsplit_once('.')
@@ -551,6 +561,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         GrammarFamily::C => tree_sitter_c::LANGUAGE.into(),
         GrammarFamily::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        GrammarFamily::Cuda => tree_sitter_cuda::LANGUAGE.into(),
         GrammarFamily::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         GrammarFamily::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
         GrammarFamily::Php => tree_sitter_php::LANGUAGE_PHP.into(),
@@ -1407,6 +1418,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "f2883ff9b21f4a5bd5553c1b10366c418947d17a7bc6bf256124a7542f079dd2",
             scanner_sha256: None,
         },
+        GrammarFamily::Cuda => GrammarIdentity {
+            language_id: "cuda",
+            grammar_version: "0.21.2",
+            source_package_sha256: "b1b6d98a9b660274093d5ee69dffa6ee4cdc077a9814647ac42d8e249f0dd990",
+            parser_sha256: "eb8a71550508fae0ce6b9602f3d77006e19af79417e424a9d8c944498a40adf2",
+            scanner_sha256: Some(
+                "de3ba63fcc30ce1a8b46acbda35bf72e64c69bde79ebfb3b6a3e1f7c61b44ba8",
+            ),
+        },
         GrammarFamily::Cpp => GrammarIdentity {
             language_id: "cpp",
             grammar_version: "0.23.4",
@@ -1482,6 +1502,10 @@ mod tests {
                 GrammarFamily::TypeScript,
             ),
             (GrammarFamily::Rust, "view.tsx", GrammarFamily::Rust),
+            (GrammarFamily::Cpp, "source.cuh", GrammarFamily::Cuda),
+            (GrammarFamily::Cpp, "source.CUH", GrammarFamily::Cuda),
+            (GrammarFamily::Cpp, "source.cuh.cpp", GrammarFamily::Cpp),
+            (GrammarFamily::Cuda, "source.cu", GrammarFamily::Cuda),
         ] {
             assert_eq!(native_family_for_source(family, path), expected, "{path}");
         }
@@ -1491,7 +1515,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 100);
+        assert_eq!(registry.descriptors().len(), 101);
         for family in [
             GrammarFamily::Idris,
             GrammarFamily::Sed,
@@ -1535,6 +1559,7 @@ mod tests {
             GrammarFamily::TypeScript,
             GrammarFamily::C,
             GrammarFamily::Cpp,
+            GrammarFamily::Cuda,
             GrammarFamily::CSharp,
             GrammarFamily::Kotlin,
             GrammarFamily::Php,
@@ -1906,6 +1931,7 @@ mod tests {
             ),
             (GrammarFamily::C, "c", "tree-sitter-c"),
             (GrammarFamily::Cpp, "cpp", "tree-sitter-cpp"),
+            (GrammarFamily::Cuda, "cuda", "tree-sitter-cuda"),
             (GrammarFamily::CSharp, "csharp", "tree-sitter-c-sharp"),
             (GrammarFamily::Kotlin, "kotlin", "tree-sitter-kotlin-ng"),
             (GrammarFamily::Php, "php", "tree-sitter-php"),
@@ -2019,7 +2045,8 @@ mod tests {
                     ) || family.is_cobol()
                         || matches!(
                             family,
-                            GrammarFamily::Haxe
+                            GrammarFamily::Cuda
+                                | GrammarFamily::Haxe
                                 | GrammarFamily::Qml
                                 | GrammarFamily::Ring
                                 | GrammarFamily::Dockerfile

@@ -256,6 +256,23 @@ pub fn structural_preprocessor_context_gaps(
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("cuda.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Declaration, "cuda.function.declaration") => {
+                Some(EntityKind::Function)
+            }
+            (SyntaxFactKind::Declaration, "cuda.parameter.declaration") => {
+                Some(EntityKind::Parameter)
+            }
+            (SyntaxFactKind::Declaration, "cuda.struct.declaration") => Some(EntityKind::Struct),
+            (SyntaxFactKind::Declaration, "cuda.field.declaration") => Some(EntityKind::Field),
+            (SyntaxFactKind::Declaration, "cuda.class.declaration") => Some(EntityKind::Class),
+            (SyntaxFactKind::Declaration, "cuda.union.declaration") => Some(EntityKind::Union),
+            (SyntaxFactKind::Declaration, "cuda.enum.declaration") => Some(EntityKind::Enum),
+            (SyntaxFactKind::Declaration, "cuda.type.declaration") => Some(EntityKind::TypeAlias),
+            _ => None,
+        };
+    }
     if jsx::owns(label) {
         return jsx::entity_kind(fact);
     }
@@ -4257,6 +4274,56 @@ mod bash_wrapper_name_contract {
                     );
                 }
             }
+        }
+    }
+}
+#[cfg(test)]
+mod cuda_classification_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn cuda_accepts_only_exact_written_owner_and_formal_labels() {
+        let make = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([7; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        for (label, expected) in [
+            ("cuda.function.declaration", EntityKind::Function),
+            ("cuda.parameter.declaration", EntityKind::Parameter),
+            ("cuda.struct.declaration", EntityKind::Struct),
+            ("cuda.field.declaration", EntityKind::Field),
+        ] {
+            assert_eq!(
+                structural_entity_kind(&make(SyntaxFactKind::Declaration, label)),
+                Some(expected)
+            );
+            for kind in [
+                SyntaxFactKind::Signature,
+                SyntaxFactKind::Occurrence,
+                SyntaxFactKind::Root,
+            ] {
+                assert_eq!(structural_entity_kind(&make(kind, label)), None);
+            }
+        }
+        for label in [
+            "cuda.external.function.declaration",
+            "cuda.function.declaration.extra",
+            "cuda.kernel_launch_target.signature",
+            "cuda.scalar_read_target.signature",
+        ] {
+            assert_eq!(
+                structural_entity_kind(&make(SyntaxFactKind::Declaration, label)),
+                None
+            );
         }
     }
 }

@@ -3,6 +3,9 @@
 #[path = "durable/source_authority.rs"]
 mod source_authority;
 
+#[cfg(test)]
+pub(super) mod publication_diagnostics;
+
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
@@ -3622,6 +3625,9 @@ impl DurableCatalog {
         repository: RepositoryId,
         retained: &BTreeSet<GenerationId>,
     ) -> Result<(), FirstSliceError> {
+        #[cfg(test)]
+        let _diagnostic_phase =
+            publication_diagnostics::phase(publication_diagnostics::Phase::RepositoryCompaction);
         let mut accounting = self
             .storage_accounting
             .lock()
@@ -4259,6 +4265,9 @@ impl DurablePreparedGeneration {
         mut self,
         scanned_generation: ScannedGeneration,
     ) -> Result<DurablePublishedGeneration, FirstSliceError> {
+        #[cfg(test)]
+        let _diagnostic_phase =
+            publication_diagnostics::phase(publication_diagnostics::Phase::GenerationPublication);
         let accounting_handle = Arc::clone(&self.storage_accounting);
         let mut accounting = accounting_handle
             .lock()
@@ -4272,12 +4281,26 @@ impl DurablePreparedGeneration {
             .publish_noreplace(self.repository().capability(), OsStr::new(&generation_name))
         {
             Ok(directory) => directory,
-            Err(PublishError::NotCommitted { .. }) => {
+            Err(PublishError::NotCommitted { source: _source }) => {
+                #[cfg(test)]
+                publication_diagnostics::platform(
+                    &_source,
+                    publication_diagnostics::Outcome::NotCommitted,
+                );
                 accounting.dirty = true;
                 self.release_staging_bytes();
                 return Err(FirstSliceError::Catalog);
             }
-            Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
+            Err(PublishError::CommittedButDurabilityUnknown {
+                directory,
+                source: _source,
+            }) => {
+                #[cfg(test)]
+                publication_diagnostics::io(
+                    &_source,
+                    "publish-private-directory-post-commit",
+                    publication_diagnostics::Outcome::CommittedButDurabilityUnknown,
+                );
                 accounting.dirty = true;
                 self.release_staging_bytes();
                 if directory.remove().is_err()
@@ -4288,7 +4311,9 @@ impl DurablePreparedGeneration {
                 }
                 return Err(FirstSliceError::Catalog);
             }
-            Err(_) => {
+            Err(_error) => {
+                #[cfg(test)]
+                publication_diagnostics::publication(&_error);
                 accounting.dirty = true;
                 self.release_staging_bytes();
                 return Err(FirstSliceError::Catalog);
@@ -4932,14 +4957,27 @@ fn private_entry_names_with_cancellation(
     cancellation: &Cancellation,
 ) -> Result<Vec<OsString>, FirstSliceError> {
     check_cancellation(cancellation)?;
-    let entries = directory
-        .capability()
-        .entries()
-        .map_err(|_| FirstSliceError::Catalog)?;
+    let entries = directory.capability().entries().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::io(
+            &_error,
+            "read-private-directory",
+            publication_diagnostics::Outcome::Operation,
+        );
+        FirstSliceError::Catalog
+    })?;
     let mut names = Vec::new();
     for entry in entries {
         check_cancellation(cancellation)?;
-        let entry = entry.map_err(|_| FirstSliceError::Catalog)?;
+        let entry = entry.map_err(|_error| {
+            #[cfg(test)]
+            publication_diagnostics::io(
+                &_error,
+                "read-private-directory",
+                publication_diagnostics::Outcome::Operation,
+            );
+            FirstSliceError::Catalog
+        })?;
         if names.len() >= MAX_DURABLE_ENTRIES {
             return Err(FirstSliceError::Retention);
         }
@@ -6113,12 +6151,21 @@ fn compact_repository_entries(
             PrivateDirectory::open(repository.capability(), &marker.name)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?
                 .remove()
-                .map_err(|_| FirstSliceError::Catalog)?;
+                .map_err(|_error| {
+                    #[cfg(test)]
+                    publication_diagnostics::platform(
+                        &_error,
+                        publication_diagnostics::Outcome::Operation,
+                    );
+                    FirstSliceError::Catalog
+                })?;
         }
     }
-    repository
-        .sync_all()
-        .map_err(|_| FirstSliceError::Catalog)?;
+    repository.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })?;
     let obsolete_generations: BTreeSet<_> = generation_names
         .difference(retained_generations)
         .copied()
@@ -6126,7 +6173,11 @@ fn compact_repository_entries(
     remove_generation_directories(repository, &obsolete_generations)?;
     let referenced = retained_source_blobs(repository, retained_generations)?;
     compact_source_blobs(repository, &referenced)?;
-    repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+    repository.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })
 }
 
 fn retained_source_blobs(
@@ -6164,6 +6215,9 @@ fn compact_source_blobs(
     repository: &PrivateDirectory<'_>,
     referenced: &BTreeSet<ContentHash>,
 ) -> Result<(), FirstSliceError> {
+    #[cfg(test)]
+    let _diagnostic_phase =
+        publication_diagnostics::phase(publication_diagnostics::Phase::SourceBlobCompaction);
     let metadata = match repository
         .capability()
         .symlink_metadata(Path::new(SOURCE_BLOBS_DIRECTORY))
@@ -6176,21 +6230,42 @@ fn compact_source_blobs(
                 Err(FirstSliceError::CatalogCorrupt)
             };
         }
-        Err(_) => return Err(FirstSliceError::Catalog),
+        Err(_error) => {
+            #[cfg(test)]
+            publication_diagnostics::io(
+                &_error,
+                "source-blob-metadata",
+                publication_diagnostics::Outcome::Operation,
+            );
+            return Err(FirstSliceError::Catalog);
+        }
     };
     if !metadata.is_dir() {
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let blobs = PrivateDirectory::open(repository.capability(), OsStr::new(SOURCE_BLOBS_DIRECTORY))
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-    let entries = blobs
-        .capability()
-        .entries()
-        .map_err(|_| FirstSliceError::Catalog)?;
+    let entries = blobs.capability().entries().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::io(
+            &_error,
+            "read-source-blob-directory",
+            publication_diagnostics::Outcome::Operation,
+        );
+        FirstSliceError::Catalog
+    })?;
     let mut visited = 0_usize;
     let mut observed = BTreeSet::new();
     for entry in entries {
-        let entry = entry.map_err(|_| FirstSliceError::Catalog)?;
+        let entry = entry.map_err(|_error| {
+            #[cfg(test)]
+            publication_diagnostics::io(
+                &_error,
+                "read-source-blob-directory",
+                publication_diagnostics::Outcome::Operation,
+            );
+            FirstSliceError::Catalog
+        })?;
         visited = visited.checked_add(1).ok_or(FirstSliceError::Limits)?;
         if visited > MAX_SOURCE_BLOB_ENTRIES {
             return Err(FirstSliceError::Retention);
@@ -6209,13 +6284,24 @@ fn compact_source_blobs(
             PrivateDirectory::open(blobs.capability(), &name)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?
                 .remove()
-                .map_err(|_| FirstSliceError::Catalog)?;
+                .map_err(|_error| {
+                    #[cfg(test)]
+                    publication_diagnostics::platform(
+                        &_error,
+                        publication_diagnostics::Outcome::Operation,
+                    );
+                    FirstSliceError::Catalog
+                })?;
         }
     }
     if !referenced.is_subset(&observed) {
         return Err(FirstSliceError::CatalogCorrupt);
     }
-    blobs.sync_all().map_err(|_| FirstSliceError::Catalog)
+    blobs.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })
 }
 
 fn compact_repository_metadata(
@@ -6229,10 +6315,21 @@ fn compact_repository_metadata(
             PrivateDirectory::open(repository.capability(), &name)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?
                 .remove()
-                .map_err(|_| FirstSliceError::Catalog)?;
+                .map_err(|_error| {
+                    #[cfg(test)]
+                    publication_diagnostics::platform(
+                        &_error,
+                        publication_diagnostics::Outcome::Operation,
+                    );
+                    FirstSliceError::Catalog
+                })?;
         }
     }
-    repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+    repository.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })
 }
 
 fn remove_repository_metadata_directories<'a>(
@@ -6243,9 +6340,20 @@ fn remove_repository_metadata_directories<'a>(
         PrivateDirectory::open(repository.capability(), name)
             .map_err(|_| FirstSliceError::CatalogCorrupt)?
             .remove()
-            .map_err(|_| FirstSliceError::Catalog)?;
+            .map_err(|_error| {
+                #[cfg(test)]
+                publication_diagnostics::platform(
+                    &_error,
+                    publication_diagnostics::Outcome::Operation,
+                );
+                FirstSliceError::Catalog
+            })?;
     }
-    repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+    repository.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })
 }
 
 fn remove_generation_directories(
@@ -6256,12 +6364,26 @@ fn remove_generation_directories(
         PrivateDirectory::open(repository.capability(), OsStr::new(&generation.to_string()))
             .map_err(|_| FirstSliceError::CatalogCorrupt)?
             .remove()
-            .map_err(|_| FirstSliceError::Catalog)?;
+            .map_err(|_error| {
+                #[cfg(test)]
+                publication_diagnostics::platform(
+                    &_error,
+                    publication_diagnostics::Outcome::Operation,
+                );
+                FirstSliceError::Catalog
+            })?;
     }
-    repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+    repository.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })
 }
 
 fn compact_activation_markers(repository: &PrivateDirectory<'_>) -> Result<(), FirstSliceError> {
+    #[cfg(test)]
+    let _diagnostic_phase =
+        publication_diagnostics::phase(publication_diagnostics::Phase::ActivationMarkerCompaction);
     let names = private_entry_names(repository)?;
     let mut markers = BTreeMap::<u64, ActivationMarker>::new();
     let mut generations = BTreeSet::new();
@@ -6295,10 +6417,21 @@ fn compact_activation_markers(repository: &PrivateDirectory<'_>) -> Result<(), F
             PrivateDirectory::open(repository.capability(), &marker.name)
                 .map_err(|_| FirstSliceError::CatalogCorrupt)?
                 .remove()
-                .map_err(|_| FirstSliceError::Catalog)?;
+                .map_err(|_error| {
+                    #[cfg(test)]
+                    publication_diagnostics::platform(
+                        &_error,
+                        publication_diagnostics::Outcome::Operation,
+                    );
+                    FirstSliceError::Catalog
+                })?;
         }
     }
-    repository.sync_all().map_err(|_| FirstSliceError::Catalog)
+    repository.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })
 }
 
 fn recovery_sidecar_memory_bytes(
@@ -7475,6 +7608,9 @@ fn publish_activation_marker(
     published_generation_count: u64,
     operation: Option<FirstSliceOperationContext>,
 ) -> Result<PublishedActivationMarker, FirstSliceError> {
+    #[cfg(test)]
+    let _diagnostic_phase =
+        publication_diagnostics::phase(publication_diagnostics::Phase::ActivationMarkerPublication);
     if repository_activation_sequence == 0
         || global_activation_sequence == 0
         || published_generation_count == 0
@@ -7484,7 +7620,11 @@ fn publish_activation_marker(
     compact_activation_markers(repository)?;
     let staging_name = random_activation_staging_name(generation)?;
     let staging = PrivateDirectory::create(repository.capability(), OsStr::new(&staging_name))
-        .map_err(|_| FirstSliceError::Catalog)?;
+        .map_err(|_error| {
+            #[cfg(test)]
+            publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+            FirstSliceError::Catalog
+        })?;
     let manifest = DurableActivationManifest {
         version: ACTIVATION_MANIFEST_VERSION,
         generation,
@@ -7501,16 +7641,45 @@ fn publish_activation_marker(
     {
         let mut file = staging
             .create_file(OsStr::new(ACTIVATION_MANIFEST_FILENAME))
-            .map_err(|_| FirstSliceError::Catalog)?;
-        file.write_all(&bytes)
-            .map_err(|_| FirstSliceError::Catalog)?;
-        file.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            .map_err(|_error| {
+                #[cfg(test)]
+                publication_diagnostics::platform(
+                    &_error,
+                    publication_diagnostics::Outcome::Operation,
+                );
+                FirstSliceError::Catalog
+            })?;
+        file.write_all(&bytes).map_err(|_error| {
+            #[cfg(test)]
+            publication_diagnostics::io(
+                &_error,
+                "write-activation-manifest",
+                publication_diagnostics::Outcome::Operation,
+            );
+            FirstSliceError::Catalog
+        })?;
+        file.sync_all().map_err(|_error| {
+            #[cfg(test)]
+            publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+            FirstSliceError::Catalog
+        })?;
     }
-    staging.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+    staging.sync_all().map_err(|_error| {
+        #[cfg(test)]
+        publication_diagnostics::platform(&_error, publication_diagnostics::Outcome::Operation);
+        FirstSliceError::Catalog
+    })?;
     let marker_name = activation_name(repository_activation_sequence, generation);
     match staging.publish_noreplace(repository.capability(), OsStr::new(&marker_name)) {
         Ok(marker) => {
-            marker.sync_all().map_err(|_| FirstSliceError::Catalog)?;
+            marker.sync_all().map_err(|_error| {
+                #[cfg(test)]
+                publication_diagnostics::platform(
+                    &_error,
+                    publication_diagnostics::Outcome::Operation,
+                );
+                FirstSliceError::Catalog
+            })?;
             let bytes = u64::try_from(bytes.len()).map_err(|_| FirstSliceError::Limits)?;
             Ok(PublishedActivationMarker {
                 marker: ActivationMarker {
@@ -7521,12 +7690,39 @@ fn publish_activation_marker(
                 bytes,
             })
         }
-        Err(PublishError::NotCommitted { .. }) => Err(FirstSliceError::Catalog),
-        Err(PublishError::CommittedButDurabilityUnknown { directory, .. }) => {
-            directory.remove().map_err(|_| FirstSliceError::Catalog)?;
+        Err(PublishError::NotCommitted { source: _source }) => {
+            #[cfg(test)]
+            publication_diagnostics::platform(
+                &_source,
+                publication_diagnostics::Outcome::NotCommitted,
+            );
             Err(FirstSliceError::Catalog)
         }
-        Err(_) => Err(FirstSliceError::Catalog),
+        Err(PublishError::CommittedButDurabilityUnknown {
+            directory,
+            source: _source,
+        }) => {
+            #[cfg(test)]
+            publication_diagnostics::io(
+                &_source,
+                "publish-private-directory-post-commit",
+                publication_diagnostics::Outcome::CommittedButDurabilityUnknown,
+            );
+            directory.remove().map_err(|_error| {
+                #[cfg(test)]
+                publication_diagnostics::platform(
+                    &_error,
+                    publication_diagnostics::Outcome::Operation,
+                );
+                FirstSliceError::Catalog
+            })?;
+            Err(FirstSliceError::Catalog)
+        }
+        Err(_error) => {
+            #[cfg(test)]
+            publication_diagnostics::publication(&_error);
+            Err(FirstSliceError::Catalog)
+        }
     }
 }
 

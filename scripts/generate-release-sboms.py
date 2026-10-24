@@ -37,6 +37,11 @@ TARGETS = (
 COMMON_ASSETS = (
     ("LICENSE", Path("LICENSE")),
     ("NOTICE", Path("NOTICE")),
+    ("licenses/tree-sitter-cuda-0.21.2-LICENSE", Path("adapters/licenses/tree-sitter-cuda-0.21.2-LICENSE")),
+    ("licenses/tree-sitter-cuda-0.21.2-Cpp-generation-LICENSE", Path("adapters/licenses/tree-sitter-cuda-0.21.2-Cpp-generation-LICENSE")),
+    ("licenses/tree-sitter-cuda-0.21.2-Cpp-gitlink-LICENSE", Path("adapters/licenses/tree-sitter-cuda-0.21.2-Cpp-gitlink-LICENSE")),
+    ("licenses/tree-sitter-cuda-0.21.2-C-generation-LICENSE", Path("adapters/licenses/tree-sitter-cuda-0.21.2-C-generation-LICENSE")),
+
     (
         "licenses/tree-sitter-cpp-0.23.4-LICENSE",
         Path("adapters/licenses/tree-sitter-cpp-0.23.4-LICENSE"),

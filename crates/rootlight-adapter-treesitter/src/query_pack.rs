@@ -40,6 +40,7 @@ mod coq;
 mod cpp_const_formals;
 mod crystal;
 mod csharp_formals;
+mod cuda;
 mod cue;
 mod d;
 mod dart;
@@ -437,6 +438,7 @@ struct QueryScanLimits {
 }
 
 pub(crate) struct QueryPack {
+    native_family: GrammarFamily,
     // Optional query work may stop proportionally to the caller's output
     // budget. Identity patterns stay separate so that stopping optional work
     // can never strand a retained declaration without its defining evidence.
@@ -769,18 +771,21 @@ impl QueryPack {
             .map(|name| StructuralRole::from_capture_name(name).ok_or(family))
             .collect::<Result<Vec<_>, _>>()?;
         for pattern in 0..identity_query.pattern_count() {
-            // Nix and Eiffel certify only some variable uses. Both scans visit
-            // references; identity retention admits only native-certified targets.
-            let has_source_certified_reference =
-                matches!(family, GrammarFamily::Nix | GrammarFamily::Eiffel)
-                    && identity_query
-                        .capture_quantifiers(pattern)
-                        .iter()
-                        .zip(&roles_by_capture)
-                        .any(|(quantifier, role)| {
-                            *quantifier != CaptureQuantifier::Zero
-                                && *role == StructuralRole::Reference
-                        });
+            // These source proofs certify only selected names. Both scans visit
+            // references; mandatory retention admits only native-certified uses.
+            let has_source_certified_reference = matches!(
+                family,
+                GrammarFamily::Nix
+                    | GrammarFamily::Eiffel
+                    | GrammarFamily::Cpp
+                    | GrammarFamily::Cuda
+            ) && identity_query
+                .capture_quantifiers(pattern)
+                .iter()
+                .zip(&roles_by_capture)
+                .any(|(quantifier, role)| {
+                    *quantifier != CaptureQuantifier::Zero && *role == StructuralRole::Reference
+                });
             let has_identity_capture = identity_query
                 .capture_quantifiers(pattern)
                 .iter()
@@ -800,6 +805,7 @@ impl QueryPack {
             }
         }
         let pack = Self {
+            native_family,
             identity_query,
             optional_query,
             roles_by_capture,
@@ -1090,6 +1096,10 @@ impl QueryPack {
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "csharp.formal_receiver")
+                    || (matches!(family, GrammarFamily::Cpp | GrammarFamily::Cuda)
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && matches!(candidate.syntax, "cpp.identifier" | "cuda.identifier"))
                     || (family == GrammarFamily::Cpp
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1143,6 +1153,9 @@ impl QueryPack {
                     // Data scalar siblings are needed to count array positions,
                     // even when they contain no named declaration themselves.
                     candidate.required = candidate.role != StructuralRole::Scope
+                        || (matches!(family, GrammarFamily::Cpp | GrammarFamily::Cuda)
+                            && candidate.required
+                            && matches!(candidate.syntax, "cpp.block" | "cuda.block"))
                         || (family == GrammarFamily::C
                             && candidate.required
                             && matches!(candidate.syntax, "c.block" | "c.for"))
@@ -1269,7 +1282,7 @@ impl QueryPack {
         let mut limit = None;
         let c_dialect = match input.family {
             GrammarFamily::C => Some(c::PreprocessorDialect::C),
-            GrammarFamily::Cpp => Some(c::PreprocessorDialect::Cpp),
+            GrammarFamily::Cpp | GrammarFamily::Cuda => Some(c::PreprocessorDialect::Cpp),
             _ => None,
         };
         let c_included_ranges = c_dialect.map(|_| input.tree.included_ranges());
@@ -1307,6 +1320,12 @@ impl QueryPack {
             input.tree.root_node(),
             limits.captures.min(limits.body_nodes),
             complete_file_input,
+        );
+        let mut cuda = cuda::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.captures.min(limits.body_nodes),
+            complete_file_input && self.native_family == GrammarFamily::Cuda,
         );
         let mut cpp_const_formals = cpp_const_formals::CaptureCache::new(
             input.source,
@@ -3118,6 +3137,23 @@ impl QueryPack {
                         continue;
                     }
                 }
+                if self.native_family == GrammarFamily::Cuda
+                    && matches!(input.family, GrammarFamily::Cpp | GrammarFamily::Cuda)
+                {
+                    let decision =
+                        cuda.refine(capture.node, role, &mut candidate, input.cancellation)?;
+                    if cuda.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::CudaWritten));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(keep) = decision {
+                        if keep {
+                            retain(candidate)?;
+                        }
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::Cpp {
                     let keep = cpp_const_formals.refine(
                         capture.node,
@@ -3475,6 +3511,7 @@ fn identity_scan_limits(max_nodes: usize) -> QueryScanLimits {
 pub(crate) struct QueryPackRegistry {
     packs: Vec<(GrammarFamily, QueryPackEntry)>,
     typescript_tsx: QueryPackEntry,
+    cpp_cuda: QueryPackEntry,
 }
 
 struct QueryPackEntry {
@@ -4050,12 +4087,14 @@ fn candidate_for_capture(
             GrammarFamily::Rust => "rust.test_attribute",
             GrammarFamily::Java => "java.test_attribute",
             GrammarFamily::Cpp => "cpp.test_attribute",
+            GrammarFamily::Cuda => "cuda.test_attribute",
             _ => return Err(query_failure("query-test-attribute-family")),
         },
         StructuralRole::ScopedCall => "rust.scoped_call",
         StructuralRole::CallName => match family {
             GrammarFamily::C => "c.call_name",
             GrammarFamily::Cpp => "cpp.call_name",
+            GrammarFamily::Cuda => "cuda.call_name",
             GrammarFamily::CSharp => "csharp.call_name",
             GrammarFamily::Go => "go.call_name",
             GrammarFamily::Java => "java.call_name",
@@ -4088,6 +4127,7 @@ fn candidate_for_capture(
             GrammarFamily::TypeScript => "typescript.call",
             GrammarFamily::C => "c.call",
             GrammarFamily::Cpp => "cpp.call",
+            GrammarFamily::Cuda => "cuda.call",
             GrammarFamily::CSharp => "csharp.call",
             GrammarFamily::Kotlin => "kotlin.call",
             GrammarFamily::Php => "php.call",
@@ -4591,6 +4631,7 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
         GrammarFamily::Apex
             | GrammarFamily::C
             | GrammarFamily::Cpp
+            | GrammarFamily::Cuda
             | GrammarFamily::CSharp
             | GrammarFamily::Go
             | GrammarFamily::Java
@@ -4611,7 +4652,10 @@ const fn supports_terminal_call_name(family: GrammarFamily) -> bool {
 }
 
 const fn supports_test_attribute(family: GrammarFamily) -> bool {
-    matches!(family, GrammarFamily::Cpp | GrammarFamily::Java)
+    matches!(
+        family,
+        GrammarFamily::Cpp | GrammarFamily::Cuda | GrammarFamily::Java
+    )
 }
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
@@ -5040,6 +5084,39 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::C, "comment") => Some("c.comment"),
         (GrammarFamily::C, "string_literal") => Some("c.string"),
         (GrammarFamily::C, "concatenated_string") => Some("c.concatenated_string"),
+        (GrammarFamily::Cuda, "translation_unit") => Some("cuda.file"),
+        (GrammarFamily::Cuda, "namespace_definition") => Some("cuda.namespace"),
+        (GrammarFamily::Cuda, "function_definition") => Some("cuda.function"),
+        (GrammarFamily::Cuda, "declaration") => Some("cuda.declaration"),
+        (GrammarFamily::Cuda, "field_declaration") => Some("cuda.function"),
+        (GrammarFamily::Cuda, "class_specifier") => Some("cuda.class"),
+        (GrammarFamily::Cuda, "struct_specifier") => Some("cuda.struct"),
+        (GrammarFamily::Cuda, "union_specifier") => Some("cuda.union"),
+        (GrammarFamily::Cuda, "enum_specifier") => Some("cuda.enum"),
+        (GrammarFamily::Cuda, "type_definition") => Some("cuda.type"),
+        (GrammarFamily::Cuda, "template_declaration") => Some("cuda.template"),
+        (GrammarFamily::Cuda, "preproc_include") => Some("cuda.include"),
+        (GrammarFamily::Cuda, "preproc_def") => Some("cuda.macro"),
+        (GrammarFamily::Cuda, "preproc_function_def") => Some("cuda.function_macro"),
+        (GrammarFamily::Cuda, "preproc_params") => Some("cuda.preprocessor_parameters"),
+        (GrammarFamily::Cuda, "preproc_if" | "preproc_ifdef") => {
+            Some("cuda.preprocessor_condition")
+        }
+        (GrammarFamily::Cuda, "parameter_declaration") => Some("cuda.parameter"),
+        (GrammarFamily::Cuda, "parameter_list") => Some("cuda.parameters"),
+        (GrammarFamily::Cuda, "template_parameter_list") => Some("cuda.template_parameters"),
+        (GrammarFamily::Cuda, "compound_statement") => Some("cuda.block"),
+        (GrammarFamily::Cuda, "declaration_list") => Some("cuda.declaration_list"),
+        (GrammarFamily::Cuda, "identifier") => Some("cuda.identifier"),
+        (GrammarFamily::Cuda, "field_identifier") => Some("cuda.field_identifier"),
+        (GrammarFamily::Cuda, "type_identifier") => Some("cuda.type_identifier"),
+        (GrammarFamily::Cuda, "namespace_identifier") => Some("cuda.namespace_identifier"),
+        (GrammarFamily::Cuda, "comment") => Some("cuda.comment"),
+        (GrammarFamily::Cuda, "string_literal") => Some("cuda.string"),
+        (GrammarFamily::Cuda, "raw_string_literal") => Some("cuda.raw_string"),
+        (GrammarFamily::Cuda, "concatenated_string") => Some("cuda.concatenated_string"),
+        (GrammarFamily::Cpp, "function_declarator") => Some("cpp.cuda_owned_function"),
+        (GrammarFamily::Cuda, "function_declarator") => Some("cuda.owned_function"),
         (GrammarFamily::Cpp, "translation_unit") => Some("cpp.file"),
         (GrammarFamily::Cpp, "namespace_definition") => Some("cpp.namespace"),
         (GrammarFamily::Cpp, "function_definition") => Some("cpp.function"),
@@ -5160,6 +5237,10 @@ impl QueryPackRegistry {
             .typescript_tsx
             .load(&cancellation)
             .map_err(|_| GrammarFamily::TypeScript)?;
+        registry
+            .cpp_cuda
+            .load(&cancellation)
+            .map_err(|_| GrammarFamily::Cpp)?;
         Ok(registry)
     }
 
@@ -5173,7 +5254,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(81);
+        let mut packs = Vec::with_capacity(101);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5205,6 +5286,7 @@ impl QueryPackRegistry {
             ),
             (GrammarFamily::C, include_str!("../queries/c.scm")),
             (GrammarFamily::Cpp, include_str!("../queries/cpp.scm")),
+            (GrammarFamily::Cuda, include_str!("../queries/cuda.scm")),
             (GrammarFamily::CSharp, include_str!("../queries/csharp.scm")),
             (GrammarFamily::Kotlin, include_str!("../queries/kotlin.scm")),
             (GrammarFamily::Php, include_str!("../queries/php.scm")),
@@ -5379,6 +5461,11 @@ impl QueryPackRegistry {
         Self {
             packs,
             typescript_tsx,
+            cpp_cuda: QueryPackEntry::new(
+                GrammarFamily::Cpp,
+                GrammarFamily::Cuda,
+                include_str!("../queries/cpp.scm"),
+            ),
         }
     }
 
@@ -5400,7 +5487,7 @@ impl QueryPackRegistry {
     }
 
     pub(crate) const fn len(&self) -> usize {
-        self.packs.len() + 1
+        self.packs.len() + 2
     }
 
     pub(crate) fn get_for_source(
@@ -5421,6 +5508,8 @@ impl QueryPackRegistry {
         cancellation.check()?;
         let entry = if family == GrammarFamily::TypeScript && native == GrammarFamily::JavaScript {
             Some(&self.typescript_tsx)
+        } else if family == GrammarFamily::Cpp && native == GrammarFamily::Cuda {
+            Some(&self.cpp_cuda)
         } else if family == native {
             self.entry(family)
         } else {
@@ -5435,7 +5524,7 @@ impl QueryPackRegistry {
         self.packs
             .iter()
             .map(|(_, entry)| entry)
-            .chain(std::iter::once(&self.typescript_tsx))
+            .chain([&self.typescript_tsx, &self.cpp_cuda])
             .filter(|entry| entry.compiled.get().is_some())
             .count()
     }
@@ -5444,7 +5533,7 @@ impl QueryPackRegistry {
         self.packs
             .iter()
             .map(|(_, entry)| entry)
-            .chain(std::iter::once(&self.typescript_tsx))
+            .chain([&self.typescript_tsx, &self.cpp_cuda])
             .filter_map(|entry| entry.compiled.get().and_then(|result| result.as_ref().ok()))
             .map(|pack| pack.identity_query.pattern_count())
             .sum()
@@ -5485,7 +5574,7 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 101);
+        assert_eq!(registry.len(), 103);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [

@@ -94,3 +94,9 @@
 (function_definition) @signature
 ; The identity pass certifies receivers without making ordinary names required.
 (identifier) @signature
+
+; Ordinary written fields have no callable declarator.
+(field_declaration declarator: (field_identifier) @definition) @declaration
+; Whole-source and callable certificates are independent of written signatures.
+(translation_unit) @signature
+(function_declarator) @signature

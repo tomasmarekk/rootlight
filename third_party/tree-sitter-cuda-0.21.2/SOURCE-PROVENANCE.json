@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "package_identity": "Local operational derivative; not a pristine registry publication",
+  "upstream": "https://github.com/tree-sitter-grammars/tree-sitter-cuda",
+  "commit": "d58080a327756e4d1d16ec329ba7cb2048f6c6cd",
+  "upstream_version": "0.21.2",
+  "license": "MIT",
+  "generated_abi": 15,
+  "complete_upstream_files": 227,
+  "complete_upstream_bytes": 85845412,
+  "git_blobs_authenticated": 202,
+  "published_npm_files_authenticated": 25,
+  "packages": [
+    {
+      "label": "cuda",
+      "destination": "upstream",
+      "files": 68,
+      "bytes": 32130595,
+      "origin": {
+        "repository": "https://github.com/tree-sitter-grammars/tree-sitter-cuda",
+        "commit": "d58080a327756e4d1d16ec329ba7cb2048f6c6cd",
+        "gitlinks": [
+          {
+            "path": "tree-sitter-cpp",
+            "mode": "160000",
+            "type": "commit",
+            "sha": "a71474021410973b29bfe99440d57bcd750246b1"
+          }
+        ],
+        "archive_sha256": "18f7bcaf6115c7b9ca57505653e787c565f4cdc7886caf76a004c36e8aa1548a",
+        "all_git_blobs_authenticated": true,
+        "upstream_execution": false
+      },
+      "archive": {
+        "path": "source-archives/cuda.tar.gz",
+        "url": "https://codeload.github.com/tree-sitter-grammars/tree-sitter-cuda/tar.gz/d58080a327756e4d1d16ec329ba7cb2048f6c6cd",
+        "bytes": 2081124,
+        "sha256": "18f7bcaf6115c7b9ca57505653e787c565f4cdc7886caf76a004c36e8aa1548a"
+      },
+      "manifest_path": "source-manifests/cuda-manifest.json",
+      "retained_manifest_sha256": "5a97bf8ce6c4ef3aecfca01f6deacb0133f8d71138a4045c968617a82b13d7e7"
+    },
+    {
+      "label": "cpp-generation",
+      "destination": "upstream-dependencies/cpp-generation",
+      "files": 79,
+      "bytes": 26972103,
+      "origin": {
+        "repository": "https://github.com/tree-sitter/tree-sitter-cpp",
+        "commit": "8b5b49eb196bec7040441bee33b2c9a4838d6967",
+        "gitlinks": [],
+        "archive_sha256": "a12b464b8c89d7c1843849bfebb0b5807980555351d60598b92939233abff842",
+        "all_git_blobs_authenticated": true,
+        "upstream_execution": false
+      },
+      "archive": {
+        "path": "source-archives/cpp-generation.tar.gz",
+        "url": "https://codeload.github.com/tree-sitter/tree-sitter-cpp/tar.gz/8b5b49eb196bec7040441bee33b2c9a4838d6967",
+        "bytes": 1740822,
+        "sha256": "a12b464b8c89d7c1843849bfebb0b5807980555351d60598b92939233abff842"
+      },
+      "manifest_path": "source-manifests/cpp-generation-manifest.json",
+      "retained_manifest_sha256": "dd5465bc7e4f60752cab896878ccdf03b7d3f920302c185cbae1f6edceeaf800"
+    },
+    {
+      "label": "cpp-gitlink",
+      "destination": "upstream-dependencies/cpp-gitlink",
+      "files": 55,
+      "bytes": 17723653,
+      "origin": {
+        "repository": "https://github.com/tree-sitter/tree-sitter-cpp",
+        "commit": "a71474021410973b29bfe99440d57bcd750246b1",
+        "gitlinks": [],
+        "archive_sha256": "dbb423572f2ab96c868450afffa1804c6d718c69e407d2d372f94f32e477341d",
+        "all_git_blobs_authenticated": true,
+        "upstream_execution": false
+      },
+      "archive": {
+        "path": "source-archives/cpp-gitlink.tar.gz",
+        "url": "https://codeload.github.com/tree-sitter/tree-sitter-cpp/tar.gz/a71474021410973b29bfe99440d57bcd750246b1",
+        "bytes": 1058667,
+        "sha256": "dbb423572f2ab96c868450afffa1804c6d718c69e407d2d372f94f32e477341d"
+      },
+      "manifest_path": "source-manifests/cpp-gitlink-manifest.json",
+      "retained_manifest_sha256": "5c68a16dddd7bd64f544dcfccb4c9fbe5b97b87cd0013589bf34628249f3a455"
+    },
+    {
+      "label": "c-generation",
+      "destination": "upstream-dependencies/c-generation",
+      "files": 25,
+      "bytes": 9019061,
+      "origin": {
+        "package": "tree-sitter-c",
+        "version": "0.24.1",
+        "source": "https://registry.npmjs.org/tree-sitter-c/0.24.1",
+        "archive_integrity": "sha512-lkYwWN3SRecpvaeqmFKkuPNR3ZbtnvHU+4XAEEkJdrp3JfSp2pBrhXOtvfsENUneye76g889Y0ddF2DM0gEDpA==",
+        "git_head": "7fa1be1b694b6e763686793d97da01f36a0e5c12",
+        "upstream_execution": false
+      },
+      "archive": {
+        "path": "source-archives/c-generation.tgz",
+        "url": "https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-0.24.1.tgz",
+        "bytes": 947664,
+        "sha256": "8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e"
+      },
+      "manifest_path": "source-manifests/c-generation-manifest.json",
+      "retained_manifest_sha256": "d81e81f3987230b02fb32535e8d91794bcb4585f94377cd2c5acd2dd33eebb98"
+    }
+  ],
+  "build_downloads": false,
+  "generator_executed": false,
+  "upstream_scripts_executed": false,
+  "active_sources": [
+    {
+      "retained_path": "development-docs/language-coverage/future-work/cuda/candidate/active-src/scanner.c",
+      "path": "active-src/scanner.c",
+      "bytes": 7661,
+      "sha256": "de3ba63fcc30ce1a8b46acbda35bf72e64c69bde79ebfb3b6a3e1f7c61b44ba8"
+    },
+    {
+      "retained_path": "development-docs/language-coverage/future-work/cuda/candidate/active-src/rootlight_cuda_status.c",
+      "path": "active-src/rootlight_cuda_status.c",
+      "bytes": 4754,
+      "sha256": "6a960b2b34e9beb631e4f07db9b1bfa388a9e3812b0f00faa93ab388f3aaff77"
+    },
+    {
+      "retained_path": "development-docs/language-coverage/future-work/cuda/candidate/active-src/rootlight_cuda_status.h",
+      "path": "active-src/rootlight_cuda_status.h",
+      "bytes": 2267,
+      "sha256": "2055808f917fb77370a9f8bfe4010be1fa075ac80448a9cf5b35ac0d1737b078"
+    },
+    {
+      "retained_path": "development-docs/language-coverage/future-work/cuda/candidate/bindings/rust/lib.rs",
+      "path": "bindings/rust/lib.rs",
+      "bytes": 11034,
+      "sha256": "6a0e08a1a0163902b7cf575d360f4483f0a0beb0be3faad31348d24228154abe"
+    },
+    {
+      "retained_path": "development-docs/language-coverage/future-work/cuda/candidate/bindings/rust/tests.rs",
+      "path": "bindings/rust/tests.rs",
+      "bytes": 4825,
+      "sha256": "a394d5f89f937fc1e56c49963be66e64d0c379aef898f78905bd26ad756a148f"
+    },
+    {
+      "retained_path": "development-docs/language-coverage/future-work/cuda/candidate/controls/scanner_controls.c",
+      "path": "controls/scanner_controls.c",
+      "bytes": 11828,
+      "sha256": "e6241f79bb9a3c6c2b2e98be55af064958fc75c996f58c554af799b4dbb046a4"
+    },
+    {
+      "retained_path": "development-docs/language-coverage/future-work/cuda/candidate/controls/native_observer.c",
+      "path": "controls/native_observer.c",
+      "bytes": 5866,
+      "sha256": "30805a2bf8cb9c8df0a0f7df40b17fc19ba2dc011b5b272af43b69c43cc2ae25"
+    }
+  ],
+  "scanner_contract": "cuda-scanner-fixed-state/1;wire=version1-header4-u32le-count16;maxwire=68;source=preserve;edits=fresh;parser=eb8a71550508fae0ce6b9602f3d77006e19af79417e424a9d8c944498a40adf2;scanner=de3ba63fcc30ce1a8b46acbda35bf72e64c69bde79ebfb3b6a3e1f7c61b44ba8;status=6a960b2b34e9beb631e4f07db9b1bfa388a9e3812b0f00faa93ab388f3aaff77;header=2055808f917fb77370a9f8bfe4010be1fa075ac80448a9cf5b35ac0d1737b078;host-normalized=cfc494b6baf654aa49bdeb615e9a11b1f767770e2704758b51277ded81ff96ba",
+  "host_derivation": "Existing owned Rc lifecycle from the retained Idris host; CUDA namespace, ABI15 inventory, supported statuses and identity changes",
+  "mechanical_origins": [
+    {
+      "path": "third_party/tree-sitter-idris-0.0.1/active-src/rootlight_idris_status.c",
+      "bytes": 4821,
+      "sha256": "08a32258c098c936226fb85cede29be5f6c78e140eb27d45c725ee670bb8f9b4"
+    },
+    {
+      "path": "third_party/tree-sitter-idris-0.0.1/active-src/rootlight_idris_status.h",
+      "bytes": 2386,
+      "sha256": "9f74de2c05a1b557aa0505fe06b9afb212feb2ba625b9a714565147c4357933a"
+    },
+    {
+      "path": "third_party/tree-sitter-idris-0.0.1/bindings/rust/lib.rs",
+      "bytes": 11123,
+      "sha256": "29d4ea43702f67b8cdad003238c4df7c3d1cca125d9a0bc6d5071187ddf6322b"
+    }
+  ],
+  "local_build_dependencies": [
+    {
+      "name": "cc",
+      "version": "1.2.67",
+      "registry_checksum": "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38",
+      "source": "source-inputs/cargo/cc-1.2.67",
+      "source_files_verified": 27,
+      "checksum_manifest": {
+        "bytes": 2490,
+        "sha256": "b2087e4e0d90ec4284067ae2093eae94365980298c93459ae056ca93f625b52c"
+      },
+      "dependencies": [
+        "find-msvc-tools",
+        "shlex"
+      ]
+    },
+    {
+      "name": "find-msvc-tools",
+      "version": "0.1.9",
+      "registry_checksum": "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582",
+      "source": "source-inputs/cargo/find-msvc-tools-0.1.9",
+      "source_files_verified": 18,
+      "checksum_manifest": {
+        "bytes": 1639,
+        "sha256": "034bfab843498d74362268c02d81c2e740ec999daa33c61ab18f8a8ceb11b34a"
+      },
+      "dependencies": []
+    },
+    {
+      "name": "shlex",
+      "version": "2.0.1",
+      "registry_checksum": "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba",
+      "source": "source-inputs/cargo/shlex-2.0.1",
+      "source_files_verified": 13,
+      "checksum_manifest": {
+        "bytes": 1208,
+        "sha256": "86b1e05b6d6d1852a43fad018088c05141fcd25567b818bff71832e6364dedac"
+      },
+      "dependencies": []
+    },
+    {
+      "name": "tree-sitter-language",
+      "version": "0.1.7",
+      "registry_checksum": "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782",
+      "source": "source-inputs/cargo/tree-sitter-language-0.1.7",
+      "source_files_verified": 20,
+      "checksum_manifest": {
+        "bytes": 1864,
+        "sha256": "b1d60189513dc9b1fd6bcd1db6c7b7142d8fbe62d21e6355e6d4628b462645ee"
+      },
+      "dependencies": []
+    }
+  ],
+  "rust_host_tests": [
+    "pre_cancel_is_strict_even_at_zero_credit",
+    "callback_panic_does_not_cross_the_native_abi",
+    "nested_begin_cannot_reset_the_outer_refusal",
+    "drop_detaches_before_releasing_the_owned_probe",
+    "native_callback_remains_owned_after_the_callers_handle_is_dropped",
+    "late_cancellation_outranks_a_recorded_work_refusal",
+    "callback_can_drop_its_guard_without_dangling_context",
+    "independent_workers_have_independent_native_scope_ownership"
+  ],
+  "rust_host_tests_executed": false,
+  "c_scanner_controls": [
+    "allocation_refusal_is_typed",
+    "canonical_wire_keeps_non_bmp_scalars",
+    "empty_restore_is_complete_reset",
+    "malformed_lengths_cannot_mutate_payload",
+    "version_reserved_capacity_and_invalid_scalars_are_refused",
+    "invalid_live_state_cannot_partially_serialize",
+    "false_symbol_mask_preserves_payload_and_result",
+    "recovery_symbol_mask_declines_cleanly",
+    "ordinary_lexical_decline_is_transactional",
+    "fifteen_and_sixteen_scalar_delimiters_fit",
+    "seventeenth_scalar_refuses_capacity_without_truncation",
+    "closing_mismatch_does_not_reset_state",
+    "matching_closing_delimiter_resets_all_state",
+    "embedded_nul_content_is_not_eof",
+    "mid_scan_work_refusal_preserves_payload",
+    "invalid_input_scalar_is_strict",
+    "cancellation_outranks_zero_work",
+    "mid_advance_cancellation_prevents_commit",
+    "reentrant_scope_cannot_replace_owner",
+    "next_clean_scope_is_available"
+  ],
+  "current_native_commands_executed": 0,
+  "historical_native_evidence": "Twelve isolated C commands and twenty controls were previously executed for the retained candidate; relocation is not fresh qualification",
+  "production_admission": false,
+  "root_workspace_or_registry_changed": false,
+  "git_byte_preservation": {
+    "scope": "Local descendant attributes for two exact authenticated CRLF corpus files; no executable source changes",
+    "overrides": [
+      {
+        "path": "upstream/test/corpus/c/.gitattributes",
+        "bytes": 139,
+        "sha256": "0a4d913933b7df33a6ccb00aa2d7c210ea53f431d07026c8f889fcba66912ebe",
+        "git_mode": "100644"
+      },
+      {
+        "path": "upstream-dependencies/cpp-generation/test/corpus/c/.gitattributes",
+        "bytes": 139,
+        "sha256": "0a4d913933b7df33a6ccb00aa2d7c210ea53f431d07026c8f889fcba66912ebe",
+        "git_mode": "100644"
+      }
+    ],
+    "upstream_files_changed": false,
+    "qualification_reexecuted": false
+  }
+}

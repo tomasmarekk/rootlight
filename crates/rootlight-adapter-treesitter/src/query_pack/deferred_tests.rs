@@ -12,9 +12,33 @@ use rootlight_cancel::CancellationReason;
 use super::*;
 
 #[test]
+fn cpp_cuda_pair_initializes_only_its_actual_native_query() {
+    let registry = QueryPackRegistry::catalogue();
+    let cancel = Cancellation::new();
+    let header = registry
+        .get_for_source(GrammarFamily::Cpp, "written.cuh", &cancel)
+        .unwrap();
+    assert_eq!(header.native_family, GrammarFamily::Cuda);
+    assert_eq!(registry.initialized_count(), 1);
+    for family in [
+        GrammarFamily::Cpp,
+        GrammarFamily::Cuda,
+        GrammarFamily::TypeScript,
+    ] {
+        assert!(registry.entry(family).unwrap().compiled.get().is_none());
+    }
+    let plain = registry
+        .get_for_source(GrammarFamily::Cpp, "written.cpp", &cancel)
+        .unwrap();
+    assert_eq!(plain.native_family, GrammarFamily::Cpp);
+    assert!(!std::ptr::eq(header, plain));
+    assert_eq!(registry.initialized_count(), 2);
+}
+
+#[test]
 fn cold_catalogue_initializes_only_the_requested_factory() {
     let registry = QueryPackRegistry::catalogue();
-    assert_eq!(registry.len(), 101);
+    assert_eq!(registry.len(), 103);
     assert_eq!(registry.initialized_count(), 0);
     assert_eq!(registry.initialized_pattern_count(), 0);
     for family in [

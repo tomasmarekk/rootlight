@@ -1518,6 +1518,13 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
+    // CUDA host/device lookup and launch binding require language-owned proof.
+    // Preserve unresolved/candidate source uses without changing ordinary C++.
+    if occurrence.syntax_kind.starts_with("cuda.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     if occurrence.syntax_kind.starts_with("idris.")
         && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
     {
@@ -4320,3 +4327,6 @@ mod typescript_const_fence_tests {
 #[cfg(test)]
 #[path = "engine/bash_source_tests.rs"]
 mod bash_source_tests;
+
+#[cfg(test)]
+mod cuda_source_tests;

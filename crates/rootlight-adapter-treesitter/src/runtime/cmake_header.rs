@@ -1710,6 +1710,8 @@ mod tests {
                     crate::runtime::dockerfile_scope::SCANNER_CONTRACT_IDENTITY,
                 pug_scanner_contract: crate::runtime::pug_scope::SCANNER_CONTRACT_IDENTITY,
                 lean_scanner_contract: crate::runtime::lean_scope::SCANNER_CONTRACT_IDENTITY,
+                cuda_scanner_contract: crate::runtime::cuda_scope::SCANNER_CONTRACT_IDENTITY,
+                cuda_frontend_policy: crate::runtime::cuda_scope::FRONTEND_POLICY,
                 wolfram_scanner_contract: crate::runtime::wolfram_scope::SCANNER_CONTRACT_IDENTITY,
                 idris_scanner_contract: crate::runtime::idris_scope::SCANNER_CONTRACT_IDENTITY,
                 idris_frontend_policy: crate::runtime::idris_scope::FRONTEND_POLICY,

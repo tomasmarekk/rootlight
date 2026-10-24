@@ -577,6 +577,8 @@ fn fence_language(
             .iter()
             .find(|descriptor| {
                 descriptor.language().as_str() != "markdown"
+                      // CUDA's scanner contract admits complete standalone inputs.
+                      && descriptor.family() != GrammarFamily::Cuda
                     && descriptor.language().as_str().as_bytes() == text
             })
             .map(|descriptor| descriptor.language().clone()));

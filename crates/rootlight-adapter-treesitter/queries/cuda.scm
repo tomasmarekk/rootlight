@@ -1,0 +1,102 @@
+; Reviewed Tier D structural evidence for the pinned CUDA grammar.
+; Templates, overloads, and preprocessor branches remain unresolved syntax.
+
+(translation_unit) @root
+(namespace_definition) @module
+
+[
+  (preproc_def)
+  (preproc_function_def)
+  (function_definition)
+  (declaration)
+  (field_declaration
+    declarator: (function_declarator
+      declarator: [(identifier) (field_identifier)]))
+  (field_declaration
+    declarator: (pointer_declarator
+      declarator: (function_declarator
+        declarator: [(identifier) (field_identifier)])))
+  (field_declaration
+    declarator: (reference_declarator
+      (function_declarator
+        declarator: [(identifier) (field_identifier)])))
+  (class_specifier)
+  (struct_specifier)
+  (union_specifier)
+  (enum_specifier)
+  (type_definition)
+  (template_declaration)
+] @declaration
+
+[
+  (preproc_def name: (identifier) @definition)
+  (preproc_function_def name: (identifier) @definition)
+  (function_declarator declarator: [(identifier) (field_identifier)] @definition)
+  (class_specifier name: (type_identifier) @definition)
+  (struct_specifier name: (type_identifier) @definition)
+  (union_specifier name: (type_identifier) @definition)
+  (enum_specifier name: (type_identifier) @definition)
+  (type_definition declarator: (type_identifier) @definition)
+  (namespace_definition name: (namespace_identifier) @definition)
+]
+
+(preproc_include) @import
+[(parameter_list) (template_parameter_list)] @signature
+[(preproc_def) (preproc_function_def)] @signature
+(preproc_params) @signature
+; Branch selection and macro expansion remain source-bound semantic gaps.
+[(preproc_if) (preproc_ifdef)] @signature
+[(preproc_def) (preproc_function_def)] @string
+[(compound_statement) (declaration_list)] @scope
+(call_expression) @call
+[
+  (call_expression
+    function: (identifier) @call_name)
+  (call_expression
+    function: (template_function
+      name: (identifier) @call_name))
+  (call_expression
+    function: (field_expression
+      field: (field_identifier) @call_name))
+  (call_expression
+    function: (field_expression
+      field: (template_method
+        name: (field_identifier) @call_name)))
+  (call_expression
+    function: (qualified_identifier
+      name: [
+        (identifier)
+        (field_identifier)
+      ] @call_name))
+]
+((function_definition
+  declarator: (function_declarator
+    declarator: (identifier) @test_attribute))
+  (#match? @test_attribute "^(TEST|TEST_F)$"))
+[
+  (identifier)
+  (field_identifier)
+  (type_identifier)
+  (namespace_identifier)
+] @reference
+(comment) @comment
+
+((comment) @documentation
+  (#match? @documentation "^/\\*\\*"))
+
+[(string_literal) (raw_string_literal) (concatenated_string)] @string
+
+; Structural formals and receiver certificates have separate admission proofs.
+(parameter_declaration) @declaration
+(parameter_declaration declarator: (identifier) @definition)
+(parameter_declaration declarator: (pointer_declarator declarator: (identifier) @definition))
+(parameter_declaration declarator: (reference_declarator (identifier) @definition))
+(function_definition) @signature
+; The identity pass certifies receivers without making ordinary names required.
+(identifier) @signature
+
+; Ordinary written fields have no callable declarator.
+(field_declaration declarator: (field_identifier) @definition) @declaration
+; Whole-source and callable certificates are independent of written signatures.
+(translation_unit) @signature
+(function_declarator) @signature

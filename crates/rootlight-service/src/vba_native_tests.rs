@@ -13,6 +13,94 @@ fn deadline() -> Cancellation {
     Cancellation::with_deadline(Instant::now().checked_add(Duration::from_secs(60)).unwrap())
 }
 
+struct VbaPublicationContext<'a> {
+    language: &'a str,
+    position: usize,
+    source: &'a str,
+    operation: &'static str,
+}
+
+fn publish_vba_with_diagnostics(
+    service: &mut FirstSliceService,
+    prepared: FirstSliceIndexPreparation,
+    repository: &mut tempfile::TempDir,
+    storage: &mut tempfile::TempDir,
+    context: VbaPublicationContext<'_>,
+) -> FirstSliceIndexCommit {
+    let observed = durable::publication_diagnostics::observe();
+    match service.publish_prepared_with_metrics(prepared, &deadline()) {
+        Ok(committed) => committed,
+        Err(error) => fail_vba_publication(
+            error,
+            observed.first_failure(),
+            repository,
+            storage,
+            context,
+        ),
+    }
+}
+
+fn fail_vba_publication(
+    error: FirstSliceError,
+    first: Option<durable::publication_diagnostics::Failure>,
+    repository: &mut tempfile::TempDir,
+    storage: &mut tempfile::TempDir,
+    context: VbaPublicationContext<'_>,
+) -> ! {
+    // Preserve both exact owners only after a failed publication.
+    repository.disable_cleanup(true);
+    storage.disable_cleanup(true);
+    panic!(
+        "VBA publication failed: language={} state={} operation={} source_hash={} error={error:?} first_failure={first:?} repository={:?} storage={:?}",
+        context.language,
+        context.position,
+        context.operation,
+        content_hash(context.source.as_bytes()),
+        repository.path(),
+        storage.path(),
+    );
+}
+
+#[test]
+fn publication_failure_retains_both_exact_owners_for_diagnosis() {
+    let owner = tempfile::tempdir().unwrap();
+    let mut repository = tempfile::tempdir_in(owner.path()).unwrap();
+    let mut storage = tempfile::tempdir_in(owner.path()).unwrap();
+    let repository_path = repository.path().to_owned();
+    let storage_path = storage.path().to_owned();
+    fs::write(repository_path.join("module.bas"), b"Option Explicit\n").unwrap();
+    fs::write(storage_path.join("evidence"), b"retained").unwrap();
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fail_vba_publication(
+            FirstSliceError::Catalog,
+            None,
+            &mut repository,
+            &mut storage,
+            VbaPublicationContext {
+                language: "vba",
+                position: 3,
+                source: "Option Explicit\n",
+                operation: "retention-control",
+            },
+        );
+    }));
+    assert!(failure.is_err());
+    drop(repository);
+    drop(storage);
+    assert_eq!(
+        fs::read(repository_path.join("module.bas")).unwrap(),
+        b"Option Explicit\n"
+    );
+    assert_eq!(
+        fs::read(storage_path.join("evidence")).unwrap(),
+        b"retained"
+    );
+    // The containing test owner removes only this control's retained children.
+    drop(owner);
+    assert!(!repository_path.exists());
+    assert!(!storage_path.exists());
+}
+
 fn assert_source_and_identity(
     service: &FirstSliceService,
     receipt: &FirstSliceIndexReceipt,
@@ -2740,8 +2828,8 @@ fn named_optional_defaults_preserve_module_constant_namespace_and_source_lifetim
     ];
     for language in ["visual-basic-classic", "vba"] {
         let current = std::env::current_dir().unwrap();
-        let repository = tempfile::tempdir_in(&current).unwrap();
-        let storage = tempfile::tempdir_in(&current).unwrap();
+        let mut repository = tempfile::tempdir_in(&current).unwrap();
+        let mut storage = tempfile::tempdir_in(&current).unwrap();
         let paths = rootlight_runtime::RuntimePaths::new(
             storage.path().join("state"),
             storage.path().join("runtime"),
@@ -2778,9 +2866,18 @@ fn named_optional_defaults_preserve_module_constant_namespace_and_source_lifetim
             let prepared = service
                 .prepare_repository(repository.path(), &deadline())
                 .unwrap();
-            let committed = service
-                .publish_prepared_with_metrics(prepared, &deadline())
-                .unwrap();
+            let committed = publish_vba_with_diagnostics(
+                &mut service,
+                prepared,
+                &mut repository,
+                &mut storage,
+                VbaPublicationContext {
+                    language,
+                    position,
+                    source: &source,
+                    operation: "named-default-initial",
+                },
+            );
             assert_eq!(committed.evidence().rebuilt_files, 1);
             assert_eq!(committed.evidence().reused_files, 0);
             if position > 0 {
@@ -2857,9 +2954,18 @@ fn named_optional_defaults_preserve_module_constant_namespace_and_source_lifetim
                     &deadline(),
                 )
                 .unwrap();
-            let committed = service
-                .publish_prepared_with_metrics(prepared, &deadline())
-                .unwrap();
+            let committed = publish_vba_with_diagnostics(
+                &mut service,
+                prepared,
+                &mut repository,
+                &mut storage,
+                VbaPublicationContext {
+                    language,
+                    position,
+                    source: &source,
+                    operation: "named-default-clean-rebuild",
+                },
+            );
             assert_eq!(committed.evidence().rebuilt_files, 1);
             assert_eq!(committed.evidence().reused_files, 0);
             let rebuilt = committed.receipt().clone();
@@ -13045,8 +13151,8 @@ fn assert_value_application_layout_lifetimes(layout: ValueApplicationLayout) {
     }
     for language in ["visual-basic-classic", "vba"] {
         let current = std::env::current_dir().unwrap();
-        let repository = tempfile::tempdir_in(&current).unwrap();
-        let storage = tempfile::tempdir_in(&current).unwrap();
+        let mut repository = tempfile::tempdir_in(&current).unwrap();
+        let mut storage = tempfile::tempdir_in(&current).unwrap();
         let paths = rootlight_runtime::RuntimePaths::new(
             storage.path().join("state"),
             storage.path().join("runtime"),
@@ -13127,9 +13233,18 @@ fn assert_value_application_layout_lifetimes(layout: ValueApplicationLayout) {
             let prepared = service
                 .prepare_repository(repository.path(), &deadline())
                 .unwrap();
-            let committed = service
-                .publish_prepared_with_metrics(prepared, &deadline())
-                .unwrap();
+            let committed = publish_vba_with_diagnostics(
+                &mut service,
+                prepared,
+                &mut repository,
+                &mut storage,
+                VbaPublicationContext {
+                    language,
+                    position,
+                    source: &source,
+                    operation: "value-layout-initial",
+                },
+            );
             assert_eq!(committed.evidence().rebuilt_files, 1);
             assert_eq!(committed.evidence().reused_files, 0);
             if position > 0 {
@@ -13199,9 +13314,18 @@ fn assert_value_application_layout_lifetimes(layout: ValueApplicationLayout) {
                     &deadline(),
                 )
                 .unwrap();
-            let committed = service
-                .publish_prepared_with_metrics(prepared, &deadline())
-                .unwrap();
+            let committed = publish_vba_with_diagnostics(
+                &mut service,
+                prepared,
+                &mut repository,
+                &mut storage,
+                VbaPublicationContext {
+                    language,
+                    position,
+                    source: &source,
+                    operation: "value-layout-clean-rebuild",
+                },
+            );
             assert_eq!(committed.evidence().rebuilt_files, 1);
             assert_eq!(committed.evidence().reused_files, 0);
             let rebuilt = committed.receipt().clone();

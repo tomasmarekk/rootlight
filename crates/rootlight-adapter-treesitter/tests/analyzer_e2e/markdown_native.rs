@@ -2825,6 +2825,25 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             },
         ])
         .collect();
+    // CUDA is registered for complete inputs; its included-range scanner remains unqualified.
+    let opaque_cases = [LanguageCase {
+        name: "cuda",
+        path: "src/written.cu",
+        frontend: "tree-sitter-cuda-0.21.2",
+        source: "__global__ void kernel(int value) {}\nvoid launch(int scalar) { int next = scalar * 2; kernel<<<1, 1>>>(next); }\n",
+        generated: false,
+        body_before: "scalar * 2",
+        body_after: "scalar * 3",
+    }];
+    let available_languages: BTreeSet<_> = cases.iter().map(|case| case.name.to_owned()).collect();
+    let opaque_languages: BTreeSet<_> = opaque_cases
+        .iter()
+        .map(|case| case.name.to_owned())
+        .collect();
+    assert_eq!(available_languages.len(), cases.len());
+    assert_eq!(opaque_languages.len(), opaque_cases.len());
+    assert!(available_languages.is_disjoint(&opaque_languages));
+    assert_eq!(opaque_languages, BTreeSet::from(["cuda".to_owned()]));
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()
         .unwrap()
         .descriptors()
@@ -2833,9 +2852,9 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
         .map(|descriptor| descriptor.language().as_str().to_owned())
         .collect();
     assert_eq!(
-        cases
-            .iter()
-            .map(|case| case.name.to_owned())
+        available_languages
+            .union(&opaque_languages)
+            .cloned()
             .collect::<BTreeSet<_>>(),
         expected_languages
     );
@@ -2946,6 +2965,156 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             assert!(!expected.is_empty(), "{}", case.name);
         }
     }
+    for case in opaque_cases {
+        assert_opaque_markdown_case(&provider, case, &budget);
+    }
+}
+
+fn assert_opaque_markdown_case(
+    provider: &Arc<TreeSitterProvider>,
+    case: LanguageCase,
+    budget: &AnalysisLimits,
+) {
+    let fixture = Fixture::new(case, case.source.as_bytes());
+    let standalone = analyze(
+        &analyzer(provider, case),
+        &request(&fixture.snapshot, &fixture.source, case, budget),
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(
+        standalone.document(),
+        budget.ir(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let definitions: BTreeSet<_> = standalone
+        .document()
+        .occurrences
+        .iter()
+        .filter_map(|occurrence| {
+            if occurrence.role != OccurrenceRole::Definition {
+                return None;
+            }
+            let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+                return None;
+            };
+            let entity = standalone
+                .document()
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            if entity.language != case.name {
+                return None;
+            }
+            let span = occurrence.source.span();
+            let text = &case.source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert_eq!(
+                occurrence.syntactic_text_hash,
+                content_hash(text.as_bytes())
+            );
+            Some((entity.kind, entity.canonical_name.as_str(), text))
+        })
+        .collect();
+    assert!(!definitions.is_empty(), "{}", case.name);
+    assert!(definitions.contains(&(EntityKind::Function, "kernel", "kernel")));
+    assert!(definitions.contains(&(EntityKind::Function, "launch", "launch")));
+
+    let ranged = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(case),
+        EncodingId::utf8(),
+        vec![IncludedRange::new(fixture.source.span(), language(case))],
+        AnalysisTier::TierD,
+        build_context(),
+        budget,
+    )
+    .unwrap();
+    assert!(matches!(
+        rootlight_adapter_sdk::execute_parse(
+            provider.as_ref(),
+            &ranged.to_parse_request(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        ),
+        Err(AdapterError::RejectedRequest(
+            rootlight_adapter_sdk::RequestError::EmbeddedRangesUnsupported
+        ))
+    ));
+
+    let fence = format!("~~~~~~~~{}\n{}\n~~~~~~~~\n", case.name, case.source);
+    let source = format!("# Example\n\n{fence}");
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        provider.as_ref(),
+        &initial.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let signatures: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == "markdown.code_block.signature")
+        .collect();
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(
+        signatures[0].kind(),
+        rootlight_adapter_sdk::SyntaxFactKind::Signature
+    );
+    let span = signatures[0].span();
+    let fence_start = source.find(&fence).unwrap();
+    assert_eq!(span.file(), fixture.source.span().file());
+    assert_eq!(span.start_byte(), u64::try_from(fence_start).unwrap());
+    assert_eq!(span.end_byte(), u64::try_from(source.len()).unwrap());
+    assert_eq!(source.get(fence_start..), Some(fence.as_str()));
+    assert!(!parsed.facts().iter().any(|fact| {
+        fact.syntax_kind().as_str().starts_with("cuda.")
+            || fact.syntax_kind().as_str().starts_with("cpp.")
+    }));
+    let embedded = analyze(
+        &analyzer(provider, MARKDOWN),
+        &initial,
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(
+        embedded.document(),
+        budget.ir(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let document = embedded.document();
+    assert_eq!(document.files.len(), 1);
+    let file = &document.files[0];
+    assert_eq!(file.content_hash, content_hash(source.as_bytes()));
+    assert_eq!(file.byte_length, u64::try_from(source.len()).unwrap());
+    assert_eq!(file.evidence.source.as_ref(), Some(&fixture.source));
+    let gaps: Vec<_> = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "markdown-embedded-analysis-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    let gap = gaps[0];
+    assert_eq!(gap.domain, FactDomain::Entities);
+    assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+    assert_eq!(gap.source.span(), span);
+    assert_eq!(gap.source.repository(), document.repository);
+    assert_eq!(gap.source.generation(), document.generation);
+    assert_eq!(gap.source.content_hash(), file.content_hash);
+    assert!(!document.entities.iter().any(|entity| {
+        entity.language == case.name
+            || matches!(
+                entity.canonical_name.as_str(),
+                "kernel" | "launch" | "value" | "scalar" | "next"
+            )
+    }));
+    assert!(!document.occurrences.iter().any(|occurrence| matches!(
+        occurrence.syntax_kind.as_str(),
+        "cuda.kernel_launch.call" | "cuda.scalar_formal.read"
+    )));
 }
 
 #[test]

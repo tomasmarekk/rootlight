@@ -6,6 +6,7 @@ use rootlight_adapter_sdk::{AdapterError, DiagnosticCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefusalOrigin {
+    CudaWritten,
     CaptureSlots,
     GeneratedSlots,
     Candidates,
@@ -81,6 +82,7 @@ pub(crate) enum RefusalOrigin {
 impl RefusalOrigin {
     const fn code(self) -> &'static str {
         match self {
+            Self::CudaWritten => "query-identity-cuda-written-limit",
             Self::CaptureSlots => "query-identity-capture-slots-limit",
             Self::GeneratedSlots => "query-identity-generated-slots-limit",
             Self::Candidates => "query-identity-candidate-limit",
@@ -157,7 +159,8 @@ impl RefusalOrigin {
     fn recognizes(code: &str) -> bool {
         matches!(
             code,
-            "query-identity-capture-slots-limit"
+            "query-identity-cuda-written-limit"
+                | "query-identity-capture-slots-limit"
                 | "query-identity-generated-slots-limit"
                 | "query-identity-candidate-limit"
                 | "query-identity-cursor-active-match-limit"

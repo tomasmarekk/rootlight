@@ -1,0 +1,3 @@
+# Preserve the authenticated CRLF interoperability input as published.
+# The retained upstream attributes remain unchanged.
+crlf.txt -text

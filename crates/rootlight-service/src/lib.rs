@@ -25,6 +25,8 @@ mod compressed_chunk;
 mod compression;
 mod container_sources;
 mod coverage_languages;
+#[cfg(test)]
+mod cuda_resolution_tests;
 mod durable;
 #[cfg(test)]
 mod eiffel_resolution_contract;
@@ -951,8 +953,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/333";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/143";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/334";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/144";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/14";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -12578,12 +12580,40 @@ impl FirstSliceService {
         prepared: FirstSliceIndexPreparation,
         cancellation: &Cancellation,
     ) -> Result<FirstSliceIndexCommit, FirstSliceError> {
-        let staged = self.stage_prepared(prepared, cancellation)?;
+        #[cfg(test)]
+        let _stage_phase = durable::publication_diagnostics::phase(
+            durable::publication_diagnostics::Phase::StagePrepared,
+        );
+        let staged = self
+            .stage_prepared(prepared, cancellation)
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                durable::publication_diagnostics::service("stage-prepared");
+            })?;
+        #[cfg(test)]
+        let _checkpoint_phase = durable::publication_diagnostics::phase(
+            durable::publication_diagnostics::Phase::CancellationCheckpoint,
+        );
         if let Err(error) = check_cancellation(cancellation) {
-            self.discard_staged(staged)?;
+            #[cfg(test)]
+            let _discard_phase = durable::publication_diagnostics::phase(
+                durable::publication_diagnostics::Phase::DiscardAfterCancellation,
+            );
+            self.discard_staged(staged).inspect_err(|_error| {
+                #[cfg(test)]
+                durable::publication_diagnostics::service("discard-after-cancellation");
+            })?;
             return Err(error);
         }
+        #[cfg(test)]
+        let _commit_phase = durable::publication_diagnostics::phase(
+            durable::publication_diagnostics::Phase::CommitStaged,
+        );
         self.commit_staged_with_operation(staged, None)
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                durable::publication_diagnostics::service("commit-staged");
+            })
     }
 
     fn oldest_inactive_generation(&self, repository: RepositoryId) -> Option<GenerationId> {
@@ -35105,6 +35135,7 @@ mod tests {
             "sample.astro",
             "sample.c",
             "sample.cpp",
+            "sample.cu",
             "sample.cs",
             "sample.css",
             "sample.fsx",

@@ -4648,3 +4648,6 @@ mod lean_native;
 
 #[path = "analyzer_e2e/idris_native.rs"]
 mod idris_native;
+
+#[path = "analyzer_e2e/cuda_admission.rs"]
+mod cuda_admission;

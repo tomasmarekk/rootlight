@@ -373,3 +373,8 @@ third_party/tree-sitter-idris-0.0.1/** -text
 # Preserve physical bytes in the retained GLSL and Python module originals.
 /crates/rootlight-adapter-treesitter/tests/fixtures/glsl_written_binding/** -text
 /crates/rootlight-adapter-treesitter/tests/fixtures/python_module_updates/** -text
+
+# Preserve every authenticated CUDA source input, archive and licensed original.
+/third_party/tree-sitter-cuda-0.21.2/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/adapters/licenses/tree-sitter-cuda-0.21.2-* -text
+/crates/rootlight-adapter-treesitter/tests/fixtures/cuda_original/** -text

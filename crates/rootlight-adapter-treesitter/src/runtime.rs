@@ -11,6 +11,9 @@ mod cmake_command_template;
 mod cmake_header;
 mod cmake_patch;
 mod coffeescript_scope;
+pub(crate) mod cuda_scope;
+#[cfg(test)]
+mod cuda_scope_tests;
 #[cfg(test)]
 #[path = "runtime/dockerfile_cache_tests.rs"]
 mod dockerfile_cache_tests;
@@ -689,7 +692,10 @@ impl TreeSitterProvider {
         // Arbitrary public ranges can join unrelated physical text. Markdown
         // separately admits only a qualified complete physical-line body.
         if (native_family.is_cobol()
-            || matches!(native_family, GrammarFamily::Sed | GrammarFamily::Idris))
+            || matches!(
+                native_family,
+                GrammarFamily::Sed | GrammarFamily::Idris | GrammarFamily::Cuda
+            ))
             && !request.included_ranges().is_empty()
         {
             return Err(RequestError::EmbeddedRangesUnsupported.into());
@@ -770,9 +776,9 @@ impl TreeSitterProvider {
         parse_input: Option<&[u8]>,
         upstream_owned_bytes: usize,
         cancellation: &Cancellation,
-        scanner_refusal: Option<&mut Option<NativeScannerRefusalDetails>>,
+        mut scanner_refusal: Option<&mut Option<NativeScannerRefusalDetails>>,
     ) -> Result<NativeParsedTree, AdapterError> {
-        if !matches!(request.language().as_str(), "c" | "cpp") {
+        if !matches!(request.language().as_str(), "c" | "cpp" | "cuda") {
             return self
                 .parse_native_tree_once(
                     request,
@@ -809,9 +815,9 @@ impl TreeSitterProvider {
             Some(&mut *shared),
             parse_input,
             cancellation,
-            None,
+            scanner_refusal.as_deref_mut(),
         )?;
-        let recognize = if request.language().as_str() == "cpp" {
+        let recognize = if matches!(request.language().as_str(), "cpp" | "cuda") {
             c_preprocessor::MacroProjection::recognize_cpp
         } else {
             c_preprocessor::MacroProjection::recognize
@@ -883,7 +889,7 @@ impl TreeSitterProvider {
             Some(shared),
             Some(plan.as_bytes()),
             cancellation,
-            None,
+            scanner_refusal,
         )?;
         Ok(NativeParsedTree {
             tree,
@@ -1006,6 +1012,11 @@ impl TreeSitterProvider {
                 coffeescript_scope::begin(cancellation, parse_work_limit.max_total_progress_checks)
             })
             .transpose()?;
+        // The declared source can be Cpp while its selected native parser is CUDA.
+        // This boundary also covers every C/Cpp macro-projection reparse.
+        let cuda_scope = (language == &language_for(GrammarFamily::Cuda))
+            .then(|| cuda_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
+            .transpose()?;
         let idris_scope = (request.language().as_str() == "idris")
             .then(|| idris_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
             .transpose()?;
@@ -1035,6 +1046,7 @@ impl TreeSitterProvider {
             || wolfram_scope.is_some()
             || sed_scope.is_some()
             || idris_scope.is_some()
+            || cuda_scope.is_some()
         {
             // Keep a refused or interrupted native scanner transaction out of the
             // reusable pool until its native scope and returned tree are admitted.
@@ -1178,6 +1190,14 @@ impl TreeSitterProvider {
         if let Some(scope) = pug_scope
             && let Err(error) =
                 pug_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = cuda_scope
+            && let Err(error) =
+                cuda_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
         {
             parser.reset();
             drop(tree);
@@ -1587,6 +1607,8 @@ impl ParseCache {
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
             lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
+            cuda_scanner_contract: cuda_scope::SCANNER_CONTRACT_IDENTITY,
+            cuda_frontend_policy: cuda_scope::FRONTEND_POLICY,
             idris_scanner_contract: idris_scope::SCANNER_CONTRACT_IDENTITY,
             idris_frontend_policy: idris_scope::FRONTEND_POLICY,
             sed_scanner_contract: sed_scope::SCANNER_CONTRACT_IDENTITY,
@@ -1631,6 +1653,8 @@ struct CachedParse {
     cmake_command_template_projection_policy: &'static str,
     pug_scanner_contract: &'static str,
     lean_scanner_contract: &'static str,
+    cuda_scanner_contract: &'static str,
+    cuda_frontend_policy: &'static str,
     idris_scanner_contract: &'static str,
     idris_frontend_policy: &'static str,
     sed_scanner_contract: &'static str,
@@ -1658,6 +1682,8 @@ impl CachedParse {
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
             lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
+            cuda_scanner_contract: cuda_scope::SCANNER_CONTRACT_IDENTITY,
+            cuda_frontend_policy: cuda_scope::FRONTEND_POLICY,
             idris_scanner_contract: idris_scope::SCANNER_CONTRACT_IDENTITY,
             idris_frontend_policy: idris_scope::FRONTEND_POLICY,
             sed_scanner_contract: sed_scope::SCANNER_CONTRACT_IDENTITY,
@@ -1685,6 +1711,8 @@ impl CachedParse {
             cmake_command_template_projection_policy: self.cmake_command_template_projection_policy,
             pug_scanner_contract: self.pug_scanner_contract,
             lean_scanner_contract: self.lean_scanner_contract,
+            cuda_scanner_contract: self.cuda_scanner_contract,
+            cuda_frontend_policy: self.cuda_frontend_policy,
             idris_scanner_contract: self.idris_scanner_contract,
             idris_frontend_policy: self.idris_frontend_policy,
             sed_scanner_contract: self.sed_scanner_contract,
@@ -1818,6 +1846,17 @@ fn prepare_reuse(
     if current.family == GrammarFamily::Wolfram
         && cached.wolfram_scanner_contract != wolfram_scope::SCANNER_CONTRACT_IDENTITY
     {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Cuda
+        && (cached.cuda_scanner_contract != cuda_scope::SCANNER_CONTRACT_IDENTITY
+            || cached.cuda_frontend_policy != cuda_scope::FRONTEND_POLICY
+            || !edits.is_empty())
+    {
+        // Edited scanner snapshots have not been admitted by the owned scanner contract.
         return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
@@ -4390,8 +4429,8 @@ mod tests {
         .unwrap();
         let provider = TreeSitterProvider::with_query_packs(config, registry).unwrap();
         assert_eq!(registry.initialized_count(), 0);
-        assert_eq!(provider.registry.descriptors().len(), 100);
-        assert_eq!(provider.capabilities.languages().len(), 100);
+        assert_eq!(provider.registry.descriptors().len(), 101);
+        assert_eq!(provider.capabilities.languages().len(), 101);
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
         let debug = format!("{provider:?}");
@@ -4574,6 +4613,8 @@ mod tests {
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
             lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
+            cuda_scanner_contract: cuda_scope::SCANNER_CONTRACT_IDENTITY,
+            cuda_frontend_policy: cuda_scope::FRONTEND_POLICY,
             idris_scanner_contract: idris_scope::SCANNER_CONTRACT_IDENTITY,
             idris_frontend_policy: idris_scope::FRONTEND_POLICY,
             sed_scanner_contract: sed_scope::SCANNER_CONTRACT_IDENTITY,

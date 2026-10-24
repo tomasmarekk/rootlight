@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.75";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.76";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2530,8 +2530,16 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "cuda",
+        suffixes: &[".cu"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "cpp",
-        suffixes: &[".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"],
+        suffixes: &[".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".cuh"],
         aliases: &["cplusplus"],
         detectors: &["extension", "content"],
         maximum_tier: "tier_b",
@@ -8787,6 +8795,9 @@ max_source_file_bytes = 2097152
         assert_eq!(extension_language("source.fsx"), Some("fsharp"));
         assert_eq!(extension_language("source.c"), Some("c"));
         assert_eq!(extension_language("source.cpp"), Some("cpp"));
+        assert_eq!(extension_language("source.cu"), Some("cuda"));
+        assert_eq!(extension_language("source.cuh"), Some("cpp"));
+        assert_eq!(extension_language("source.cuh.cpp"), Some("cpp"));
         for alias in ["shader", "source.glsl", "source.cpp", "c", "cpp"] {
             assert!(!matches!(canonical_language(alias), Some("glsl" | "hlsl")));
         }

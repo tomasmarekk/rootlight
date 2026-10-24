@@ -116,3 +116,10 @@ The scoped scanner and owned Rust host are disclosed in LOCAL_CHANGES.md.
 Idris grammar sources retain the MIT notices of Max Brunsfeld, Maskhjarna,
 postsolar, Hideaki Kawai and kayhide. See third_party/tree-sitter-idris-0.0.1/NOTICE
 and LICENSE for the complete retained grant and local derivative disclosure.
+
+The local CUDA grammar retains complete authenticated CUDA, C++ generation,
+historical C++ Gitlink and C generation source inputs with their original MIT
+grants. Their separate origins, complete archives and inventories remain in
+third_party/tree-sitter-cuda-0.21.2/SOURCE-PROVENANCE.json. The fixed scanner and
+owned Rust host are disclosed local derivatives; see NOTICE and LOCAL_CHANGES.md
+in that directory. Vendoring conveys no upstream authorship or exclusive rights.

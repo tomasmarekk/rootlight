@@ -155,6 +155,7 @@ dependencies = [
  "tree-sitter-coffeescript",
  "tree-sitter-commonlisp",
  "tree-sitter-crystal",
+ "tree-sitter-cuda",
  "tree-sitter-cue",
  "tree-sitter-d",
  "tree-sitter-dart",
@@ -393,6 +394,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-crystal"
 version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-cuda"
+version = "0.21.2"
 dependencies = [
  "cc",
  "tree-sitter-language",

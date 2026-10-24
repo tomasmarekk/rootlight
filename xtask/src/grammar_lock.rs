@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "e52fc786b8dd7d87a265514a9f1412fe90b79ea7eb14da71307f6f128de8628f";
+    "f85987a17b7663b2273d911bb5581d83fe7715f1e19e14b5e8141231a0f6aa24";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 57] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 58] = [
+    (
+        "tree-sitter-cuda",
+        "0.21.2",
+        "third_party/tree-sitter-cuda-0.21.2",
+        "b1b6d98a9b660274093d5ee69dffa6ee4cdc077a9814647ac42d8e249f0dd990",
+    ),
     (
         "tree-sitter-idris",
         "0.0.1",
@@ -609,6 +615,27 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_local_license(root, JAVA_LICENSE_PATH, JAVA_LICENSE_SHA256)?;
     validate_local_license(root, TYPESCRIPT_LICENSE_PATH, TYPESCRIPT_LICENSE_SHA256)?;
     validate_local_license(root, CPP_LICENSE_PATH, CPP_LICENSE_SHA256)?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-cuda-0.21.2-LICENSE",
+        "f44d7107a33801260dc82624c91a71ebf5918b4038a0fb0e3ef60e2dd9ba1999",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-cuda-0.21.2-Cpp-generation-LICENSE",
+        "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-cuda-0.21.2-Cpp-gitlink-LICENSE",
+        "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+    )?;
+    validate_local_license(
+        root,
+        "adapters/licenses/tree-sitter-cuda-0.21.2-C-generation-LICENSE",
+        "2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
+    )?;
+
     validate_local_license(root, KOTLIN_LICENSE_PATH, KOTLIN_LICENSE_SHA256)?;
     validate_local_license(root, LUA_LICENSE_PATH, LUA_LICENSE_SHA256)?;
     validate_local_license(root, RUBY_LICENSE_PATH, RUBY_LICENSE_SHA256)?;
@@ -792,7 +819,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 97 {
+    if manifest.grammars.len() != 98 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -817,6 +844,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "cuda",
         "idris",
         "lean",
         "sed",
@@ -4982,5 +5010,74 @@ mod tests {
             "registry": registry,
         }))
         .expect("test dependency metadata is valid")
+    }
+}
+
+#[cfg(test)]
+mod cuda_vendor_tests {
+    use super::*;
+
+    #[test]
+    fn cuda_vendor_retains_all_sources_and_distinct_generation_origins() {
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "cuda")
+            .unwrap();
+        let vendored = grammar.vendored.as_ref().unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("third_party/tree-sitter-cuda-0.21.2");
+        assert_eq!(vendored.files.len(), 253);
+        assert_eq!(grammar.crate_version, "0.21.2");
+        assert_eq!(grammar.commit, "d58080a327756e4d1d16ec329ba7cb2048f6c6cd");
+        assert_eq!(
+            vendored.parser_path.as_deref(),
+            Some("upstream/src/parser.c")
+        );
+        assert_eq!(
+            vendored.scanner_path.as_deref(),
+            Some("active-src/scanner.c")
+        );
+        validate_vendored_tree(&directory, grammar, vendored).unwrap();
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("SOURCE-PROVENANCE.json")).unwrap())
+                .unwrap();
+        assert_eq!(provenance["complete_upstream_files"], 227);
+        assert_eq!(provenance["git_blobs_authenticated"], 202);
+        assert_eq!(provenance["published_npm_files_authenticated"], 25);
+        assert_eq!(provenance["build_downloads"], false);
+        assert_eq!(provenance["generator_executed"], false);
+        let packages = provenance["packages"].as_array().unwrap();
+        let generation = packages
+            .iter()
+            .find(|item| item["label"] == "cpp-generation")
+            .unwrap();
+        let gitlink = packages
+            .iter()
+            .find(|item| item["label"] == "cpp-gitlink")
+            .unwrap();
+        assert_eq!(
+            generation["origin"]["commit"],
+            "8b5b49eb196bec7040441bee33b2c9a4838d6967"
+        );
+        assert_eq!(
+            gitlink["origin"]["commit"],
+            "a71474021410973b29bfe99440d57bcd750246b1"
+        );
+        assert_ne!(generation["origin"]["commit"], gitlink["origin"]["commit"]);
+        let upstream: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("UPSTREAM-INVENTORY.json")).unwrap())
+                .unwrap();
+        assert_eq!(upstream["files"].as_array().unwrap().len(), 227);
+        for item in upstream["files"].as_array().unwrap() {
+            let bytes = fs::read(directory.join(item["path"].as_str().unwrap())).unwrap();
+            assert_eq!(
+                u64::try_from(bytes.len()).unwrap(),
+                item["bytes"].as_u64().unwrap()
+            );
+            assert_eq!(sha256_hex(&bytes), item["sha256"].as_str().unwrap());
+        }
     }
 }
