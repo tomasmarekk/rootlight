@@ -1634,6 +1634,7 @@ pub fn structural_captured_name_for_fact<'a>(
     if label.starts_with("c.written_variable")
         || label.starts_with("c.unproven_variable")
         || label.starts_with("c.variable_name")
+        || label.starts_with("c.local_address")
     {
         return (language == "c"
             && fact.kind() == SyntaxFactKind::Occurrence
@@ -1642,6 +1643,7 @@ pub fn structural_captured_name_for_fact<'a>(
                 "c.written_variable.reference"
                     | "c.unproven_variable.reference"
                     | "c.variable_name.definition"
+                    | "c.local_address.reference"
             )
             && text.len() <= maximum_bytes
             && text
@@ -2279,6 +2281,54 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c_local_address_name_requires_exact_language_role_namespace_and_identifier() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 5).unwrap();
+        let fact = |kind, label| {
+            SyntaxFact::new(1, None, kind, span, 0, SyntaxKindLabel::new(label).unwrap())
+        };
+        let site = fact(SyntaxFactKind::Occurrence, "c.local_address.reference");
+        assert_eq!(
+            structural_captured_name_for_fact("c", &site, "local", 5).as_deref(),
+            Some("local")
+        );
+        for text in [
+            "9local",
+            "&local",
+            "local.member",
+            "local name",
+            "l\u{00f8}cal",
+            "",
+        ] {
+            assert!(
+                structural_captured_name_for_fact("c", &site, text, 64).is_none(),
+                "{text}"
+            );
+        }
+        assert!(structural_captured_name_for_fact("c", &site, "local", 4).is_none());
+        assert!(structural_captured_name_for_fact("cpp", &site, "local", 64).is_none());
+        for (kind, label) in [
+            (SyntaxFactKind::Signature, "c.local_address.reference"),
+            (SyntaxFactKind::Occurrence, "c.local_address.read"),
+            (
+                SyntaxFactKind::Occurrence,
+                "c.local_address_target.reference",
+            ),
+            (
+                SyntaxFactKind::Signature,
+                "c.local_address_target.signature",
+            ),
+        ] {
+            assert!(
+                structural_captured_name_for_fact("c", &fact(kind, label), "local", 64).is_none()
+            );
+        }
+    }
 
     #[test]
     fn c_family_preprocessor_context_never_replaces_written_headers() {

@@ -3453,6 +3453,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.coordinates.facts(),
                 &materialized,
                 self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
                 |span| self.text_for_span(span),
                 |span| self.coordinates.physical(span),
                 cancellation,
@@ -8141,6 +8148,38 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 hash.update(label.as_bytes());
                 hash.update(&position.to_be_bytes());
                 Some(*hash.finalize().as_bytes())
+            } else if self.language_for_fact(fact) == "c"
+                && kind == EntityKind::Variable
+                && fact.syntax_kind().as_str() == "c.variable.declaration"
+            {
+                // The container already carries the named owner's identity.
+                // Anonymous scope ordinals change after unrelated block edits;
+                // only this owner's same-name declaration ordinal belongs here.
+                let label = fact.syntax_kind().as_str();
+                let mut label_key = String::new();
+                label_key
+                    .try_reserve_exact(label.len())
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                label_key.push_str(label);
+                let mut name_key = String::new();
+                name_key
+                    .try_reserve_exact(name.len())
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                name_key.push_str(&name);
+                written_declarations
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                let next = written_declarations
+                    .entry((parent_entity, label_key, name_key))
+                    .or_default();
+                let position = *next;
+                *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
+                Some(source_occurrence_identity(
+                    "rootlight.c-written-variable-declaration/1",
+                    None,
+                    label,
+                    position,
+                ))
             } else if self.language_for_fact(fact) == "apex"
                 && kind == EntityKind::Variable
                 && matches!(
@@ -12785,6 +12824,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
             | "c.formal_binding_context.signature"
             | "c.variable_file_context.signature"
             | "c.variable_target.signature"
+            | "c.local_address_target.signature"
             | "nix.formal_clean_file.signature"
             | "nix.formal_read_target.signature"
             | "bash.direct_wrapper_context.signature"
@@ -13440,7 +13480,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
-            "c.written_variable.reference" | "c.unproven_variable.reference"
+            "c.written_variable.reference"
+                | "c.unproven_variable.reference"
+                | "c.local_address.reference"
         )
     {
         return Some("c-native-written-variable-binding-unavailable");
@@ -13871,7 +13913,11 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         return Some(OccurrenceRole::Declaration);
     }
     if c_variables::required(fact) {
-        return Some(OccurrenceRole::Read);
+        return Some(if c_variables::address(fact) {
+            OccurrenceRole::Reference
+        } else {
+            OccurrenceRole::Read
+        });
     }
     if php_this_calls::required(fact) {
         return Some(OccurrenceRole::CallSite);

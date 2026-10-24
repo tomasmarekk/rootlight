@@ -60,5 +60,6 @@
 ; Exact native declarator and target-coordinate proof carriers.
 (init_declarator declarator: (identifier)) @declaration
 (init_declarator declarator: (identifier) @definition)
+(declaration declarator: (identifier) @definition)
 (translation_unit) @signature
 (identifier) @scope

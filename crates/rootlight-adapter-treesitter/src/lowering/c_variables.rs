@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use rootlight_adapter_sdk::{AdapterError, SinkError, SyntaxFact, SyntaxFactKind};
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{SymbolId, content_hash};
+use rootlight_ids::{ContentHash, SymbolId, content_hash};
 use rootlight_ir::{
     ContainerRef, EntityKind, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, SourceRef,
     SourceSpan,
@@ -14,9 +14,28 @@ use rootlight_ir::{
 
 use super::MaterializedEntity;
 
+mod address_proof;
+
 pub(super) fn required(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Occurrence
-        && fact.syntax_kind().as_str() == "c.written_variable.reference"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "c.written_variable.reference" | "c.local_address.reference"
+        )
+}
+
+pub(super) fn address(fact: &SyntaxFact) -> bool {
+    fact.kind() == SyntaxFactKind::Occurrence
+        && fact.syntax_kind().as_str() == "c.local_address.reference"
+}
+
+#[derive(Clone, Copy)]
+struct NativeAddress {
+    site: SourceSpan,
+    declaration: SourceSpan,
+    name: SourceSpan,
+    owner: SourceSpan,
+    owner_name: SourceSpan,
 }
 
 fn same_source(left: &SourceRef, right: &SourceRef) -> bool {
@@ -25,16 +44,26 @@ fn same_source(left: &SourceRef, right: &SourceRef) -> bool {
 
 pub(super) struct VariableTargets<'a> {
     variables: HashMap<u64, Option<&'a MaterializedEntity>>,
-    owners: HashMap<SymbolId, Option<&'a MaterializedEntity>>,
+    owners: HashMap<SymbolId, Option<SourceSpan>>,
     targets: HashMap<u64, Option<u64>>,
+    address_targets: HashMap<u64, Option<u64>>,
+    names: HashMap<u64, Option<SourceSpan>>,
+    native_addresses: HashMap<u64, NativeAddress>,
     source: &'a SourceRef,
 }
 
 impl<'a> VariableTargets<'a> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "logical source and exact physical projection are independently checked"
+    )]
     pub(super) fn new<'text>(
         facts: &[SyntaxFact],
         entities: &'a HashMap<u64, MaterializedEntity>,
         source: &'a SourceRef,
+        current: &[u8],
+        original: &[u8],
+        maximum: usize,
         mut text: impl FnMut(SourceSpan) -> Result<&'text str, AdapterError>,
         mut physical: impl FnMut(SourceSpan) -> Result<SourceSpan, AdapterError>,
         cancel: &Cancellation,
@@ -44,8 +73,58 @@ impl<'a> VariableTargets<'a> {
             variables: HashMap::new(),
             owners: HashMap::new(),
             targets: HashMap::new(),
+            address_targets: HashMap::new(),
+            names: HashMap::new(),
+            native_addresses: HashMap::new(),
             source,
         };
+        if facts.iter().any(address) {
+            if u64::try_from(original.len()).ok() != Some(source.span().end_byte()) {
+                return Ok(output);
+            }
+            let mut hash = blake3::Hasher::new();
+            for chunk in original.chunks(4096) {
+                cancel.check()?;
+                hash.update(chunk);
+            }
+            if ContentHash::from_bytes(*hash.finalize().as_bytes()) != source.content_hash() {
+                return Ok(output);
+            }
+            let native = address_proof::source_addresses(current, maximum, cancel)?;
+            output
+                .native_addresses
+                .try_reserve(native.len())
+                .map_err(|_| SinkError::AllocationFailed)?;
+            let mut native_span = |(start, end)| {
+                let span = SourceSpan::new(
+                    source.span().file(),
+                    u64::try_from(start)
+                        .map_err(|_| super::provider_failure("c-address-native-span"))?,
+                    u64::try_from(end)
+                        .map_err(|_| super::provider_failure("c-address-native-span"))?,
+                )
+                .map_err(|_| super::provider_failure("c-address-native-span"))?;
+                physical(span)
+            };
+            for (site, proof) in native {
+                cancel.check()?;
+                let site = native_span(site)?;
+                let declaration = native_span(proof.declaration)?;
+                let name = native_span(proof.name)?;
+                let owner = native_span(proof.owner)?;
+                let owner_name = native_span(proof.owner_name)?;
+                output.native_addresses.insert(
+                    site.end_byte(),
+                    NativeAddress {
+                        site,
+                        declaration,
+                        name,
+                        owner,
+                        owner_name,
+                    },
+                );
+            }
+        }
         let mut by_id = HashMap::new();
         let mut raw_counts = HashMap::new();
         by_id
@@ -97,6 +176,10 @@ impl<'a> VariableTargets<'a> {
             .owners
             .try_reserve(entities.len())
             .map_err(|_| SinkError::AllocationFailed)?;
+        output
+            .names
+            .try_reserve(entities.len())
+            .map_err(|_| SinkError::AllocationFailed)?;
         for (local, entity) in entities {
             cancel.check()?;
             if entity.record.language != "c"
@@ -144,6 +227,11 @@ impl<'a> VariableTargets<'a> {
                 && entity.record.container == Some(entity.direct_parent);
             if entity.record.kind == EntityKind::Variable {
                 output
+                    .names
+                    .entry(entity_source.span().start_byte())
+                    .and_modify(|entry| *entry = None)
+                    .or_insert(valid.then_some(physical(definition.span())?));
+                output
                     .variables
                     .entry(entity_source.span().start_byte())
                     .and_modify(|entry| *entry = None)
@@ -153,17 +241,36 @@ impl<'a> VariableTargets<'a> {
                     .owners
                     .entry(entity.record.id)
                     .and_modify(|entry| *entry = None)
-                    .or_insert(valid.then_some(entity));
+                    .or_insert(if valid {
+                        Some(physical(definition.span())?)
+                    } else {
+                        None
+                    });
             }
         }
         for fact in facts {
             cancel.check()?;
+            if address(fact)
+                && raw_counts.get(&(fact.kind(), fact.syntax_kind().as_str(), fact.span()))
+                    != Some(&1)
+            {
+                output
+                    .native_addresses
+                    .remove(&physical(fact.span())?.end_byte());
+            }
             if fact.kind() == SyntaxFactKind::Signature
-                && fact.syntax_kind().as_str() == "c.variable_target.signature"
+                && matches!(
+                    fact.syntax_kind().as_str(),
+                    "c.variable_target.signature" | "c.local_address_target.signature"
+                )
             {
                 let span = physical(fact.span())?;
-                output
-                    .targets
+                let targets = if fact.syntax_kind().as_str() == "c.local_address_target.signature" {
+                    &mut output.address_targets
+                } else {
+                    &mut output.targets
+                };
+                targets
                     .try_reserve(1)
                     .map_err(|_| SinkError::AllocationFailed)?;
                 let unique = by_id.get(&fact.local_id()).copied().flatten().is_some()
@@ -171,8 +278,7 @@ impl<'a> VariableTargets<'a> {
                         == Some(&1)
                     && span.file() == source.span().file()
                     && super::span_contains(source.span(), span);
-                output
-                    .targets
+                targets
                     .entry(span.end_byte())
                     .and_modify(|entry| *entry = None)
                     .or_insert(unique.then_some(span.start_byte()));
@@ -192,9 +298,15 @@ impl<'a> VariableTargets<'a> {
     ) -> Result<Option<SymbolId>, AdapterError> {
         cancel.check()?;
         let Some(owner) = owner else { return Ok(None) };
+        let address = address(fact);
         if !required(fact)
-            || occurrence.role != OccurrenceRole::Read
-            || occurrence.syntax_kind != "c.written_variable.reference"
+            || occurrence.role
+                != if address {
+                    OccurrenceRole::Reference
+                } else {
+                    OccurrenceRole::Read
+                }
+            || occurrence.syntax_kind != fact.syntax_kind().as_str()
             || !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
             || self
                 .owners
@@ -214,7 +326,12 @@ impl<'a> VariableTargets<'a> {
         {
             return Ok(None);
         }
-        let Some(start) = self.targets.get(&span.end_byte()).copied().flatten() else {
+        let targets = if address {
+            &self.address_targets
+        } else {
+            &self.targets
+        };
+        let Some(start) = targets.get(&span.end_byte()).copied().flatten() else {
             return Ok(None);
         };
         let Some(variable) = self.variables.get(&start).copied().flatten() else {
@@ -234,6 +351,33 @@ impl<'a> VariableTargets<'a> {
                 && variable.direct_parent != ContainerRef::Entity(owner.record.id)
         {
             return Ok(None);
+        }
+        if !address
+            && self
+                .names
+                .get(&start)
+                .copied()
+                .flatten()
+                .map(|name| name.start_byte())
+                != Some(variable_source.span().start_byte())
+        {
+            // Existing initialized targets start at their identifier declarator.
+            // A bare declaration starts at its type and cannot supply a value Read.
+            return Ok(None);
+        }
+        if address {
+            let Some(native) = self.native_addresses.get(&span.end_byte()) else {
+                return Ok(None);
+            };
+            if native.site != span
+                || native.declaration != variable_source.span()
+                || self.names.get(&start).copied().flatten() != Some(native.name)
+                || native.owner != owner_source.span()
+                || self.owners.get(&owner.record.id).copied().flatten() != Some(native.owner_name)
+                || variable.direct_parent != ContainerRef::Entity(owner.record.id)
+            {
+                return Ok(None);
+            }
         }
         Ok(Some(variable.record.id))
     }

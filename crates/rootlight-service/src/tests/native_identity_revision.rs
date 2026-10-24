@@ -932,7 +932,7 @@ fn go_function_value_references_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/334"
+        b"rootlight.first-slice.treesitter-structural/335"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -950,7 +950,7 @@ fn complete_native_query_captures_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/334"
+        b"rootlight.first-slice.treesitter-structural/335"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -982,7 +982,7 @@ fn written_native_semantics_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/334"
+        b"rootlight.first-slice.treesitter-structural/335"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -1000,9 +1000,9 @@ fn typescript_const_proofs_invalidate_preceding_parser_and_resolver_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/334"
+        b"rootlight.first-slice.treesitter-structural/335"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/144");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/145");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1023,9 +1023,9 @@ fn bash_written_wrapper_proofs_invalidate_preceding_parser_and_resolver_identity
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/334"
+        b"rootlight.first-slice.treesitter-structural/335"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/144");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/145");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1046,9 +1046,9 @@ fn eiffel_formal_receiver_reads_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/334"
+        b"rootlight.first-slice.treesitter-structural/335"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/144");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/145");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
 
@@ -1065,12 +1065,54 @@ fn cuda_native_proofs_invalidate_preceding_parser_and_resolver_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/334"
+        b"rootlight.first-slice.treesitter-structural/335"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/144");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/145");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
         content_hash(b"rootlight.first-slice.resolve/143")
     );
+}
+
+#[test]
+fn c_local_address_proofs_invalidate_immediate_parser_and_resolver_identity() {
+    let grammar = first_slice_grammar_revision_hash().unwrap();
+    let previous_parser = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        b"rootlight.first-slice.treesitter-structural/334",
+        grammar.as_bytes(),
+    ])
+    .unwrap();
+    let parser = first_slice_parser_provider_hash().unwrap();
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/335"
+    );
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/145");
+    assert_ne!(parser, previous_parser);
+    assert_ne!(
+        content_hash(RESOLVER_BINARY_SEED),
+        content_hash(b"rootlight.first-slice.resolve/144")
+    );
+    for structural in [previous_parser, parser] {
+        let previous = hash_static_components(&[
+            PROVIDER_SET_SEED,
+            structural.as_bytes(),
+            DISCOVERY_MANIFEST_VERSION.as_bytes(),
+            RESOLVER_PROVIDER_VERSION.as_bytes(),
+            b"rootlight.first-slice.resolve/144",
+            SEARCH_REVISION_SEED,
+            INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+            DERIVED_PLAN_REVISION_SEED,
+            LANGUAGE_DISPOSITION_PROVIDER_SEED,
+            SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+            container_sources::REVISION,
+        ])
+        .unwrap();
+        assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
+    }
 }

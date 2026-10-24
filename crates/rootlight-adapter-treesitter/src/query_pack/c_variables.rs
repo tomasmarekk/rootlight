@@ -14,6 +14,7 @@ use super::{QueryCandidate, StructuralRole};
 struct Variable {
     declaration: (usize, usize),
     name: (usize, usize),
+    initialized: bool,
 }
 
 pub(super) struct CaptureCache<'source> {
@@ -25,6 +26,7 @@ pub(super) struct CaptureCache<'source> {
     variables: HashMap<usize, Variable>,
     bindings: HashMap<(usize, [u8; 32]), Option<usize>>,
     reads: HashMap<usize, Option<Variable>>,
+    addresses: HashMap<usize, Option<Variable>>,
 }
 
 impl<'source> CaptureCache<'source> {
@@ -38,6 +40,7 @@ impl<'source> CaptureCache<'source> {
             variables: HashMap::new(),
             bindings: HashMap::new(),
             reads: HashMap::new(),
+            addresses: HashMap::new(),
         }
     }
 
@@ -229,19 +232,30 @@ impl<'source> CaptureCache<'source> {
                     match child.kind() {
                         "primitive_type" | "type_identifier" | "type_qualifier" | "comment" => {}
                         "init_declarator" if declarator.is_none() => declarator = Some(child),
+                        "identifier"
+                            if declarator.is_none() && parent.kind() == "compound_statement" =>
+                        {
+                            declarator = Some(child);
+                        }
                         _ => return Ok(false),
                     }
                 }
                 let Some(declarator) = declarator else {
                     return Ok(false);
                 };
-                let Some(name_node) = declarator.child_by_field_name("declarator") else {
-                    return Ok(false);
+                let initialized = declarator.kind() == "init_declarator";
+                let name_node = if initialized {
+                    let Some(name) = declarator.child_by_field_name("declarator") else {
+                        return Ok(false);
+                    };
+                    name
+                } else {
+                    declarator
                 };
                 let Some(name) = self.name(name_node, cancel)? else {
                     return Ok(false);
                 };
-                if declarator.child_by_field_name("value").is_none() {
+                if initialized && declarator.child_by_field_name("value").is_none() {
                     return Ok(false);
                 }
                 let Some(scope) = self.scope(parent, cancel)? else {
@@ -253,8 +267,13 @@ impl<'source> CaptureCache<'source> {
                 self.variables.insert(
                     declarator.id(),
                     Variable {
-                        declaration: (declarator.start_byte(), declarator.end_byte()),
+                        declaration: if initialized {
+                            (declarator.start_byte(), declarator.end_byte())
+                        } else {
+                            (node.start_byte(), node.end_byte())
+                        },
                         name: (name_node.start_byte(), name_node.end_byte()),
+                        initialized,
                     },
                 );
                 self.bind(scope, name, Some(declarator.id()))?;
@@ -357,7 +376,7 @@ impl<'source> CaptureCache<'source> {
                     selected = binding
                         .and_then(|id| self.variables.get(&id))
                         .copied()
-                        .filter(|v| v.declaration.1 <= node.start_byte());
+                        .filter(|v| v.initialized && v.declaration.1 <= node.start_byte());
                     break;
                 }
                 ancestor = parent.parent();
@@ -370,12 +389,107 @@ impl<'source> CaptureCache<'source> {
         Ok(selected)
     }
 
+    fn address_target(
+        &mut self,
+        node: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<Option<Variable>, AdapterError> {
+        if let Some(target) = self.addresses.get(&node.id()) {
+            return Ok(*target);
+        }
+        let mut selected = None;
+        if self.census(node, cancel)?
+            && self.address_operand(node, cancel)?
+            && let Some(name) = self.name(node, cancel)?
+        {
+            let mut ancestor = node.parent();
+            while let Some(parent) = ancestor {
+                if !self.step(cancel)? {
+                    return Ok(None);
+                }
+                if parent.kind() == "function_definition" {
+                    break;
+                }
+                if matches!(parent.kind(), "compound_statement" | "for_statement")
+                    && let Some(binding) = self.bindings.get(&(parent.id(), name))
+                {
+                    selected = binding
+                        .and_then(|id| self.variables.get(&id))
+                        .copied()
+                        .filter(|v| v.declaration.1 <= node.start_byte());
+                    break;
+                }
+                ancestor = parent.parent();
+            }
+        }
+        self.addresses
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        self.addresses.insert(node.id(), selected);
+        Ok(selected)
+    }
+
+    fn address_operand(
+        &mut self,
+        node: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        let Some(pointer) = node.parent() else {
+            return Ok(false);
+        };
+        let Some(arguments) = pointer.parent() else {
+            return Ok(false);
+        };
+        let Some(call) = arguments.parent() else {
+            return Ok(false);
+        };
+        let Some(statement) = call.parent() else {
+            return Ok(false);
+        };
+        if !self.step(cancel)?
+            || pointer.kind() != "pointer_expression"
+            || pointer.child_by_field_name("argument") != Some(node)
+            || pointer
+                .child_by_field_name("operator")
+                .and_then(|n| self.source.get(n.byte_range()))
+                != Some(b"&".as_slice())
+            || arguments.kind() != "argument_list"
+            || call.kind() != "call_expression"
+            || call.child_by_field_name("arguments") != Some(arguments)
+            || statement.kind() != "expression_statement"
+        {
+            return Ok(false);
+        }
+        let mut child = statement;
+        while let Some(parent) = child.parent() {
+            if !self.step(cancel)? {
+                return Ok(false);
+            }
+            match parent.kind() {
+                "compound_statement" | "if_statement" | "while_statement" | "do_statement"
+                | "switch_statement" | "case_statement" | "labeled_statement" => {}
+                "for_statement" if parent.child_by_field_name("body") == Some(child) => {}
+                "function_definition" => {
+                    return Ok(parent.child_by_field_name("body") == Some(child));
+                }
+                _ => return Ok(false),
+            }
+            child = parent;
+        }
+        Ok(false)
+    }
+
     fn declared(&mut self, node: Node<'_>, cancel: &Cancellation) -> Result<bool, AdapterError> {
         let Some(variable) = self.variables.get(&node.id()).copied() else {
             return Ok(false);
         };
-        let Some(name) = node.child_by_field_name("declarator") else {
-            return Ok(false);
+        let name = if node.kind() == "identifier" {
+            node
+        } else {
+            let Some(name) = node.child_by_field_name("declarator") else {
+                return Ok(false);
+            };
+            name
         };
         if (name.start_byte(), name.end_byte()) != variable.name {
             return Ok(false);
@@ -414,6 +528,14 @@ impl<'source> CaptureCache<'source> {
             }
             if !supported {
                 candidate.syntax = "c.unproven_declarator";
+                return Ok(Some(true));
+            }
+            if node
+                .child_by_field_name("declarator")
+                .is_some_and(|d| d.kind() == "identifier")
+            {
+                candidate.syntax = "c.variable";
+                candidate.required = true;
                 return Ok(Some(true));
             }
             return Ok(None);
@@ -455,7 +577,9 @@ impl<'source> CaptureCache<'source> {
             return Ok(None);
         }
         if role == StructuralRole::Definition
-            && node.parent().is_some_and(|p| p.kind() == "init_declarator")
+            && node
+                .parent()
+                .is_some_and(|p| matches!(p.kind(), "init_declarator" | "declaration"))
         {
             if !self.census(node, cancel)? {
                 return Ok(Some(false));
@@ -463,7 +587,12 @@ impl<'source> CaptureCache<'source> {
             let Some(parent) = node.parent() else {
                 return Ok(Some(false));
             };
-            if !self.declared(parent, cancel)? {
+            let declarator = if parent.kind() == "declaration" {
+                node
+            } else {
+                parent
+            };
+            if !self.declared(declarator, cancel)? {
                 return Ok(Some(false));
             }
             candidate.syntax = "c.variable_name";
@@ -475,6 +604,18 @@ impl<'source> CaptureCache<'source> {
             StructuralRole::Reference | StructuralRole::Signature | StructuralRole::Scope
         ) {
             return Ok(None);
+        }
+        if let Some(target) = self.address_target(node, cancel)? {
+            if role == StructuralRole::Scope {
+                candidate.role = StructuralRole::Signature;
+                candidate.start = target.declaration.0;
+                candidate.syntax = "c.local_address_target";
+            } else {
+                candidate.role = StructuralRole::Reference;
+                candidate.syntax = "c.local_address";
+            }
+            candidate.required = true;
+            return Ok(Some(true));
         }
         if let Some(target) = self.target(node, cancel)? {
             if role == StructuralRole::Scope {
@@ -535,6 +676,123 @@ mod tests {
             required: false,
             native_depth: 0,
         }
+    }
+
+    #[test]
+    fn complete_original_census_accepts_all_six_ordinary_declarations_and_one_address() {
+        let source =
+            include_bytes!("../../tests/fixtures/c_local_references/test_outlier_detector.c");
+        assert_eq!(source.len(), 1778);
+        let tree = tree(source);
+        assert!(!tree.root_node().has_error());
+        let mut cache = CaptureCache::new(source, 16384, true);
+        assert!(
+            cache
+                .census(tree.root_node(), &Cancellation::new())
+                .unwrap()
+        );
+        assert_eq!(cache.variables.len(), 6);
+        assert_eq!(
+            cache.variables.values().filter(|v| !v.initialized).count(),
+            1
+        );
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(320, 328)
+            .unwrap();
+        assert_eq!(node.kind(), "identifier");
+        let mut reference = candidate(node, StructuralRole::Reference);
+        assert_eq!(
+            cache
+                .refine(
+                    node,
+                    StructuralRole::Reference,
+                    &mut reference,
+                    &Cancellation::new()
+                )
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(reference.syntax, "c.local_address");
+        assert!(reference.required);
+        let mut window = candidate(node, StructuralRole::Scope);
+        assert_eq!(
+            cache
+                .refine(
+                    node,
+                    StructuralRole::Scope,
+                    &mut window,
+                    &Cancellation::new()
+                )
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!((window.start, window.end), (274, 328));
+        assert_eq!(window.syntax, "c.local_address_target");
+        assert_eq!(window.role, StructuralRole::Signature);
+    }
+
+    #[test]
+    fn a_plain_local_blocks_outer_value_reads_and_has_its_own_full_declaration() {
+        let source = b"int value=1; int owned(void){ int value; use(&value); return value; }\n";
+        let tree = tree(source);
+        let mut cache = CaptureCache::new(source, 4096, true);
+        assert!(
+            cache
+                .census(tree.root_node(), &Cancellation::new())
+                .unwrap()
+        );
+        let read = at(&tree, source, b"value;");
+        assert!(cache.target(read, &Cancellation::new()).unwrap().is_none());
+        let at = source.windows(6).position(|s| s == b"&value").unwrap() + 1;
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(at, at + 5)
+            .unwrap();
+        let address = cache
+            .address_target(node, &Cancellation::new())
+            .unwrap()
+            .unwrap();
+        assert!(!address.initialized);
+        let start = source.windows(10).position(|s| s == b"int value;").unwrap();
+        assert_eq!(address.declaration, (start, start + 10));
+        assert_eq!(address.name, (start + 4, start + 9));
+    }
+
+    #[test]
+    fn local_address_work_exact_boundary_and_cancellation_never_emit_partial_proof() {
+        let source = b"int owned(void){ int value; use(&value); }\n";
+        let tree = tree(source);
+        let node = at(&tree, source, b"value");
+        let mut wide = CaptureCache::new(source, 16384, true);
+        assert!(
+            wide.address_target(node, &Cancellation::new())
+                .unwrap()
+                .is_some()
+        );
+        let used = 16384 - wide.remaining_work();
+        let mut exact = CaptureCache::new(source, used, true);
+        assert!(
+            exact
+                .address_target(node, &Cancellation::new())
+                .unwrap()
+                .is_some()
+        );
+        assert!(!exact.exhausted());
+        let mut low = CaptureCache::new(source, used - 1, true);
+        assert!(
+            low.address_target(node, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(low.exhausted());
+        let stopped = Cancellation::new();
+        stopped.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut cache = CaptureCache::new(source, 4096, true);
+        assert!(matches!(
+            cache.address_target(node, &stopped),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 
     #[test]

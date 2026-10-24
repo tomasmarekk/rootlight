@@ -4608,6 +4608,9 @@ mod c_formal_reads;
 #[path = "analyzer_e2e/c_written_bindings.rs"]
 mod c_written_bindings;
 
+#[path = "analyzer_e2e/c_local_references.rs"]
+mod c_local_references;
+
 #[path = "analyzer_e2e/qsharp_native.rs"]
 mod qsharp_native;
 #[path = "analyzer_e2e/sml_standalone_formals.rs"]
