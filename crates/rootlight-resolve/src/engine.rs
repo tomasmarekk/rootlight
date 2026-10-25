@@ -1567,7 +1567,10 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | "python.module_binding_unavailable.reference"
             | "python.module_call_unavailable.call"
             | "typescript.const_value.reference"
+            | "javascript.const_receiver.reference"
             | "typescript.const_value_read.read"
+            | "javascript.method_var.reference"
+            | "javascript.method_var_read.read"
             | "astro.template_binding_read.reference"
             | "astro.template_value_read.read"
             | "java.setter_parameter.reference"
@@ -4356,6 +4359,10 @@ mod typescript_const_fence_tests {
                 "typescript.const_value.reference",
             ),
             (OccurrenceRole::Read, "typescript.const_value_read.read"),
+            (
+                OccurrenceRole::Reference,
+                "javascript.const_receiver.reference",
+            ),
         ] {
             let mut site = OccurrenceRecord {
                 id: FactId::from_bytes([5; 20]),
@@ -4394,3 +4401,62 @@ mod bash_source_tests;
 
 #[cfg(test)]
 mod cuda_source_tests;
+
+#[cfg(test)]
+mod javascript_method_var_source_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn method_var_reference_and_read_require_proof_before_generic_spelling() {
+        for (label, role) in [
+            ("javascript.method_var.reference", OccurrenceRole::Reference),
+            ("javascript.method_var_read.read", OccurrenceRole::Read),
+        ] {
+            let repository = RepositoryId::from_bytes([1; 16]);
+            let generation = GenerationId::from_bytes([2; 20]);
+            let file = FileId::from_bytes([3; 20]);
+            let hash = content_hash(b"local");
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, 5).unwrap(),
+                hash,
+                None,
+            );
+            let symbol = SymbolId::from_bytes([6; 20]);
+            let mut site = OccurrenceRecord {
+                id: FactId::from_bytes([4; 20]),
+                repository,
+                generation,
+                file,
+                source: source.clone(),
+                role,
+                enclosing: None,
+                target: OccurrenceTarget::Unresolved { text_hash: hash },
+                syntactic_text_hash: hash,
+                syntax_kind: label.to_owned(),
+                provenance: FactId::from_bytes([5; 20]),
+                confidence: Confidence::new(0).unwrap(),
+                evidence: FactEvidence {
+                    source: Some(source),
+                    derivation: Vec::new(),
+                },
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            site.syntax_kind = "javascript.identifier.reference".to_owned();
+            site.role = OccurrenceRole::Reference;
+            assert!(resolvable_occurrence(&site));
+        }
+    }
+}

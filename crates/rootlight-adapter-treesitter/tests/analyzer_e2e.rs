@@ -4611,6 +4611,12 @@ mod c_written_bindings;
 #[path = "analyzer_e2e/c_local_references.rs"]
 mod c_local_references;
 
+#[path = "analyzer_e2e/javascript_method_var_reads.rs"]
+mod javascript_method_var_reads;
+
+#[path = "analyzer_e2e/javascript_method_var_tsx_refusals.rs"]
+mod javascript_method_var_tsx_refusals;
+
 #[path = "analyzer_e2e/qsharp_native.rs"]
 mod qsharp_native;
 #[path = "analyzer_e2e/sml_standalone_formals.rs"]
@@ -4654,6 +4660,9 @@ mod idris_native;
 
 #[path = "analyzer_e2e/cuda_admission.rs"]
 mod cuda_admission;
+
+#[path = "analyzer_e2e/javascript_const_receivers.rs"]
+mod javascript_const_receivers;
 
 #[path = "analyzer_e2e/python_module_function_references.rs"]
 mod python_module_function_references;

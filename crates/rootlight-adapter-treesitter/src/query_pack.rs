@@ -70,6 +70,7 @@ mod hlsl;
 pub(crate) mod identity_refusal;
 #[cfg(test)]
 mod identity_refusal_tests;
+mod javascript_method_vars;
 mod nix_formal_reads;
 mod php_ordinary;
 mod php_this_calls;
@@ -80,6 +81,7 @@ mod dockerfile;
 mod idris;
 mod java_local_receivers;
 mod java_parameters;
+mod javascript_const_receivers;
 mod json_schema;
 mod jsx;
 mod julia;
@@ -776,7 +778,8 @@ impl QueryPack {
             // references; mandatory retention admits only native-certified uses.
             let has_source_certified_reference = matches!(
                 family,
-                GrammarFamily::Nix
+                GrammarFamily::JavaScript
+                    | GrammarFamily::Nix
                     | GrammarFamily::Eiffel
                     | GrammarFamily::Cpp
                     | GrammarFamily::Cuda
@@ -1036,10 +1039,18 @@ impl QueryPack {
                             candidate.syntax,
                             "sed.written_branch" | "sed.unproved_branch"
                         ))
+                    || (family == GrammarFamily::JavaScript
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "javascript.method_var")
                     || (family == GrammarFamily::TypeScript
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "typescript.const_value")
+                    || (family == GrammarFamily::JavaScript
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "javascript.const_receiver")
                     || (family == GrammarFamily::Python
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1455,7 +1466,19 @@ impl QueryPack {
         let mut clojure_captures =
             clojure::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut racket_captures = racket::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut javascript_method_vars = javascript_method_vars::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes,
+            complete_file_input,
+        );
         let mut typescript_const = typescript_const::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
+        let mut javascript_const_receivers = javascript_const_receivers::CaptureCache::new(
             input.source,
             input.tree.root_node(),
             limits.body_nodes.min(limits.captures),
@@ -2925,6 +2948,26 @@ impl QueryPack {
                 {
                     continue;
                 }
+                if input.family == GrammarFamily::JavaScript
+                    && role == StructuralRole::Signature
+                    && capture.node.kind() == "program"
+                {
+                    for candidate in javascript_const_receivers.candidates(
+                        capture.node,
+                        role,
+                        input.cancellation,
+                    )? {
+                        retain(candidate)?;
+                    }
+                    if javascript_const_receivers.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(
+                            RefusalOrigin::JavascriptConstReceivers,
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    continue;
+                }
                 if input.family == GrammarFamily::TypeScript
                     && role == StructuralRole::Signature
                     && capture.node.kind() == "program"
@@ -3399,6 +3442,33 @@ impl QueryPack {
                     }
                     if bash_reads.exhausted() {
                         refusal = Some(IdentityRefusal::helper(RefusalOrigin::BashReads));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                }
+                if input.family == GrammarFamily::JavaScript && role == StructuralRole::Reference {
+                    if javascript_method_vars.certified(capture.node, input.cancellation)? {
+                        candidate.syntax = "javascript.method_var";
+                        candidate.required = true;
+                    }
+                    if javascript_method_vars.exhausted() {
+                        refusal =
+                            Some(IdentityRefusal::helper(RefusalOrigin::JavascriptMethodVars));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                }
+                if input.family == GrammarFamily::JavaScript {
+                    javascript_const_receivers.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if javascript_const_receivers.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(
+                            RefusalOrigin::JavascriptConstReceivers,
+                        ));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }

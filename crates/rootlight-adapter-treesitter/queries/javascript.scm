@@ -1,7 +1,7 @@
 ; Reviewed Tier C/D structural evidence for the pinned JavaScript grammar.
 ; Captures describe source structure only; no name resolution is inferred.
 
-(program) @root @module
+(program) @root @module @signature
 
 [
   (function_declaration)

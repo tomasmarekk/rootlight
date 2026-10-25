@@ -54,6 +54,8 @@ mod hdl;
 mod idris;
 mod java_local_receivers;
 mod java_parameters;
+mod javascript_const_receivers;
+mod javascript_method_vars;
 mod json_schema;
 mod julia;
 mod lean;
@@ -953,10 +955,12 @@ fn required_syntax_fact_count_from_output(
             || ocaml_bindings::required(fact)
             || astro_reads::required(fact)
             || typescript_const::required(fact)
+            || javascript_method_vars::required(fact)
             || cuda_ends.scope_required(fact, cancellation)?
             || (cuda::reference(fact)
                 && cuda_ends
                     .contains_key(&(fact.span().file(), fact.span().end_byte()), cancellation)?)
+            || javascript_const_receivers::required(fact)
             || (nix_formal_reads::reference(fact)
                 && nix_read_ends.contains_key(&(fact.span().file(), fact.span().end_byte())))
             || (eiffel_formal_reads::reference(fact)
@@ -1672,6 +1676,28 @@ fn preflight_lowering_limits(
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
                 account_string(&mut string_bytes, nix_formal_reads::READ.len(), limits)?;
             }
+            if request.language().as_str() == "javascript"
+                && request.included_ranges().is_empty()
+                && matches!(
+                    parse_output.report().coverage().status(),
+                    CoverageStatus::Complete | CoverageStatus::Bounded
+                )
+                && javascript_method_vars::required(fact)
+            {
+                occurrence_candidates = checked_add(occurrence_candidates, 1)?;
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 2)?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+                account_string(
+                    &mut string_bytes,
+                    javascript_method_vars::READ.len(),
+                    limits,
+                )?;
+            }
             if request.language().as_str() == "typescript"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -1856,6 +1882,10 @@ fn preflight_lowering_limits(
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && typescript_const::required(fact))
+                    || (request.language().as_str() == "javascript"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && javascript_const_receivers::required(fact))
                     || (request.language().as_str() == "astro"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3042,6 +3072,50 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 &materialized,
                 &facts_by_id,
                 self.full_source,
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let javascript_const_receivers = if self.request.language().as_str() == "javascript"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(javascript_const_receivers::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view,
+                self.request.source().bytes(),
+                self.request.source().path().as_str(),
+                self.request.build_context(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let javascript_method_vars = if self.request.language().as_str() == "javascript"
+            && self.request.included_ranges().is_empty()
+            && matches!(
+                self.parse_output.report().coverage().status(),
+                CoverageStatus::Complete | CoverageStatus::Bounded
+            ) {
+            Some(javascript_method_vars::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                javascript_method_vars::CurrentSource {
+                    reference: self.full_source,
+                    logical: self.source_view.as_bytes(),
+                    original: self.request.source().bytes(),
+                    maximum: self.request.limits().max_syntax_nodes(),
+                },
+                |span| self.text_for_span(span),
                 |span| self.coordinates.physical(span),
                 cancellation,
             )?)
@@ -4709,7 +4783,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .map(|bindings| bindings.owner(fact, &materialized, cancellation))
                     .transpose()?
                     .flatten();
-                let enclosing_entity = php_call_owner
+                let javascript_method_owner = javascript_method_vars
+                    .as_ref()
+                    .map(|bindings| bindings.owner(fact, &materialized, cancellation))
+                    .transpose()?
+                    .flatten();
+                let enclosing_entity = javascript_method_owner
+                    .or(php_call_owner)
                     .or(bash_call_owner)
                     .or(go_call_owner)
                     .or(glsl_owner)
@@ -4833,6 +4913,49 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("agda-rhs-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &javascript_const_receivers
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence).map_err(|_| {
+                        provider_failure("javascript-const-receiver-reference-identity")
+                    })?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &javascript_method_vars
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                    && let Some(owner) = javascript_method_owner
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence).map_err(|_| {
+                        provider_failure("javascript-method-var-reference-identity")
+                    })?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                    let mut read = occurrence.clone();
+                    read.role = OccurrenceRole::Read;
+                    read.syntax_kind.clear();
+                    read.syntax_kind.push_str(javascript_method_vars::READ);
+                    read.id = derive_occurrence_record_id(&read)
+                        .map_err(|_| provider_failure("javascript-method-var-read-identity"))?;
+                    let relation = lexical_reference_relation(&read, symbol)?;
+                    relations.insert(relation.id, relation);
+                    let relation =
+                        javascript_method_vars::relation(&read, owner, symbol, cancellation)?;
+                    relations.insert(relation.id, relation);
+                    occurrences.insert(read.id, read);
                 }
                 if let Some(targets) = &typescript_const
                     && let Some(symbol) = targets.resolve(
@@ -12938,6 +13061,7 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
         || sed::metadata(fact)
         || idris::metadata(fact)
         || typescript_const::metadata(fact)
+        || javascript_const_receivers::metadata(fact)
     {
         return false;
     }
@@ -13726,11 +13850,17 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     {
         return Some("ring-native-formal-binding-unavailable");
     }
+    if javascript_method_vars::required(fact) {
+        return Some("javascript-native-method-var-binding-unavailable");
+    }
     if typescript_const::required(fact) {
         return Some("typescript-native-const-value-binding-unavailable");
     }
     if python_module_functions::required(fact) {
         return Some("python-native-module-function-binding-unavailable");
+    }
+    if javascript_const_receivers::required(fact) {
+        return Some("javascript-native-const-receiver-binding-unavailable");
     }
     if python_module_reads::required(fact) {
         return Some("python-native-module-rhs-binding-unavailable");

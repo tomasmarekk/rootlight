@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/h5bp/html5-boilerplate",
+  "source_path": "src/webpack.common.js",
+  "source_bytes": 199,
+  "source_sha256": "e0b8e6d415a7d5d7f039c5cb43b5410294bfc21683e7f0edb1819235ecbbde84",
+  "license": "MIT",
+  "license_path": "LICENSE.txt",
+  "license_sha256": "38dbda1787367225469ead815b992e54c5107201353821eaf3dcb30f03d4d322",
+  "scope": "Complete unmodified original source for lexical const receiver binding; no runtime module or method target is inferred."
+}

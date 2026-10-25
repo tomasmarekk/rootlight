@@ -1453,6 +1453,36 @@ pub fn structural_captured_name_for_fact<'a>(
         // A complete command span is evidence, never an identifier projection.
         return None;
     }
+    if label.starts_with("javascript.const_receiver") {
+        return (language == "javascript"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "javascript.const_receiver.reference"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("javascript.method_var") {
+        return (language == "javascript"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "javascript.method_var.reference"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')))
+        .then_some(Cow::Borrowed(text));
+    }
     if label.starts_with("typescript.const_") {
         return (language == "typescript"
             && fact.kind() == SyntaxFactKind::Occurrence
@@ -4393,6 +4423,214 @@ mod cuda_classification_tests {
             assert_eq!(
                 structural_entity_kind(&make(SyntaxFactKind::Declaration, label)),
                 None
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod javascript_const_receiver_name_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn receiver_name_projection_requires_exact_language_role_label_and_plain_identifier() {
+        for (language, kind, label, text, maximum, admitted) in [
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.reference",
+                "$value2",
+                32,
+                true,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.reference",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Signature,
+                "javascript.const_receiver.reference",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver_other.reference",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.read",
+                "value",
+                32,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.reference",
+                "value",
+                4,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.reference",
+                "",
+                32,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.reference",
+                "value.member",
+                32,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.reference",
+                "value\0",
+                32,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.const_receiver.reference",
+                r"val\u0075e",
+                32,
+                false,
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 7).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact(language, &fact, text, maximum).is_some(),
+                admitted,
+                "{language}/{kind:?}/{label}/{text:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod javascript_method_var_name_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn method_var_certificate_names_keep_exact_language_role_label_and_spelling_guards() {
+        for (language, kind, label, name, maximum, expected) in [
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var.reference",
+                "$radius2",
+                8,
+                true,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var.reference",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Signature,
+                "javascript.method_var.reference",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var_other.reference",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var_read.read",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var.reference",
+                "radiusX",
+                6,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var.reference",
+                "",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var.reference",
+                "this.x",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.method_var.reference",
+                "x\\u0079",
+                8,
+                false,
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 8).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact(language, &fact, name, maximum).is_some(),
+                expected,
+                "{language} {label} {name:?}"
             );
         }
     }
