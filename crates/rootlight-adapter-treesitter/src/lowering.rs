@@ -55,6 +55,7 @@ mod idris;
 mod java_local_receivers;
 mod java_parameters;
 mod javascript_const_receivers;
+mod javascript_default_class_exports;
 mod javascript_method_vars;
 mod json_schema;
 mod julia;
@@ -956,6 +957,7 @@ fn required_syntax_fact_count_from_output(
             || astro_reads::required(fact)
             || typescript_const::required(fact)
             || javascript_method_vars::required(fact)
+            || javascript_default_class_exports::required(fact)
             || cuda_ends.scope_required(fact, cancellation)?
             || (cuda::reference(fact)
                 && cuda_ends
@@ -1885,7 +1887,8 @@ fn preflight_lowering_limits(
                     || (request.language().as_str() == "javascript"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
-                        && javascript_const_receivers::required(fact))
+                        && (javascript_const_receivers::required(fact)
+                            || javascript_default_class_exports::required(fact)))
                     || (request.language().as_str() == "astro"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3095,6 +3098,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .max_syntax_nodes()
                     .saturating_mul(128)
                     .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let javascript_default_class_exports = if self.request.language().as_str() == "javascript"
+            && self.request.included_ranges().is_empty()
+            && matches!(
+                self.parse_output.report().coverage().status(),
+                CoverageStatus::Complete | CoverageStatus::Bounded
+            ) {
+            Some(javascript_default_class_exports::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                javascript_default_class_exports::CurrentSource {
+                    reference: self.full_source,
+                    logical: self.source_view.as_bytes(),
+                    original: self.request.source().bytes(),
+                    maximum: self.request.limits().max_syntax_nodes(),
+                },
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
                 cancellation,
             )?)
         } else {
@@ -4911,6 +4936,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("agda-rhs-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &javascript_default_class_exports
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence).map_err(|_| {
+                        provider_failure("javascript-default-class-export-reference-identity")
+                    })?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -13852,6 +13892,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     }
     if javascript_method_vars::required(fact) {
         return Some("javascript-native-method-var-binding-unavailable");
+    }
+    if javascript_default_class_exports::required(fact) {
+        return Some("javascript-native-default-class-export-binding-unavailable");
     }
     if typescript_const::required(fact) {
         return Some("typescript-native-const-value-binding-unavailable");

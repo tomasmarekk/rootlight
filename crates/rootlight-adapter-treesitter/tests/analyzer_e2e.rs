@@ -4614,6 +4614,9 @@ mod c_local_references;
 #[path = "analyzer_e2e/javascript_method_var_reads.rs"]
 mod javascript_method_var_reads;
 
+#[path = "analyzer_e2e/javascript_default_class_exports.rs"]
+mod javascript_default_class_exports;
+
 #[path = "analyzer_e2e/javascript_method_var_tsx_refusals.rs"]
 mod javascript_method_var_tsx_refusals;
 

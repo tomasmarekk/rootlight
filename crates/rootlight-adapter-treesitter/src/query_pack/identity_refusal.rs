@@ -74,6 +74,7 @@ pub(crate) enum RefusalOrigin {
     TypescriptCalls,
     TypescriptConst,
     JavascriptMethodVars,
+    JavascriptDefaultClassExports,
     JavascriptConstReceivers,
     VCaptures,
     VhdlCaptures,
@@ -153,6 +154,9 @@ impl RefusalOrigin {
             Self::TypescriptCalls => "query-identity-typescript-calls-limit",
             Self::TypescriptConst => "query-identity-typescript-const-value-limit",
             Self::JavascriptMethodVars => "query-identity-javascript-method-vars-limit",
+            Self::JavascriptDefaultClassExports => {
+                "query-identity-javascript-default-class-exports-limit"
+            }
             Self::JavascriptConstReceivers => "query-identity-javascript-const-receivers-limit",
             Self::VCaptures => "query-identity-v-captures-limit",
             Self::VhdlCaptures => "query-identity-vhdl-captures-limit",

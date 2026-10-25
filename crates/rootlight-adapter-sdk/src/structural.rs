@@ -1468,6 +1468,21 @@ pub fn structural_captured_name_for_fact<'a>(
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')))
         .then_some(Cow::Borrowed(text));
     }
+    if label.starts_with("javascript.default_class_export") {
+        return (language == "javascript"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "javascript.default_class_export.reference"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'_' | b'$'))
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$')))
+        .then_some(Cow::Borrowed(text));
+    }
     if label.starts_with("javascript.method_var") {
         return (language == "javascript"
             && fact.kind() == SyntaxFactKind::Occurrence
@@ -4706,3 +4721,103 @@ mod python_module_function_name_tests {
 #[cfg(test)]
 #[path = "structural/php_ordinary_contract_tests.rs"]
 mod php_ordinary_contract_tests;
+
+#[cfg(test)]
+mod javascript_default_class_export_name_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn default_class_export_names_require_exact_language_label_role_and_ascii_name() {
+        for (language, kind, label, name, maximum, expected) in [
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export.reference",
+                "$radius2",
+                8,
+                true,
+            ),
+            (
+                "typescript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export.reference",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Signature,
+                "javascript.default_class_export.reference",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export_other.reference",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export_read.read",
+                "radiusX",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export.reference",
+                "radiusX",
+                6,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export.reference",
+                "",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export.reference",
+                "this.x",
+                8,
+                false,
+            ),
+            (
+                "javascript",
+                SyntaxFactKind::Occurrence,
+                "javascript.default_class_export.reference",
+                "x\\u0079",
+                8,
+                false,
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 8).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact(language, &fact, name, maximum).is_some(),
+                expected,
+                "{language} {label} {name:?}"
+            );
+        }
+    }
+}

@@ -964,8 +964,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/338";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/148";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/339";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/149";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/14";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
@@ -43164,6 +43164,16 @@ mod tests {
         for (changed_key, previous, expected_decision) in [
             (
                 adapter_key,
+                previous_parser(b"rootlight.first-slice.treesitter-structural/338"),
+                ArtifactDecisionKind::Rebuild,
+            ),
+            (
+                InputKey::ResolverVersion,
+                content_hash(b"rootlight.first-slice.resolve/148"),
+                ArtifactDecisionKind::Reuse,
+            ),
+            (
+                adapter_key,
                 previous_parser(b"rootlight.first-slice.treesitter-structural/337"),
                 ArtifactDecisionKind::Rebuild,
             ),
@@ -43387,6 +43397,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/291",
             b"rootlight.first-slice.treesitter-structural/329",
             b"rootlight.first-slice.treesitter-structural/334",
+            b"rootlight.first-slice.treesitter-structural/338",
             b"rootlight.first-slice.treesitter-structural/337",
             b"rootlight.first-slice.treesitter-structural/336",
             b"rootlight.first-slice.treesitter-structural/335",
@@ -43426,6 +43437,7 @@ mod tests {
             b"rootlight.first-slice.resolve/121",
             b"rootlight.first-slice.resolve/122",
             b"rootlight.first-slice.resolve/144",
+            b"rootlight.first-slice.resolve/148",
             b"rootlight.first-slice.resolve/147",
             b"rootlight.first-slice.resolve/146",
             b"rootlight.first-slice.resolve/145",

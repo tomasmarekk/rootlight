@@ -70,6 +70,7 @@ mod hlsl;
 pub(crate) mod identity_refusal;
 #[cfg(test)]
 mod identity_refusal_tests;
+mod javascript_default_class_exports;
 mod javascript_method_vars;
 mod nix_formal_reads;
 mod php_ordinary;
@@ -1042,7 +1043,10 @@ impl QueryPack {
                     || (family == GrammarFamily::JavaScript
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
-                        && candidate.syntax == "javascript.method_var")
+                        && matches!(
+                            candidate.syntax,
+                            "javascript.method_var" | "javascript.default_class_export"
+                        ))
                     || (family == GrammarFamily::TypeScript
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1466,6 +1470,13 @@ impl QueryPack {
         let mut clojure_captures =
             clojure::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut racket_captures = racket::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut javascript_default_class_exports =
+            javascript_default_class_exports::CaptureCache::new(
+                input.source,
+                input.tree.root_node(),
+                limits.body_nodes,
+                complete_file_input,
+            );
         let mut javascript_method_vars = javascript_method_vars::CaptureCache::new(
             input.source,
             input.tree.root_node(),
@@ -3447,6 +3458,19 @@ impl QueryPack {
                     }
                 }
                 if input.family == GrammarFamily::JavaScript && role == StructuralRole::Reference {
+                    if javascript_default_class_exports
+                        .certified(capture.node, input.cancellation)?
+                    {
+                        candidate.syntax = "javascript.default_class_export";
+                        candidate.required = true;
+                    }
+                    if javascript_default_class_exports.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(
+                            RefusalOrigin::JavascriptDefaultClassExports,
+                        ));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
                     if javascript_method_vars.certified(capture.node, input.cancellation)? {
                         candidate.syntax = "javascript.method_var";
                         candidate.required = true;
