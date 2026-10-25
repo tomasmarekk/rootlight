@@ -24,6 +24,7 @@ mod r_names;
 mod report;
 mod request;
 mod rust_bindings;
+mod rust_inherent_owners;
 mod sink;
 mod sql_names;
 mod structural;
@@ -72,6 +73,9 @@ pub use request::{
 };
 pub use rust_bindings::{
     RustBindingLookup, RustBindings, RustDirectDefinition, canonical_rust_identifier,
+};
+pub use rust_inherent_owners::{
+    RustInherentOwnerPlan, RustInherentOwnerProof, RustStructFieldProof, rust_inherent_owner_plan,
 };
 pub use sink::{
     AdapterDiagnostic, AnalysisOutput, BoundedIrSink, BoundedSyntaxSink, DiagnosticCode, IrBatch,

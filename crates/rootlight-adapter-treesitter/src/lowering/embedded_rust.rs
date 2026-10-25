@@ -11,6 +11,35 @@ pub(super) struct Plan {
 }
 
 impl Plan {
+    pub(super) fn modeled_owned_bytes(
+        &self,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        let mut bytes = std::mem::size_of::<Self>();
+        if let Some((bindings, _)) = &self.file {
+            bytes = checked_add(bytes, bindings.modeled_owned_bytes(cancellation)?)?;
+        }
+        bytes = checked_add(
+            bytes,
+            self.examples
+                .capacity()
+                .checked_mul(std::mem::size_of::<(RustBindings, bool)>())
+                .ok_or(SinkError::AccountingOverflow)?,
+        )?;
+        bytes = checked_add(
+            bytes,
+            self.example_facts
+                .capacity()
+                .checked_mul(128)
+                .ok_or(SinkError::AccountingOverflow)?,
+        )?;
+        for (bindings, _) in &self.examples {
+            cancellation.check()?;
+            bytes = checked_add(bytes, bindings.modeled_owned_bytes(cancellation)?)?;
+        }
+        Ok(bytes)
+    }
+
     pub(super) fn standalone(bindings: RustBindings, complete: bool) -> Self {
         Self {
             file: Some((bindings, complete)),

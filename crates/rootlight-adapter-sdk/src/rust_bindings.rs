@@ -119,6 +119,112 @@ pub struct RustBindings {
 }
 
 impl RustBindings {
+    /// Models retained collection slots and owned payloads for caller admission.
+    ///
+    /// Tree slots use a conservative fixed node envelope; vector/string capacities
+    /// are retained capacities. This is a checked admission model, not RSS.
+    ///
+    /// # Errors
+    /// Returns cancellation or checked accounting overflow.
+    pub fn modeled_owned_bytes(&self, cancellation: &Cancellation) -> Result<usize, AdapterError> {
+        fn add(total: &mut usize, bytes: usize) -> Result<(), AdapterError> {
+            *total = total
+                .checked_add(bytes)
+                .ok_or(SinkError::AccountingOverflow)?;
+            Ok(())
+        }
+        fn slots(total: &mut usize, count: usize, width: usize) -> Result<(), AdapterError> {
+            add(
+                total,
+                count
+                    .checked_mul(width)
+                    .ok_or(SinkError::AccountingOverflow)?,
+            )
+        }
+        let mut total = std::mem::size_of::<Self>();
+        for count in [
+            self.scopes.len(),
+            self.fact_scopes.len(),
+            self.positions.len(),
+            self.owners.len(),
+            self.definitions.len(),
+            self.bindings.len(),
+            self.unavailable_names.len(),
+            self.blocked_bindings.len(),
+            self.unavailable_environments.len(),
+            self.identities.len(),
+            self.direct_definitions.len(),
+            self.direct_barriers.len(),
+        ] {
+            cancellation.check()?;
+            slots(&mut total, count, 256)?;
+        }
+        for scope in self.scopes.values() {
+            cancellation.check()?;
+            add(&mut total, scope.label.capacity())?;
+        }
+        for names in self.bindings.values() {
+            cancellation.check()?;
+            slots(&mut total, names.len(), 256)?;
+            for (name, bindings) in names {
+                cancellation.check()?;
+                add(&mut total, name.capacity())?;
+                slots(
+                    &mut total,
+                    bindings.capacity(),
+                    std::mem::size_of::<Binding>(),
+                )?;
+            }
+        }
+        for names in self.blocked_bindings.values() {
+            cancellation.check()?;
+            slots(&mut total, names.len(), 256)?;
+            for (name, bindings) in names {
+                cancellation.check()?;
+                add(&mut total, name.capacity())?;
+                slots(&mut total, bindings.capacity(), std::mem::size_of::<u64>())?;
+            }
+        }
+        for names in self.unavailable_names.values() {
+            cancellation.check()?;
+            slots(&mut total, names.capacity(), std::mem::size_of::<u64>())?;
+        }
+        for environments in self.unavailable_environments.values() {
+            cancellation.check()?;
+            slots(&mut total, environments.len(), 256)?;
+            for (name, index) in environments {
+                cancellation.check()?;
+                if let Some(name) = name {
+                    add(&mut total, name.capacity())?;
+                }
+                slots(
+                    &mut total,
+                    index.spans.capacity(),
+                    std::mem::size_of::<SourceSpan>(),
+                )?;
+                slots(
+                    &mut total,
+                    index.ends.capacity(),
+                    std::mem::size_of::<u64>(),
+                )?;
+            }
+        }
+        for names in self.direct_definitions.values() {
+            cancellation.check()?;
+            slots(&mut total, names.len(), 256)?;
+            for (name, definitions) in names {
+                cancellation.check()?;
+                add(&mut total, name.capacity())?;
+                slots(
+                    &mut total,
+                    definitions.capacity(),
+                    std::mem::size_of::<RustDirectDefinition>(),
+                )?;
+            }
+        }
+        Ok(total)
+    }
+
     /// Builds local environments from a complete, already bounded fact stream.
     ///
     /// Names are decoded, source-backed spellings keyed by syntax-local fact ID.
@@ -1264,5 +1370,39 @@ mod tests {
                 .unwrap(),
             RustBindingLookup::Definition(12)
         );
+    }
+}
+
+#[cfg(test)]
+mod owned_memory_model_tests {
+    use super::*;
+
+    #[test]
+    fn retained_model_counts_nested_environment_capacities_and_cancellation() {
+        let cancellation = Cancellation::new();
+        let mut bindings = RustBindings::default();
+        let baseline = bindings.modeled_owned_bytes(&cancellation).unwrap();
+        let name = String::with_capacity(64);
+        let index = EnvironmentIndex {
+            spans: Vec::with_capacity(8),
+            ends: Vec::with_capacity(16),
+        };
+        let payload = name.capacity()
+            + index.spans.capacity() * std::mem::size_of::<SourceSpan>()
+            + index.ends.capacity() * std::mem::size_of::<u64>();
+        bindings
+            .unavailable_environments
+            .insert(1, BTreeMap::from([(Some(name), index)]));
+        assert_eq!(
+            bindings.modeled_owned_bytes(&cancellation).unwrap(),
+            baseline + 512 + payload
+        );
+        assert!(cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest));
+        assert!(matches!(
+            bindings.modeled_owned_bytes(&cancellation),
+            Err(AdapterError::Cancelled {
+                reason: rootlight_cancel::CancellationReason::ClientRequest
+            })
+        ));
     }
 }

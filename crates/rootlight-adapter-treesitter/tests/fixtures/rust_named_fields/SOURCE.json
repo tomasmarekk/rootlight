@@ -1,0 +1,16 @@
+{
+  "upstream_repository": "https://github.com/denoland/deno",
+  "revision": "ce9bc924abea6a0d0839b3a53438e4da44d08cd7",
+  "upstream_path": "libs/core/event_loop.rs",
+  "fixture_path": "event_loop.rs",
+  "bytes": 1724,
+  "sha256": "120898f9aea8d4be075da10e2183d17b5d7de76035a4aa053b9871dbbed06117",
+  "license": {
+    "upstream_path": "LICENSE.md",
+    "retained_path": "DENO-LICENSE.md",
+    "bytes": 1074,
+    "sha256": "f62497fffecc0852960c8d3e6934b9db86d16396e9b604072e923892cae3a588"
+  },
+  "source_scope": "Complete original physical UTF-8 source without reformatting or reduction; the source is parser input and is not compiled as Deno.",
+  "semantic_scope": "Written named struct-field definitions and source-authenticated plain inherent Struct ownership; repository capacity and whole-repository completeness require independent qualification."
+}

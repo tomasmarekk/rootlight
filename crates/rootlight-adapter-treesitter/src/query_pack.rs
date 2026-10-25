@@ -5051,6 +5051,8 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Rust, "mod_item") => Some("rust.module"),
         (GrammarFamily::Rust, "function_item") => Some("rust.function"),
         (GrammarFamily::Rust, "struct_item") => Some("rust.struct"),
+        (GrammarFamily::Rust, "field_declaration") => Some("rust.field"),
+        (GrammarFamily::Rust, "field_identifier") => Some("rust.field_identifier"),
         (GrammarFamily::Rust, "enum_item") => Some("rust.enum"),
         (GrammarFamily::Rust, "trait_item") => Some("rust.trait"),
         (GrammarFamily::Rust, "type_item") => Some("rust.type"),

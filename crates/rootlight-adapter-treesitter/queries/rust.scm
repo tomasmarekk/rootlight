@@ -27,6 +27,15 @@
   (static_item name: (identifier) @definition)
 ]
 
+; Only direct named struct members establish this reviewed Field contract.
+(struct_item
+  body: (field_declaration_list
+    (field_declaration) @declaration))
+(struct_item
+  body: (field_declaration_list
+    (field_declaration
+      name: (field_identifier) @definition)))
+
 (use_declaration) @import
 (parameters) @signature
 (closure_parameters) @signature

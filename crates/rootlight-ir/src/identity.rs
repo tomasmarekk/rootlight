@@ -801,6 +801,61 @@ struct RustScopeComponent {
     display: String,
 }
 
+/// One authored Rust token emitted by the existing bounded scope scanner.
+///
+/// Ranges index the exact supplied UTF-8 bytes. A literal is retained as one
+/// opaque token; comments and whitespace have no token. This is lexical source
+/// evidence, not a Rust grammar, binding, activation or typechecking proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RustSourceToken {
+    /// Inclusive UTF-8 byte offset in the supplied source.
+    pub start_byte: usize,
+    /// Exclusive UTF-8 byte offset in the supplied source.
+    pub end_byte: usize,
+    /// Whether the token is an opaque string, raw string or character literal.
+    pub literal: bool,
+}
+
+/// Projects authored token ranges using the Rust impl-identity lexical scanner.
+///
+/// Input is capped by the caller's `maximum_source_bytes`; the identity-only
+/// 4 KiB signature ceiling remains with its original consumer. At most
+/// `maximum_tokens` ranges are allocated. The
+/// caller must authenticate the source and check cancellation before and after
+/// this bounded scan. Empty or unterminated input returns `None`.
+///
+/// # Errors
+/// Returns the existing lexical resource/accounting errors for allocation,
+/// token-budget refusal or checked byte arithmetic failure.
+pub fn rust_source_tokens(
+    text: &str,
+    maximum_source_bytes: usize,
+    maximum_tokens: usize,
+) -> Result<Option<Vec<RustSourceToken>>, RustScopeIdentityError> {
+    if text.is_empty() || text.len() > maximum_source_bytes {
+        return Ok(None);
+    }
+    let mut tokens = Vec::new();
+    tokens
+        .try_reserve_exact(text.len().min(32).min(maximum_tokens))
+        .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
+    let valid = scan_rust_scope_tokens(text, |start_byte, end_byte, literal| {
+        if tokens.len() == maximum_tokens {
+            return Err(RustScopeIdentityError::ResourceLimit);
+        }
+        tokens
+            .try_reserve(1)
+            .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
+        tokens.push(RustSourceToken {
+            start_byte,
+            end_byte,
+            literal,
+        });
+        Ok(())
+    })?;
+    Ok((valid && !tokens.is_empty()).then_some(tokens))
+}
+
 fn canonical_rust_scope_component(
     text: &str,
     maximum_string_bytes: usize,
@@ -811,11 +866,42 @@ fn canonical_rust_scope_component(
     {
         return Ok(None);
     }
-    let bytes = text.as_bytes();
     let mut tokens = Vec::new();
     tokens
         .try_reserve_exact(text.len().min(32))
         .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
+    if !scan_rust_scope_tokens(text, |start, end, _literal| {
+        push_rust_scope_token(&mut tokens, text, start, end)
+    })? {
+        return Ok(None);
+    }
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let mut display = String::new();
+    display
+        .try_reserve_exact(text.len())
+        .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
+    let mut previous_word = false;
+    for token in &tokens {
+        let word = rust_scope_token_is_word(token);
+        if previous_word && word {
+            display.push(' ');
+        }
+        display.push_str(token);
+        previous_word = word;
+    }
+    if display.len() > maximum_string_bytes {
+        return Ok(None);
+    }
+    Ok(Some(RustScopeComponent { tokens, display }))
+}
+
+fn scan_rust_scope_tokens(
+    text: &str,
+    mut emit: impl FnMut(usize, usize, bool) -> Result<(), RustScopeIdentityError>,
+) -> Result<bool, RustScopeIdentityError> {
+    let bytes = text.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
         if bytes[index..].starts_with(b"//") {
@@ -842,12 +928,12 @@ fn canonical_rust_scope_component(
                 }
             }
             if depth != 0 {
-                return Ok(None);
+                return Ok(false);
             }
             continue;
         }
         if let Some(end) = rust_raw_string_end(bytes, index) {
-            push_rust_scope_token(&mut tokens, text, index, end)?;
+            emit(index, end, true)?;
             index = end;
             continue;
         }
@@ -858,9 +944,9 @@ fn canonical_rust_scope_component(
         };
         if let Some(quote) = normal_string_start {
             let Some(end) = rust_quoted_end(bytes, quote, b'"') else {
-                return Ok(None);
+                return Ok(false);
             };
-            push_rust_scope_token(&mut tokens, text, index, end)?;
+            emit(index, end, true)?;
             index = end;
             continue;
         }
@@ -874,7 +960,7 @@ fn canonical_rust_scope_component(
         if let Some(quote) = char_start
             && let Some(end) = rust_char_literal_end(text, quote)
         {
-            push_rust_scope_token(&mut tokens, text, index, end)?;
+            emit(index, end, true)?;
             index = end;
             continue;
         }
@@ -913,35 +999,16 @@ fn canonical_rust_scope_component(
                     .checked_add(next.len_utf8())
                     .ok_or(RustScopeIdentityError::AccountingOverflow)?;
             }
-            push_rust_scope_token(&mut tokens, text, start, index)?;
+            emit(start, index, false)?;
             continue;
         }
         let end = index
             .checked_add(character.len_utf8())
             .ok_or(RustScopeIdentityError::AccountingOverflow)?;
-        push_rust_scope_token(&mut tokens, text, index, end)?;
+        emit(index, end, false)?;
         index = end;
     }
-    if tokens.is_empty() {
-        return Ok(None);
-    }
-    let mut display = String::new();
-    display
-        .try_reserve_exact(text.len())
-        .map_err(|_| RustScopeIdentityError::ResourceLimit)?;
-    let mut previous_word = false;
-    for token in &tokens {
-        let word = rust_scope_token_is_word(token);
-        if previous_word && word {
-            display.push(' ');
-        }
-        display.push_str(token);
-        previous_word = word;
-    }
-    if display.len() > maximum_string_bytes {
-        return Ok(None);
-    }
-    Ok(Some(RustScopeComponent { tokens, display }))
+    Ok(true)
 }
 
 fn hash_rust_scope_component(
@@ -2865,5 +2932,124 @@ mod tests {
 
         assert_eq!(result, Err(IdentityClaimError::Interrupted));
         assert_eq!(checkpoints, 3);
+    }
+}
+
+#[cfg(test)]
+mod rust_source_token_tests {
+    use super::*;
+
+    #[test]
+    fn source_projection_keeps_literals_opaque_and_excludes_comment_tokens() {
+        let source = "// struct Comment {}\n/* impl Hidden {} */\nstruct Real { value: &'static str }\nconst TEXT: &str = r###\"impl Literal {}\"###;\nconst BRACE: char = '{';\n";
+        let tokens = rust_source_tokens(source, MAX_LEXICAL_SIGNATURE_BYTES, 256)
+            .unwrap()
+            .unwrap();
+        let written: Vec<_> = tokens
+            .iter()
+            .filter(|token| !token.literal)
+            .map(|token| &source[token.start_byte..token.end_byte])
+            .collect();
+        assert!(written.contains(&"Real"));
+        assert!(
+            !written
+                .iter()
+                .any(|text| matches!(*text, "Comment" | "Hidden" | "Literal"))
+        );
+        let literals: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.literal)
+            .map(|token| &source[token.start_byte..token.end_byte])
+            .collect();
+        assert_eq!(literals, ["r###\"impl Literal {}\"###", "'{'"]);
+        assert!(
+            tokens
+                .windows(2)
+                .all(|pair| pair[0].end_byte <= pair[1].start_byte)
+        );
+        assert!(
+            tokens
+                .iter()
+                .all(|token| source.get(token.start_byte..token.end_byte).is_some())
+        );
+    }
+
+    #[test]
+    fn projection_refuses_unterminated_source_and_actual_token_limits() {
+        for source in ["/* open", "\"open", "r###\"open"] {
+            assert!(
+                rust_source_tokens(source, MAX_LEXICAL_SIGNATURE_BYTES, 128)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(matches!(
+            rust_source_tokens("struct Name;", 128, 1),
+            Err(RustScopeIdentityError::ResourceLimit)
+        ));
+        assert!(
+            rust_source_tokens("struct Name;", 4, 128)
+                .unwrap()
+                .is_none()
+        );
+        let source = "struct Owner {}";
+        let count = rust_source_tokens(source, source.len(), source.len())
+            .unwrap()
+            .unwrap()
+            .len();
+        assert_eq!(
+            rust_source_tokens(source, source.len(), count)
+                .unwrap()
+                .unwrap()
+                .len(),
+            count
+        );
+        assert!(matches!(
+            rust_source_tokens(source, source.len(), count - 1),
+            Err(RustScopeIdentityError::ResourceLimit)
+        ));
+    }
+
+    #[test]
+    fn identity_consumer_keeps_existing_comment_literal_and_trait_token_recipes() {
+        for (plain, decorated) in [
+            ("Name<T>", "Name /* trivia */ < T >"),
+            ("[u8; 4]", "[ u8 ; /* count */ 4 ]"),
+        ] {
+            let before = canonical_rust_impl_scope(plain, None, 256)
+                .unwrap()
+                .unwrap();
+            let after = canonical_rust_impl_scope(decorated, None, 256)
+                .unwrap()
+                .unwrap();
+            assert_eq!(before, after);
+        }
+        let inherent = canonical_rust_impl_scope("Name", None, 256)
+            .unwrap()
+            .unwrap();
+        let trait_impl = canonical_rust_impl_scope("Name", Some("Trait"), 256)
+            .unwrap()
+            .unwrap();
+        assert_ne!(inherent.header(), trait_impl.header());
+    }
+
+    #[test]
+    fn whole_source_projection_does_not_change_the_identity_signature_ceiling() {
+        let text = format!("/*{}*/ struct Owner {{}}", "padding ".repeat(600));
+        assert!(text.len() > MAX_LEXICAL_SIGNATURE_BYTES);
+        let tokens = rust_source_tokens(&text, text.len(), 4).unwrap().unwrap();
+        assert_eq!(tokens.len(), 4);
+        assert!(
+            canonical_rust_scope_component(&text, text.len())
+                .unwrap()
+                .is_none()
+        );
+        let plain = canonical_rust_impl_scope("crate::Owner<'a>", None, 256)
+            .unwrap()
+            .unwrap();
+        let trivia = canonical_rust_impl_scope("crate /* source */ :: Owner < 'a >", None, 256)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain, trivia);
     }
 }

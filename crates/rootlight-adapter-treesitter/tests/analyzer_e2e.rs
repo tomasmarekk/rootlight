@@ -132,6 +132,10 @@ mod python_module_updates;
 mod r_native;
 #[path = "analyzer_e2e/rust_bindings.rs"]
 mod rust_bindings;
+#[path = "analyzer_e2e/rust_inherent_owners.rs"]
+mod rust_inherent_owners;
+#[path = "analyzer_e2e/rust_named_fields.rs"]
+mod rust_named_fields;
 #[path = "analyzer_e2e/sas_native.rs"]
 mod sas_native;
 #[path = "analyzer_e2e/scala_native.rs"]

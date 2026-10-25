@@ -1,4 +1,4 @@
-//! Native Rust pattern leaves and identifier namespaces.
+//! Native Rust pattern leaves, identifier namespaces and named field evidence.
 //! The query emits one declaration per proven leaf; complete let and callable
 //! extents remain separate metadata for the shared lexical binding consumer.
 
@@ -177,6 +177,13 @@ impl CaptureCache {
         source: &[u8],
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
+        if matches!(
+            (role, node.kind()),
+            (StructuralRole::Declaration, "field_declaration")
+                | (StructuralRole::Definition, "field_identifier")
+        ) {
+            return Ok(named_struct_field_capture(node, role, source));
+        }
         if role == StructuralRole::Signature && node.kind() == "function_item" {
             if module_const_parameter_context(node, cancellation)?.is_some() {
                 return Ok(true);
@@ -466,6 +473,64 @@ fn module_const_parameter_context<'tree>(
     Ok(None)
 }
 
+fn named_struct_field_capture(node: Node<'_>, role: StructuralRole, source: &[u8]) -> bool {
+    let field = if role == StructuralRole::Declaration {
+        node
+    } else {
+        let Some(field) = node.parent() else {
+            return false;
+        };
+        field
+    };
+    if field.kind() != "field_declaration" || !complete_field_node(field, source) {
+        return false;
+    }
+    let Some(name) = field.child_by_field_name("name") else {
+        return false;
+    };
+    let Some(field_type) = field.child_by_field_name("type") else {
+        return false;
+    };
+    if name.kind() != "field_identifier"
+        || !complete_field_node(name, source)
+        || !complete_field_node(field_type, source)
+        || name.parent() != Some(field)
+        || field_type.parent() != Some(field)
+        || name.start_byte() < field.start_byte()
+        || name.end_byte() > field.end_byte()
+        || field_type.start_byte() < name.end_byte()
+        || field_type.end_byte() > field.end_byte()
+        || (role == StructuralRole::Definition && node != name)
+    {
+        return false;
+    }
+    let Some(body) = field.parent() else {
+        return false;
+    };
+    let Some(owner) = body.parent() else {
+        return false;
+    };
+    // A sibling's recovery marks the enclosing list and struct as error-bearing.
+    // Only this field subtree is required to be recovery-free.
+    body.kind() == "field_declaration_list"
+        && owner.kind() == "struct_item"
+        && owner.child_by_field_name("body") == Some(body)
+        && bounded_field_node(body, source)
+        && bounded_field_node(owner, source)
+        && owner.start_byte() <= body.start_byte()
+        && body.start_byte() <= field.start_byte()
+        && field.end_byte() <= body.end_byte()
+        && body.end_byte() <= owner.end_byte()
+}
+
+fn complete_field_node(node: Node<'_>, source: &[u8]) -> bool {
+    !node.is_error() && !node.is_missing() && !node.has_error() && bounded_field_node(node, source)
+}
+
+fn bounded_field_node(node: Node<'_>, source: &[u8]) -> bool {
+    node.start_byte() < node.end_byte() && source.get(node.byte_range()).is_some()
+}
+
 fn macro_pattern(node: Node<'_>, cancellation: &Cancellation) -> Result<bool, AdapterError> {
     let mut current = node;
     while let Some(parent) = current.parent() {
@@ -510,4 +575,59 @@ fn first_let_end(
         pending.extend(node.named_children(&mut cursor));
     }
     Ok(first)
+}
+
+#[cfg(test)]
+mod named_struct_fields {
+    use super::*;
+
+    #[test]
+    fn captures_require_the_native_field_name_and_complete_physical_source() {
+        let source = "struct Owner { value: u8 }\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let owner = tree.root_node().named_child(0).unwrap();
+        let body = owner.child_by_field_name("body").unwrap();
+        let field = body.named_child(0).unwrap();
+        let name = field.child_by_field_name("name").unwrap();
+        let field_type = field.child_by_field_name("type").unwrap();
+        let cancellation = Cancellation::new();
+        let mut cache = CaptureCache::default();
+        for (node, role) in [
+            (field, StructuralRole::Declaration),
+            (name, StructuralRole::Definition),
+        ] {
+            assert!(
+                cache
+                    .retain(node, role, source.as_bytes(), &cancellation)
+                    .unwrap()
+            );
+            for end in [
+                0,
+                field.start_byte(),
+                name.end_byte() - 1,
+                field_type.end_byte() - 1,
+            ] {
+                assert!(
+                    !cache
+                        .retain(node, role, &source.as_bytes()[..end], &cancellation)
+                        .unwrap()
+                );
+            }
+        }
+        assert!(!named_struct_field_capture(
+            field_type,
+            StructuralRole::Definition,
+            source.as_bytes()
+        ));
+        assert!(
+            cache
+                .retain(name, StructuralRole::Call, source.as_bytes(), &cancellation)
+                .unwrap()
+        );
+    }
 }

@@ -44,6 +44,9 @@ mod common_lisp_identity;
 #[path = "lowering_contract/assembly_identity.rs"]
 mod assembly_identity;
 
+#[path = "lowering_contract/rust_named_fields.rs"]
+mod rust_named_fields;
+
 #[test]
 fn json_key_captures_lower_to_exact_source_bound_properties() {
     assert_data_key_captures(

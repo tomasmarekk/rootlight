@@ -89,6 +89,7 @@ mod qsharp;
 mod qsharp_formals;
 mod racket;
 mod ring;
+mod rust_inherent_owners;
 mod sass;
 mod scala_formals;
 mod scheme_calls;
@@ -712,7 +713,9 @@ impl TreeSitterAnalyzer {
             usage.records(),
             parse_resources.syntax_nodes(),
             parse_resources.max_syntax_depth(),
-            parse_resources.reported_memory_bytes(),
+            parse_resources
+                .reported_memory_bytes()
+                .map(|parsed_peak| parsed_peak.max(lowered.rust_owner_modeled_peak)),
             usage,
         );
         rootlight_adapter_sdk::WorkReport::new(
@@ -2414,6 +2417,38 @@ impl<'context, 'source> Lowering<'context, 'source> {
             .unsupported_scope_entities
             .extend(exclude_ambiguous_entities(&mut materialized));
 
+        let (rust_owner_gaps, rust_owner_modeled_peak) = if self.request.language().as_str()
+            == "rust"
+            && rust_inherent_owners::has_candidates(drafts, &materialized, cancellation)?
+        {
+            let resident = rust_inherent_owners::resident_bytes(
+                &entity_plan,
+                &materialized,
+                self.parse_output,
+                self.request.source().bytes().len(),
+                self.source_view.owned_bytes(),
+                &budget,
+                cancellation,
+            )?;
+            let outcome = rust_inherent_owners::reconcile(
+                &mut materialized,
+                drafts,
+                self.coordinates.facts(),
+                self.full_source,
+                self.request.source().bytes(),
+                self.source_view.is_identity()
+                    && self.request.encoding().as_str() == "utf-8"
+                    && self.request.included_ranges().is_empty()
+                    && self.parse_output.report().coverage().status() == CoverageStatus::Complete,
+                resident,
+                self.request.limits(),
+                cancellation,
+            )?;
+            (outcome.gaps, outcome.modeled_peak)
+        } else {
+            (Vec::new(), 0)
+        };
+
         let mut entities = BTreeMap::<SymbolId, EntityRecord>::new();
         let mut symbol_claims = BTreeMap::<SymbolId, SymbolIdentityClaim>::new();
         let mut identity_guards = BTreeMap::<SymbolId, [u8; 32]>::new();
@@ -2622,6 +2657,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut skipped = BTreeMap::<FactId, SkippedRegion>::new();
         let skipped_limit = self.request.limits().ir().max_skipped_regions;
         let mut diagnostics = BTreeMap::<FactId, DiagnosticRecord>::new();
+        for span in rust_owner_gaps {
+            let region = self.skipped_region(
+                span,
+                FactDomain::Relations,
+                SkippedRegionReason::UnsupportedConstruct,
+                "rust-inherent-impl-owner-unavailable",
+                provenance_id,
+            )?;
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+        }
         for span in classic_dialect_spans(self.request) {
             cancellation.check()?;
             let region = skipped_region(
@@ -7186,6 +7231,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         records.extend(extensions.into_values().map(IrRecord::Extension));
 
         Ok(LoweredOutput {
+            rust_owner_modeled_peak,
             records,
             coverage_status,
             skipped_regions: stats.skipped_regions,
@@ -9575,6 +9621,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
 }
 
 struct LoweredOutput {
+    rust_owner_modeled_peak: usize,
     records: Vec<IrRecord>,
     coverage_status: CoverageStatus,
     skipped_regions: usize,

@@ -13,6 +13,7 @@ mod ecmascript;
 mod go;
 mod module_resolution;
 mod php;
+mod rust_inherent_owners;
 mod rust_modules;
 mod rust_source;
 
@@ -1910,6 +1911,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     rust_direct_calls: BTreeMap<SourceSpan, RustDirectCallDraft>,
     rust_module_calls: BTreeMap<SourceSpan, rust_modules::CallProof>,
     rust_trait_calls: BTreeMap<SourceSpan, rust_modules::TraitCallProof>,
+    rust_definition_owners: BTreeMap<SourceSpan, rust_inherent_owners::DefinitionOwner>,
     go_bindings: BTreeMap<SourceSpan, go::Proof>,
     php_bindings: BTreeMap<SourceSpan, php::Proof>,
     rust_local_symbols: BTreeSet<SymbolId>,
@@ -1947,6 +1949,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             rust_direct_calls: BTreeMap::new(),
             rust_module_calls: BTreeMap::new(),
             rust_trait_calls: BTreeMap::new(),
+            rust_definition_owners: BTreeMap::new(),
             go_bindings: BTreeMap::new(),
             php_bindings: BTreeMap::new(),
             rust_local_symbols: BTreeSet::new(),
@@ -1967,6 +1970,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         self.collect_syntax()?;
         self.materialize_entities()?;
         if self.analyzer.language == SemanticProjectLanguage::Rust {
+            self.rust_definition_owners = rust_inherent_owners::reconcile(&mut self)?;
             let module_calls = rust_modules::resolve(&self)?;
             self.rust_module_calls = module_calls.proofs;
             self.rust_trait_calls = module_calls.trait_calls;
@@ -3444,14 +3448,21 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 self.push_source_gap(&input, draft.source.span(), FactDomain::Relations, detail)?;
             }
             let provenance = self.provenance_for_file(draft.file)?;
-            let enclosing = draft
-                .enclosing_declaration
-                .and_then(|declaration| {
-                    self.symbol_by_declaration
-                        .get(&(draft.file, declaration))
-                        .copied()
-                })
-                .or(draft.enclosing);
+            let enclosing = rust_inherent_owners::definition_enclosing(
+                &self.rust_definition_owners,
+                &draft,
+                &target,
+            )
+            .or_else(|| {
+                draft
+                    .enclosing_declaration
+                    .and_then(|declaration| {
+                        self.symbol_by_declaration
+                            .get(&(draft.file, declaration))
+                            .copied()
+                    })
+                    .or(draft.enclosing)
+            });
             self.materialize_go_route(&draft, &definitions)?;
             let mut record = OccurrenceRecord {
                 id: FactId::from_bytes([0; 20]),
@@ -7598,6 +7609,9 @@ mod python_required_context_qualification_tests {
 
 #[cfg(test)]
 mod formal_context_tests;
+
+#[cfg(test)]
+mod rust_inherent_owner_tests;
 
 #[cfg(test)]
 mod scala_formal_metadata_tests {
