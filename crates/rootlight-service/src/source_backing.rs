@@ -69,6 +69,15 @@ pub(super) struct GenerationBacking<'a> {
     generation: &'a GenerationSnapshot,
 }
 
+impl<'a> GenerationBacking<'a> {
+    pub(super) fn new(service: &'a FirstSliceService, generation: &'a GenerationSnapshot) -> Self {
+        Self {
+            service,
+            generation,
+        }
+    }
+}
+
 impl fmt::Debug for GenerationBacking<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

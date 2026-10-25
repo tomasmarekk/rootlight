@@ -66,6 +66,10 @@ mod prepared_artifacts;
 mod refinement;
 pub mod source_archive;
 mod source_backing;
+mod source_read_operation;
+pub use source_read_operation::{
+    FirstSliceSourceReadOperation, FirstSliceSourceReadOperationLimits,
+};
 mod source_find;
 mod source_generation;
 mod source_owner;

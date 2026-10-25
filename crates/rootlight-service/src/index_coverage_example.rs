@@ -26,7 +26,8 @@ use rootlight_ir::{
 };
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
-    FirstSliceBudget, FirstSliceIndexMode, FirstSliceIndexProgress, FirstSliceService,
+    FirstSliceBudget, FirstSliceError, FirstSliceIndexMode, FirstSliceIndexProgress,
+    FirstSliceService, FirstSliceSourceReadOperation, FirstSliceSourceReadOperationLimits,
     FirstSliceStoragePolicy, capture_first_slice_analysis_profile,
 };
 use rootlight_source::{SourceEncoding, SourceReadOptions};
@@ -626,12 +627,100 @@ struct VerifiedSource {
     gap_text: Option<gap_text::GapTexts>,
 }
 
+#[derive(Clone, Copy)]
+enum AccountingReadState {
+    Unopened,
+    Unavailable,
+    Open,
+    Failed(FirstSliceError),
+}
+
+struct AccountingReads<'a> {
+    cancellation: &'a Cancellation,
+    limits: FirstSliceSourceReadOperationLimits,
+    state: AccountingReadState,
+    operation: Option<FirstSliceSourceReadOperation<'a>>,
+}
+
+impl<'a> AccountingReads<'a> {
+    fn current(
+        &mut self,
+        service: &'a FirstSliceService,
+        generation: rootlight_ids::GenerationId,
+    ) -> Result<Option<&mut FirstSliceSourceReadOperation<'a>>, FirstSliceError> {
+        if matches!(self.state, AccountingReadState::Unopened) {
+            self.state =
+                match service.source_read_operation(generation, self.limits, self.cancellation) {
+                    Ok(Some(operation)) => {
+                        self.operation = Some(operation);
+                        AccountingReadState::Open
+                    }
+                    Ok(None) => AccountingReadState::Unavailable,
+                    Err(error) => AccountingReadState::Failed(error),
+                };
+        }
+        match &mut self.state {
+            AccountingReadState::Open => self
+                .operation
+                .as_mut()
+                .map(Some)
+                .ok_or(FirstSliceError::Retention),
+            AccountingReadState::Unavailable => Ok(None),
+            AccountingReadState::Failed(error) => Err(*error),
+            AccountingReadState::Unopened => Err(FirstSliceError::Retention),
+        }
+    }
+}
+
+fn accounting_read_limits(
+    file_lengths: impl Iterator<Item = u64>,
+) -> Result<FirstSliceSourceReadOperationLimits, Box<dyn Error>> {
+    let query = FirstSliceBudget::default().query();
+    // A UTF-8 cut can retreat at most three bytes from the 64 KiB boundary.
+    const MINIMUM_FULL_CHUNK: u64 = 64 * 1024 - 3;
+    // These are work units, not allocations. This covers maximum bounded
+    // publication/index/pack visits around each single-selector request.
+    const STORAGE_WORK_ENVELOPE: u64 = 2 * 1024 * 1024 * 1024;
+    const GLOBAL_MEMORY_CEILING: u64 = 16 * 1024 * 1024 * 1024;
+    let query_work = query
+        .max_rows()
+        .checked_add(query.max_memory_bytes())
+        .and_then(|value| value.checked_add(query.max_json_bytes()))
+        .ok_or("source accounting operation work bound overflow")?;
+    let mut reads = 0u64;
+    let mut work = STORAGE_WORK_ENVELOPE;
+    for bytes in file_lengths {
+        let chunks = bytes
+            .checked_div(MINIMUM_FULL_CHUNK)
+            .and_then(|value| value.checked_add(1))
+            .ok_or("source accounting operation read bound overflow")?;
+        reads = reads
+            .checked_add(chunks)
+            .ok_or("source accounting operation read bound overflow")?;
+        let per_read = bytes
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(query_work))
+            .and_then(|value| value.checked_add(STORAGE_WORK_ENVELOPE))
+            .ok_or("source accounting operation work bound overflow")?;
+        work = per_read
+            .checked_mul(chunks)
+            .and_then(|value| work.checked_add(value))
+            .ok_or("source accounting operation work bound overflow")?;
+    }
+    Ok(FirstSliceSourceReadOperationLimits::new(
+        reads.max(1),
+        work,
+        GLOBAL_MEMORY_CEILING,
+    )?)
+}
+
 struct FileSourceVerifier<'a> {
     snapshot: &'a rootlight_storage::GenerationSnapshot,
     service: &'a FirstSliceService,
     repository: &'a Path,
     generation: rootlight_ids::GenerationId,
     verified_containers: BTreeSet<rootlight_ids::FileId>,
+    accounting_reads: Option<AccountingReads<'a>>,
 }
 
 impl<'a> FileSourceVerifier<'a> {
@@ -647,6 +736,26 @@ impl<'a> FileSourceVerifier<'a> {
             repository,
             generation,
             verified_containers: BTreeSet::new(),
+            accounting_reads: None,
+        }
+    }
+
+    fn with_accounting_reads(
+        snapshot: &'a rootlight_storage::GenerationSnapshot,
+        service: &'a FirstSliceService,
+        repository: &'a Path,
+        generation: rootlight_ids::GenerationId,
+        cancellation: &'a Cancellation,
+        limits: FirstSliceSourceReadOperationLimits,
+    ) -> Self {
+        Self {
+            accounting_reads: Some(AccountingReads {
+                cancellation,
+                limits,
+                state: AccountingReadState::Unopened,
+                operation: None,
+            }),
+            ..Self::new(snapshot, service, repository, generation)
         }
     }
 
@@ -714,47 +823,82 @@ impl<'a> FileSourceVerifier<'a> {
                 source.content_hash(),
                 None,
             );
-            let read = self.service.source_read_with_options_and_budget(
-                self.generation,
-                vec![part.clone()],
-                SourceReadOptions::new()
-                    .with_context_lines_before(0)
-                    .with_context_lines_after(0)
-                    .with_encoding(encoding),
-                FirstSliceBudget::default(),
-                &Cancellation::new(),
-            )?;
-            if read.data.generation != self.generation || read.data.chunks.len() != 1 {
-                return Err(format!(
-                    "source retrieval returned an unexpected generation or chunk count: {}",
-                    file.path
-                )
-                .into());
-            }
-            let chunk = &read.data.chunks[0];
-            if chunk.reference != part
-                || chunk.extracted_from.as_ref() != origin
-                || chunk.path != file.path
-                || chunk.content_hash != file.content_hash
-                || chunk.language != file.language
-                || chunk.start_byte != u64::try_from(start)?
-                || chunk.end_byte != u64::try_from(end)?
-                || live
-                    .as_ref()
-                    .is_some_and(|bytes| Some(chunk.bytes.as_slice()) != bytes.get(start..end))
-            {
-                return Err(format!("source retrieval differs from indexed evidence: {} at {start}..{end}, returned {}..{} ({} bytes)",
-                    file.path, chunk.start_byte, chunk.end_byte, chunk.bytes.len()).into());
-            }
-            returned_hasher.update(&chunk.bytes);
-            read_bytes = read_bytes
-                .checked_add(u64::try_from(chunk.bytes.len())?)
-                .ok_or("source read byte count overflow")?;
-            read_chunks = read_chunks
-                .checked_add(1)
-                .ok_or("source read chunk count overflow")?;
-            if let Some(text) = &mut gap_text {
-                text.capture(start, &chunk.bytes)?;
+            let generation = self.generation;
+            let mut consume = |read: &rootlight_query::QueryResponse<
+                rootlight_query::SourceReadQueryResult,
+            >|
+             -> Result<(), Box<dyn Error>> {
+                if read.data.generation != generation || read.data.chunks.len() != 1 {
+                    return Err(format!(
+                        "source retrieval returned an unexpected generation or chunk count: {}",
+                        file.path
+                    )
+                    .into());
+                }
+                let chunk = &read.data.chunks[0];
+                if chunk.reference != part
+                    || chunk.extracted_from.as_ref() != origin
+                    || chunk.path != file.path
+                    || chunk.content_hash != file.content_hash
+                    || chunk.language != file.language
+                    || chunk.start_byte != u64::try_from(start)?
+                    || chunk.end_byte != u64::try_from(end)?
+                    || live
+                        .as_ref()
+                        .is_some_and(|bytes| Some(chunk.bytes.as_slice()) != bytes.get(start..end))
+                {
+                    return Err(format!("source retrieval differs from indexed evidence: {} at {start}..{end}, returned {}..{} ({} bytes)",
+                        file.path, chunk.start_byte, chunk.end_byte, chunk.bytes.len()).into());
+                }
+                returned_hasher.update(&chunk.bytes);
+                read_bytes = read_bytes
+                    .checked_add(u64::try_from(chunk.bytes.len())?)
+                    .ok_or("source read byte count overflow")?;
+                read_chunks = read_chunks
+                    .checked_add(1)
+                    .ok_or("source read chunk count overflow")?;
+                if let Some(text) = &mut gap_text {
+                    text.capture(start, &chunk.bytes)?;
+                }
+                Ok(())
+            };
+            let active = match &mut self.accounting_reads {
+                Some(reads) => reads.current(self.service, self.generation)?,
+                None => None,
+            };
+            if let Some(operation) = active {
+                let mut callback_error = None;
+                let outcome = operation.read(
+                    vec![part.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(encoding),
+                    FirstSliceBudget::default(),
+                    |read| {
+                        consume(read).map_err(|error| {
+                            callback_error = Some(error);
+                            FirstSliceError::Source
+                        })
+                    },
+                );
+                // The original diagnostic error precedes its typed service bridge.
+                if let Some(error) = callback_error {
+                    return Err(error);
+                }
+                outcome?;
+            } else {
+                let read = self.service.source_read_with_options_and_budget(
+                    self.generation,
+                    vec![part.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(encoding),
+                    FirstSliceBudget::default(),
+                    &Cancellation::new(),
+                )?;
+                consume(&read)?;
             }
             if end == file_length {
                 break;
@@ -901,7 +1045,16 @@ fn inspect_source_files(
         }
         add_count(&mut counts.gaps, 1)?;
     }
-    let mut verifier = FileSourceVerifier::new(snapshot, service, repository, generation);
+    let cancellation = Cancellation::new();
+    let limits = accounting_read_limits(files.values().map(|(file, _, _)| file.byte_length))?;
+    let mut verifier = FileSourceVerifier::with_accounting_reads(
+        snapshot,
+        service,
+        repository,
+        generation,
+        &cancellation,
+        limits,
+    );
     let mut rows = Vec::new();
     let mut gap_total = 0_usize;
     let mut occurrence_total = 0_usize;
@@ -3817,5 +3970,308 @@ mod tests {
             );
             assert!(inspect(&repository, &state, config, StateMode::Fresh).is_err());
         }
+    }
+
+    #[test]
+    fn accounting_operation_matches_ordinary_verification_for_complete_multichunk_sources() {
+        let directory = tempdir();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("notes.txt"),
+            format!(
+                "{}🦀\r\n{}",
+                "x".repeat(64 * 1024 - 1),
+                "tail".repeat(20_000)
+            ),
+        )
+        .unwrap();
+        fs::write(repository.join("empty.txt"), b"").unwrap();
+        let encoded = std::iter::once(0xfeff_u16)
+            .chain("λ𝄞\r\n".repeat(15_000).encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        fs::write(repository.join("encoded.txt"), encoded).unwrap();
+        // Sixteen complete small sources select the real bounded single-pack layout.
+        for index in 0..13 {
+            fs::write(
+                repository.join(format!("packed-read-padding-{index:02}.txt")),
+                b"packed read fixture padding\n",
+            )
+            .unwrap();
+        }
+        let state = directory.path().join("state");
+        let mut session =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
+        let receipt = session
+            .service
+            .index_repository(&repository, &Cancellation::new())
+            .unwrap();
+        session
+            .service
+            .inspect_generation(
+                receipt.repository,
+                Some(receipt.generation),
+                &Cancellation::new(),
+                |snapshot| {
+                    let mut files = BTreeMap::new();
+                    for file in snapshot.document().files.iter().chain(
+                        snapshot
+                            .source_files()
+                            .entries()
+                            .iter()
+                            .map(|entry| entry.file()),
+                    ) {
+                        assert!(files.insert(file.path.as_str(), file).is_none());
+                    }
+                    assert_eq!(files.len(), snapshot.file_count());
+                    assert_eq!(files.len(), 16);
+                    for index in 0..13 {
+                        let padding = format!("packed-read-padding-{index:02}.txt");
+                        assert!(files.remove(padding.as_str()).is_some());
+                    }
+                    assert_eq!(files.len(), 3);
+                    assert_eq!(
+                        files.keys().copied().collect::<Vec<_>>(),
+                        vec!["empty.txt", "encoded.txt", "notes.txt"]
+                    );
+                    let cancellation = Cancellation::new();
+                    let limits =
+                        accounting_read_limits(files.values().map(|file| file.byte_length))
+                            .unwrap();
+                    let mut ordinary = FileSourceVerifier::new(
+                        snapshot,
+                        &session.service,
+                        &repository,
+                        receipt.generation,
+                    );
+                    let mut accounting = FileSourceVerifier::with_accounting_reads(
+                        snapshot,
+                        &session.service,
+                        &repository,
+                        receipt.generation,
+                        &cancellation,
+                        limits,
+                    );
+                    let mut checked = BTreeSet::new();
+                    for (path, file) in files {
+                        let expected_bytes = match path {
+                            "empty.txt" => 0,
+                            "encoded.txt" => 150_002,
+                            "notes.txt" => 145_541,
+                            _ => panic!("unexpected source-accounting fixture"),
+                        };
+                        let source = file.evidence.source.as_ref().unwrap();
+                        assert_eq!(file.byte_length, expected_bytes);
+                        assert_eq!(source.span().start_byte(), 0);
+                        assert_eq!(source.span().end_byte(), expected_bytes);
+                        let expected = ordinary.verify(file, None, None).unwrap();
+                        let actual = accounting.verify(file, None, None).unwrap();
+                        assert_eq!(actual.source_exact, expected.source_exact);
+                        assert!(actual.source_exact);
+                        assert_eq!(actual.read_bytes, expected.read_bytes);
+                        assert_eq!(actual.read_bytes, expected_bytes);
+                        assert_eq!(actual.read_chunks, expected.read_chunks);
+                        assert!(actual.gap_text.is_none());
+                        match path {
+                            "empty.txt" => assert_eq!(actual.read_chunks, 1),
+                            "encoded.txt" => {
+                                assert_eq!(file.encoding, "utf-16le");
+                                assert!(actual.read_chunks > 1);
+                            }
+                            "notes.txt" => {
+                                assert_eq!(file.encoding, "utf-8");
+                                assert!(actual.read_chunks > 1);
+                            }
+                            _ => unreachable!(),
+                        }
+                        assert!(checked.insert(path));
+                    }
+                    assert_eq!(
+                        checked,
+                        BTreeSet::from(["empty.txt", "encoded.txt", "notes.txt"])
+                    );
+                    assert!(matches!(
+                        accounting.accounting_reads.as_ref().unwrap().state,
+                        AccountingReadState::Open
+                    ));
+                    assert!(
+                        accounting
+                            .accounting_reads
+                            .as_ref()
+                            .unwrap()
+                            .operation
+                            .is_some()
+                    );
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn accounting_callback_preserves_the_original_diagnostic_error_instead_of_its_sentinel() {
+        let directory = tempdir();
+        let repository = directory.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("notes.txt"), b"retained exact bytes\r\n").unwrap();
+        for index in 0..15 {
+            fs::write(
+                repository.join(format!("packed-read-padding-{index:02}.txt")),
+                b"packed read fixture padding\n",
+            )
+            .unwrap();
+        }
+        let state = directory.path().join("state");
+        let mut session =
+            DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
+        let receipt = session
+            .service
+            .index_repository(&repository, &Cancellation::new())
+            .unwrap();
+        session
+            .service
+            .inspect_generation(
+                receipt.repository,
+                Some(receipt.generation),
+                &Cancellation::new(),
+                |snapshot| {
+                    let mut files = BTreeMap::new();
+                    for file in snapshot.document().files.iter().chain(
+                        snapshot
+                            .source_files()
+                            .entries()
+                            .iter()
+                            .map(|entry| entry.file()),
+                    ) {
+                        assert!(files.insert(file.path.as_str(), file).is_none());
+                    }
+                    assert_eq!(files.len(), snapshot.file_count());
+                    assert_eq!(files.len(), 16);
+                    let valid = *files.get("notes.txt").unwrap();
+                    assert_eq!(valid.byte_length, 22);
+                    let mut substituted = valid.clone();
+                    substituted.language.push_str("-foreign");
+                    let cancellation = Cancellation::new();
+                    let limits =
+                        accounting_read_limits(std::iter::once(substituted.byte_length)).unwrap();
+                    let mut ordinary = FileSourceVerifier::new(
+                        snapshot,
+                        &session.service,
+                        &repository,
+                        receipt.generation,
+                    );
+                    let mut accounting = FileSourceVerifier::with_accounting_reads(
+                        snapshot,
+                        &session.service,
+                        &repository,
+                        receipt.generation,
+                        &cancellation,
+                        limits,
+                    );
+                    let expected = ordinary
+                        .verify(&substituted, None, None)
+                        .err()
+                        .unwrap()
+                        .to_string();
+                    let actual = accounting
+                        .verify(&substituted, None, None)
+                        .err()
+                        .unwrap()
+                        .to_string();
+                    assert!(expected.starts_with(
+                        "source retrieval differs from indexed evidence: notes.txt at "
+                    ));
+                    assert_eq!(actual, expected);
+                    assert_ne!(actual, FirstSliceError::Source.to_string());
+                    assert!(matches!(
+                        accounting.accounting_reads.as_ref().unwrap().state,
+                        AccountingReadState::Open
+                    ));
+                    assert!(
+                        accounting
+                            .accounting_reads
+                            .as_ref()
+                            .unwrap()
+                            .operation
+                            .is_some()
+                    );
+                    assert!(
+                        accounting.verify(valid, None, None).is_err(),
+                        "callback failure cannot trigger ordinary fallback"
+                    );
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn accounting_not_applicable_is_sticky_and_uses_ordinary_public_source_reads() {
+        let directory = tempdir();
+        fs::write(
+            directory.path().join("notes.txt"),
+            b"retained exact bytes\r\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(directory.path(), &Cancellation::new())
+            .unwrap();
+        service
+            .inspect_generation(
+                receipt.repository,
+                Some(receipt.generation),
+                &Cancellation::new(),
+                |snapshot| {
+                    let cancellation = Cancellation::new();
+                    let limits = accounting_read_limits(
+                        snapshot
+                            .document()
+                            .files
+                            .iter()
+                            .map(|file| file.byte_length),
+                    )
+                    .unwrap();
+                    let mut ordinary = FileSourceVerifier::new(
+                        snapshot,
+                        &service,
+                        directory.path(),
+                        receipt.generation,
+                    );
+                    let mut accounting = FileSourceVerifier::with_accounting_reads(
+                        snapshot,
+                        &service,
+                        directory.path(),
+                        receipt.generation,
+                        &cancellation,
+                        limits,
+                    );
+                    for _ in 0..2 {
+                        let file = &snapshot.document().files[0];
+                        let expected = ordinary.verify(file, None, None).unwrap();
+                        let actual = accounting.verify(file, None, None).unwrap();
+                        assert_eq!(
+                            (actual.source_exact, actual.read_bytes, actual.read_chunks),
+                            (
+                                expected.source_exact,
+                                expected.read_bytes,
+                                expected.read_chunks
+                            )
+                        );
+                        assert!(matches!(
+                            accounting.accounting_reads.as_ref().unwrap().state,
+                            AccountingReadState::Unavailable
+                        ));
+                        assert!(
+                            accounting
+                                .accounting_reads
+                                .as_ref()
+                                .unwrap()
+                                .operation
+                                .is_none()
+                        );
+                    }
+                },
+            )
+            .unwrap();
     }
 }

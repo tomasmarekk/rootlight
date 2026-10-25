@@ -1,5 +1,7 @@
 //! Crash-safe generation publication and restoration for the first-slice service.
 
+#[path = "durable/read_operation.rs"]
+pub(super) mod read_operation;
 pub(super) mod restore_envelope;
 #[path = "durable/source_authority.rs"]
 mod source_authority;

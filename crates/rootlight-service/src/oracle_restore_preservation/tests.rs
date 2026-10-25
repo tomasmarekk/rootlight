@@ -196,7 +196,13 @@ fn assert_sources(
     preserved_note
 }
 
-fn assert_selective_facts(service: &FirstSliceService, generation: GenerationId) {
+fn assert_selective_facts(
+    service: &FirstSliceService,
+    generation: GenerationId,
+    stage: &str,
+    calibration_observed: u64,
+    ceiling: u64,
+) {
     let cancellation = Cancellation::new();
     let snapshot = service.loaded_generation_snapshot(generation).unwrap();
     let document = snapshot.document();
@@ -205,17 +211,69 @@ fn assert_selective_facts(service: &FirstSliceService, generation: GenerationId)
         .iter()
         .find(|file| file.path == "b.cs")
         .unwrap();
+    let failure_context = || {
+        let files: Vec<_> = document
+            .files
+            .iter()
+            .map(|file| {
+                let entities = document
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().file() == file.id)
+                    })
+                    .count();
+                let occurrences = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| site.source.span().file() == file.id)
+                    .count();
+                let first_gap = document
+                    .skipped_regions
+                    .iter()
+                    .find(|gap| gap.source.span().file() == file.id)
+                    .map(|gap| gap.detail.as_str());
+                let latest_preview = OBSERVED.with(|values| {
+                    values
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .find(|(id, _)| *id == file.id)
+                        .map(|(_, bytes)| *bytes)
+                });
+                (
+                    file.path.as_str(),
+                    file.id,
+                    entities,
+                    occurrences,
+                    first_gap,
+                    latest_preview,
+                )
+            })
+            .collect();
+        format!(
+            "stage={stage} generation={generation} calibration_observed={calibration_observed} ceiling={ceiling} files=(path,id,entities,occurrences,first_gap,latest_recorded_file_preview){files:?}"
+        )
+    };
     assert!(
         document
             .entities
             .iter()
-            .any(|entity| entity.canonical_name == "First")
+            .any(|entity| entity.canonical_name == "First"),
+        "{}",
+        failure_context()
     );
     assert!(
         document
             .entities
             .iter()
-            .any(|entity| entity.canonical_name == "Last")
+            .any(|entity| entity.canonical_name == "Last"),
+        "{}",
+        failure_context()
     );
     assert!(!document.entities.iter().any(|entity| {
         entity
@@ -256,6 +314,41 @@ fn assert_selective_facts(service: &FirstSliceService, generation: GenerationId)
     }
 }
 
+fn assert_current_restore_quotes(
+    service: &FirstSliceService,
+    generation: GenerationId,
+    stage: &str,
+    ceiling: u64,
+) {
+    let snapshot = service.loaded_generation_snapshot(generation).unwrap();
+    for (path, admitted) in [("a.cs", true), ("b.cs", false), ("z.cs", true)] {
+        let file = snapshot
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap()
+            .id;
+        OBSERVED.with(|values| {
+            let values = values.borrow();
+            let mut quotes = values.iter().filter(|(id, _)| *id == file);
+            let observed = quotes
+                .next()
+                .unwrap_or_else(|| panic!("stage={stage} path={path} has no current restore quote"))
+                .1;
+            assert!(
+                quotes.next().is_none(),
+                "stage={stage} path={path} has duplicate current restore quotes"
+            );
+            assert_eq!(
+                observed <= ceiling,
+                admitted,
+                "stage={stage} path={path} observed={observed} ceiling={ceiling}"
+            );
+        });
+    }
+}
+
 #[test]
 fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source_through_lifecycle()
 {
@@ -285,7 +378,26 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
             .unwrap()
             .1
     });
-    let ceiling = observed.checked_sub(1).unwrap();
+    let prefix = snapshot
+        .document()
+        .files
+        .iter()
+        .find(|file| file.path == "a.cs")
+        .unwrap()
+        .id;
+    let prefix_observed = OBSERVED.with(|values| {
+        values
+            .borrow()
+            .iter()
+            .find(|(file, _)| *file == prefix)
+            .unwrap()
+            .1
+    });
+    let separation = observed.checked_sub(prefix_observed).unwrap();
+    let ceiling = prefix_observed.checked_add(separation / 2).unwrap();
+    // Fresh repositories can encode raw identity discriminators differently.
+    // An interior ceiling avoids depending on exact cross-repository quote equality.
+    assert!(prefix_observed < ceiling && ceiling < observed);
     assert!(ceiling > 256 * 1024 * 1024 * 8);
     assert!(
         snapshot
@@ -297,11 +409,13 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
     drop((snapshot, calibration));
     let (_storage, root, paths) = fixture();
     let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &cancellation).unwrap();
+    OBSERVED.with(|values| values.borrow_mut().clear());
     let first = durable::with_restore_test_ceiling(ceiling, || {
         service.index_repository(root.path(), &cancellation)
     })
     .unwrap();
-    assert_selective_facts(&service, first.generation);
+    assert_current_restore_quotes(&service, first.generation, "first-index", ceiling);
+    assert_selective_facts(&service, first.generation, "first-index", observed, ceiling);
     let original_note = assert_sources(&service, first.generation, root.path());
     let noop = durable::with_restore_test_ceiling(ceiling, || {
         service.index_repository(root.path(), &cancellation)
@@ -317,13 +431,21 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
         "// written-lifecycle\nclass First { public int Keep() { return 3; } }\n",
     )
     .unwrap();
+    OBSERVED.with(|values| values.borrow_mut().clear());
     let changed = durable::with_restore_test_ceiling(ceiling, || {
         service.index_repository(root.path(), &cancellation)
     })
     .unwrap();
     assert_ne!(changed.generation, first.generation);
     assert_eq!(changed.parent, Some(first.generation));
-    assert_selective_facts(&service, changed.generation);
+    assert_current_restore_quotes(&service, changed.generation, "changed-index", ceiling);
+    assert_selective_facts(
+        &service,
+        changed.generation,
+        "changed-index",
+        observed,
+        ceiling,
+    );
     let changed_note = assert_sources(&service, changed.generation, root.path());
     drop(service);
     let reopened = durable::with_restore_test_ceiling(ceiling, || {
@@ -334,8 +456,20 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
         reopened.active_generation_for(first.repository),
         Some(changed.generation)
     );
-    assert_selective_facts(&reopened, first.generation);
-    assert_selective_facts(&reopened, changed.generation);
+    assert_selective_facts(
+        &reopened,
+        first.generation,
+        "reopened-first",
+        observed,
+        ceiling,
+    );
+    assert_selective_facts(
+        &reopened,
+        changed.generation,
+        "reopened-changed",
+        observed,
+        ceiling,
+    );
     assert_eq!(
         assert_note_metadata(&reopened, first.generation),
         original_note

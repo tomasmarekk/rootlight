@@ -1211,3 +1211,108 @@ fn true_origins_foreign_parser_stale_source_and_cancellation_remain_strict() {
 
 #[path = "fresh_projection_capacity/projection_profile.rs"]
 mod projection_profile;
+
+#[test]
+fn resource_fallback_loaded_catalog_uses_one_operation_index_for_source_accounting_reads() {
+    let measured = measured();
+    let (_storage, root, paths) = fixture();
+    let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(120));
+    let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
+    let receipt = with_ceiling(measured.ceiling, || {
+        service
+            .index_repository(root.path(), &cancellation)
+            .unwrap()
+    });
+    let lease = service
+        .generation_lease(receipt.generation, &cancellation)
+        .unwrap();
+    let generation = lease.generation();
+    assert!(generation.document().entities.is_empty());
+    assert!(
+        generation
+            .document()
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE
+                    && diagnostic.message.contains("fresh projection capacity")
+            )
+    );
+    assert_eq!(generation.document().files.len(), 1);
+    assert!(generation.source_files().entries().len() >= 2);
+    let anchor = generation.document().files[0]
+        .evidence
+        .source
+        .clone()
+        .unwrap();
+    let catalog: Vec<_> = generation
+        .source_files()
+        .entries()
+        .iter()
+        .take(2)
+        .map(|entry| entry.file().evidence.source.clone().unwrap())
+        .collect();
+    assert_eq!(catalog.len(), 2);
+    for reference in &catalog {
+        assert!(
+            !generation
+                .document()
+                .files
+                .iter()
+                .any(|file| file.id == reference.span().file())
+        );
+        let file = generation
+            .find_file(reference.span().file())
+            .expect("catalog-only source resolves through the actual generation accessor");
+        assert!(file.path_locator.is_some());
+        assert_eq!(file.evidence.source.as_ref(), Some(reference));
+    }
+    let references: Vec<_> = std::iter::once(anchor).chain(catalog).collect();
+    assert_eq!(references.len(), 3);
+    service
+        .source_snapshots
+        .shed_cached_sources(SourceSnapshotCacheEntry::Committed(receipt.generation))
+        .unwrap();
+    let limits =
+        FirstSliceSourceReadOperationLimits::new(20, 1024 * 1024 * 1024, 1024 * 1024 * 1024)
+            .unwrap();
+    let mut operation = service
+        .source_read_operation(receipt.generation, limits, &cancellation)
+        .unwrap()
+        .expect("the actual loaded file-catalog fallback route must be applicable");
+    for reference in references.iter().chain(references.iter()) {
+        let expected = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![reference.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::new(),
+                &cancellation,
+            )
+            .unwrap();
+        operation
+            .read(
+                vec![reference.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::new(),
+                |actual| {
+                    assert_eq!(actual.data, expected.data);
+                    assert_eq!(actual.plan, expected.plan);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(operation.test_io_counts(), (1, 1, 0));
+    assert!(
+        service
+            .source_snapshots
+            .snapshots(receipt.generation)
+            .unwrap()
+            .is_empty()
+    );
+}
