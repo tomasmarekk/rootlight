@@ -20,6 +20,8 @@ pub(crate) enum RefusalOrigin {
     CFormalReads,
     NixFormalReads,
     CVariables,
+    RubyBindings,
+    RubyFormalReceivers,
     ChapelCaptures,
     ClojureCaptures,
     CmakeCaptures,
@@ -100,6 +102,8 @@ impl RefusalOrigin {
             Self::CFormalReads => "query-identity-c-formal-reads-limit",
             Self::NixFormalReads => "query-identity-nix-formal-reads-limit",
             Self::CVariables => "query-identity-c-written-variables-limit",
+            Self::RubyBindings => "query-identity-ruby-receiver-bindings-limit",
+            Self::RubyFormalReceivers => "query-identity-ruby-formal-receivers-limit",
             Self::ChapelCaptures => "query-identity-chapel-captures-limit",
             Self::ClojureCaptures => "query-identity-clojure-captures-limit",
             Self::CmakeCaptures => "query-identity-cmake-captures-limit",
@@ -180,6 +184,8 @@ impl RefusalOrigin {
                 | "query-identity-bash-reads-limit"
                 | "query-identity-c-calls-limit"
                 | "query-identity-c-formal-reads-limit"
+                | "query-identity-ruby-receiver-bindings-limit"
+                | "query-identity-ruby-formal-receivers-limit"
                 | "query-identity-chapel-captures-limit"
                 | "query-identity-clojure-captures-limit"
                 | "query-identity-cmake-captures-limit"

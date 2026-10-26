@@ -378,3 +378,7 @@ third_party/tree-sitter-idris-0.0.1/** -text
 /third_party/tree-sitter-cuda-0.21.2/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /adapters/licenses/tree-sitter-cuda-0.21.2-* -text
 /crates/rootlight-adapter-treesitter/tests/fixtures/cuda_original/** -text
+
+# Preserve complete licensed Ruby originals and physical line endings.
+/crates/rootlight-adapter-treesitter/tests/fixtures/ruby_formal_receivers/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/crates/rootlight-adapter-treesitter/tests/fixtures/ruby_lexical_receivers/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol

@@ -75,6 +75,8 @@ mod javascript_method_vars;
 mod nix_formal_reads;
 mod php_ordinary;
 mod php_this_calls;
+pub(crate) mod ruby_bindings;
+pub(crate) mod ruby_formal_receivers;
 pub use identity_refusal::NativeIdentityRefusalDetails;
 use identity_refusal::{IdentityRefusal, RefusalOrigin};
 mod coffeescript;
@@ -781,6 +783,7 @@ impl QueryPack {
                 family,
                 GrammarFamily::JavaScript
                     | GrammarFamily::Nix
+                    | GrammarFamily::Ruby
                     | GrammarFamily::Eiffel
                     | GrammarFamily::Cpp
                     | GrammarFamily::Cuda
@@ -1159,6 +1162,14 @@ impl QueryPack {
                             candidate.syntax,
                             "ocaml.match_formal" | "ocaml.direct_file_call"
                         ))
+                    || (family == GrammarFamily::Ruby
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "ruby.lexical_receiver")
+                    || (family == GrammarFamily::Ruby
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "ruby.formal_receiver")
                     || (family == GrammarFamily::C
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1408,6 +1419,16 @@ impl QueryPack {
             limits.captures.min(limits.body_nodes),
             matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()),
+        );
+        let mut ruby_bindings = ruby_bindings::CaptureCache::new(
+            input.source,
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
+        let mut ruby_formal_receivers = ruby_formal_receivers::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
         );
         let mut c_variables = c_variables::CaptureCache::new(
             input.source,
@@ -3150,6 +3171,30 @@ impl QueryPack {
                     break 'query;
                 }
                 let mut candidate = candidate;
+                if input.family == GrammarFamily::Ruby {
+                    let keep = ruby_bindings.refine(
+                        capture.node,
+                        &mut candidate,
+                        input.cancellation,
+                        &mut retain,
+                    )?;
+                    if !keep {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::RubyBindings));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                }
+                if input.family == GrammarFamily::Ruby
+                    && !ruby_formal_receivers.refine(
+                        capture.node,
+                        &mut candidate,
+                        input.cancellation,
+                    )?
+                {
+                    refusal = Some(IdentityRefusal::helper(RefusalOrigin::RubyFormalReceivers));
+                    limit = Some(QueryLimit::Capture);
+                    break 'query;
+                }
                 if input.family == GrammarFamily::Nix {
                     let keep = nix_formal_reads.refine(
                         capture.node,
@@ -4592,10 +4637,13 @@ fn candidate_for_capture(
             | GrammarFamily::FSharpSignature
             | GrammarFamily::CobolFixed
             | GrammarFamily::CobolFree
+            | GrammarFamily::Ruby
     ) || (family == GrammarFamily::Markdown
         && matches!(role, StructuralRole::Module | StructuralRole::Signature)
         && capture.node.kind() == "fenced_code_block")
     {
+        // Ruby LF terminators can leave a sole method and its body scope with
+        // equal extents; their native nesting must still establish the parent.
         // A sole fence can share the file's extent. Its actual native nesting
         // keeps the file outside the example instead of winning a lexical tie.
         native_depth(capture.node, cancellation)?
@@ -6626,6 +6674,138 @@ mod file_root_bom_tests {
             pack.extract_identity(GrammarFamily::Astro, &tree, SOURCE, 16_384, &cancel),
             Err(AdapterError::Cancelled { .. })
         ));
+    }
+
+    #[test]
+    fn ruby_tiny_census_work_issues_identity_refusal_instead_of_generic_references() {
+        let source = b"records = {}\nrecords[0] = 7\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::Ruby).unwrap();
+        for body_nodes in [0, 1, 2] {
+            let cancellation = Cancellation::new();
+            let mut issued = None;
+            let mut emitted = Vec::new();
+            let limit = pack
+                .scan_query_with_refusal(
+                    &pack.identity_query,
+                    QueryInput {
+                        family: GrammarFamily::Ruby,
+                        tree: &tree,
+                        source,
+                        cancellation: &cancellation,
+                        normalize_calls: false,
+                    },
+                    QueryScanLimits {
+                        matches: 100,
+                        captures: 100,
+                        body_nodes,
+                    },
+                    |candidate| {
+                        emitted.push(candidate);
+                        Ok(())
+                    },
+                    Some(&mut issued),
+                )
+                .unwrap();
+            assert_eq!(limit, Some(QueryLimit::Capture));
+            assert!(
+                !emitted
+                    .iter()
+                    .any(|fact| fact.role == StructuralRole::Reference)
+            );
+            let event = issued.unwrap();
+            assert_eq!(
+                event.details().origin(),
+                "query-identity-ruby-receiver-bindings-limit"
+            );
+            assert_eq!(event.details().unit(), "helper-allowance");
+            assert_eq!(
+                (event.details().observed(), event.details().limit()),
+                (None, None)
+            );
+            assert!(IdentityRefusal::recognizes(&event.error()));
+            assert!(event.matches_error(&event.error()));
+            cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+            assert!(matches!(
+                pack.scan_query_with_refusal(
+                    &pack.identity_query,
+                    QueryInput {
+                        family: GrammarFamily::Ruby,
+                        tree: &tree,
+                        source,
+                        cancellation: &cancellation,
+                        normalize_calls: false,
+                    },
+                    QueryScanLimits {
+                        matches: 100,
+                        captures: 100,
+                        body_nodes
+                    },
+                    |_| panic!("cancellation cannot retain facts"),
+                    None
+                ),
+                Err(AdapterError::Cancelled { .. })
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod ruby_formal_receiver_retention_tests {
+    use super::*;
+
+    #[test]
+    fn complete_original_receiver_and_method_header_belong_to_native_identity_partition() {
+        const SOURCE: &[u8] =
+            include_bytes!("../tests/fixtures/ruby_formal_receivers/html_helper.rb");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Ruby))
+            .unwrap();
+        let tree = parser.parse(SOURCE, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let registry = QueryPackRegistry::audited().unwrap();
+        let pack = registry.get(GrammarFamily::Ruby).unwrap();
+        let candidates = pack
+            .extract_identity(
+                GrammarFamily::Ruby,
+                &tree,
+                SOURCE,
+                16_384,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        for (role, syntax, at) in [
+            (
+                StructuralRole::Reference,
+                "ruby.formal_receiver",
+                (1419, 1420),
+            ),
+            (StructuralRole::Signature, "ruby.method", (1368, 1391)),
+        ] {
+            let selected: Vec<_> = candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.role == role
+                        && candidate.syntax == syntax
+                        && (candidate.start, candidate.end) == at
+                })
+                .collect();
+            assert_eq!(selected.len(), 1, "exact {syntax}");
+            assert!(selected[0].required);
+        }
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.role == StructuralRole::Reference
+                    && candidate.syntax == "ruby.unproven_formal_receiver")
+        );
     }
 }
 

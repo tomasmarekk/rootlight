@@ -1561,7 +1561,9 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     // A refused native formal join cannot be repaired by matching another name.
     if matches!(
         occurrence.syntax_kind.as_str(),
-        "python.parameter_body.reference"
+        "ruby.formal_receiver.reference"
+            | "ruby.unproven_formal_receiver.reference"
+            | "python.parameter_body.reference"
             | "python.module_read.reference"
             | "python.module_function.reference"
             | "python.module_binding_unavailable.reference"
@@ -1586,6 +1588,8 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | "c.unproven_formal_value.reference"
             | "c.written_variable.reference"
             | "c.local_address.reference"
+            | "ruby.lexical_receiver.reference"
+            | "ruby.unproven_receiver.reference"
             | "c.unproven_variable.reference"
             | "cpp.const_formal_receiver.reference"
             | "cpp.unproven_const_formal.reference"
@@ -4402,6 +4406,136 @@ mod bash_source_tests;
 
 #[cfg(test)]
 mod cuda_source_tests;
+
+#[cfg(test)]
+mod ruby_receiver_source_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn ruby_receiver_requires_native_binding_before_generic_spelling() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"local");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 5).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "ruby.lexical_receiver.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Resolved { symbol };
+        assert!(resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        site.syntax_kind = "ruby.unproven_receiver.reference".to_owned();
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Candidates {
+            symbols: vec![symbol],
+            total_count: 1,
+            completeness: CoverageStatus::Complete,
+        };
+        assert!(!resolvable_occurrence(&site));
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        site.syntax_kind = "ruby.identifier.reference".to_owned();
+        assert!(resolvable_occurrence(&site));
+    }
+}
+
+#[cfg(test)]
+mod ruby_formal_receiver_source_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn refused_ruby_formal_receivers_never_gain_targets_from_spelling() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"a");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "ruby.formal_receiver.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for (label, role) in [
+            ("ruby.formal_receiver.reference", OccurrenceRole::Reference),
+            (
+                "ruby.unproven_formal_receiver.reference",
+                OccurrenceRole::Reference,
+            ),
+        ] {
+            site.syntax_kind = label.to_owned();
+            site.role = role;
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(resolvable_occurrence(&site));
+        }
+        site.role = OccurrenceRole::Reference;
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        site.syntax_kind = "ruby.identifier.reference".to_owned();
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic Ruby remains unchanged"
+        );
+    }
+}
 
 #[cfg(test)]
 mod javascript_method_var_source_tests {

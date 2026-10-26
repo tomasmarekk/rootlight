@@ -4614,6 +4614,10 @@ mod c_written_bindings;
 
 #[path = "analyzer_e2e/c_local_references.rs"]
 mod c_local_references;
+#[path = "analyzer_e2e/ruby_formal_receivers.rs"]
+mod ruby_formal_receivers;
+#[path = "analyzer_e2e/ruby_lexical_receivers.rs"]
+mod ruby_lexical_receivers;
 
 #[path = "analyzer_e2e/javascript_method_var_reads.rs"]
 mod javascript_method_var_reads;

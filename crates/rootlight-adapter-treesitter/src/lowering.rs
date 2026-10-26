@@ -89,6 +89,8 @@ mod qsharp;
 mod qsharp_formals;
 mod racket;
 mod ring;
+mod ruby_bindings;
+mod ruby_formal_receivers;
 mod rust_inherent_owners;
 mod sass;
 mod scala_formals;
@@ -806,7 +808,10 @@ fn required_syntax_fact_count_from_output(
         .map_err(|_| SinkError::AllocationFailed)?;
     for (index, fact) in facts.iter().enumerate() {
         check_periodically(index, cancellation)?;
-        if fact.kind() == SyntaxFactKind::Declaration {
+        if fact.kind() == SyntaxFactKind::Declaration
+            || ruby_bindings::required(fact)
+            || ruby_formal_receivers::required(fact)
+        {
             declarations.push((fact.span().start_byte(), fact.span().end_byte()));
         }
         if python_module_functions::required(fact) {
@@ -943,6 +948,8 @@ fn required_syntax_fact_count_from_output(
             || cpp_const_formals::required(fact)
             || c_formal_reads::certified_reference(fact)
             || c_variables::required(fact)
+            || ruby_bindings::required(fact)
+            || ruby_formal_receivers::required(fact)
             || python_module_reads::required(fact)
             || python_module_functions::required(fact)
             || (fact.kind() == SyntaxFactKind::Occurrence
@@ -1905,6 +1912,10 @@ fn preflight_lowering_limits(
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && (c_formal_reads::certified_reference(fact)
                             || c_variables::required(fact)))
+                    || (request.language().as_str() == "ruby"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && (ruby_bindings::required(fact) || ruby_formal_receivers::required(fact)))
                     || (request.language().as_str() == "wolfram"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3658,6 +3669,50 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let ruby_bindings = if self.request.language().as_str() == "ruby"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(ruby_bindings::ReceiverTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let ruby_formal_receivers = if self.request.language().as_str() == "ruby"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(ruby_formal_receivers::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let c_variables = if self.request.language().as_str() == "c"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -4858,7 +4913,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .map(|bindings| bindings.owner(fact, &materialized, cancellation))
                     .transpose()?
                     .flatten();
-                let enclosing_entity = javascript_method_owner
+                let ruby_formal_owner = if self.language_for_fact(fact) == "ruby" {
+                    ruby_formal_receivers
+                        .as_ref()
+                        .and_then(|targets| targets.owner(fact, source.span()))
+                } else {
+                    None
+                };
+                let enclosing_entity = ruby_formal_owner
+                    .or(javascript_method_owner)
                     .or(php_call_owner)
                     .or(bash_call_owner)
                     .or(go_call_owner)
@@ -5350,6 +5413,34 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("scala-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if self.language_for_fact(fact) == "ruby"
+                    && let Some(targets) = &ruby_formal_receivers
+                    && let Some(name) = resolution_text.as_deref()
+                    && let Some(symbol) =
+                        targets.resolve(fact, &occurrence, enclosing_entity, name, cancellation)?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("ruby-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(receivers) = &ruby_bindings
+                    && let Some(symbol) = receivers.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("ruby-receiver-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -13182,6 +13273,8 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
             | "c.variable_file_context.signature"
             | "c.variable_target.signature"
             | "c.local_address_target.signature"
+            | "ruby.receiver_file_context.signature"
+            | "ruby.receiver_target.signature"
             | "nix.formal_clean_file.signature"
             | "nix.formal_read_target.signature"
             | "bash.direct_wrapper_context.signature"
@@ -13804,6 +13897,22 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     {
         return Some("go-call-complete-semantic-validation-unavailable");
     }
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            ruby_formal_receivers::REFERENCE | ruby_formal_receivers::UNPROVEN
+        )
+    {
+        return Some("ruby-ordinary-formal-receiver-binding-unavailable");
+    }
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "ruby.lexical_receiver.reference" | "ruby.unproven_receiver.reference"
+        )
+    {
+        return Some("ruby-native-program-local-receiver-binding-unavailable");
+    }
     if cpp_const_formals::required(fact) {
         return Some("cpp-native-const-reference-formal-receiver-binding-unavailable");
     }
@@ -14297,6 +14406,9 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if ruby_bindings::required(fact) || ruby_formal_receivers::required(fact) {
+        return Some(OccurrenceRole::Reference);
+    }
     if thinkscript::required(fact) {
         return Some(OccurrenceRole::Read);
     }

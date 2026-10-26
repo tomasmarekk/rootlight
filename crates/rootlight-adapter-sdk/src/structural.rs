@@ -1696,6 +1696,44 @@ pub fn structural_captured_name_for_fact<'a>(
             && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
         .then_some(Cow::Borrowed(text));
     }
+    if label.starts_with("ruby.formal_receiver")
+        || label.starts_with("ruby.unproven_formal_receiver")
+    {
+        return (language == "ruby"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "ruby.formal_receiver.reference" | "ruby.unproven_formal_receiver.reference"
+            )
+            && text.len() <= maximum_bytes
+            && text.len() <= 128
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_lowercase() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
+    if label.starts_with("ruby.lexical_receiver")
+        || label.starts_with("ruby.unproven_receiver")
+        || label.starts_with("ruby.receiver_target")
+        || label.starts_with("ruby.receiver_file_context")
+    {
+        return (language == "ruby"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "ruby.lexical_receiver.reference" | "ruby.unproven_receiver.reference"
+            )
+            && text.len() <= maximum_bytes
+            && text.len() <= 128
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_lowercase() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Cow::Borrowed(text));
+    }
     if label.starts_with("c.written_variable")
         || label.starts_with("c.unproven_variable")
         || label.starts_with("c.variable_name")
@@ -2346,6 +2384,58 @@ const fn syntax_fact_kind_tag(kind: SyntaxFactKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ruby_receiver_names_require_exact_language_role_and_ordinary_written_name() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 7).unwrap();
+        let fact = |kind, label| {
+            SyntaxFact::new(1, None, kind, span, 0, SyntaxKindLabel::new(label).unwrap())
+        };
+        for label in [
+            "ruby.lexical_receiver.reference",
+            "ruby.unproven_receiver.reference",
+        ] {
+            let site = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(
+                structural_captured_name_for_fact("ruby", &site, "records", 7).as_deref(),
+                Some("records")
+            );
+            assert!(structural_captured_name_for_fact("ruby", &site, "records", 6).is_none());
+            assert!(structural_captured_name_for_fact("python", &site, "records", 64).is_none());
+            for written in [
+                "Records",
+                "9records",
+                "@records",
+                "records[0]",
+                "records.name",
+                "récords",
+                "",
+            ] {
+                assert!(structural_captured_name_for_fact("ruby", &site, written, 64).is_none());
+            }
+        }
+        for (kind, label) in [
+            (SyntaxFactKind::Signature, "ruby.lexical_receiver.reference"),
+            (SyntaxFactKind::Occurrence, "ruby.lexical_receiver.read"),
+            (
+                SyntaxFactKind::Occurrence,
+                "ruby.lexical_receiver_extra.reference",
+            ),
+            (SyntaxFactKind::Signature, "ruby.receiver_target.signature"),
+            (
+                SyntaxFactKind::Signature,
+                "ruby.receiver_file_context.signature",
+            ),
+        ] {
+            assert!(
+                structural_captured_name_for_fact("ruby", &fact(kind, label), "records", 64)
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn c_local_address_name_requires_exact_language_role_namespace_and_identifier() {
@@ -4438,6 +4528,58 @@ mod cuda_classification_tests {
             assert_eq!(
                 structural_entity_kind(&make(SyntaxFactKind::Declaration, label)),
                 None
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ruby_formal_receiver_names_tests {
+    use super::*;
+    use crate::SyntaxKindLabel;
+    use rootlight_ids::FileId;
+    use rootlight_ir::SourceSpan;
+
+    #[test]
+    fn formal_receiver_labels_require_exact_role_language_and_bounded_ascii_name() {
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 5).unwrap();
+        let fact = |kind, label| {
+            SyntaxFact::new(1, None, kind, span, 0, SyntaxKindLabel::new(label).unwrap())
+        };
+        for label in [
+            "ruby.formal_receiver.reference",
+            "ruby.unproven_formal_receiver.reference",
+        ] {
+            let site = fact(SyntaxFactKind::Occurrence, label);
+            assert_eq!(
+                structural_captured_name_for_fact("ruby", &site, "value", 5).as_deref(),
+                Some("value")
+            );
+            assert!(structural_captured_name_for_fact("ruby", &site, "value", 4).is_none());
+            assert!(structural_captured_name_for_fact("python", &site, "value", 64).is_none());
+            for name in [
+                "Value",
+                "@value",
+                "value.member",
+                "value[0]",
+                "9value",
+                "",
+                "value ",
+            ] {
+                assert!(structural_captured_name_for_fact("ruby", &site, name, 64).is_none());
+            }
+        }
+        for (kind, label) in [
+            (SyntaxFactKind::Signature, "ruby.formal_receiver.reference"),
+            (SyntaxFactKind::Occurrence, "ruby.formal_receiver.read"),
+            (
+                SyntaxFactKind::Occurrence,
+                "ruby.formal_receiver_extra.reference",
+            ),
+        ] {
+            assert!(
+                structural_captured_name_for_fact("ruby", &fact(kind, label), "value", 64)
+                    .is_none()
             );
         }
     }

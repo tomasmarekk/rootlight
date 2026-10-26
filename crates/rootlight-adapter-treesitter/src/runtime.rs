@@ -3001,7 +3001,15 @@ fn mark_required_scope_closure(
 ) -> Result<(), AdapterError> {
     let declaration_count = candidates
         .iter()
-        .filter(|candidate| candidate.required && candidate.role == StructuralRole::Declaration)
+        .filter(|candidate| {
+            candidate.required
+                && (candidate.role == StructuralRole::Declaration
+                    || (candidate.role == StructuralRole::Reference
+                        && matches!(
+                            candidate.syntax,
+                            "ruby.lexical_receiver" | "ruby.formal_receiver"
+                        )))
+        })
         .count();
     if declaration_count == 0 {
         cancellation.check()?;
@@ -3019,7 +3027,15 @@ fn mark_required_scope_closure(
         if index.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             cancellation.check()?;
         }
-        if candidate.required && candidate.role == StructuralRole::Declaration {
+        // Receiver-only blocks still need their exact lexical scope parents.
+        if candidate.required
+            && (candidate.role == StructuralRole::Declaration
+                || (candidate.role == StructuralRole::Reference
+                    && matches!(
+                        candidate.syntax,
+                        "ruby.lexical_receiver" | "ruby.formal_receiver"
+                    )))
+        {
             declarations.push((candidate.start, candidate.end));
         }
     }
