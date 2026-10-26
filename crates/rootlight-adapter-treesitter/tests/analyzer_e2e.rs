@@ -4677,3 +4677,6 @@ mod javascript_const_receivers;
 
 #[path = "analyzer_e2e/python_module_function_references.rs"]
 mod python_module_function_references;
+
+#[path = "analyzer_e2e/html_closing_tags.rs"]
+mod html_closing_tags;

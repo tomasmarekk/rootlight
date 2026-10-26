@@ -491,11 +491,95 @@ fn html_native_preserves_every_source_element_attribute_and_owner() {
             assert_eq!(parent.kind, EntityKind::MarkupElement);
         }
     }
-    assert!(
-        document
-            .relations
+    let entity_at = |kind, start, end| {
+        let found: Vec<_> = document
+            .entities
             .iter()
-            .all(|relation| relation.predicate == RelationPredicate::Contains)
+            .filter(|entity| {
+                entity.kind == kind
+                    && entity.evidence.source.as_ref().is_some_and(|source| {
+                        source.span().start_byte() == start && source.span().end_byte() == end
+                    })
+            })
+            .collect();
+        assert_eq!(found.len(), 1);
+        found[0]
+    };
+    let module = entity_at(EntityKind::Module, 0, 92);
+    let main = entity_at(EntityKind::MarkupElement, 0, 92);
+    let first = entity_at(EntityKind::MarkupElement, 6, 56);
+    let nested = entity_at(EntityKind::MarkupElement, 32, 49);
+    let second = entity_at(EntityKind::MarkupElement, 56, 85);
+    let contains = [
+        (RelationEndpoint::File(document.files[0].id), module),
+        (RelationEndpoint::Entity(module.id), main),
+        (RelationEndpoint::Entity(main.id), first),
+        (RelationEndpoint::Entity(first.id), nested),
+        (RelationEndpoint::Entity(main.id), second),
+        (
+            RelationEndpoint::Entity(first.id),
+            entity_at(EntityKind::MarkupAttribute, 12, 21),
+        ),
+        (
+            RelationEndpoint::Entity(first.id),
+            entity_at(EntityKind::MarkupAttribute, 22, 31),
+        ),
+        (
+            RelationEndpoint::Entity(nested.id),
+            entity_at(EntityKind::MarkupAttribute, 38, 46),
+        ),
+        (
+            RelationEndpoint::Entity(second.id),
+            entity_at(EntityKind::MarkupAttribute, 62, 73),
+        ),
+    ];
+    for (parent, child) in contains {
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::Contains
+                    && edge.subject == parent
+                    && edge.object == RelationEndpoint::Entity(child.id)
+                    && edge.evidence.source.as_ref() == child.evidence.source.as_ref())
+                .count(),
+            1
+        );
+    }
+    for (start, end, target) in [(51, 55, first), (80, 84, second), (87, 91, main)] {
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.syntax_kind == "html.closing_tag.reference"
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        let site = sites[0];
+        assert_eq!(
+            site.target,
+            OccurrenceTarget::Resolved { symbol: target.id }
+        );
+        assert_eq!(site.enclosing, Some(target.id));
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.object == RelationEndpoint::Entity(target.id)
+                    && edge.evidence.source.as_ref() == Some(&site.source))
+                .count(),
+            1
+        );
+    }
+    assert_eq!(
+        document.relations.len(),
+        12,
+        "the exact nine Contains and three RefersTo records exhaust the relation set"
     );
     assert_eq!(document.skipped_regions.len(), 1);
     assert_eq!(

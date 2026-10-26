@@ -1513,6 +1513,11 @@ fn unresolved_reason(role: OccurrenceRole, kind_rejection_total: u64) -> Unresol
 }
 
 pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
+    if occurrence.syntax_kind.starts_with("html.closing_tag")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     if occurrence.syntax_kind.starts_with("php.ordinary_")
         && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
     {
@@ -4657,5 +4662,73 @@ mod javascript_default_class_export_source_tests {
         site.syntax_kind = "javascript.identifier.reference".to_owned();
         site.role = OccurrenceRole::Reference;
         assert!(resolvable_occurrence(&site));
+    }
+}
+
+#[cfg(test)]
+mod html_closing_tag_source_tests {
+    use super::*;
+    use rootlight_ids::{GenerationId, RepositoryId};
+    use rootlight_ir::{FactEvidence, SourceRef, SourceSpan};
+
+    #[test]
+    fn closing_tag_labels_require_native_binding_before_generic_spelling() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let generation = GenerationId::from_bytes([2; 20]);
+        let file = FileId::from_bytes([3; 20]);
+        let hash = content_hash(b"a");
+        let source = SourceRef::new(
+            repository,
+            generation,
+            SourceSpan::new(file, 0, 1).unwrap(),
+            hash,
+            None,
+        );
+        let symbol = SymbolId::from_bytes([6; 20]);
+        let mut site = OccurrenceRecord {
+            id: FactId::from_bytes([4; 20]),
+            repository,
+            generation,
+            file,
+            source: source.clone(),
+            role: OccurrenceRole::Reference,
+            enclosing: None,
+            target: OccurrenceTarget::Unresolved { text_hash: hash },
+            syntactic_text_hash: hash,
+            syntax_kind: "html.closing_tag.reference".to_owned(),
+            provenance: FactId::from_bytes([5; 20]),
+            confidence: Confidence::new(0).unwrap(),
+            evidence: FactEvidence {
+                source: Some(source),
+                derivation: Vec::new(),
+            },
+        };
+        for (label, role) in [
+            ("html.closing_tag.reference", OccurrenceRole::Reference),
+            (
+                "html.closing_tag_unproved.reference",
+                OccurrenceRole::Reference,
+            ),
+        ] {
+            site.syntax_kind = label.to_owned();
+            site.role = role;
+            site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Candidates {
+                symbols: vec![symbol],
+                total_count: 1,
+                completeness: CoverageStatus::Complete,
+            };
+            assert!(!resolvable_occurrence(&site));
+            site.target = OccurrenceTarget::Resolved { symbol };
+            assert!(resolvable_occurrence(&site));
+        }
+        site.role = OccurrenceRole::Reference;
+        site.target = OccurrenceTarget::Unresolved { text_hash: hash };
+        site.syntax_kind = "html.ordinary_reference.reference".to_owned();
+        assert!(
+            resolvable_occurrence(&site),
+            "unrelated generic resolution remains unchanged"
+        );
     }
 }

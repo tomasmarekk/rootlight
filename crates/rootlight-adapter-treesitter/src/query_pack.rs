@@ -68,6 +68,7 @@ mod haxe;
 mod hcl;
 mod hdl;
 mod hlsl;
+mod html_closing_tags;
 pub(crate) mod identity_refusal;
 #[cfg(test)]
 mod identity_refusal_tests;
@@ -310,6 +311,7 @@ pub(crate) enum QueryLimit {
     Capture,
     Fact,
     CursorMatch,
+    HtmlClosingTags,
 }
 
 /// Private evidence of the intrinsic identity-query work ceiling, not a sink quota.
@@ -712,7 +714,10 @@ impl QueryPack {
                 )
             });
         }
-        if matches!(family, GrammarFamily::Html | GrammarFamily::Astro) {
+        if family == GrammarFamily::Html {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
+        }
+        if family == GrammarFamily::Astro {
             expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
         }
         if family == GrammarFamily::Markdown {
@@ -884,15 +889,16 @@ impl QueryPack {
     ) -> Result<QueryExtraction, AdapterError> {
         cancellation.check()?;
         let identity_limits = identity_scan_limits(max_nodes);
-        let mut identity_candidates = self.extract_identity_with_limit(
-            family,
-            tree,
-            source,
-            max_nodes,
-            cancellation,
-            identity_limit,
-            identity_refusal,
-        )?;
+        let (mut identity_candidates, identity_enrichment_limit) = self
+            .extract_identity_with_limit(
+                family,
+                tree,
+                source,
+                max_nodes,
+                cancellation,
+                identity_limit,
+                identity_refusal,
+            )?;
 
         let budgeted_matches = max_facts.saturating_mul(QUERY_MATCHES_PER_RETAINED_FACT);
         let budgeted_captures = max_facts.saturating_mul(QUERY_CAPTURES_PER_RETAINED_FACT);
@@ -950,6 +956,7 @@ impl QueryPack {
                 Ok(())
             },
         )?;
+        limit = limit.or(identity_enrichment_limit);
         if limit.is_none() && fact_limit_reached {
             limit = Some(QueryLimit::Fact);
         }
@@ -972,7 +979,21 @@ impl QueryPack {
         max_nodes: usize,
         cancellation: &Cancellation,
     ) -> Result<Vec<QueryCandidate>, AdapterError> {
-        self.extract_identity_with_limit(family, tree, source, max_nodes, cancellation, None, None)
+        let (candidates, limit) = self.extract_identity_with_limit(
+            family,
+            tree,
+            source,
+            max_nodes,
+            cancellation,
+            None,
+            None,
+        )?;
+        // This vector-only API cannot communicate incomplete enrichment.
+        if let Some(limit) = limit {
+            let limits = identity_scan_limits(max_nodes);
+            return Err(identity_scan_limit(limit, limits.matches, limits.captures));
+        }
+        Ok(candidates)
     }
 
     #[expect(
@@ -988,7 +1009,7 @@ impl QueryPack {
         cancellation: &Cancellation,
         identity_limit: Option<&mut Option<IntrinsicIdentityMatchLimit>>,
         identity_refusal: Option<&mut Option<IdentityRefusal>>,
-    ) -> Result<Vec<QueryCandidate>, AdapterError> {
+    ) -> Result<(Vec<QueryCandidate>, Option<QueryLimit>), AdapterError> {
         cancellation.check()?;
         let limits = identity_scan_limits(max_nodes);
         let mut candidates = Vec::new();
@@ -1028,6 +1049,10 @@ impl QueryPack {
                             candidate.syntax,
                             "bash.module_reference" | "bash.unproven_module_reference"
                         ))
+                    || (family == GrammarFamily::Html
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "html.closing_tag")
                     || candidate.role.belongs_to_identity_closure()
                     || (family == GrammarFamily::Nix
                         && candidate.required
@@ -1267,6 +1292,11 @@ impl QueryPack {
             }
             return Err(event.error());
         }
+        if limit == Some(QueryLimit::HtmlClosingTags) {
+            // The atomic proof withheld only the new carriers. Host identity
+            // extraction completed; the caller must retain bounded coverage.
+            return Ok((candidates, limit));
+        }
         if let Some(limit) = limit {
             if limit == QueryLimit::Match
                 && limits.matches == HARD_MAX_QUERY_MATCHES
@@ -1280,7 +1310,7 @@ impl QueryPack {
             }
             return Err(identity_scan_limit(limit, limits.matches, limits.captures));
         }
-        Ok(candidates)
+        Ok((candidates, None))
     }
 
     fn scan_query(
@@ -1530,6 +1560,12 @@ impl QueryPack {
         let mut bash_calls =
             bash_calls::CaptureCache::new(input.source, limits.captures, complete_file_input);
         let mut bash_reads = bash::CaptureCache::new(input.source, limits.body_nodes);
+        let mut html_closing_tags = html_closing_tags::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
         let mut bash_module_references = bash_module_references::CaptureCache::new(
             input.source,
             limits.body_nodes.min(limits.captures),
@@ -3489,6 +3525,22 @@ impl QueryPack {
                         continue;
                     }
                 }
+                if input.family == GrammarFamily::Html {
+                    let keep = html_closing_tags.refine(
+                        capture.node,
+                        role,
+                        &mut candidate,
+                        input.cancellation,
+                    )?;
+                    if html_closing_tags.exhausted() {
+                        // Finish ordinary host captures without claiming the
+                        // unproved closing-reference/context pair is complete.
+                        limit = limit.or(Some(QueryLimit::HtmlClosingTags));
+                    }
+                    if !keep {
+                        continue;
+                    }
+                }
                 if input.family == GrammarFamily::Bash {
                     let keep = bash_calls.refine(
                         capture.node,
@@ -3848,6 +3900,9 @@ fn identity_scan_limit(
         QueryLimit::Capture => maximum_captures,
         QueryLimit::CursorMatch => usize::try_from(QUERY_CURSOR_MATCH_LIMIT).unwrap_or(usize::MAX),
         QueryLimit::Fact => 0,
+        QueryLimit::HtmlClosingTags => {
+            return IdentityRefusal::helper(RefusalOrigin::HtmlClosingTags).error();
+        }
     };
     AdapterError::Sink(SinkError::StreamLimit {
         resource: ResourceKind::Records,
@@ -3963,6 +4018,10 @@ fn candidate_for_capture(
     if family == GrammarFamily::Html
         && role == StructuralRole::Signature
         && capture.node.kind() == "tag_name"
+        && capture
+            .node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "start_tag")
     {
         let owner = capture
             .node
@@ -6162,7 +6221,10 @@ mod tests {
                     )
                 });
             }
-            if matches!(family, GrammarFamily::Html | GrammarFamily::Astro) {
+            if family == GrammarFamily::Html {
+                expected.retain(|name| !matches!(*name, "call" | "import" | "scope"));
+            }
+            if family == GrammarFamily::Astro {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "reference" | "scope"));
             }
             if family == GrammarFamily::Sql {

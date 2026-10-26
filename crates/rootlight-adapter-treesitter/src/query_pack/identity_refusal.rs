@@ -44,6 +44,7 @@ pub(crate) enum RefusalOrigin {
     GoFormalReads,
     HareCaptures,
     HaxeCaptures,
+    HtmlClosingTags,
     HdlCaptures,
     HlslCaptures,
     JavaLocalReceivers,
@@ -126,6 +127,7 @@ impl RefusalOrigin {
             Self::GoFormalReads => "query-identity-go-formal-reads-limit",
             Self::HareCaptures => "query-identity-hare-captures-limit",
             Self::HaxeCaptures => "query-identity-haxe-captures-limit",
+            Self::HtmlClosingTags => "query-identity-html-closing-tag-limit",
             Self::HdlCaptures => "query-identity-hdl-captures-limit",
             Self::HlslCaptures => "query-identity-hlsl-captures-limit",
             Self::JavaLocalReceivers => "query-identity-java-local-receivers-limit",
@@ -207,6 +209,7 @@ impl RefusalOrigin {
                 | "query-identity-go-formal-reads-limit"
                 | "query-identity-hare-captures-limit"
                 | "query-identity-haxe-captures-limit"
+                | "query-identity-html-closing-tag-limit"
                 | "query-identity-hdl-captures-limit"
                 | "query-identity-hlsl-captures-limit"
                 | "query-identity-java-local-receivers-limit"

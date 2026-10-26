@@ -6,6 +6,7 @@
 (script_element (start_tag (tag_name) @definition)) @declaration
 (style_element (start_tag (tag_name) @definition)) @declaration
 (attribute (attribute_name) @definition) @declaration
+(end_tag (tag_name) @reference @signature)
 (raw_text) @signature
 (erroneous_end_tag) @signature
 ((element (start_tag (tag_name) @signature))

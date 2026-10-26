@@ -13,6 +13,7 @@ mod groovy_callables;
 mod groovy_calls;
 mod groovy_members;
 mod haskell_bindings;
+mod html_closing_tags;
 mod incremental;
 mod json_schema_pointer;
 mod lowering;
