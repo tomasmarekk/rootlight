@@ -16,3 +16,6 @@
 (comment) @comment
 ((comment) @documentation (#match? @documentation "^#"))
 [(string) (raw_string) (heredoc_body)] @string
+
+; A separate identity capture creates companions without replacing optional Reads.
+(variable_name) @signature

@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bash_module_references;
 mod config;
 mod fsharp_bindings;
 mod groovy_bindings;

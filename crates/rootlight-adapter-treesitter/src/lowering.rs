@@ -11,6 +11,7 @@ mod apex_calls;
 mod astro_reads;
 mod bash;
 mod bash_calls;
+mod bash_module_references;
 mod c_calls;
 mod c_formal_reads;
 mod c_variables;
@@ -959,6 +960,7 @@ fn required_syntax_fact_count_from_output(
             || glsl_bindings::required(fact)
             || go_calls::required(fact)
             || bash_calls::required(fact)
+            || bash_module_references::required(fact)
             || go_calls::package_candidate(fact)
             || php_this_calls::required(fact)
             || php_requirements.required(fact)
@@ -1881,6 +1883,10 @@ fn preflight_lowering_limits(
                             == Some(request.source().source_ref().span().end_byte())
                         && (python_module_reads::required(fact)
                             || python_module_functions::required(fact)))
+                    || (request.language().as_str() == "bash"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() == CoverageStatus::Complete
+                        && bash_module_references::required(fact))
                     || (request.language().as_str() == "mojo"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -4019,6 +4025,25 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let mut bash_module_references = if self.request.language().as_str() == "bash"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            bash_module_references::Targets::new(
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.full_source,
+                bash_module_references::BindingFacts {
+                    syntax: self.coordinates.facts(),
+                    entities: &materialized,
+                },
+                self.request.limits().max_syntax_nodes(),
+                true,
+                cancellation,
+            )?
+        } else {
+            None
+        };
         let nim_calls = if self.request.language().as_str() == "nim"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
@@ -4957,9 +4982,12 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
                 }
-                // A written shell command has no generic name authority. Keep
-                // its fenced label for the independent source-proof consumer.
-                if resolution_text.is_none() && fact.syntax_kind().as_str() != bash_calls::CALL {
+                // Shell calls and companion References have no generic name authority.
+                // Preserve their fenced labels for independent source proof.
+                if resolution_text.is_none()
+                    && fact.syntax_kind().as_str() != bash_calls::CALL
+                    && !bash_module_references::required(fact)
+                {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
                     occurrence.syntax_kind = format!(
@@ -6582,6 +6610,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                }
+                if bash_module_references::required(fact)
+                    && let Some(targets) = &mut bash_module_references
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        &occurrence,
+                        |span| self.coordinates.physical(span),
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("bash-reference-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
                 }
                 if fact.syntax_kind().as_str() == "bash.module_read.reference"
                     && let Some(bindings) = &bash_reads
@@ -12061,6 +12104,9 @@ fn structural_resolution_text<'a>(
             maximum_name_bytes,
         );
     }
+    if bash_module_references::required(fact) {
+        return None;
+    }
     if fact
         .syntax_kind()
         .as_str()
@@ -13850,6 +13896,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     if fact.syntax_kind().as_str().starts_with("php.ordinary_") {
         return Some("php-written-formal-scope-unavailable");
+    }
+    if bash_module_references::required(fact) {
+        return Some("bash-native-module-reference-binding-unavailable");
     }
     if fact.kind() == SyntaxFactKind::Occurrence && fact.syntax_kind().as_str() == bash_calls::CALL
     {

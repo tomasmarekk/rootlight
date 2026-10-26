@@ -1518,6 +1518,14 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
+    if (occurrence.syntax_kind.starts_with("bash.module_reference.")
+        || occurrence
+            .syntax_kind
+            .starts_with("bash.unproven_module_reference."))
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     if occurrence.syntax_kind.starts_with("bash.direct_wrapper")
         && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
     {

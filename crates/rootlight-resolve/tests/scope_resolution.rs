@@ -4450,3 +4450,6 @@ fn cpp_parameters_cannot_donate_spelling_candidates_without_native_owner_proof()
     assert!(matches!(&ordinary.decisions[0].outcome,
         ResolutionOutcome::Candidates { symbols, total_count: 1, .. } if symbols == &[parameter]));
 }
+
+#[path = "scope_resolution/bash_module_references.rs"]
+mod bash_module_references;

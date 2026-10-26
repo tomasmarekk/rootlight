@@ -1,0 +1,5 @@
+OWNED=1
+INDEX='OWNED++'
+ARR=(first second)
+: "${ARR[INDEX]}"
+printf '%s' "$OWNED"

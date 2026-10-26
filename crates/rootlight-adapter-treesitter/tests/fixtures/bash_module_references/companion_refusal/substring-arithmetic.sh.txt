@@ -1,0 +1,5 @@
+OWNED=1
+OFFSET='OWNED++'
+TEXT=abc
+: "${TEXT:OFFSET}"
+printf '%s' "$OWNED"

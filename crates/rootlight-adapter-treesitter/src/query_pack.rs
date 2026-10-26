@@ -23,6 +23,7 @@ mod apex;
 mod assembly;
 mod bash;
 mod bash_calls;
+mod bash_module_references;
 pub(crate) mod c;
 mod c_calls;
 mod c_formal_reads;
@@ -1020,6 +1021,13 @@ impl QueryPack {
                         && candidate.required
                         && candidate.role == StructuralRole::Call
                         && candidate.syntax == "bash.direct_wrapper_call")
+                    || (family == GrammarFamily::Bash
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && matches!(
+                            candidate.syntax,
+                            "bash.module_reference" | "bash.unproven_module_reference"
+                        ))
                     || candidate.role.belongs_to_identity_closure()
                     || (family == GrammarFamily::Nix
                         && candidate.required
@@ -1522,6 +1530,11 @@ impl QueryPack {
         let mut bash_calls =
             bash_calls::CaptureCache::new(input.source, limits.captures, complete_file_input);
         let mut bash_reads = bash::CaptureCache::new(input.source, limits.body_nodes);
+        let mut bash_module_references = bash_module_references::CaptureCache::new(
+            input.source,
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
         let mut haxe_captures = haxe::CaptureCache::new(
             input.source,
             limits.body_nodes,
@@ -3541,6 +3554,25 @@ impl QueryPack {
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
+                }
+                if input.family == GrammarFamily::Bash
+                    && role == StructuralRole::Signature
+                    && capture.node.kind() == "variable_name"
+                {
+                    let syntax = bash_module_references.syntax(
+                        input.tree.root_node(),
+                        capture.node,
+                        input.cancellation,
+                    )?;
+                    if bash_module_references.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::BashReads));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    let Some(syntax) = syntax else { continue };
+                    candidate.role = StructuralRole::Reference;
+                    candidate.syntax = syntax;
+                    candidate.required = true;
                 }
                 if input.family == GrammarFamily::TypeScript {
                     typescript_const.refine(

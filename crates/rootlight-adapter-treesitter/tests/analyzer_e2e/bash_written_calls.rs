@@ -444,3 +444,42 @@ fn valid_background_function_and_outer_group_definitions_keep_calls_unavailable(
         start + command.len(),
     );
 }
+
+// Companion proof work must preserve the complete wrapper source at its existing limits.
+// Function-owned variable uses are excluded before a module companion census.
+
+#[test]
+fn complete_nvm_wrapper_proofs_survive_companion_census_at_existing_budgets() {
+    assert_eq!(ORIGINAL.len(), 168666);
+    let output = run(ORIGINAL, EncodingId::utf8());
+    assert_call(&output, ORIGINAL, "nvm_err", "nvm_echo", 732, 749);
+    assert_call(
+        &output,
+        ORIGINAL,
+        "nvm_err_with_colors",
+        "nvm_echo_with_colors",
+        779,
+        808,
+    );
+    assert!(
+        !output
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| site.syntax_kind == "bash.module_reference.reference"
+                && site.enclosing.is_some_and(|id| output
+                    .document()
+                    .entities
+                    .iter()
+                    .any(|entity| entity.id == id && entity.kind == EntityKind::Function))),
+        "module companion admission cannot cross a written function owner"
+    );
+    assert!(
+        !output
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "query-identity-bash-reads-limit"),
+        "new work cannot erase previously qualified complete wrapper proofs"
+    );
+}
