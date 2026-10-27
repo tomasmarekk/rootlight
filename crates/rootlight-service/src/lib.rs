@@ -46171,10 +46171,44 @@ mod tests {
 
     #[test]
     fn ruby_published_declarations_preserve_symbols_and_exact_source() {
+        for file_path in [
+            "store.rb",
+            "store.ruby",
+            "store.podspec",
+            "store.gemspec",
+            "store.rake",
+        ] {
+            assert_ruby_source_path_queries(file_path);
+        }
+    }
+
+    fn assert_ruby_source_path_queries(file_path: &str) {
         let fixture = TempDir::new().expect("fixture root exists");
         let source = "module Garden\n class Store\n  DEFAULT = 1\n  def lookup(key)\n   key\n  end\n  def self.lookup(key)\n   new(key)\n  end\n  def [](key)\n   key\n  end\n  def ready\n   true\n  end\n  def self.build\n   new\n  end\n  def version = 1\n end\nend\n";
-        fs::write(fixture.path().join("store.rb"), source).expect("Ruby source writes");
+        fs::write(fixture.path().join(file_path), source).expect("Ruby source writes");
         let mut service = FirstSliceService::new(2).expect("service initializes");
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("ruby").is_some());
+        let input = ManifestInput {
+            file: FileId::from_bytes([3; 20]),
+            path: file_path.to_owned(),
+            content_hash: content_hash(source.as_bytes()),
+            bytes: u64::try_from(source.len()).unwrap(),
+            encoding: "utf-8".to_owned(),
+            class: InputClass::Source,
+            language_signals: vec![rootlight_discovery::LanguageSignal {
+                language: "cpp".to_owned(),
+                evidence: LanguageEvidence::Content,
+            }],
+            project_language_witnesses: Vec::new(),
+            decisive_rule: None,
+        };
+        assert_eq!(detected_source_language(&input), Some("ruby"));
+        assert_eq!(
+            source_language_route(&input, &service.analyzers),
+            Some("ruby")
+        );
+        assert_eq!(source_language_route(&input, &absent), None);
         let receipt = service
             .index_repository(fixture.path(), &deadline())
             .expect("Ruby index publishes");
@@ -46186,7 +46220,7 @@ mod tests {
             .document()
             .files
             .iter()
-            .find(|file| file.path == "store.rb")
+            .find(|file| file.path == file_path)
             .expect("Ruby source file remains represented");
         let coverage = service
             .source_file_coverage_until(receipt.generation, file.id, &deadline())

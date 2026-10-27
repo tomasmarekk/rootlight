@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.78";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.79";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3124,7 +3124,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "ruby",
-        suffixes: &[".rb", ".ruby"],
+        suffixes: &[".rb", ".ruby", ".podspec", ".gemspec", ".rake"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -4016,6 +4016,9 @@ mod tests {
             "misleading.rs",
             "misleading.resx",
             "misleading.svg",
+            "misleading.podspec",
+            "misleading.gemspec",
+            "misleading.rake",
         ] {
             write_fixture(&temporary, path, pdf);
         }
@@ -4032,6 +4035,9 @@ mod tests {
             "misleading.rs",
             "misleading.resx",
             "misleading.svg",
+            "misleading.podspec",
+            "misleading.gemspec",
+            "misleading.rake",
             "archive.txt",
         ] {
             assert!(
@@ -8566,6 +8572,40 @@ max_source_file_bytes = 2097152
         assert_eq!(extension_language("written.htm"), Some("html"));
         assert_ne!(canonical_language("html"), Some("xml"));
         assert_ne!(canonical_language("xml"), Some("html"));
+    }
+
+    #[test]
+    fn ruby_dsl_suffixes_use_the_ruby_source_route() {
+        let suffixes = [".rb", ".ruby", ".podspec", ".gemspec", ".rake"];
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "ruby")
+            .unwrap();
+        assert_eq!(capability.suffixes, suffixes);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        for suffix in suffixes {
+            for path in [
+                format!("written{suffix}"),
+                format!("WRITTEN{}", suffix.to_ascii_uppercase()),
+            ] {
+                assert_eq!(extension_language(&path), Some("ruby"));
+                let (class, signals) = classify(
+                    &RelativePath::parse(Path::new(&path)).unwrap(),
+                    b"Gem::Specification.new do |spec|\n spec.name = 'written'\nend\n",
+                );
+                assert_eq!(class, InputClass::Source);
+                assert_eq!(
+                    signals,
+                    [LanguageSignal {
+                        language: "ruby".to_owned(),
+                        evidence: LanguageEvidence::Extension,
+                    }]
+                );
+            }
+            assert_eq!(extension_language(&format!("written{suffix}.bak")), None);
+        }
+        assert_eq!(extension_language("written.podspec.json"), Some("json"));
+        assert_eq!(extension_language("written.erb"), None);
     }
 
     #[test]
