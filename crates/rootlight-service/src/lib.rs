@@ -36827,14 +36827,20 @@ mod tests {
 
     #[test]
     fn xml_native_source_queries_preserve_written_qnames_and_parent_evidence() {
+        for file_path in ["written.xml", "written.resx", "written.svg"] {
+            assert_xml_source_path_queries(file_path);
+        }
+    }
+
+    fn assert_xml_source_path_queries(file_path: &str) {
         let source = "<p:Root xmlns:p=\"urn:example\" p:Value=\"raw\"><p:Child/></p:Root>";
         let fixture = TempDir::new().unwrap();
-        write_language_fixture(fixture.path(), &[("written.xml", source)]);
+        write_language_fixture(fixture.path(), &[(file_path, source)]);
         let mut service = FirstSliceService::new(2).unwrap();
         let mut absent = service.analyzers.clone();
         assert!(absent.remove("xml").is_some());
         assert!(absent.contains_key("html"));
-        for path in ["written.xml", "WRITTEN.XML"] {
+        for path in [file_path.to_owned(), file_path.to_ascii_uppercase()] {
             let input = ManifestInput {
                 file: FileId::from_bytes([3; 20]),
                 path: path.to_owned(),

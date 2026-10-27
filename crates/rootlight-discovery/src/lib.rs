@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.77";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.78";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2860,7 +2860,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "xml",
-        suffixes: &[".xml"],
+        suffixes: &[".xml", ".resx", ".svg"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -4011,7 +4011,12 @@ mod tests {
     fn binary_format_signatures_override_source_suffixes() {
         let temporary = local_tempdir();
         let pdf = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
-        for path in ["document.data", "misleading.rs"] {
+        for path in [
+            "document.data",
+            "misleading.rs",
+            "misleading.resx",
+            "misleading.svg",
+        ] {
             write_fixture(&temporary, path, pdf);
         }
         write_fixture(&temporary, "archive.txt", b"PK\x03\x04opaque archive");
@@ -4022,7 +4027,13 @@ mod tests {
         assert_eq!(manifest.inputs.len(), 1);
         assert_eq!(manifest.inputs[0].path, "source.pdf");
         assert_eq!(manifest.inputs[0].encoding, "utf-8");
-        for path in ["document.data", "misleading.rs", "archive.txt"] {
+        for path in [
+            "document.data",
+            "misleading.rs",
+            "misleading.resx",
+            "misleading.svg",
+            "archive.txt",
+        ] {
             assert!(
                 manifest
                     .exclusions
@@ -8511,43 +8522,45 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn xml_and_dtd_suffixes_route_to_distinct_native_families() {
-        for (language, suffix, source) in [
+        for (language, suffixes, source) in [
             (
                 "xml",
-                ".xml",
+                &[".xml", ".resx", ".svg"][..],
                 "<root><item value=\"plain\"/><item value='other'>text</item></root>",
             ),
-            ("dtd", ".dtd", "<!ELEMENT root EMPTY>"),
+            ("dtd", &[".dtd"][..], "<!ELEMENT root EMPTY>"),
         ] {
             let capability = language_capabilities()
                 .iter()
                 .find(|entry| entry.language == language)
                 .unwrap();
-            assert_eq!(capability.suffixes, [suffix]);
+            assert_eq!(capability.suffixes, suffixes);
             assert!(capability.aliases.is_empty());
             assert_eq!(capability.detectors, ["extension"]);
             assert_eq!(capability.maximum_tier, "tier_d");
             assert_eq!(capability.analyzers, ["treesitter"]);
             assert_eq!(canonical_language(language), Some(language));
-            for path in [
-                format!("written{suffix}"),
-                format!("WRITTEN{}", suffix.to_ascii_uppercase()),
-            ] {
-                assert_eq!(extension_language(&path), Some(language));
-                let (class, signals) = classify(
-                    &RelativePath::parse(Path::new(&path)).unwrap(),
-                    source.as_bytes(),
-                );
-                assert_eq!(class, InputClass::Source);
-                assert_eq!(
-                    signals,
-                    [LanguageSignal {
-                        language: language.to_owned(),
-                        evidence: LanguageEvidence::Extension
-                    }]
-                );
+            for suffix in suffixes {
+                for path in [
+                    format!("written{suffix}"),
+                    format!("WRITTEN{}", suffix.to_ascii_uppercase()),
+                ] {
+                    assert_eq!(extension_language(&path), Some(language));
+                    let (class, signals) = classify(
+                        &RelativePath::parse(Path::new(&path)).unwrap(),
+                        source.as_bytes(),
+                    );
+                    assert_eq!(class, InputClass::Source);
+                    assert_eq!(
+                        signals,
+                        [LanguageSignal {
+                            language: language.to_owned(),
+                            evidence: LanguageEvidence::Extension
+                        }]
+                    );
+                }
+                assert_eq!(extension_language(&format!("written{suffix}.bak")), None);
             }
-            assert_eq!(extension_language(&format!("written{suffix}.bak")), None);
         }
         assert_eq!(extension_language("written.html"), Some("html"));
         assert_eq!(extension_language("written.htm"), Some("html"));
