@@ -34861,10 +34861,10 @@
       "sha256": "907581b789997511b0e60ec6eea0e9e42f29cea5705bf641c5b7a112b2731794"
     },
     {
-      "local_package_count": 68,
+      "local_package_count": 69,
       "path": "tests/native-grammars/Cargo.lock",
       "registry_package_count": 32,
-      "sha256": "68318ad13831c01af92f2be02f861befe47a0c477a58486590acd005af687470"
+      "sha256": "1fa00a293ef86ebf0759f03c1e7521b85c8d115e15532088d94af1a5ef004c8f"
     }
   ],
   "package_count": 565,

@@ -1055,8 +1055,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Assembly => GrammarIdentity {
             language_id: "assembly",
             grammar_version: "0.24.0",
-            source_package_sha256: "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
-            parser_sha256: "eca05ffdbf8d5e8788bf73776812003d8975f8b1648554b241200aa6da37a798",
+            source_package_sha256: "12f7227bea03c2fca6d073de6cc89170cac01ca6e7c42bbc41dabd34e6efd020",
+            parser_sha256: "f2a0a2d4382fa3b1c5e5197e6c89da3ebdd66feca841e6f8dc7217cd1052b96d",
             scanner_sha256: None,
         },
         GrammarFamily::Scheme => GrammarIdentity {

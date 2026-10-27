@@ -39,10 +39,18 @@ by the owner body repetition. Existing instruction rules and all original corpus
 bytes remain unchanged. The complete patches and preferred grammar are retained;
 the original grammar is not overwritten or relabelled as the derivative.
 
+`patches/masm-attributes.patch` extends the existing physical owners with written
+SEGMENT attributes, DB/DW uninitialized scalars and a dedicated ASSUME colon
+statement. Newlines, original-name fields and matching closing names remain
+required. ASSUME is an explicit source context, never binding evidence. The
+attribute list follows the repeated written options in the Microsoft MASM BNF;
+assembler validation, conflicts between attributes and register validity are
+not established by this syntax model.
+
 Six active `src/` outputs are copied literally from two independently generated,
 byte-identical source outputs produced with reviewed Tree-sitter CLI `0.26.8`,
-Node `24.11.1` and explicit ABI14. No generated parser is hand-edited. The parser
-exports `tree_sitter_asm`, has 179 states and 84 symbols, and declares no external
+Node `26.2.0` and explicit ABI14. No generated parser is hand-edited. The parser
+exports `tree_sitter_asm`, has 208 states and 96 symbols, and declares no external
 scanner. The generated allocator and array headers remain retained even though
 the selected parser compilation includes only `tree_sitter/parser.h` and declared
 system C headers. Exact input/output hashes are recorded in source provenance.
@@ -64,12 +72,18 @@ consumer gate is required before the wrapper is described as build-qualified.
 
 ## Qualification boundary
 
-The isolated native syntax gate passed the same seven groups on Rust 1.97.1 and
+The preceding generated-table frame's isolated native syntax gate passed the same seven groups on Rust 1.97.1 and
 1.90.0 plus scoped Clippy. It checked six synthetic sources and all 32 upstream
 corpus sections, 22 exact operand contracts and five physical MASM owners, with
 no native ERROR or missing nodes. Two fixture-only corrections required named
 `label` and `const` nodes when collecting declarations; anonymous literal tokens
 remain in source-conservation evidence and were not hidden or removed.
+
+The current preferred source was independently generated twice with six literal
+outputs and passed all 32 unchanged upstream native CLI corpus cases. The
+complete-original native parse retains errors outside the four required clean
+physical owners. Rust binding, production query/lowering and relocated wrapper
+qualification for these updated tables remain unexecuted.
 
 These measured witnesses do not establish every Assembly dialect, assembler
 binding, macro expansion, complete repository coverage, installed MCP behavior,

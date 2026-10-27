@@ -1,0 +1,70 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -24,6 +24,7 @@
+                 $.macro_definition,
+                 $.segment_definition,
+                 $.data_definition,
++                $.masm_assume_statement,
+                 $.constant_definition,
+                 $.meta,
+                 $.label,
+@@ -62,19 +63,47 @@
+                 field('end_name', $.ident),
+                 $._masm_ends,
+             ),
+-        segment_header: $ => $._masm_segment,
++        segment_header: $ => seq($._masm_segment, repeat($._masm_segment_option)),
++        _masm_segment_option: $ => choice(
++            $._masm_segment_align,
++            $._masm_segment_combine,
++            seq($._masm_at, $._tc_expr),
++            $._masm_segment_use,
++            $._masm_readonly,
++            $.masm_string,
++        ),
++        // These are written attributes only; placement and linking are unevaluated.
++        _masm_segment_align: $ => token(choice(
++            /[Bb][Yy][Tt][Ee]/, /[Ww][Oo][Rr][Dd]/, /[Dd][Ww][Oo][Rr][Dd]/,
++            /[Pp][Aa][Rr][Aa]/, /[Pp][Aa][Gg][Ee]/,
++        )),
++        _masm_segment_combine: $ => token(choice(
++            /[Pp][Uu][Bb][Ll][Ii][Cc]/, /[Ss][Tt][Aa][Cc][Kk]/,
++            /[Cc][Oo][Mm][Mm][Oo][Nn]/, /[Mm][Ee][Mm][Oo][Rr][Yy]/,
++            /[Pp][Rr][Ii][Vv][Aa][Tt][Ee]/,
++        )),
++        _masm_at: $ => token(/[Aa][Tt]/),
++        _masm_segment_use: $ => token(choice(/[Uu][Ss][Ee]16/, /[Uu][Ss][Ee]32/, /[Ff][Ll][Aa][Tt]/)),
++        _masm_readonly: $ => token(/[Rr][Ee][Aa][Dd][Oo][Nn][Ll][Yy]/),
++        masm_assume_statement: $ => seq(
++            $._masm_assume,
++            choice($._masm_nothing, seq($.ident, ':', $.ident)),
++            repeat(seq(',', $.ident, ':', $.ident)),
++        ),
++        _masm_assume: $ => token(/[Aa][Ss][Ss][Uu][Mm][Ee]/),
++        _masm_nothing: $ => token(/[Nn][Oo][Tt][Hh][Ii][Nn][Gg]/),
+         // Newlines remain syntax: a closer is never part of the captured body.
+         masm_body: $ =>
+             seq($._item, repeat(seq(repeat1('\n'), $._item)), repeat1('\n')),
+         data_definition: $ =>
+             seq(
+                 field('name', $.ident),
+-                field('type', $._masm_db),
++                field('type', $._masm_storage),
+                 field('value', $.masm_initializer),
+             ),
+         masm_initializer: $ =>
+             seq($._masm_initializer_value, repeat(seq(',', $._masm_initializer_value))),
+-        _masm_initializer_value: $ => choice($._tc_expr, $.float, $.masm_string),
++        _masm_initializer_value: $ => choice($._tc_expr, $.float, $.masm_string, '?'),
+         masm_string: $ => /'[^'\r\n]*'/,
+         constant_definition: $ =>
+             seq(field('name', $.ident), $._masm_equ, field('value', $._tc_expr)),
+@@ -89,7 +118,7 @@
+         _masm_endm: $ => token(/[Ee][Nn][Dd][Mm]/),
+         _masm_segment: $ => token(/[Ss][Ee][Gg][Mm][Ee][Nn][Tt]/),
+         _masm_ends: $ => token(/[Ee][Nn][Dd][Ss]/),
+-        _masm_db: $ => token(/[Dd][Bb]/),
++        _masm_storage: $ => token(/[Dd][BbWw]/),
+         _masm_equ: $ => token(/[Ee][Qq][Uu]/),
+ 
+         meta: $ =>

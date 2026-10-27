@@ -86,6 +86,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "masm_assume_statement"
+        },
+        {
+          "type": "SYMBOL",
           "name": "constant_definition"
         },
         {
@@ -347,8 +351,221 @@
       ]
     },
     "segment_header": {
-      "type": "SYMBOL",
-      "name": "_masm_segment"
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_masm_segment"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_masm_segment_option"
+          }
+        }
+      ]
+    },
+    "_masm_segment_option": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_masm_segment_align"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_masm_segment_combine"
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_masm_at"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "_tc_expr"
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_masm_segment_use"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_masm_readonly"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "masm_string"
+        }
+      ]
+    },
+    "_masm_segment_align": {
+      "type": "TOKEN",
+      "content": {
+        "type": "CHOICE",
+        "members": [
+          {
+            "type": "PATTERN",
+            "value": "[Bb][Yy][Tt][Ee]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Ww][Oo][Rr][Dd]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Dd][Ww][Oo][Rr][Dd]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Pp][Aa][Rr][Aa]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Pp][Aa][Gg][Ee]"
+          }
+        ]
+      }
+    },
+    "_masm_segment_combine": {
+      "type": "TOKEN",
+      "content": {
+        "type": "CHOICE",
+        "members": [
+          {
+            "type": "PATTERN",
+            "value": "[Pp][Uu][Bb][Ll][Ii][Cc]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Ss][Tt][Aa][Cc][Kk]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Cc][Oo][Mm][Mm][Oo][Nn]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Mm][Ee][Mm][Oo][Rr][Yy]"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Pp][Rr][Ii][Vv][Aa][Tt][Ee]"
+          }
+        ]
+      }
+    },
+    "_masm_at": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "[Aa][Tt]"
+      }
+    },
+    "_masm_segment_use": {
+      "type": "TOKEN",
+      "content": {
+        "type": "CHOICE",
+        "members": [
+          {
+            "type": "PATTERN",
+            "value": "[Uu][Ss][Ee]16"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Uu][Ss][Ee]32"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[Ff][Ll][Aa][Tt]"
+          }
+        ]
+      }
+    },
+    "_masm_readonly": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "[Rr][Ee][Aa][Dd][Oo][Nn][Ll][Yy]"
+      }
+    },
+    "masm_assume_statement": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_masm_assume"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_masm_nothing"
+            },
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "ident"
+                },
+                {
+                  "type": "STRING",
+                  "value": ":"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "ident"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": ","
+              },
+              {
+                "type": "SYMBOL",
+                "name": "ident"
+              },
+              {
+                "type": "STRING",
+                "value": ":"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "ident"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "_masm_assume": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "[Aa][Ss][Ss][Uu][Mm][Ee]"
+      }
+    },
+    "_masm_nothing": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "[Nn][Oo][Tt][Hh][Ii][Nn][Gg]"
+      }
     },
     "masm_body": {
       "type": "SEQ",
@@ -401,7 +618,7 @@
           "name": "type",
           "content": {
             "type": "SYMBOL",
-            "name": "_masm_db"
+            "name": "_masm_storage"
           }
         },
         {
@@ -453,6 +670,10 @@
         {
           "type": "SYMBOL",
           "name": "masm_string"
+        },
+        {
+          "type": "STRING",
+          "value": "?"
         }
       ]
     },
@@ -541,11 +762,11 @@
         "value": "[Ee][Nn][Dd][Ss]"
       }
     },
-    "_masm_db": {
+    "_masm_storage": {
       "type": "TOKEN",
       "content": {
         "type": "PATTERN",
-        "value": "[Dd][Bb]"
+        "value": "[Dd][BbWw]"
       }
     },
     "_masm_equ": {

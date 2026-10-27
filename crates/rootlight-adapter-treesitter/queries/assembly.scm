@@ -6,6 +6,6 @@
 [(procedure_definition) (macro_definition) (segment_definition)] @scope
 [(program) (procedure_definition) (macro_definition) (segment_definition)
  (data_definition) (constant_definition) (label) (const)
- (instruction) (meta) (ERROR)] @expression
+ (instruction) (meta) (masm_assume_statement) (ERROR)] @expression
 [(line_comment) (block_comment)] @comment
 [(string) (masm_string)] @string

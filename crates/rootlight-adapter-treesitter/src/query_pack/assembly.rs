@@ -22,14 +22,17 @@ pub(super) struct CaptureCache {
     owners: HashMap<usize, Option<OwnerProof>>,
     maximum_entries: usize,
     exhausted: bool,
+    complete_source: bool,
 }
 
 impl CaptureCache {
-    pub(super) fn new(maximum_entries: usize) -> Self {
+    /// Uses actual parser range authority; a root's extent cannot prove full context.
+    pub(super) fn new(maximum_entries: usize, complete_source: bool) -> Self {
         Self {
             owners: HashMap::new(),
             maximum_entries,
             exhausted: false,
+            complete_source,
         }
     }
 
@@ -44,6 +47,10 @@ impl CaptureCache {
         cancellation: &Cancellation,
     ) -> Result<Option<OwnerProof>, AdapterError> {
         cancellation.check()?;
+        // An included-range tree can hide the physical enclosing owner.
+        if !self.complete_source {
+            return Ok(None);
+        }
         if let Some(proof) = self.owners.get(&node.id()) {
             return Ok(proof.clone());
         }
@@ -347,7 +354,7 @@ pub(super) fn candidate(
                 "instruction" | "data_definition" | "constant_definition" | "const" => {
                     "assembly.operand_context"
                 }
-                "meta" => "assembly.directive_context",
+                "meta" | "masm_assume_statement" => "assembly.directive_context",
                 "ERROR" => "assembly.unsupported_owner",
                 _ => "assembly.owner_semantics",
             }
@@ -443,6 +450,231 @@ mod tests {
             .into_iter()
             .map(|capture| &source[capture.start..capture.end])
             .collect()
+    }
+
+    fn extract_selected(
+        source: &str,
+        spans: &[Range<usize>],
+    ) -> (tree_sitter::Tree, Vec<QueryCandidate>) {
+        let point = |offset: usize| {
+            let prefix = &source.as_bytes()[..offset];
+            tree_sitter::Point::new(
+                prefix.iter().filter(|byte| **byte == b'\n').count(),
+                prefix
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(prefix.len(), |index| prefix.len() - index - 1),
+            )
+        };
+        let ranges = spans
+            .iter()
+            .map(|span| tree_sitter::Range {
+                start_byte: span.start,
+                end_byte: span.end,
+                start_point: point(span.start),
+                end_point: point(span.end),
+            })
+            .collect::<Vec<_>>();
+        let family = crate::GrammarFamily::Assembly;
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&crate::registry::language_for(family))
+            .unwrap();
+        parser.set_included_ranges(&ranges).unwrap();
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
+        let pack =
+            super::super::QueryPack::compile(family, include_str!("../../queries/assembly.scm"))
+                .unwrap();
+        let extraction = pack
+            .extract(
+                family,
+                &tree,
+                source.as_bytes(),
+                10_000,
+                1024,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert!(extraction.limit.is_none());
+        (tree, extraction.candidates)
+    }
+
+    #[test]
+    fn selected_masm_body_cannot_borrow_missing_physical_owner_context() {
+        let source =
+            "Area SEGMENT PUBLIC\nItem DW ?\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n";
+        assert_eq!(&source[20..30], "Item DW ?\n");
+        let (tree, captures) = extract_selected(source, std::slice::from_ref(&(20..30)));
+        assert_eq!(
+            tree.root_node().named_child(0).unwrap().kind(),
+            "data_definition"
+        );
+        assert_eq!(tree.included_ranges()[0].start_byte, 20);
+        assert_eq!(tree.included_ranges()[0].end_byte, 30);
+        assert!(definitions(source, &captures).is_empty());
+        assert!(
+            captures
+                .iter()
+                .any(|capture| capture.role == StructuralRole::Expression
+                    && capture.syntax == "assembly.unsupported_owner")
+        );
+    }
+
+    #[test]
+    fn split_masm_ranges_cannot_certify_owners_with_a_full_extent_tree() {
+        let source = "Area SEGMENT PUBLIC\nItem DW ?\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n; visible\n";
+        let begin = source.find("ASSUME").unwrap();
+        let end = begin + "ASSUME cs Area\n".len();
+        let (tree, captures) = extract_selected(source, &[0..begin, end..source.len()]);
+        assert_eq!(tree.root_node().byte_range(), 0..source.len());
+        assert_eq!(tree.included_ranges().len(), 2);
+        assert!(definitions(source, &captures).is_empty());
+        assert!(!captures.iter().any(|capture| matches!(
+            capture.role,
+            StructuralRole::Declaration | StructuralRole::Definition | StructuralRole::Signature
+        ) || (capture.role == StructuralRole::Scope
+            && capture.syntax != "assembly.file")));
+        assert!(
+            captures
+                .iter()
+                .any(|capture| capture.role == StructuralRole::Comment
+                    && &source[capture.start..capture.end] == "; visible")
+        );
+        assert!(
+            captures
+                .iter()
+                .any(|capture| capture.role == StructuralRole::Expression
+                    && capture.syntax == "assembly.unsupported_owner")
+        );
+    }
+
+    #[test]
+    fn complete_masm_range_keeps_owners_and_refuses_invalid_physical_context() {
+        let source = "; prefix\nArea SEGMENT PUBLIC\nItem DW ?\nArea ENDS\n";
+        for spans in [Vec::new(), std::iter::once(0..source.len()).collect()] {
+            let (_, captures) = extract_selected(source, &spans);
+            assert_eq!(definitions(source, &captures), ["Area", "Item"]);
+        }
+        let invalid =
+            "Area SEGMENT PUBLIC\nItem DW ?\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n";
+        for spans in [Vec::new(), std::iter::once(0..invalid.len()).collect()] {
+            let (_, captures) = extract_selected(invalid, &spans);
+            assert!(definitions(invalid, &captures).is_empty());
+        }
+    }
+
+    #[test]
+    fn complete_original_masm_attributes_keep_only_clean_written_owners() {
+        let source = include_str!("../../tests/fixtures/assembly/reboot.asm");
+        assert_eq!(source.len(), 504);
+        assert!(source.as_bytes().ends_with(b"\x1a"));
+        assert_eq!(
+            source
+                .as_bytes()
+                .windows(2)
+                .filter(|bytes| *bytes == b"\r\n")
+                .count(),
+            42
+        );
+        let (tree, captures) = extract(source);
+        assert!(tree.root_node().has_error());
+        assert_eq!(
+            definitions(source, &captures),
+            ["ROMDATA", "BootType", "ROMBIOS", "_text", "_reboot"]
+        );
+        let spans = captures
+            .iter()
+            .filter(|capture| capture.role == StructuralRole::Definition)
+            .map(|capture| (capture.start, capture.end))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            spans,
+            [(84, 91), (120, 128), (151, 158), (217, 222), (348, 355)].into()
+        );
+        assert!(!spans.contains(&(425, 433)));
+        assert!(
+            captures
+                .iter()
+                .any(|capture| capture.role == StructuralRole::Expression
+                    && capture.syntax == "assembly.directive_context"
+                    && &source[capture.start..capture.end] == "assume\tds:ROMDATA")
+        );
+        assert!(!captures.iter().any(|capture| matches!(
+            capture.role,
+            StructuralRole::Call
+                | StructuralRole::CallName
+                | StructuralRole::ScopedCall
+                | StructuralRole::Reference
+                | StructuralRole::Import
+        )));
+    }
+
+    #[test]
+    fn masm_attribute_storage_and_assume_nodes_keep_generic_physical_names() {
+        for newline in ["\n", "\r\n"] {
+            let source = [
+                "Renamed SEGMENT WORD PUBLIC USE16 'DATA' READONLY",
+                "Bytes DB 1, 2",
+                "Words DW ?, 7",
+                "Routine PROC FAR",
+                "ASSUME cs:Renamed, ds:NOTHING",
+                "mov ax, Words",
+                "Routine ENDP",
+                "Renamed ENDS",
+                "",
+            ]
+            .join(newline);
+            let (tree, captures) = extract(&source);
+            assert!(
+                !tree.root_node().has_error(),
+                "{}",
+                tree.root_node().to_sexp()
+            );
+            assert_eq!(
+                definitions(&source, &captures),
+                ["Renamed", "Bytes", "Words", "Routine"]
+            );
+            let contexts = captures
+                .iter()
+                .filter(|capture| capture.syntax == "assembly.directive_context")
+                .map(|capture| &source[capture.start..capture.end])
+                .collect::<Vec<_>>();
+            assert_eq!(contexts, ["ASSUME cs:Renamed, ds:NOTHING"]);
+        }
+    }
+
+    #[test]
+    fn masm_attribute_recovery_and_closer_mismatch_cannot_lend_child_owners() {
+        for source in [
+            "Area SEGMENT UNKNOWN\nItem DW ?\nArea ENDS\n",
+            "Area SEGMENT PUBLICextra\nItem DW ?\nArea ENDS\n",
+            "Area SEGMENT PUBLIC\nItem DW ?\nOther ENDS\n",
+            "Area SEGMENT PUBLIC\nItem DW ?\n",
+            "Area SEGMENT PUBLIC\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n",
+            "Area SEGMENT PUBLIC\nItem DWextra ?\nArea ENDS\n",
+        ] {
+            let (_, captures) = extract(source);
+            assert!(definitions(source, &captures).is_empty(), "{source}");
+            assert!(
+                captures
+                    .iter()
+                    .any(|capture| capture.syntax == "assembly.unsupported_owner"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn masm_keyword_prefixes_remain_instructions_without_segment_identity() {
+        let source = "Area SEGMENTPUBLIC\nmov ax, bx\nArea ENDS\n";
+        let (_, captures) = extract(source);
+        assert!(definitions(source, &captures).is_empty());
+        assert!(
+            !captures
+                .iter()
+                .any(|capture| capture.role == StructuralRole::Scope
+                    && capture.syntax == "assembly.segment")
+        );
     }
 
     #[test]
@@ -611,7 +843,7 @@ mod tests {
         let source = b"entry:\nnop\n";
         let tree = parser.parse(source, None).unwrap();
         let owner = tree.root_node().named_child(0).unwrap();
-        let mut cache = CaptureCache::new(0);
+        let mut cache = CaptureCache::new(0, true);
         let cancellation = Cancellation::new();
         assert!(
             !retain_capture(

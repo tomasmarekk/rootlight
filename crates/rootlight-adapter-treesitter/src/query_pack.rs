@@ -1509,8 +1509,10 @@ impl QueryPack {
         let mut scheme_captures = scheme::CaptureCache::new(limits.captures.min(limits.body_nodes))
             .with_complete_source(matches!(input.tree.included_ranges().as_slice(), [range]
                 if range.start_byte == 0 && range.end_byte >= input.source.len()));
-        let mut assembly_captures =
-            assembly::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut assembly_captures = assembly::CaptureCache::new(
+            limits.captures.min(limits.body_nodes),
+            complete_file_input,
+        );
         let mut glsl_captures = glsl::CaptureCache::new_with_source_frame(
             limits.captures.min(limits.body_nodes),
             matches!(input.tree.included_ranges().as_slice(), [range] if range.start_byte == 0 && range.end_byte >= input.source.len()),

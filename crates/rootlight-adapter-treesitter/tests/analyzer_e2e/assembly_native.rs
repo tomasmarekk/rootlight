@@ -215,6 +215,368 @@ fn assert_gap(
     );
 }
 
+fn output_selected(source: &str, spans: &[std::ops::Range<usize>]) -> AnalysisOutput {
+    let fixture = Fixture::new(ASSEMBLY, source.as_bytes());
+    let provider = Arc::new(provider());
+    let budget = limits();
+    let ranges = spans
+        .iter()
+        .map(|span| {
+            IncludedRange::new(
+                SourceSpan::new(
+                    fixture.source.span().file(),
+                    u64::try_from(span.start).unwrap(),
+                    u64::try_from(span.end).unwrap(),
+                )
+                .unwrap(),
+                language(ASSEMBLY),
+            )
+        })
+        .collect();
+    let input = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(ASSEMBLY),
+        EncodingId::utf8(),
+        ranges,
+        AnalysisTier::TierD,
+        build_context(),
+        &budget,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    let result = analyze(
+        &analyzer(&provider, ASSEMBLY),
+        &input,
+        &ExtensionSupport::default(),
+    );
+    assert_sources(&result, source);
+    result
+}
+
+#[test]
+fn assembly_selected_body_refuses_owner_identity_hidden_by_invalid_context() {
+    let source = "Area SEGMENT PUBLIC\nItem DW ?\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n";
+    assert_eq!(&source[20..30], "Item DW ?\n");
+    let result = output_selected(source, std::slice::from_ref(&(20..30)));
+    assert_absent(&result, &["Area", "Item", "Run"]);
+    assert!(
+        !result
+            .document()
+            .occurrences
+            .iter()
+            .any(|occurrence| occurrence.role == OccurrenceRole::Definition)
+    );
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Entities,
+        "assembly-written-owner-analysis-unavailable",
+        "Item DW ?",
+    );
+}
+
+#[test]
+fn assembly_split_ranges_keep_comments_and_gaps_without_owner_certification() {
+    let source = "Area SEGMENT PUBLIC\nItem DW ?\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n; visible\n";
+    let begin = source.find("ASSUME").unwrap();
+    let end = begin + "ASSUME cs Area\n".len();
+    let result = output_selected(source, &[0..begin, end..source.len()]);
+    assert_absent(&result, &["Area", "Item", "Run"]);
+    assert!(
+        !result
+            .document()
+            .occurrences
+            .iter()
+            .any(|occurrence| occurrence.role == OccurrenceRole::Definition)
+    );
+    assert!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .any(
+                |occurrence| occurrence.role == OccurrenceRole::Documentation
+                    && text(source, &occurrence.source) == "; visible"
+            )
+    );
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Entities,
+        "assembly-written-owner-analysis-unavailable",
+        "Item DW ?",
+    );
+}
+
+#[test]
+fn assembly_complete_range_preserves_written_owners_and_physical_context_refusal() {
+    let source = "; prefix\nArea SEGMENT PUBLIC\nItem DW ?\nArea ENDS\n";
+    for spans in [Vec::new(), std::iter::once(0..source.len()).collect()] {
+        let result = output_selected(source, &spans);
+        assert_definition(&result, source, "Area", EntityKind::Module);
+        assert_definition(&result, source, "Item", EntityKind::Variable);
+        assert_owner(&result, "Area", ASSEMBLY.path);
+        assert_owner(&result, "Item", "Area");
+    }
+    let invalid = "Area SEGMENT PUBLIC\nItem DW ?\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n";
+    for spans in [Vec::new(), std::iter::once(0..invalid.len()).collect()] {
+        let result = output_selected(invalid, &spans);
+        assert_absent(&result, &["Area", "Item", "Run"]);
+        assert!(
+            !result
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::Definition)
+        );
+    }
+}
+
+#[test]
+fn assembly_complete_original_masm_attributes_keep_five_exact_definitions_and_contains() {
+    let source = include_str!("../fixtures/assembly/reboot.asm");
+    assert_eq!(source.len(), 504);
+    assert!(source.as_bytes().ends_with(b"\x1a"));
+    assert_eq!(
+        source
+            .as_bytes()
+            .windows(2)
+            .filter(|bytes| *bytes == b"\r\n")
+            .count(),
+        42
+    );
+    let result = output(source);
+    for (name, kind, start, end, parent) in [
+        ("ROMDATA", EntityKind::Module, 84, 91, ASSEMBLY.path),
+        ("BootType", EntityKind::Variable, 120, 128, "ROMDATA"),
+        ("ROMBIOS", EntityKind::Module, 151, 158, ASSEMBLY.path),
+        ("_text", EntityKind::Module, 217, 222, ASSEMBLY.path),
+        ("_reboot", EntityKind::Function, 348, 355, "_text"),
+    ] {
+        assert_definition(&result, source, name, kind);
+        assert_owner(&result, name, parent);
+        let id = named(&result, name).id;
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: id }
+            })
+            .unwrap();
+        assert_eq!(
+            (
+                definition.source.span().start_byte(),
+                definition.source.span().end_byte()
+            ),
+            (start, end)
+        );
+        let parent = named(&result, parent).id;
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|relation| relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(id)
+                    && relation.object == RelationEndpoint::Entity(parent))
+        );
+    }
+    assert_eq!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Definition)
+            .count(),
+        5
+    );
+    assert!(
+        !result
+            .document()
+            .occurrences
+            .iter()
+            .any(|occurrence| occurrence.role == OccurrenceRole::Definition
+                && occurrence.source.span().start_byte() == 425
+                && occurrence.source.span().end_byte() == 433)
+    );
+    assert_absent(&result, &["POR", "ax", "ds", "cs", "nothing", "mov"]);
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Entities,
+        "assembly-directive-owner-analysis-unavailable",
+        "assume\tds:ROMDATA",
+    );
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Occurrences,
+        "assembly-source-use-analysis-unavailable",
+        "mov\tBootType,1234h",
+    );
+}
+
+#[test]
+fn assembly_complete_original_artifact_rebinds_generation_and_refuses_changed_bytes() {
+    let source = include_str!("../fixtures/assembly/reboot.asm");
+    let provider = Arc::new(provider());
+    let frontend = analyzer(&provider, ASSEMBLY);
+    let fixture = Fixture::new(ASSEMBLY, source.as_bytes());
+    let budget = limits();
+    let (initial, artifact) = frontend
+        .analyze_and_capture(
+            &request(&fixture.snapshot, &fixture.source, ASSEMBLY, &budget),
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let assert_rombios = |result: &AnalysisOutput| {
+        assert_definition(result, source, "ROMBIOS", EntityKind::Module);
+        assert_owner(result, "ROMBIOS", ASSEMBLY.path);
+        let id = named(result, "ROMBIOS").id;
+        let definition = result
+            .document()
+            .occurrences
+            .iter()
+            .find(|occurrence| {
+                occurrence.role == OccurrenceRole::Definition
+                    && occurrence.target == OccurrenceTarget::Resolved { symbol: id }
+            })
+            .unwrap();
+        assert_eq!(
+            (
+                definition.source.span().start_byte(),
+                definition.source.span().end_byte()
+            ),
+            (151, 158)
+        );
+    };
+    assert_sources(&initial, source);
+    assert_rombios(&initial);
+    assert_eq!(
+        initial
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Definition)
+            .count(),
+        5
+    );
+    let successor = fixture.next_generation();
+    let successor_request = request(&successor.snapshot, &successor.source, ASSEMBLY, &budget);
+    let reused = frontend
+        .analyze_from_artifact(
+            &successor_request,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let clean = analyze(&frontend, &successor_request, &ExtensionSupport::default());
+    assert_sources(&reused, source);
+    assert_sources(&clean, source);
+    assert_rombios(&reused);
+    assert_rombios(&clean);
+    assert_eq!(
+        reused
+            .document()
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Definition)
+            .count(),
+        5
+    );
+    assert_eq!(reused.document(), clean.document());
+    assert_eq!(reused.report(), clean.report());
+    assert_ne!(initial.document().generation, reused.document().generation);
+    let edited = source.replace("mov\tBootType,1234h", "mov\tBootType,1235h");
+    assert_ne!(source, edited);
+    let changed = fixture.rewrite(edited.as_bytes());
+    assert!(matches!(
+        frontend.analyze_from_artifact(
+            &request(&changed.snapshot, &changed.source, ASSEMBLY, &budget),
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        ),
+        Err(AdapterError::ProviderFailed { code })
+            if code.as_str() == "treesitter-structural-artifact-mismatch"
+    ));
+}
+
+#[test]
+fn assembly_generic_masm_attributes_preserve_storage_owners_without_bindings() {
+    for newline in ["\n", "\r\n"] {
+        let source = [
+            "Renamed SEGMENT WORD PUBLIC USE16 'DATA' READONLY",
+            "Bytes DB 1, 2",
+            "Words DW ?, 7",
+            "Routine PROC FAR",
+            "ASSUME cs:Renamed, ds:NOTHING",
+            "mov ax, Words",
+            "Routine ENDP",
+            "Renamed ENDS",
+            "",
+        ]
+        .join(newline);
+        let result = output(&source);
+        for (name, kind) in [
+            ("Renamed", EntityKind::Module),
+            ("Bytes", EntityKind::Variable),
+            ("Words", EntityKind::Variable),
+            ("Routine", EntityKind::Function),
+        ] {
+            assert_definition(&result, &source, name, kind);
+        }
+        for child in ["Bytes", "Words", "Routine"] {
+            assert_owner(&result, child, "Renamed");
+        }
+        assert_gap(
+            &result,
+            &source,
+            FactDomain::Entities,
+            "assembly-directive-owner-analysis-unavailable",
+            "ASSUME cs:Renamed, ds:NOTHING",
+        );
+        assert_absent(&result, &["cs", "ds", "NOTHING", "ax", "mov", "ASSUME"]);
+    }
+}
+
+#[test]
+fn assembly_unsupported_masm_header_body_and_closers_refuse_complete_identity_groups() {
+    for source in [
+        "Area SEGMENT UNKNOWN\nItem DW ?\nArea ENDS\n",
+        "Area SEGMENT PUBLICextra\nItem DW ?\nArea ENDS\n",
+        "Area SEGMENT PUBLIC\nItem DW ?\nOther ENDS\n",
+        "Area SEGMENT PUBLIC\nItem DW ?\n",
+        "Area SEGMENT PUBLIC\nRun PROC\nASSUME cs Area\nRun ENDP\nArea ENDS\n",
+        "Area SEGMENT PUBLIC\nItem DWextra ?\nArea ENDS\n",
+    ] {
+        let result = output(source);
+        assert_absent(&result, &["Area", "Item", "Run", "Other"]);
+        assert_eq!(result.document().entities.len(), 1, "{source}");
+        assert!(
+            !result
+                .document()
+                .occurrences
+                .iter()
+                .any(|occurrence| occurrence.role == OccurrenceRole::Definition)
+        );
+        assert_gap(
+            &result,
+            source,
+            FactDomain::Entities,
+            "assembly-written-owner-analysis-unavailable",
+            source.lines().next().unwrap(),
+        );
+    }
+}
+
 #[test]
 fn assembly_eight_written_owners_keep_names_kinds_scopes_and_headers() {
     let result = output(WRITTEN_OWNERS);

@@ -2906,7 +2906,7 @@ mod tests {
         assert!(grammar.crates_io_checksum.is_none());
         assert_eq!(grammar.abi, 14);
         assert_eq!(grammar.scanner_sha256, "none");
-        assert_eq!(sources.files.len(), 89);
+        assert_eq!(sources.files.len(), 90);
         assert_eq!(sources.parser_path.as_deref(), Some("src/parser.c"));
         assert_eq!(sources.license_path.as_deref(), Some("notices/LICENSE"));
         assert_eq!(
@@ -2935,7 +2935,7 @@ mod tests {
                 payload["bytes"]
             );
         }
-        assert_eq!(payload_paths.len(), 87);
+        assert_eq!(payload_paths.len(), 88);
         payload_paths.extend(["SOURCE-INVENTORY.json", "SOURCE-PROVENANCE.json"]);
         assert_eq!(
             payload_paths,
@@ -2986,8 +2986,8 @@ mod tests {
         assert_eq!(provenance["license"], "MIT");
         let generation = &provenance["local_generation"];
         assert_eq!(generation["abi"], 14);
-        assert_eq!(generation["state_count"], 179);
-        assert_eq!(generation["symbol_count"], 84);
+        assert_eq!(generation["state_count"], 208);
+        assert_eq!(generation["symbol_count"], 96);
         assert_eq!(generation["external_token_count"], 0);
         let outputs = generation["outputs"].as_object().unwrap();
         assert_eq!(outputs.len(), 6);

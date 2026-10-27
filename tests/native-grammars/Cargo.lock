@@ -142,10 +142,12 @@ name = "rootlight-native-grammar-tests"
 version = "0.0.0"
 dependencies = [
  "dekobon-tree-sitter-groovy",
+ "regex",
  "rnix",
  "serde_json",
  "tree-sitter",
  "tree-sitter-ada",
+ "tree-sitter-asm",
  "tree-sitter-astro-next",
  "tree-sitter-bash",
  "tree-sitter-chapel",
@@ -322,6 +324,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-ada"
 version = "0.9.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-asm"
+version = "0.24.0"
 dependencies = [
  "cc",
  "tree-sitter-language",

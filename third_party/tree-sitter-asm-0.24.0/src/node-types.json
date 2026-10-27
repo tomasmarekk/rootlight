@@ -260,6 +260,21 @@
     }
   },
   {
+    "type": "masm_assume_statement",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "ident",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "masm_body",
     "named": true,
     "fields": {},
@@ -292,6 +307,10 @@
           "named": true
         },
         {
+          "type": "masm_assume_statement",
+          "named": true
+        },
+        {
           "type": "meta",
           "named": true
         },
@@ -312,7 +331,7 @@
     "fields": {},
     "children": {
       "multiple": true,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "float",
@@ -479,6 +498,10 @@
           "named": true
         },
         {
+          "type": "masm_assume_statement",
+          "named": true
+        },
+        {
           "type": "meta",
           "named": true
         },
@@ -584,7 +607,33 @@
   {
     "type": "segment_header",
     "named": true,
-    "fields": {}
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "ident",
+          "named": true
+        },
+        {
+          "type": "int",
+          "named": true
+        },
+        {
+          "type": "masm_string",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "tc_infix",
+          "named": true
+        }
+      ]
+    }
   },
   {
     "type": "tc_infix",
@@ -724,6 +773,10 @@
   },
   {
     "type": ":",
+    "named": false
+  },
+  {
+    "type": "?",
     "named": false
   },
   {
