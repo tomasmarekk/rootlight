@@ -6449,6 +6449,8 @@ fn recovery_sidecar_memory_bytes(
     )
 }
 
+const RECOVERY_SIDECAR_MEMORY_MULTIPLIER: u64 = 8;
+
 fn recovery_sidecar_memory_bytes_from_parts(
     incremental_state: Option<DurableSidecarDescriptor>,
     source_file_catalog: Option<DurableSidecarDescriptor>,
@@ -6488,7 +6490,7 @@ fn recovery_sidecar_memory_bytes_from_parts(
         .checked_add(source_authority.map_or(0, |descriptor| descriptor.bytes))
         .and_then(|bytes| bytes.checked_add(source_catalog))
         .and_then(|bytes| bytes.checked_add(packed_index))
-        .and_then(|bytes| bytes.checked_mul(8))
+        .and_then(|bytes| bytes.checked_mul(RECOVERY_SIDECAR_MEMORY_MULTIPLIER))
         .and_then(|bytes| bytes.checked_add(file_entries))
         .and_then(|bytes| bytes.checked_add(super::GENERATION_MEMORY_FIXED_OVERHEAD_BYTES))
         .ok_or(FirstSliceError::Limits)
@@ -7347,21 +7349,66 @@ pub(super) fn oracle_restore_memory_bytes(
     has_source_catalog: bool,
     staging_bytes: u64,
 ) -> Result<u64, FirstSliceError> {
+    Ok(oracle_restore_memory_breakdown(plan, has_source_catalog, staging_bytes)?.total_bytes)
+}
+
+/// Scalar components of the existing logical restore reservation, not heap or RSS.
+#[derive(Debug, Serialize)]
+pub(super) struct OracleRestoreMemoryBreakdown {
+    pub(super) record_workspace_bytes: u64,
+    pub(super) maximum_payload_bytes: u64,
+    pub(super) transient_decode_bytes: u64,
+    pub(super) materialization_bytes: u64,
+    pub(super) physical_rows: u64,
+    pub(super) index_build_bytes_per_row: u64,
+    pub(super) index_build_bytes: u64,
+    pub(super) text_bytes: u64,
+    pub(super) text_copies: u64,
+    pub(super) text_memory_bytes: u64,
+    pub(super) sidecar_staging_bytes: u64,
+    pub(super) total_bytes: u64,
+}
+
+pub(super) fn oracle_restore_memory_breakdown(
+    plan: OracleReadMemoryPlan,
+    has_source_catalog: bool,
+    staging_bytes: u64,
+) -> Result<OracleRestoreMemoryBreakdown, FirstSliceError> {
     let text_copies = if has_source_catalog { 14 } else { 6 };
     let index_build_bytes_per_row = u64::try_from(
         4 * std::mem::size_of::<(rootlight_ids::SymbolId, usize)>()
             + 2 * std::mem::size_of::<usize>(),
     )
     .map_err(|_| FirstSliceError::Limits)?;
-    plan.materialization_bytes()
-        .checked_add(
-            plan.physical_rows()
-                .checked_mul(index_build_bytes_per_row)
-                .ok_or(FirstSliceError::Limits)?,
-        )
-        .and_then(|bytes| bytes.checked_add(plan.stats().text_bytes().checked_mul(text_copies)?))
+    let index_build_bytes = plan
+        .physical_rows()
+        .checked_mul(index_build_bytes_per_row)
+        .ok_or(FirstSliceError::Limits)?;
+    let text_memory_bytes = plan
+        .stats()
+        .text_bytes()
+        .checked_mul(text_copies)
+        .ok_or(FirstSliceError::Limits)?;
+    let total_bytes = plan
+        .materialization_bytes()
+        .checked_add(index_build_bytes)
+        .and_then(|bytes| bytes.checked_add(text_memory_bytes))
         .and_then(|bytes| bytes.checked_add(staging_bytes))
-        .ok_or(FirstSliceError::Limits)
+        .ok_or(FirstSliceError::Limits)?;
+    Ok(OracleRestoreMemoryBreakdown {
+        record_workspace_bytes: plan.record_workspace_bytes(),
+        maximum_payload_bytes: plan.maximum_payload_bytes(),
+        transient_decode_bytes: plan.transient_decode_bytes(),
+        materialization_bytes: plan.materialization_bytes(),
+        physical_rows: plan.physical_rows(),
+        index_build_bytes_per_row,
+        index_build_bytes,
+        text_bytes: plan.stats().text_bytes(),
+        text_copies,
+        text_memory_bytes,
+        sidecar_staging_bytes: staging_bytes,
+        total_bytes,
+    })
 }
 
 pub(super) fn oracle_restore_memory_limit() -> u64 {

@@ -410,74 +410,154 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
     let (_storage, root, paths) = fixture();
     let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &cancellation).unwrap();
     OBSERVED.with(|values| values.borrow_mut().clear());
-    let first = durable::with_restore_test_ceiling(ceiling, || {
-        service.index_repository(root.path(), &cancellation)
-    })
-    .unwrap();
-    assert_current_restore_quotes(&service, first.generation, "first-index", ceiling);
-    assert_selective_facts(&service, first.generation, "first-index", observed, ceiling);
-    let original_note = assert_sources(&service, first.generation, root.path());
-    let noop = durable::with_restore_test_ceiling(ceiling, || {
-        service.index_repository(root.path(), &cancellation)
-    })
-    .unwrap();
-    assert_eq!(noop, first);
+    let ((first, refused, refusal_count), profile) = capture_first_slice_analysis_profile(|| {
+        let first = durable::with_restore_test_ceiling(ceiling, || {
+            service.index_repository(root.path(), &cancellation)
+        })
+        .unwrap();
+        let refused = OBSERVED.with(|values| {
+            values
+                .borrow()
+                .iter()
+                .copied()
+                .filter(|(_, bytes)| *bytes > ceiling)
+                .collect::<Vec<_>>()
+        });
+        let first_refusal_count = refused.len();
+        assert_current_restore_quotes(&service, first.generation, "first-index", ceiling);
+        assert_selective_facts(&service, first.generation, "first-index", observed, ceiling);
+        let original_note = assert_sources(&service, first.generation, root.path());
+        let noop = durable::with_restore_test_ceiling(ceiling, || {
+            service.index_repository(root.path(), &cancellation)
+        })
+        .unwrap();
+        assert_eq!(noop, first);
+        assert_eq!(
+            assert_note_metadata(&service, noop.generation),
+            original_note
+        );
+        fs::write(
+            root.path().join("a.cs"),
+            "// written-lifecycle\nclass First { public int Keep() { return 3; } }\n",
+        )
+        .unwrap();
+        OBSERVED.with(|values| values.borrow_mut().clear());
+        let changed = durable::with_restore_test_ceiling(ceiling, || {
+            service.index_repository(root.path(), &cancellation)
+        })
+        .unwrap();
+        let refusal_count = first_refusal_count
+            + OBSERVED.with(|values| {
+                values
+                    .borrow()
+                    .iter()
+                    .filter(|(_, bytes)| *bytes > ceiling)
+                    .count()
+            });
+        assert_ne!(changed.generation, first.generation);
+        assert_eq!(changed.parent, Some(first.generation));
+        assert_current_restore_quotes(&service, changed.generation, "changed-index", ceiling);
+        assert_selective_facts(
+            &service,
+            changed.generation,
+            "changed-index",
+            observed,
+            ceiling,
+        );
+        let changed_note = assert_sources(&service, changed.generation, root.path());
+        drop(service);
+        let reopened = durable::with_restore_test_ceiling(ceiling, || {
+            FirstSliceService::new_durable(4, paths.state_dir(), &cancellation)
+        })
+        .unwrap();
+        assert_eq!(
+            reopened.active_generation_for(first.repository),
+            Some(changed.generation)
+        );
+        assert_selective_facts(
+            &reopened,
+            first.generation,
+            "reopened-first",
+            observed,
+            ceiling,
+        );
+        assert_selective_facts(
+            &reopened,
+            changed.generation,
+            "reopened-changed",
+            observed,
+            ceiling,
+        );
+        assert_eq!(
+            assert_note_metadata(&reopened, first.generation),
+            original_note
+        );
+        assert_eq!(
+            assert_sources(&reopened, changed.generation, root.path()),
+            changed_note
+        );
+        (first, refused, refusal_count)
+    });
+    let observation = profile.first_oracle_restore_refusal.as_ref().unwrap();
+    assert_eq!(observation.repository, first.repository);
+    assert_eq!(observation.generation, first.generation);
     assert_eq!(
-        assert_note_metadata(&service, noop.generation),
-        original_note
+        (observation.file, observation.memory.total_bytes),
+        refused[0]
     );
-    fs::write(
-        root.path().join("a.cs"),
-        "// written-lifecycle\nclass First { public int Keep() { return 3; } }\n",
-    )
-    .unwrap();
-    OBSERVED.with(|values| values.borrow_mut().clear());
-    let changed = durable::with_restore_test_ceiling(ceiling, || {
-        service.index_repository(root.path(), &cancellation)
-    })
-    .unwrap();
-    assert_ne!(changed.generation, first.generation);
-    assert_eq!(changed.parent, Some(first.generation));
-    assert_current_restore_quotes(&service, changed.generation, "changed-index", ceiling);
-    assert_selective_facts(
-        &service,
-        changed.generation,
-        "changed-index",
-        observed,
-        ceiling,
-    );
-    let changed_note = assert_sources(&service, changed.generation, root.path());
-    drop(service);
-    let reopened = durable::with_restore_test_ceiling(ceiling, || {
-        FirstSliceService::new_durable(4, paths.state_dir(), &cancellation)
-    })
-    .unwrap();
+    assert_eq!(observation.limit, ceiling);
     assert_eq!(
-        reopened.active_generation_for(first.repository),
-        Some(changed.generation)
-    );
-    assert_selective_facts(
-        &reopened,
-        first.generation,
-        "reopened-first",
-        observed,
-        ceiling,
-    );
-    assert_selective_facts(
-        &reopened,
-        changed.generation,
-        "reopened-changed",
-        observed,
-        ceiling,
+        observation.scope,
+        "prospective_cumulative_restore_model_not_heap_or_rss"
     );
     assert_eq!(
-        assert_note_metadata(&reopened, first.generation),
-        original_note
+        observation.sidecar_input_scope,
+        "reserved_envelope_not_actual_written_descriptors"
+    );
+    assert!(observation.memory.total_bytes > ceiling);
+    assert!(profile.counts_complete);
+    assert!(
+        refusal_count > 1,
+        "both real indexing operations refuse a candidate"
     );
     assert_eq!(
-        assert_sources(&reopened, changed.generation, root.path()),
-        changed_note
+        profile.later_oracle_restore_refusals,
+        u64::try_from(refusal_count - 1).unwrap()
     );
+    let memory = &observation.memory;
+    assert_eq!(
+        memory.materialization_bytes,
+        memory.record_workspace_bytes + memory.transient_decode_bytes
+    );
+    assert_eq!(
+        memory.index_build_bytes,
+        memory.physical_rows * memory.index_build_bytes_per_row
+    );
+    assert_eq!(
+        memory.text_memory_bytes,
+        memory.text_bytes * memory.text_copies
+    );
+    assert_eq!(memory.text_copies, 6);
+    assert_eq!(
+        memory.total_bytes,
+        memory.materialization_bytes
+            + memory.index_build_bytes
+            + memory.text_memory_bytes
+            + memory.sidecar_staging_bytes
+    );
+    let sidecars = serde_json::to_value(&observation.reserved_sidecars).unwrap();
+    assert_eq!(sidecars["incremental_encoded_bytes"], 256_u64 * 1024 * 1024);
+    assert_eq!(
+        memory.sidecar_staging_bytes,
+        (sidecars["incremental_encoded_bytes"].as_u64().unwrap()
+            + sidecars["authority_encoded_bytes"].as_u64().unwrap()
+            + sidecars["packed_index_encoded_bytes"].as_u64().unwrap())
+            * sidecars["memory_multiplier"].as_u64().unwrap()
+            + sidecars["fixed_overhead_bytes"].as_u64().unwrap()
+    );
+    let encoded = serde_json::to_string(&profile).unwrap();
+    assert!(!encoded.contains("written-lifecycle"));
+    assert!(!encoded.contains("b.cs"));
 }
 
 #[test]

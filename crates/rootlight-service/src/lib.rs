@@ -268,7 +268,7 @@ const MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
 const DEFAULT_GENERATION_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const DISCOVERY_PROGRESS_INTERVAL_FILES: u64 = 64;
 const MAX_FIRST_SLICE_PLANNING_DEPENDENCY_KEYS: usize = 32;
-/// Source-free, opt-in wall-time observations from one synchronous developer run.
+/// Source-free, opt-in development observations from one synchronous run.
 ///
 /// Phases are inclusive scopes, not exclusive CPU time or native parser call
 /// counts. Missing records and allocation/accounting loss remain explicit.
@@ -294,6 +294,8 @@ pub struct FirstSliceAnalysisProfile {
     terminal_file_failure: Option<AnalysisProfileFileFailure>,
     last_fresh_projection_admission: Option<projection_profile::Observation>,
     last_fresh_projection_records: Option<projection_profile::records::Observation>,
+    first_oracle_restore_refusal: Option<oracle_restore_preservation::RefusalObservation>,
+    later_oracle_restore_refusals: u64,
     append: AnalysisProfileAppend,
     append_scope: &'static str,
     phases: Vec<AnalysisProfileEvent>,
@@ -331,6 +333,8 @@ impl Default for FirstSliceAnalysisProfile {
             terminal_file_failure: None,
             last_fresh_projection_admission: None,
             last_fresh_projection_records: None,
+            first_oracle_restore_refusal: None,
+            later_oracle_restore_refusals: 0,
             append: AnalysisProfileAppend::default(),
             append_scope: "inclusive_append_substages_nested_search_and_classification_decoder_times_overlap_decoder_counters_cover_classification_calls_only",
             phases: Vec::new(),

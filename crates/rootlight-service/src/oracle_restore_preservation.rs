@@ -11,6 +11,18 @@ use super::*;
 
 const EXPLANATION_BYTES: usize = 109;
 
+#[derive(Debug, Serialize)]
+pub(super) struct RefusalObservation {
+    scope: &'static str,
+    sidecar_input_scope: &'static str,
+    repository: RepositoryId,
+    generation: GenerationId,
+    file: FileId,
+    memory: durable::OracleRestoreMemoryBreakdown,
+    reserved_sidecars: durable::restore_envelope::ReservedSidecarInputs,
+    limit: u64,
+}
+
 pub(super) struct FileRestoreCapacity {
     file: FileId,
     observed: u64,
@@ -624,15 +636,38 @@ impl Reservation {
                 self.workspace.admit(bytes, admission)
             })
             .map_err(|error| catalog(error, cancellation))?;
-        let observed = self.envelope.observed(
+        let memory = self.envelope.breakdown(
             preview
                 .read_memory_plan(context)
                 .map_err(|error| map_catalog_error(&error, cancellation))?,
         )?;
+        let observed = memory.total_bytes;
         drop(preview);
         #[cfg(test)]
         tests::observe(file, observed);
-        Ok(FileRestoreCapacity::from_observed(file, observed))
+        let refusal = FileRestoreCapacity::from_observed(file, observed);
+        if let Some(refusal) = &refusal {
+            with_analysis_profile(|profile| {
+                if profile.first_oracle_restore_refusal.is_none() {
+                    profile.first_oracle_restore_refusal = Some(RefusalObservation {
+                        scope: "prospective_cumulative_restore_model_not_heap_or_rss",
+                        sidecar_input_scope: "reserved_envelope_not_actual_written_descriptors",
+                        repository: target.repository,
+                        generation: target.generation,
+                        file,
+                        memory,
+                        reserved_sidecars: self.envelope.reserved_sidecar_inputs(),
+                        limit: refusal.limit,
+                    });
+                } else {
+                    increment_profile_count(
+                        &mut profile.later_oracle_restore_refusals,
+                        &mut profile.counts_complete,
+                    );
+                }
+            });
+        }
+        Ok(refusal)
     }
 
     pub(super) fn preview(

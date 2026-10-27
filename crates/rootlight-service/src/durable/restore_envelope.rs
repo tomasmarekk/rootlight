@@ -22,6 +22,15 @@ pub(crate) struct Envelope {
     payload_bytes: u64,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct ReservedSidecarInputs {
+    incremental_encoded_bytes: u64,
+    authority_encoded_bytes: u64,
+    packed_index_encoded_bytes: u64,
+    memory_multiplier: u64,
+    fixed_overhead_bytes: u64,
+}
+
 pub(super) struct Counter<'a> {
     pub(super) bytes: u64,
     cancellation: &'a Cancellation,
@@ -231,7 +240,24 @@ impl Envelope {
         &self,
         plan: rootlight_catalog::OracleReadMemoryPlan,
     ) -> Result<u64, FirstSliceError> {
-        oracle_restore_memory_bytes(plan, false, self.restore_bytes()?)
+        Ok(self.breakdown(plan)?.total_bytes)
+    }
+
+    pub(crate) fn breakdown(
+        &self,
+        plan: rootlight_catalog::OracleReadMemoryPlan,
+    ) -> Result<OracleRestoreMemoryBreakdown, FirstSliceError> {
+        oracle_restore_memory_breakdown(plan, false, self.restore_bytes()?)
+    }
+
+    pub(crate) fn reserved_sidecar_inputs(&self) -> ReservedSidecarInputs {
+        ReservedSidecarInputs {
+            incremental_encoded_bytes: MAX_INCREMENTAL_STATE_BYTES,
+            authority_encoded_bytes: self.authority,
+            packed_index_encoded_bytes: self.packed_index,
+            memory_multiplier: RECOVERY_SIDECAR_MEMORY_MULTIPLIER,
+            fixed_overhead_bytes: crate::GENERATION_MEMORY_FIXED_OVERHEAD_BYTES,
+        }
     }
 }
 
