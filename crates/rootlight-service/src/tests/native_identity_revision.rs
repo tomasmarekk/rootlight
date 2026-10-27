@@ -939,7 +939,7 @@ fn go_function_value_references_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -957,7 +957,7 @@ fn complete_native_query_captures_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -989,7 +989,7 @@ fn written_native_semantics_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
@@ -1007,9 +1007,9 @@ fn typescript_const_proofs_invalidate_preceding_parser_and_resolver_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1030,9 +1030,9 @@ fn bash_written_wrapper_proofs_invalidate_preceding_parser_and_resolver_identity
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1053,9 +1053,9 @@ fn eiffel_formal_receiver_reads_invalidate_preceding_parser_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
 }
 
@@ -1072,9 +1072,9 @@ fn cuda_native_proofs_invalidate_preceding_parser_and_resolver_identity() {
     .unwrap();
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(first_slice_parser_provider_hash().unwrap(), previous);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1097,9 +1097,9 @@ fn c_local_address_proofs_invalidate_immediate_parser_and_resolver_identity() {
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1139,9 +1139,9 @@ fn python_module_main_references_invalidate_immediate_parser_and_resolver_identi
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1181,13 +1181,13 @@ fn php_ordinary_source_proofs_invalidate_immediate_parser_and_resolver_identity(
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1227,13 +1227,13 @@ fn javascript_written_bindings_invalidate_immediate_parser_and_resolver_identity
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1273,13 +1273,13 @@ fn javascript_default_class_export_proofs_invalidate_immediate_parser_and_resolv
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1319,13 +1319,13 @@ fn rust_struct_member_ownership_invalidates_immediate_native_and_deep_contexts()
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1399,13 +1399,13 @@ fn ruby_written_bindings_invalidate_immediate_parser_and_resolver_identity() {
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1445,13 +1445,13 @@ fn bash_module_references_invalidate_immediate_parser_and_resolver_identity() {
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1491,13 +1491,13 @@ fn html_closing_tag_references_invalidate_immediate_parser_and_resolver_identity
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),
@@ -1537,13 +1537,13 @@ fn assembly_written_owners_invalidate_immediate_parser_and_resolver_identity() {
     assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/4");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
-        b"rootlight.first-slice.project-provider/30"
+        b"rootlight.first-slice.project-provider/31"
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/344"
+        b"rootlight.first-slice.treesitter-structural/345"
     );
-    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/154");
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/155");
     assert_ne!(parser, previous_parser);
     assert_ne!(
         content_hash(RESOLVER_BINARY_SEED),

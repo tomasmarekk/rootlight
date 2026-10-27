@@ -56,6 +56,13 @@ pub enum NativeScannerRefusalDetails {
     },
     /// Complete Pug state or indentation width exceeds its native format.
     PugStateCapacity,
+    /// Actual accepted stateless Liquid scanner work; total demand remains unknown.
+    LiquidExternalWork {
+        /// Accepted external-scanner logical steps.
+        consumed: u64,
+        /// Finite invocation credit.
+        limit: u64,
+    },
     /// Actual accepted external steps; the refused next step is not counted.
     PugExternalWork {
         /// Accepted native external-scanner logical steps.
@@ -117,6 +124,9 @@ impl NativeScannerRefusalDetails {
             Self::WolframExternalWork { consumed, limit } => format!(
                 "{message}; origin wolfram-external-scanner; unit accepted-external-scanner-logical-steps; limit {limit}; consumed {consumed}; demanded unknown; remaining-demand unknown; next charge declined"
             ),
+            Self::LiquidExternalWork { consumed, limit } => format!(
+                "{message}; origin liquid-external-scanner; unit accepted-external-scanner-logical-steps; limit {limit}; consumed {consumed}; demanded unknown; next charge declined"
+            ),
             Self::PugStateCapacity => format!(
                 "{message}; origin pug-state-or-column; unit complete-native-state; limit state-bytes-1024-or-column-65535; observed unknown"
             ),
@@ -157,6 +167,7 @@ impl NativeScannerRefusalDetails {
             Self::WolframCommentDepth => "wolfram-scanner-capacity",
             Self::WolframExternalWork { .. } => "wolfram-scanner-work-limit",
             Self::PugStateCapacity => "pug-scanner-capacity",
+            Self::LiquidExternalWork { .. } => "liquid-scanner-work-limit",
             Self::PugExternalWork { .. } => "pug-scanner-work-limit",
             Self::CoffeescriptStateCapacity => "coffeescript-scanner-capacity",
             Self::CoffeescriptNulSemantics => "coffeescript-scanner-nul-unavailable",
@@ -200,7 +211,7 @@ impl NativeScannerRefusal {
     #[must_use]
     pub fn recognizes_error(error: &AdapterError) -> bool {
         matches!(error, AdapterError::ProviderFailed { code } if matches!(
-            code.as_str(), "cuda-scanner-capacity" | "cuda-scanner-work-limit" | "idris-scanner-capacity" | "idris-scanner-work-limit" | "lean-scanner-capacity" | "lean-scanner-work-limit" | "sed-scanner-capacity" | "sed-scanner-work-limit" | "wolfram-scanner-capacity" | "wolfram-scanner-work-limit" | "pug-scanner-capacity" | "pug-scanner-work-limit" | "dockerfile-scanner-capacity" | "dockerfile-scanner-unsupported-marker"
+            code.as_str(), "liquid-scanner-work-limit" | "cuda-scanner-capacity" | "cuda-scanner-work-limit" | "idris-scanner-capacity" | "idris-scanner-work-limit" | "lean-scanner-capacity" | "lean-scanner-work-limit" | "sed-scanner-capacity" | "sed-scanner-work-limit" | "wolfram-scanner-capacity" | "wolfram-scanner-work-limit" | "pug-scanner-capacity" | "pug-scanner-work-limit" | "dockerfile-scanner-capacity" | "dockerfile-scanner-unsupported-marker"
                 | "coffeescript-scanner-capacity" | "coffeescript-scanner-nul-unavailable"
                 | "coffeescript-scanner-indentation-unavailable" | "coffeescript-scanner-work-limit"))
     }
@@ -280,6 +291,7 @@ impl TreeSitterProvider {
                 | "dockerfile"
                 | "coffeescript"
                 | "pug"
+                | "liquid"
                 | "wolfram"
                 | "sed"
                 | "idris"

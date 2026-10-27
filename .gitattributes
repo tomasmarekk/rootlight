@@ -382,3 +382,9 @@ third_party/tree-sitter-idris-0.0.1/** -text
 # Preserve complete licensed Ruby originals and physical line endings.
 /crates/rootlight-adapter-treesitter/tests/fixtures/ruby_formal_receivers/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /crates/rootlight-adapter-treesitter/tests/fixtures/ruby_lexical_receivers/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Liquid retained source bytes and inert upstream binary preserve exact provenance.
+/third_party/tree-sitter-liquid-0.0.1/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/third_party/tree-sitter-liquid-0.0.1/upstream/prebuilds/** binary
+/source-inputs/git/tree-sitter-liquid-e45dbac8c5fa95b1f0e00e7e0c04bc8855823391.tar.gz binary
+/crates/rootlight-adapter-treesitter/tests/fixtures/liquid/blog-sidebar.liquid -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

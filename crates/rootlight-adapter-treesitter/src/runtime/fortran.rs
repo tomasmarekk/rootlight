@@ -474,6 +474,7 @@ mod tests {
             dockerfile_scanner_contract:
                 crate::runtime::dockerfile_scope::SCANNER_CONTRACT_IDENTITY,
             pug_scanner_contract: crate::runtime::pug_scope::SCANNER_CONTRACT_IDENTITY,
+            liquid_scanner_contract: crate::runtime::liquid_scope::SCANNER_CONTRACT_IDENTITY,
             lean_scanner_contract: crate::runtime::lean_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_scanner_contract: crate::runtime::cuda_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_frontend_policy: crate::runtime::cuda_scope::FRONTEND_POLICY,

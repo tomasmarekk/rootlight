@@ -16,6 +16,7 @@ mod haskell_bindings;
 mod html_closing_tags;
 mod incremental;
 mod json_schema_pointer;
+mod liquid_bindings;
 mod lowering;
 mod lua_bindings;
 mod markdown_bindings;

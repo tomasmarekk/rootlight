@@ -106,6 +106,8 @@ mod html_native;
 mod jsonc_native;
 #[path = "analyzer_e2e/julia_native.rs"]
 mod julia_native;
+#[path = "analyzer_e2e/liquid_native.rs"]
+mod liquid_native;
 #[path = "analyzer_e2e/markdown_native.rs"]
 mod markdown_native;
 #[path = "analyzer_e2e/matlab_native.rs"]

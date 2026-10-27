@@ -21,6 +21,8 @@ pub enum GrammarFamily {
     Wolfram,
     /// Pug native written syntax without template or embedded JavaScript evaluation.
     Pug,
+    /// Liquid written loop items and scoped local value reads without evaluation.
+    Liquid,
     /// Lean written direct definitions and explicit typed formals.
     Lean,
     /// Dockerfile written stages and clean literal prior-stage references.
@@ -311,12 +313,13 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(101);
+        let mut descriptors = Vec::with_capacity(102);
         for family in [
             GrammarFamily::Idris,
             GrammarFamily::Sed,
             GrammarFamily::Wolfram,
             GrammarFamily::Pug,
+            GrammarFamily::Liquid,
             GrammarFamily::Lean,
             GrammarFamily::Dockerfile,
             GrammarFamily::Coffeescript,
@@ -525,6 +528,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Sed => tree_sitter_gsed::LANGUAGE_BRE.into(),
         GrammarFamily::Wolfram => tree_sitter_wolfram::LANGUAGE.into(),
         GrammarFamily::Pug => tree_sitter_pug::LANGUAGE.into(),
+        GrammarFamily::Liquid => tree_sitter_liquid::LANGUAGE.into(),
         GrammarFamily::Lean => tree_sitter_lean::LANGUAGE.into(),
         GrammarFamily::Coffeescript => tree_sitter_coffeescript::LANGUAGE.into(),
         GrammarFamily::Meson => tree_sitter_meson::LANGUAGE.into(),
@@ -709,6 +713,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268",
             scanner_sha256: Some(
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
+            ),
+        },
+        GrammarFamily::Liquid => GrammarIdentity {
+            language_id: "liquid",
+            grammar_version: "0.0.1",
+            source_package_sha256: "28507e7a6a175b9393139231946360e4a86291f3c710272ce4cd1e19059f42b6",
+            parser_sha256: "f0d8b7a6119a357106b0634d8befaa3426b0306044df5593b5235c0d7794a297",
+            scanner_sha256: Some(
+                "1886ff732ee081cc9c942a05edb968ef9af0df75f986826b3fd53cad9984e201",
             ),
         },
         GrammarFamily::Pug => GrammarIdentity {
@@ -1515,12 +1528,13 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 101);
+        assert_eq!(registry.descriptors().len(), 102);
         for family in [
             GrammarFamily::Idris,
             GrammarFamily::Sed,
             GrammarFamily::Wolfram,
             GrammarFamily::Pug,
+            GrammarFamily::Liquid,
             GrammarFamily::Lean,
             GrammarFamily::Dockerfile,
             GrammarFamily::Coffeescript,
@@ -1893,6 +1907,7 @@ mod tests {
             (GrammarFamily::Sed, "sed", "tree-sitter-gsed"),
             (GrammarFamily::Wolfram, "wolfram", "tree-sitter-wolfram"),
             (GrammarFamily::Pug, "pug", "tree-sitter-pug"),
+            (GrammarFamily::Liquid, "liquid", "tree-sitter-liquid"),
             (GrammarFamily::Lean, "lean", "tree-sitter-lean"),
             (GrammarFamily::Meson, "meson", "tree-sitter-meson"),
             (GrammarFamily::Gdscript, "gdscript", "tree-sitter-gdscript"),
@@ -2052,6 +2067,7 @@ mod tests {
                                 | GrammarFamily::Dockerfile
                                 | GrammarFamily::Coffeescript
                                 | GrammarFamily::Pug
+                                | GrammarFamily::Liquid
                                 | GrammarFamily::Wolfram
                                 | GrammarFamily::Lean
                                 | GrammarFamily::Idris

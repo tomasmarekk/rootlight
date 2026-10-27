@@ -189,6 +189,7 @@ dependencies = [
  "tree-sitter-pascal",
  "tree-sitter-pony",
  "tree-sitter-powershell",
+ "tree-sitter-liquid",
  "tree-sitter-pug",
  "tree-sitter-qmljs",
  "tree-sitter-qsharp",
@@ -584,6 +585,14 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-liquid"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-matlab"

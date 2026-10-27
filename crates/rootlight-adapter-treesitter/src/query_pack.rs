@@ -91,6 +91,7 @@ mod json_schema;
 mod jsx;
 mod julia;
 mod lean;
+mod liquid;
 mod markdown;
 mod matlab;
 mod meson;
@@ -607,6 +608,9 @@ impl QueryPack {
         if family.is_json() || family == GrammarFamily::Toml {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
         }
+        if family == GrammarFamily::Liquid {
+            expected.retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
+        }
         if family == GrammarFamily::Pug {
             expected.retain(|name| {
                 !matches!(
@@ -794,6 +798,7 @@ impl QueryPack {
                     | GrammarFamily::Cpp
                     | GrammarFamily::Cuda
                     | GrammarFamily::Php
+                    | GrammarFamily::Liquid
             ) && identity_query
                 .capture_quantifiers(pattern)
                 .iter()
@@ -1606,6 +1611,12 @@ impl QueryPack {
             limits.body_nodes.min(limits.captures),
             complete_file_input,
         );
+        let mut liquid_captures = liquid::CaptureCache::new(
+            input.source,
+            input.tree.root_node(),
+            limits.body_nodes.min(limits.captures),
+            complete_file_input,
+        );
         let mut pug_captures = pug::CaptureCache::new(
             input.source,
             input.tree.root_node(),
@@ -2001,6 +2012,23 @@ impl QueryPack {
                     )?;
                     if lean_captures.exhausted() {
                         refusal = Some(IdentityRefusal::helper(RefusalOrigin::LeanCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Liquid {
+                    let candidate = liquid::candidate(
+                        capture.node,
+                        role,
+                        input.cancellation,
+                        &mut liquid_captures,
+                    )?;
+                    if liquid_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::LiquidCaptures));
                         limit = Some(QueryLimit::Capture);
                         break 'query;
                     }
@@ -4474,6 +4502,7 @@ fn candidate_for_capture(
             GrammarFamily::Sed => return Err(query_failure("query-sed-call-unimplemented")),
             GrammarFamily::Wolfram => return Err(query_failure("query-wolfram-call-unproven")),
             GrammarFamily::Pug => return Err(query_failure("query-pug-call-unproven")),
+            GrammarFamily::Liquid => return Err(query_failure("query-liquid-call-unproven")),
             GrammarFamily::Lean => return Err(query_failure("query-lean-call-unproven")),
             GrammarFamily::Coffeescript => {
                 return Err(query_failure("query-coffeescript-call-unproven"));
@@ -5562,7 +5591,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(101);
+        let mut packs = Vec::with_capacity(102);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5680,6 +5709,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Idris, include_str!("../queries/idris.scm")),
             (GrammarFamily::Sed, include_str!("../queries/sed.scm")),
             (GrammarFamily::Pug, include_str!("../queries/pug.scm")),
+            (GrammarFamily::Liquid, include_str!("../queries/liquid.scm")),
             (GrammarFamily::Lean, include_str!("../queries/lean.scm")),
             (GrammarFamily::Meson, include_str!("../queries/meson.scm")),
             (GrammarFamily::Chapel, include_str!("../queries/chapel.scm")),
@@ -5882,7 +5912,7 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 103);
+        assert_eq!(registry.len(), 104);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
@@ -5962,6 +5992,7 @@ mod tests {
             GrammarFamily::Sed,
             GrammarFamily::Wolfram,
             GrammarFamily::Pug,
+            GrammarFamily::Liquid,
             GrammarFamily::Lean,
             GrammarFamily::Meson,
             GrammarFamily::Gdscript,
@@ -6119,6 +6150,10 @@ mod tests {
                         "call" | "import" | "reference" | "scope" | "comment" | "documentation"
                     )
                 });
+            }
+            if family == GrammarFamily::Liquid {
+                expected
+                    .retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
             }
             if family == GrammarFamily::Pug {
                 expected.retain(|name| {

@@ -64,6 +64,7 @@ mod julia;
 mod lean;
 mod lean_formals;
 mod less;
+mod liquid;
 mod make_dependencies;
 mod matlab;
 mod meson_bindings;
@@ -814,6 +815,7 @@ fn required_syntax_fact_count_from_output(
             || ruby_bindings::required(fact)
             || ruby_formal_receivers::required(fact)
             || html_closing_tags::required(fact)
+            || liquid::required(fact)
         {
             declarations.push((fact.span().start_byte(), fact.span().end_byte()));
         }
@@ -963,6 +965,7 @@ fn required_syntax_fact_count_from_output(
             || go_calls::required(fact)
             || bash_calls::required(fact)
             || html_closing_tags::required(fact)
+            || liquid::required(fact)
             || bash_module_references::required(fact)
             || go_calls::package_candidate(fact)
             || php_this_calls::required(fact)
@@ -1915,6 +1918,10 @@ fn preflight_lowering_limits(
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && astro_reads::required(fact))
+                    || (request.language().as_str() == "liquid"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && liquid::required(fact))
                     || (request.language().as_str() == "scala"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3439,6 +3446,32 @@ impl<'context, 'source> Lowering<'context, 'source> {
             Some(python_parameters::ParameterTargets::new(
                 &materialized,
                 self.full_source,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let liquid_reads = if self.request.language().as_str() == "liquid" {
+            Some(liquid::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                liquid::CurrentSource {
+                    reference: self.full_source,
+                    logical: self.source_view.as_bytes(),
+                    original: self.request.source().bytes(),
+                    encoding: self.request.encoding().as_str(),
+                    complete: self.request.included_ranges().is_empty()
+                        && self.parse_output.report().coverage().status()
+                            != CoverageStatus::Unknown,
+                    maximum: self
+                        .request
+                        .limits()
+                        .max_syntax_nodes()
+                        .saturating_mul(128)
+                        .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                },
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
                 cancellation,
             )?)
         } else {
@@ -5019,6 +5052,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && fact.syntax_kind().as_str() != bash_calls::CALL
                     && !bash_module_references::required(fact)
                     && fact.syntax_kind().as_str() != html_closing_tags::REFERENCE
+                    && !liquid::reference(fact)
                 {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
@@ -5188,6 +5222,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&read, symbol)?;
                     relations.insert(relation.id, relation);
                     occurrences.insert(read.id, read);
+                }
+                if let Some(bindings) = &liquid_reads
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("liquid-loop-read-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
                 }
                 if let Some(reads) = &astro_reads
                     && let Some(symbol) = reads.resolve(
@@ -10650,6 +10698,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(haxe::gaps(fact))
         .chain(coffeescript::gaps(fact))
         .chain(pug::gaps(fact))
+        .chain(liquid::gaps(fact))
         .chain(sed::gaps(fact))
         .chain(idris::gaps(fact))
         .chain(wolfram::gaps(fact))
@@ -11619,6 +11668,9 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
     if language == "idris" {
         return idris::written_identity(kind, label);
     }
+    if language == "liquid" {
+        return liquid::written_identity(kind, label);
+    }
     if language == "pug" {
         return pug::written_identity(kind, label);
     }
@@ -11932,6 +11984,8 @@ fn written_source_identity(
         "rootlight.lean-written-source-occurrence/1"
     } else if language == "wolfram" {
         "rootlight.wolfram-written-source-occurrence/1"
+    } else if language == "liquid" {
+        "rootlight.liquid-written-source-occurrence/1"
     } else if language == "pug" {
         "rootlight.pug-written-source-occurrence/1"
     } else if language == "xml" {
@@ -12143,6 +12197,9 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    if liquid::reference(fact) {
+        return None;
+    }
     if fact.syntax_kind().as_str().starts_with("typescript.const_") {
         return rootlight_adapter_sdk::structural_captured_name_for_fact(
             language,
@@ -13029,6 +13086,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "liquid" || fact.syntax_kind().as_str().starts_with("liquid.") {
+        return language == "liquid"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "liquid.file.module";
+    }
     if language == "idris" || fact.syntax_kind().as_str().starts_with("idris.") {
         return language == "idris"
             && fact.kind() == SyntaxFactKind::Module
@@ -13303,6 +13365,9 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
     if fact.syntax_kind().as_str().starts_with("thinkscript.") {
         return fact.kind() == SyntaxFactKind::Signature
             && fact.syntax_kind().as_str() == "thinkscript.script.signature";
+    }
+    if fact.syntax_kind().as_str().starts_with("liquid.") {
+        return false;
     }
     if fact.syntax_kind().as_str().starts_with("pug.") {
         return false;
@@ -13942,6 +14007,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if liquid::reference(fact) {
+        return Some("liquid-current-source-local-value-binding-unavailable");
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str() == html_closing_tags::REFERENCE
     {
@@ -14508,6 +14576,9 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if liquid::reference(fact) {
+        return Some(OccurrenceRole::Read);
+    }
     if ruby_bindings::required(fact) || ruby_formal_receivers::required(fact) {
         return Some(OccurrenceRole::Reference);
     }

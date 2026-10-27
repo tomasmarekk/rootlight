@@ -45,6 +45,7 @@ tree-sitter-idris.workspace = true
 tree-sitter-gsed.workspace = true
 tree-sitter-wolfram.workspace = true
 tree-sitter-pug.workspace = true
+tree-sitter-liquid.workspace = true
 tree-sitter-lean.workspace = true
 tree-sitter-coffeescript.workspace = true
 tree-sitter-meson.workspace = true

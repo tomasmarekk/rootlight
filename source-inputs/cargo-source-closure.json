@@ -34254,7 +34254,7 @@
   },
   "frontend_external_source_closure_verified": false,
   "licensing_scope": "supplied metadata and present files; not a completeness or authorship assessment",
-  "local_package_count": 143,
+  "local_package_count": 144,
   "local_packages": [
     {
       "name": "dekobon-tree-sitter-groovy",
@@ -34657,6 +34657,10 @@
       "version": "0.2.0"
     },
     {
+      "name": "tree-sitter-liquid",
+      "version": "0.0.1"
+    },
+    {
       "name": "tree-sitter-matlab",
       "version": "1.3.0"
     },
@@ -34831,10 +34835,10 @@
   ],
   "lockfiles": [
     {
-      "local_package_count": 132,
+      "local_package_count": 133,
       "path": "Cargo.lock",
       "registry_package_count": 308,
-      "sha256": "95cd288af01c179103888739c79b3df847d5eadd26eb40d12826923c63243b48"
+      "sha256": "650e600df8d14ddb9fc67aa918f382a5b3d85795f12921c43543a8227a57a633"
     },
     {
       "local_package_count": 7,
@@ -34861,10 +34865,10 @@
       "sha256": "907581b789997511b0e60ec6eea0e9e42f29cea5705bf641c5b7a112b2731794"
     },
     {
-      "local_package_count": 69,
+      "local_package_count": 70,
       "path": "tests/native-grammars/Cargo.lock",
       "registry_package_count": 32,
-      "sha256": "1fa00a293ef86ebf0759f03c1e7521b85c8d115e15532088d94af1a5ef004c8f"
+      "sha256": "c2c0236e3dd8f7c91cbbcd85c899112e40a7fc007cf8c478e6bc280155f4bc9b"
     }
   ],
   "package_count": 565,

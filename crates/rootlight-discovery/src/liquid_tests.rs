@@ -1,9 +1,9 @@
-//! A Liquid suffix identifies the source format without advertising a parser.
+//! Liquid routes preserve source classification and advertise the audited parser.
 
 use super::*;
 
 #[test]
-fn liquid_suffix_and_configuration_name_preserve_source_only_capability() {
+fn liquid_suffix_and_configuration_name_advertise_native_parser() {
     for path in [
         "snippet.liquid",
         "unrelated/NESTED.LIQUID",
@@ -22,7 +22,7 @@ fn liquid_suffix_and_configuration_name_preserve_source_only_capability() {
         .find(|entry| entry.language == "liquid")
         .unwrap();
     assert_eq!(capability.suffixes, &[".liquid"]);
-    assert_eq!(capability.analyzers, &["source-fallback"]);
+    assert_eq!(capability.analyzers, &["treesitter"]);
     assert_eq!(capability.detectors, &["extension", "configuration"]);
     assert_eq!(capability.maximum_tier, "tier_d");
 }

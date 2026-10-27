@@ -53,6 +53,7 @@ pub(crate) enum RefusalOrigin {
     JuliaCaptures,
     CoffeescriptCaptures,
     PugCaptures,
+    LiquidCaptures,
     LeanCaptures,
     WolframCaptures,
     SedCaptures,
@@ -136,6 +137,7 @@ impl RefusalOrigin {
             Self::JuliaCaptures => "query-identity-julia-captures-limit",
             Self::CoffeescriptCaptures => "query-identity-coffeescript-captures-limit",
             Self::PugCaptures => "query-identity-pug-captures-limit",
+            Self::LiquidCaptures => "query-identity-liquid-captures-limit",
             Self::LeanCaptures => "query-identity-lean-captures-limit",
             Self::WolframCaptures => "query-identity-wolfram-captures-limit",
             Self::SedCaptures => "query-identity-sed-captures-limit",
@@ -218,6 +220,7 @@ impl RefusalOrigin {
                 | "query-identity-julia-captures-limit"
                 | "query-identity-coffeescript-captures-limit"
                 | "query-identity-pug-captures-limit"
+                | "query-identity-liquid-captures-limit"
                 | "query-identity-wolfram-captures-limit"
                 | "query-identity-sed-captures-limit"
                 | "query-identity-idris-captures-limit"

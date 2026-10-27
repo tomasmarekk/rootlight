@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.76";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.77";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2968,7 +2968,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         aliases: &[],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
-        analyzers: &["source-fallback"],
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "lua",

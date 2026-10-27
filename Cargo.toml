@@ -79,6 +79,7 @@ exclude = [
     "third_party/tree-sitter-gsed-0.4.0",
     "third_party/tree-sitter-wolfram-0.0.1",
     "third_party/tree-sitter-pug-0.0.1",
+    "third_party/tree-sitter-liquid-0.0.1",
     "third_party/tree-sitter-lean-0.2.0",
     "third_party/tree-sitter-coffeescript-1.0.0",
     "third_party/tree-sitter-meson-1.0.0",
@@ -205,6 +206,7 @@ tree-sitter-idris = { path = "third_party/tree-sitter-idris-0.0.1", version = "=
 tree-sitter-gsed = { path = "third_party/tree-sitter-gsed-0.4.0", version = "=0.4.0", default-features = false }
 tree-sitter-wolfram = { path = "third_party/tree-sitter-wolfram-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-pug = { path = "third_party/tree-sitter-pug-0.0.1", version = "=0.0.1", default-features = false }
+tree-sitter-liquid = { path = "third_party/tree-sitter-liquid-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-lean = { path = "third_party/tree-sitter-lean-0.2.0", version = "=0.2.0", default-features = false }
 tree-sitter-coffeescript = { path = "third_party/tree-sitter-coffeescript-1.0.0", version = "=1.0.0", default-features = false }
 tree-sitter-meson = { path = "third_party/tree-sitter-meson-1.0.0", version = "=1.0.0", default-features = false }

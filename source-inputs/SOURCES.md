@@ -338,3 +338,16 @@ Full-product acceptance requires complete reviewed sources for every build and
 packaging input, a preinstalled declared toolchain, initially empty dependency
 caches, independently blocked network access, and successful build and packaging
 verification. Neither an offline flag nor a prefetched cache proves this contract.
+
+
+## Retained Git grammar archives
+
+`git/tree-sitter-liquid-e45dbac8c5fa95b1f0e00e7e0c04bc8855823391.tar.gz`
+retains the separately acquired original Liquid source archive (SHA-256
+`8e8176fdeb87291b5932d2ae509f2206fcac28703a0445bd11bbe2ac410595e1`).
+The complete47-blob revision, original Git modes, original paths and reversible
+retained paths are bound in the local grammar's `UPSTREAM-INVENTORY.json`.
+Upstream ignore/filter metadata and the prebuilt Node module remain inert
+provenance data; production builds compile declared reviewed C sources only.
+The active corrected grammar, generated tables and bounded stateless scanner
+are separate derivatives whose complete file inventory is in `adapters/grammars.lock`.

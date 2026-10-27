@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "f85987a17b7663b2273d911bb5581d83fe7715f1e19e14b5e8141231a0f6aa24";
+    "de0e21c50f37e396fd6bd4750f349f1e17bba6fff98eee812c819294b3147a10";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 58] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 59] = [
+    (
+        "tree-sitter-liquid",
+        "0.0.1",
+        "third_party/tree-sitter-liquid-0.0.1",
+        "28507e7a6a175b9393139231946360e4a86291f3c710272ce4cd1e19059f42b6",
+    ),
     (
         "tree-sitter-cuda",
         "0.21.2",
@@ -502,7 +508,7 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 58] = [
         "tree-sitter-asm",
         "0.24.0",
         "third_party/tree-sitter-asm-0.24.0",
-        "05ab716e887d01045e6357cbce255e427546bc540035703105de8a42d2a1a95e",
+        "12f7227bea03c2fca6d073de6cc89170cac01ca6e7c42bbc41dabd34e6efd020",
     ),
     (
         "tree-sitter-glsl",
@@ -819,7 +825,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 98 {
+    if manifest.grammars.len() != 99 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -850,6 +856,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "sed",
         "wolfram",
         "pug",
+        "liquid",
         "dockerfile",
         "coffeescript",
         "meson",
@@ -1652,7 +1659,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 96")]
+    #[error("grammar lock contains {0} grammars instead of 99")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),

@@ -38,6 +38,10 @@ mod jsonc;
 mod lean_scope;
 #[cfg(test)]
 mod lean_scope_tests;
+mod liquid_scope;
+#[cfg(test)]
+#[path = "runtime/liquid_scope_tests.rs"]
+mod liquid_scope_tests;
 mod markdown;
 mod perl;
 mod pug_scope;
@@ -1026,6 +1030,9 @@ impl TreeSitterProvider {
         let wolfram_scope = (request.language().as_str() == "wolfram")
             .then(|| wolfram_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
             .transpose()?;
+        let liquid_scope = (request.language().as_str() == "liquid")
+            .then(|| liquid_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
+            .transpose()?;
         let pug_scope = (request.language().as_str() == "pug")
             .then(|| pug_scope::begin(cancellation, parse_work_limit.max_total_progress_checks))
             .transpose()?;
@@ -1042,6 +1049,7 @@ impl TreeSitterProvider {
         if dockerfile_scope.is_some()
             || coffeescript_scope.is_some()
             || pug_scope.is_some()
+            || liquid_scope.is_some()
             || lean_scope.is_some()
             || wolfram_scope.is_some()
             || sed_scope.is_some()
@@ -1182,6 +1190,14 @@ impl TreeSitterProvider {
         if let Some(scope) = lean_scope
             && let Err(error) =
                 lean_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
+        {
+            parser.reset();
+            drop(tree);
+            return Err(error);
+        }
+        if let Some(scope) = liquid_scope
+            && let Err(error) =
+                liquid_scope::finish(scope, cancellation, scanner_refusal.as_deref_mut())
         {
             parser.reset();
             drop(tree);
@@ -1606,6 +1622,7 @@ impl ParseCache {
             cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
+            liquid_scanner_contract: liquid_scope::SCANNER_CONTRACT_IDENTITY,
             lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_scanner_contract: cuda_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_frontend_policy: cuda_scope::FRONTEND_POLICY,
@@ -1652,6 +1669,7 @@ struct CachedParse {
     cmake_patch_projection_policy: &'static str,
     cmake_command_template_projection_policy: &'static str,
     pug_scanner_contract: &'static str,
+    liquid_scanner_contract: &'static str,
     lean_scanner_contract: &'static str,
     cuda_scanner_contract: &'static str,
     cuda_frontend_policy: &'static str,
@@ -1681,6 +1699,7 @@ impl CachedParse {
             cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
+            liquid_scanner_contract: liquid_scope::SCANNER_CONTRACT_IDENTITY,
             lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_scanner_contract: cuda_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_frontend_policy: cuda_scope::FRONTEND_POLICY,
@@ -1710,6 +1729,7 @@ impl CachedParse {
             cmake_patch_projection_policy: self.cmake_patch_projection_policy,
             cmake_command_template_projection_policy: self.cmake_command_template_projection_policy,
             pug_scanner_contract: self.pug_scanner_contract,
+            liquid_scanner_contract: self.liquid_scanner_contract,
             lean_scanner_contract: self.lean_scanner_contract,
             cuda_scanner_contract: self.cuda_scanner_contract,
             cuda_frontend_policy: self.cuda_frontend_policy,
@@ -1883,6 +1903,14 @@ fn prepare_reuse(
         ));
     }
     if cached.identity.line_endings != current.line_endings {
+        return Ok((
+            None,
+            ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
+        ));
+    }
+    if current.family == GrammarFamily::Liquid
+        && cached.liquid_scanner_contract != liquid_scope::SCANNER_CONTRACT_IDENTITY
+    {
         return Ok((
             None,
             ReuseStatus::Invalidated(ReuseInvalidation::FrontendRoute),
@@ -4449,8 +4477,8 @@ mod tests {
         .unwrap();
         let provider = TreeSitterProvider::with_query_packs(config, registry).unwrap();
         assert_eq!(registry.initialized_count(), 0);
-        assert_eq!(provider.registry.descriptors().len(), 101);
-        assert_eq!(provider.capabilities.languages().len(), 101);
+        assert_eq!(provider.registry.descriptors().len(), 102);
+        assert_eq!(provider.capabilities.languages().len(), 102);
         assert_eq!(provider.stats().pooled_parsers, 0);
         assert_eq!(provider.stats().cache.entries, 0);
         let debug = format!("{provider:?}");
@@ -4632,6 +4660,7 @@ mod tests {
             cmake_patch_projection_policy: CMAKE_PATCH_PROJECTION_POLICY,
             cmake_command_template_projection_policy: CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY,
             pug_scanner_contract: pug_scope::SCANNER_CONTRACT_IDENTITY,
+            liquid_scanner_contract: liquid_scope::SCANNER_CONTRACT_IDENTITY,
             lean_scanner_contract: lean_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_scanner_contract: cuda_scope::SCANNER_CONTRACT_IDENTITY,
             cuda_frontend_policy: cuda_scope::FRONTEND_POLICY,

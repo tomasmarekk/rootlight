@@ -1,0 +1,18 @@
+[package]
+name = "tree-sitter-liquid"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/hankthetank27/tree-sitter-liquid"
+description = "Pinned Liquid tables with bounded stateless external scanning"
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

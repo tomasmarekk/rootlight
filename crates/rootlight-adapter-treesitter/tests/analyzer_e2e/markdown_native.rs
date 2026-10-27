@@ -2825,16 +2825,28 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
             },
         ])
         .collect();
-    // CUDA is registered for complete inputs; its included-range scanner remains unqualified.
-    let opaque_cases = [LanguageCase {
-        name: "cuda",
-        path: "src/written.cu",
-        frontend: "tree-sitter-cuda-0.21.2",
-        source: "__global__ void kernel(int value) {}\nvoid launch(int scalar) { int next = scalar * 2; kernel<<<1, 1>>>(next); }\n",
-        generated: false,
-        body_before: "scalar * 2",
-        body_after: "scalar * 3",
-    }];
+    // CUDA's scanner requires standalone inputs; Liquid binding certificates
+    // require a complete physical source.
+    let opaque_cases = [
+        LanguageCase {
+            name: "cuda",
+            path: "src/written.cu",
+            frontend: "tree-sitter-cuda-0.21.2",
+            source: "__global__ void kernel(int value) {}\nvoid launch(int scalar) { int next = scalar * 2; kernel<<<1, 1>>>(next); }\n",
+            generated: false,
+            body_before: "scalar * 2",
+            body_after: "scalar * 3",
+        },
+        LanguageCase {
+            name: "liquid",
+            path: "written.liquid",
+            frontend: "tree-sitter-liquid-0.0.1",
+            source: "{% comment %}marker λ😀{% endcomment %}\r\n{% for item in source %}{{ item }}{% endfor %}\r\n",
+            generated: false,
+            body_before: "",
+            body_after: "",
+        },
+    ];
     let available_languages: BTreeSet<_> = cases.iter().map(|case| case.name.to_owned()).collect();
     let opaque_languages: BTreeSet<_> = opaque_cases
         .iter()
@@ -2843,7 +2855,10 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
     assert_eq!(available_languages.len(), cases.len());
     assert_eq!(opaque_languages.len(), opaque_cases.len());
     assert!(available_languages.is_disjoint(&opaque_languages));
-    assert_eq!(opaque_languages, BTreeSet::from(["cuda".to_owned()]));
+    assert_eq!(
+        opaque_languages,
+        BTreeSet::from(["cuda".to_owned(), "liquid".to_owned()])
+    );
     let expected_languages: BTreeSet<_> = rootlight_adapter_treesitter::GrammarRegistry::audited()
         .unwrap()
         .descriptors()
@@ -2966,8 +2981,201 @@ fn markdown_fenced_definitions_match_standalone_language_evidence() {
         }
     }
     for case in opaque_cases {
-        assert_opaque_markdown_case(&provider, case, &budget);
+        if case.name == "liquid" {
+            assert_opaque_liquid_markdown_case(&provider, case, &budget);
+        } else {
+            assert_opaque_markdown_case(&provider, case, &budget);
+        }
     }
+}
+
+fn assert_opaque_liquid_markdown_case(
+    provider: &Arc<TreeSitterProvider>,
+    case: LanguageCase,
+    budget: &AnalysisLimits,
+) {
+    assert_eq!(case.name, "liquid");
+    let fixture = Fixture::new(case, case.source.as_bytes());
+    let standalone = analyze(
+        &analyzer(provider, case),
+        &request(&fixture.snapshot, &fixture.source, case, budget),
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(
+        standalone.document(),
+        budget.ir(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let document = standalone.document();
+    assert_eq!(document.files.len(), 1);
+    assert_eq!(
+        document.files[0].evidence.source.as_ref(),
+        Some(&fixture.source)
+    );
+    let written = u64::try_from(case.source.find("item in").unwrap()).unwrap();
+    let used = u64::try_from(case.source.find("item }}").unwrap()).unwrap();
+    let definition_span =
+        SourceSpan::new(fixture.source.span().file(), written, written + 4).unwrap();
+    let definitions: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Definition && site.source.span() == definition_span
+        })
+        .collect();
+    assert_eq!(definitions.len(), 1);
+    let definition = definitions[0];
+    let OccurrenceTarget::Resolved { symbol } = definition.target else {
+        panic!("standalone Liquid item must own a Variable")
+    };
+    let variable = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == symbol)
+        .unwrap();
+    assert_eq!(variable.kind, EntityKind::Variable);
+    assert_eq!(variable.language, case.name);
+    assert_eq!(variable.canonical_name, "item");
+    assert_eq!(variable.evidence.source.as_ref(), Some(&definition.source));
+    assert_eq!(definition.syntactic_text_hash, content_hash(b"item"));
+    assert_eq!(definition.source.repository(), document.repository);
+    assert_eq!(definition.source.generation(), document.generation);
+    assert_eq!(
+        definition.source.content_hash(),
+        fixture.source.content_hash()
+    );
+    let Some(rootlight_ir::ContainerRef::Entity(owner)) = variable.container else {
+        panic!("standalone Liquid item must have a module owner")
+    };
+    let module = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == owner)
+        .unwrap();
+    assert_eq!(module.kind, EntityKind::Module);
+    assert_eq!(module.language, case.name);
+    assert_eq!(
+        module.container,
+        Some(rootlight_ir::ContainerRef::File(
+            fixture.source.span().file()
+        ))
+    );
+    assert_eq!(module.evidence.source.as_ref(), Some(&fixture.source));
+    assert_eq!(variable.provenance, module.provenance);
+    assert_eq!(definition.provenance, variable.provenance);
+    assert_eq!(definition.enclosing, Some(module.id));
+    let provenance = document
+        .provenance
+        .iter()
+        .find(|record| record.id == variable.provenance)
+        .unwrap();
+    assert_eq!(provenance.language, case.name);
+    assert_eq!(provenance.frontend_version.as_deref(), Some(case.frontend));
+    let read_span = SourceSpan::new(fixture.source.span().file(), used, used + 4).unwrap();
+    let reads: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::Read && site.source.span() == read_span)
+        .collect();
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].target, OccurrenceTarget::Resolved { symbol });
+    assert_eq!(reads[0].syntactic_text_hash, content_hash(b"item"));
+    assert_eq!(
+        reads[0].source.content_hash(),
+        fixture.source.content_hash()
+    );
+
+    let fence = format!("~~~~~~~~{}\n{}\n~~~~~~~~\n", case.name, case.source);
+    let source = format!("# Example\n\n{fence}");
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let initial = request(&fixture.snapshot, &fixture.source, MARKDOWN, budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        provider.as_ref(),
+        &initial.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let signatures: Vec<_> = parsed
+        .facts()
+        .iter()
+        .filter(|fact| fact.syntax_kind().as_str() == "markdown.code_block.signature")
+        .collect();
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(
+        signatures[0].kind(),
+        rootlight_adapter_sdk::SyntaxFactKind::Signature
+    );
+    let span = signatures[0].span();
+    let fence_start = source.find(&fence).unwrap();
+    assert_eq!(span.file(), fixture.source.span().file());
+    assert_eq!(span.start_byte(), u64::try_from(fence_start).unwrap());
+    assert_eq!(span.end_byte(), u64::try_from(source.len()).unwrap());
+    assert_eq!(source.get(fence_start..), Some(fence.as_str()));
+    assert!(
+        !parsed
+            .facts()
+            .iter()
+            .any(|fact| { fact.syntax_kind().as_str().starts_with("liquid.") })
+    );
+    let embedded = analyze(
+        &analyzer(provider, MARKDOWN),
+        &initial,
+        &ExtensionSupport::default(),
+    );
+    validate_ir_document(
+        embedded.document(),
+        budget.ir(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap();
+    let document = embedded.document();
+    assert_eq!(document.files.len(), 1);
+    let file = &document.files[0];
+    assert_eq!(file.content_hash, content_hash(source.as_bytes()));
+    assert_eq!(file.byte_length, u64::try_from(source.len()).unwrap());
+    assert_eq!(file.evidence.source.as_ref(), Some(&fixture.source));
+    let gaps: Vec<_> = document
+        .skipped_regions
+        .iter()
+        .filter(|gap| gap.detail == "markdown-embedded-analysis-unavailable")
+        .collect();
+    assert_eq!(gaps.len(), 1);
+    let gap = gaps[0];
+    assert_eq!(gap.domain, FactDomain::Entities);
+    assert_eq!(gap.reason, SkippedRegionReason::UnsupportedConstruct);
+    assert_eq!(gap.source.span(), span);
+    assert_eq!(gap.source.repository(), document.repository);
+    assert_eq!(gap.source.generation(), document.generation);
+    assert_eq!(gap.source.content_hash(), file.content_hash);
+    assert!(
+        !document
+            .entities
+            .iter()
+            .any(|entity| { entity.language == case.name || entity.canonical_name == "item" })
+    );
+    assert!(
+        !document
+            .occurrences
+            .iter()
+            .any(|site| site.syntax_kind.starts_with("liquid."))
+    );
+    assert!(
+        document
+            .occurrences
+            .iter()
+            .all(|site| site.source.content_hash() == file.content_hash)
+    );
+    assert!(document.relations.iter().all(|relation| {
+        document
+            .provenance
+            .iter()
+            .find(|record| record.id == relation.provenance)
+            .unwrap()
+            .language
+            != case.name
+    }));
 }
 
 fn assert_opaque_markdown_case(

@@ -579,6 +579,8 @@ fn fence_language(
                 descriptor.language().as_str() != "markdown"
                       // CUDA's scanner contract admits complete standalone inputs.
                       && descriptor.family() != GrammarFamily::Cuda
+                      // Liquid binding certificates require a complete physical source.
+                      && descriptor.family() != GrammarFamily::Liquid
                     && descriptor.language().as_str().as_bytes() == text
             })
             .map(|descriptor| descriptor.language().clone()));
