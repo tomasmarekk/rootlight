@@ -391,6 +391,8 @@ fn present_text(
         deadline: raw.deadline,
         #[cfg(test)]
         after_operation: None,
+        #[cfg(test)]
+        origin_record_visits: Default::default(),
     };
     control.check()?;
     if raw.result.chunks.len() != raw.text_encodings.len() {

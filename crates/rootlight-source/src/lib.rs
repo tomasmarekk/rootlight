@@ -855,9 +855,13 @@ impl<'a> SourceService<'a> {
                     file.extracted_from = authority.origin(file.file).cloned();
                 }
             }
-            generation_view::GenerationView::Full(snapshot) => {
-                // Keep one whole-origin scan per request on the existing graph route.
+            generation_view::GenerationView::Full(snapshot)
+                if snapshot.has_extraction_origin_records() =>
+            {
+                // Possible origins require whole-origin validation on every request.
                 for mapping in &snapshot.document().source_mappings {
+                    #[cfg(test)]
+                    control.record_origin_visit();
                     control.check()?;
                     if mapping.kind == SourceMappingKind::ExtractedFromContainer {
                         for file in &mut files {
@@ -870,6 +874,8 @@ impl<'a> SourceService<'a> {
                     }
                 }
                 for extension in &snapshot.document().extensions {
+                    #[cfg(test)]
+                    control.record_origin_visit();
                     control.check()?;
                     if extension.namespace == rootlight_ir::AGGREGATE_SOURCE_ORIGIN_NAMESPACE {
                         let (derived, container) =
@@ -885,6 +891,7 @@ impl<'a> SourceService<'a> {
                     }
                 }
             }
+            generation_view::GenerationView::Full(_) => {}
         }
         Ok(PreparedRequest {
             file_slots,
@@ -1022,6 +1029,8 @@ struct SourceControl<'a> {
     deadline: Option<Instant>,
     #[cfg(test)]
     after_operation: Option<&'a dyn Fn()>,
+    #[cfg(test)]
+    origin_record_visits: std::cell::Cell<usize>,
 }
 
 impl<'a> SourceControl<'a> {
@@ -1032,6 +1041,8 @@ impl<'a> SourceControl<'a> {
             deadline: Some(started.checked_add(max_duration).unwrap_or(started)),
             #[cfg(test)]
             after_operation: None,
+            #[cfg(test)]
+            origin_record_visits: std::cell::Cell::new(0),
         }
     }
 
@@ -1051,6 +1062,8 @@ impl<'a> SourceControl<'a> {
                 .map(|duration| started.checked_add(duration).unwrap_or(started)),
             #[cfg(test)]
             after_operation: None,
+            #[cfg(test)]
+            origin_record_visits: std::cell::Cell::new(0),
         }
     }
 
@@ -1079,6 +1092,12 @@ impl<'a> SourceControl<'a> {
         }
         self.check()?;
         result
+    }
+
+    #[cfg(test)]
+    fn record_origin_visit(&self) {
+        self.origin_record_visits
+            .set(self.origin_record_visits.get() + 1);
     }
 
     #[cfg(test)]
@@ -1916,6 +1935,160 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_multichunk_reads_skip_unrelated_origin_rows_on_every_request() {
+        let content = vec![b'x'; 2 * 64 * 1024 + 17];
+        let mut fixture = fixture(
+            &content,
+            "utf-8",
+            (0, u64::try_from(content.len()).unwrap()),
+        );
+        let container = add_fixture_file(&mut fixture, "container.bin", b"container", (0, 9));
+        let metadata = fixture.generation.metadata();
+        let mut document = fixture.generation.clone().into_document();
+        document
+            .source_mappings
+            .push(rootlight_ir::SourceMappingRecord {
+                id: derive_fact("rootlight.source-mapping/v1", b"ordinary-origin").id(),
+                repository: metadata.repository(),
+                generation: metadata.generation(),
+                from: fixture.reference.clone(),
+                to: container.clone(),
+                kind: SourceMappingKind::GeneratedToOrigin,
+                provenance: document.provenance[0].id,
+                evidence: FactEvidence {
+                    source: Some(container.clone()),
+                    derivation: Vec::new(),
+                },
+            });
+        let mut extension = rootlight_ir::new_aggregate_source_origin_envelope(
+            metadata.repository(),
+            metadata.generation(),
+            document.provenance[0].id,
+            container.clone(),
+            fixture.reference.clone(),
+            container,
+        )
+        .unwrap();
+        extension.namespace.push_str(".unrelated");
+        document.extensions.push(extension);
+        fixture.generation = GenerationSnapshot::new(
+            metadata,
+            document,
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+        )
+        .unwrap();
+        let service = SourceService::new(&fixture.root, &fixture.generation).unwrap();
+        let cancellation = Cancellation::new();
+        let options = SourceReadOptions::new()
+            .with_context_lines_before(0)
+            .with_context_lines_after(0);
+        let budget = SourceBudget::new();
+        for _ in 0..2 {
+            for start in (0..content.len()).step_by(64 * 1024) {
+                let end = (start + 64 * 1024).min(content.len());
+                let reference = selected_reference(&fixture, start, end);
+                let references = std::slice::from_ref(&reference);
+                let control = SourceControl::for_service(&service, &cancellation, budget);
+                let prepared = service
+                    .preflight(
+                        references,
+                        metadata.repository(),
+                        metadata.generation(),
+                        SourceReadMode::Legacy(SourceEncoding::Utf8),
+                        budget,
+                        &control,
+                    )
+                    .unwrap();
+                assert_eq!(control.origin_record_visits.get(), 0);
+                assert_eq!(prepared.files[0].extracted_from, None);
+                let result = service
+                    .read(references, options, budget, &cancellation)
+                    .unwrap();
+                assert_eq!(result.chunks[0].reference, reference);
+                assert_eq!(result.chunks[0].bytes, content[start..end]);
+                assert_eq!(result.chunks[0].content_hash, content_hash(&content));
+            }
+        }
+    }
+
+    #[test]
+    fn extraction_presence_preserves_global_malformed_and_duplicate_origin_checks() {
+        let mut fixture = fixture(b"derived", "utf-8", (0, 7));
+        let container = add_fixture_file(&mut fixture, "container.bin", b"container", (0, 9));
+        let metadata = fixture.generation.metadata();
+        let base = fixture.generation.clone().into_document();
+        let origin = rootlight_ir::new_aggregate_source_origin_envelope(
+            metadata.repository(),
+            metadata.generation(),
+            base.provenance[0].id,
+            container.clone(),
+            fixture.reference.clone(),
+            container.clone(),
+        )
+        .unwrap();
+        for case in 0..3 {
+            let mut document = base.clone();
+            let mut extension = origin.clone();
+            if case == 1 {
+                extension.payload = "malformed".to_owned();
+            }
+            document.extensions.push(extension);
+            if case == 2 {
+                document.version = rootlight_ir::NormalizedIrVersion::V1_6;
+                document
+                    .source_mappings
+                    .push(rootlight_ir::SourceMappingRecord {
+                        id: derive_fact("rootlight.source-mapping/v1", b"duplicate-origin").id(),
+                        repository: metadata.repository(),
+                        generation: metadata.generation(),
+                        from: fixture.reference.clone(),
+                        to: container.clone(),
+                        kind: SourceMappingKind::ExtractedFromContainer,
+                        provenance: document.provenance[0].id,
+                        evidence: FactEvidence {
+                            source: Some(container.clone()),
+                            derivation: Vec::new(),
+                        },
+                    });
+            }
+            let snapshot = GenerationSnapshot::new(
+                metadata,
+                document,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap();
+            let service = SourceService::new(&fixture.root, &snapshot).unwrap();
+            let cancellation = Cancellation::new();
+            let budget = SourceBudget::new();
+            let control = SourceControl::for_service(&service, &cancellation, budget);
+            let reference = if case == 1 {
+                &container
+            } else {
+                &fixture.reference
+            };
+            let result = service.preflight(
+                std::slice::from_ref(reference),
+                metadata.repository(),
+                metadata.generation(),
+                SourceReadMode::Legacy(SourceEncoding::Utf8),
+                budget,
+                &control,
+            );
+            assert!(control.origin_record_visits.get() > 0);
+            if case == 0 {
+                assert_eq!(
+                    result.unwrap().files[0].extracted_from,
+                    Some(container.clone())
+                );
+            } else {
+                assert!(matches!(result, Err(SourceError::StaleSource)));
+            }
+        }
+    }
+
+    #[test]
     fn lossless_utf8_borrows_exact_legacy_chunks() {
         let fixture = fixture(b"zero\r\none\nTWO\nthree\nfour\n", "utf8", (10, 13));
         let cancellation = Cancellation::new();
@@ -2614,6 +2787,7 @@ mod tests {
                 cancellation: &uncancelled,
                 deadline: Some(Instant::now()),
                 after_operation: None,
+                origin_record_visits: Cell::new(0),
             };
             assert_eq!(
                 lossless_text::bounded_text_context_prefix(
@@ -3257,6 +3431,7 @@ mod tests {
             cancellation: &uncancelled,
             deadline: Some(Instant::now()),
             after_operation: None,
+            origin_record_visits: Cell::new(0),
         };
         assert_eq!(
             lossless_text::bounded_text_prefix(

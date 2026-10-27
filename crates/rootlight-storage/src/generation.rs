@@ -242,6 +242,7 @@ pub struct GenerationSnapshot {
     source_files: SourceFileCatalog,
     coverage_ordinals_by_scope: Vec<usize>,
     symbol_explain_indexes: SymbolExplainIndexes,
+    has_extraction_origin_records: bool,
 }
 
 impl GenerationSnapshot {
@@ -332,12 +333,15 @@ impl GenerationSnapshot {
             checkpoint,
         )?;
         let symbol_explain_indexes = SymbolExplainIndexes::build(document.document(), checkpoint)?;
+        let has_extraction_origin_records =
+            extraction_origin_records_present(document.document(), checkpoint)?;
         Ok(Self {
             metadata,
             document,
             source_files,
             coverage_ordinals_by_scope,
             symbol_explain_indexes,
+            has_extraction_origin_records,
         })
     }
 
@@ -422,6 +426,15 @@ impl GenerationSnapshot {
     #[must_use]
     pub const fn document(&self) -> &NormalizedIrDocument {
         self.document.document()
+    }
+
+    /// Reports whether mappings or extensions may record extraction origins.
+    ///
+    /// A false result proves that neither extraction-origin mechanism is present.
+    /// Payload validity and duplicate-origin checks remain caller-owned.
+    #[must_use]
+    pub const fn has_extraction_origin_records(&self) -> bool {
+        self.has_extraction_origin_records
     }
 
     /// Returns canonical coverage-record ordinals grouped by scope.
@@ -604,6 +617,26 @@ impl GenerationSnapshot {
                 _ => GenerationNeutralDigestError::InvalidGeneration,
             })
     }
+}
+
+fn extraction_origin_records_present<E>(
+    document: &NormalizedIrDocument,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, IndexConstructionError<E>> {
+    for mapping in &document.source_mappings {
+        checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+        if mapping.kind == rootlight_ir::SourceMappingKind::ExtractedFromContainer {
+            return Ok(true);
+        }
+    }
+    for extension in &document.extensions {
+        checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+        if extension.namespace == rootlight_ir::AGGREGATE_SOURCE_ORIGIN_NAMESPACE {
+            return Ok(true);
+        }
+    }
+    checkpoint().map_err(IndexConstructionError::Checkpoint)?;
+    Ok(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -3326,6 +3359,98 @@ mod tests {
 
         assert_eq!(snapshot.metadata().generation(), generation);
         assert_eq!(snapshot.document().repository, repository);
+        assert!(!snapshot.has_extraction_origin_records());
+    }
+
+    #[test]
+    fn extraction_origin_presence_survives_clone_catalog_and_document_roundtrip() {
+        let (metadata, document, catalog) = file_only_generation(true);
+        for namespace in [
+            FILE_IDENTITY_CLAIM_NAMESPACE,
+            "rootlight.aggregate_source_origin.other",
+            rootlight_ir::AGGREGATE_SOURCE_ORIGIN_NAMESPACE,
+        ] {
+            let mut document = document.clone();
+            document.extensions[0].namespace = namespace.to_owned();
+            document.extensions[0].payload = "malformed origin payload".to_owned();
+            let snapshot = GenerationSnapshot::new(
+                metadata,
+                document,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap();
+            let expected = namespace == rootlight_ir::AGGREGATE_SOURCE_ORIGIN_NAMESPACE;
+            assert_eq!(snapshot.has_extraction_origin_records(), expected);
+            assert_eq!(snapshot.clone().has_extraction_origin_records(), expected);
+            let restored = GenerationSnapshot::new(
+                metadata,
+                snapshot.clone().into_document(),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap()
+            .with_source_files(catalog.clone())
+            .unwrap();
+            assert_eq!(restored.has_extraction_origin_records(), expected);
+            assert_eq!(restored.source_files(), &catalog);
+        }
+    }
+
+    #[test]
+    fn extraction_origin_presence_distinguishes_mapping_kind_and_checks_scan_cancellation() {
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        document.version = rootlight_ir::NormalizedIrVersion::V1_6;
+        document.files.push(catalog.entries()[0].file().clone());
+        let from = document.files[0].evidence.source.clone().unwrap();
+        let to = document.files[1].evidence.source.clone().unwrap();
+        document
+            .source_mappings
+            .push(rootlight_ir::SourceMappingRecord {
+                id: FactId::from_bytes([31; 20]),
+                repository: document.repository,
+                generation: document.generation,
+                from,
+                to: to.clone(),
+                kind: rootlight_ir::SourceMappingKind::GeneratedToOrigin,
+                provenance: document.provenance[0].id,
+                evidence: FactEvidence {
+                    source: Some(to),
+                    derivation: Vec::new(),
+                },
+            });
+        for stop in 1..=3 {
+            let mut visits = 0;
+            assert!(matches!(
+                extraction_origin_records_present(&document, &mut || {
+                    visits += 1;
+                    if visits == stop {
+                        Err("cancelled")
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(IndexConstructionError::Checkpoint("cancelled"))
+            ));
+            assert_eq!(visits, stop);
+        }
+        for kind in [
+            rootlight_ir::SourceMappingKind::GeneratedToOrigin,
+            rootlight_ir::SourceMappingKind::ExtractedFromContainer,
+        ] {
+            document.source_mappings[0].kind = kind;
+            let snapshot = GenerationSnapshot::new(
+                metadata,
+                document.clone(),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                snapshot.has_extraction_origin_records(),
+                kind == rootlight_ir::SourceMappingKind::ExtractedFromContainer
+            );
+        }
     }
 
     fn symbol_posting_fixture() -> (GenerationMetadata, NormalizedIrDocument, SymbolId, SymbolId) {
