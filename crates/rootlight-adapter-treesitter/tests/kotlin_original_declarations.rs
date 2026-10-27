@@ -5,7 +5,7 @@ use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
 use rootlight_adapter_sdk::{
     AnalysisLimits, AnalysisRequest, BatchThresholds, GenerationBoundSnapshot, LanguageId,
-    MemoryAdmissionPolicy, StreamLimits, SyntaxFact, SyntaxFactKind, execute_analysis,
+    MemoryAdmissionPolicy, ParseOutput, StreamLimits, SyntaxFact, SyntaxFactKind, execute_analysis,
     execute_parse,
 };
 use rootlight_adapter_treesitter::{
@@ -14,7 +14,7 @@ use rootlight_adapter_treesitter::{
 use rootlight_cancel::Cancellation;
 use rootlight_ids::{GenerationId, SymbolId, content_hash, derive_repository};
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, EntityKind, ExtensionSupport, IrLimits,
+    AnalysisTier, BuildContextIdentity, ContainerRef, EntityKind, ExtensionSupport, IrLimits,
     NormalizedIrDocument, OccurrenceRole, OccurrenceTarget, ProducerIdentity, RelationEndpoint,
     RelationPredicate, SourceRef, SourceSpan, derive_relation_record_id, validate_ir_document,
 };
@@ -58,6 +58,7 @@ fn native_definition(facts: &[SyntaxFact], start: u64, end: u64, declaration: &s
 
 fn definition(
     document: &NormalizedIrDocument,
+    source_bytes: &[u8],
     start: u64,
     end: u64,
     name: &str,
@@ -83,19 +84,14 @@ fn definition(
         .unwrap();
     assert_eq!(entity.kind, kind);
     assert_eq!(entity.canonical_name, name);
-    assert_eq!(sites[0].source.content_hash(), content_hash(ORIGINAL));
+    assert_eq!(sites[0].source.content_hash(), content_hash(source_bytes));
     assert_eq!(sites[0].syntactic_text_hash, content_hash(name.as_bytes()));
     symbol
 }
 
-#[test]
-fn original_kotlin_class_and_override_method_keep_names_and_containment() {
-    assert_eq!(ORIGINAL.len(), 835);
-    assert_eq!(&ORIGINAL[390..411], b"SlideInRightAnimation");
-    assert_eq!(&ORIGINAL[580..588], b"animator");
-    assert_eq!(&ORIGINAL[667..679], b"translationX");
+fn analyze(source_bytes: &[u8]) -> (ParseOutput, NormalizedIrDocument) {
     let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("Source.kt"), ORIGINAL).unwrap();
+    fs::write(directory.path().join("Source.kt"), source_bytes).unwrap();
     let repository = derive_repository(b"kotlin-original-declaration-contract").id();
     let root = RepositoryRoot::open(repository, directory.path()).unwrap();
     let snapshot = root
@@ -107,7 +103,12 @@ fn original_kotlin_class_and_override_method_keep_names_and_containment() {
     let source = SourceRef::new(
         repository,
         GenerationId::from_bytes([9; 20]),
-        SourceSpan::new(snapshot.file(), 0, u64::try_from(ORIGINAL.len()).unwrap()).unwrap(),
+        SourceSpan::new(
+            snapshot.file(),
+            0,
+            u64::try_from(source_bytes.len()).unwrap(),
+        )
+        .unwrap(),
         snapshot.content_hash(),
         None,
     );
@@ -211,17 +212,44 @@ fn original_kotlin_class_and_override_method_keep_names_and_containment() {
             .count(),
         output.document().skipped_regions
     );
+    let (document, _, _) = output.into_parts();
+    (parsed, document)
+}
+
+#[test]
+fn original_kotlin_class_and_override_method_keep_names_and_containment() {
+    assert_eq!(ORIGINAL.len(), 835);
+    assert_eq!(&ORIGINAL[390..411], b"SlideInRightAnimation");
+    assert_eq!(&ORIGINAL[580..588], b"animator");
+    assert_eq!(&ORIGINAL[667..679], b"translationX");
+    let (parsed, document) = analyze(ORIGINAL);
+    let repository = derive_repository(b"kotlin-original-declaration-contract").id();
     native_definition(parsed.facts(), 390, 411, "kotlin.class.declaration");
     native_definition(parsed.facts(), 580, 588, "kotlin.function.declaration");
-    let document = output.document();
+    native_definition(parsed.facts(), 589, 593, "kotlin.parameter.declaration");
+    let document = &document;
     let class = definition(
         document,
+        ORIGINAL,
         390,
         411,
         "SlideInRightAnimation",
         EntityKind::Class,
     );
-    let method = definition(document, 580, 588, "animator", EntityKind::Method);
+    let method = definition(document, ORIGINAL, 580, 588, "animator", EntityKind::Method);
+    let parameter = definition(document, ORIGINAL, 589, 593, "view", EntityKind::Parameter);
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::Contains
+                    && edge.subject == RelationEndpoint::Entity(method)
+                    && edge.object == RelationEndpoint::Entity(parameter)
+            })
+            .count(),
+        1
+    );
     let edges: Vec<_> = document
         .relations
         .iter()
@@ -235,7 +263,7 @@ fn original_kotlin_class_and_override_method_keep_names_and_containment() {
     assert_eq!(edges[0].id, derive_relation_record_id(edges[0]).unwrap());
     let witness = edges[0].evidence.source.as_ref().unwrap();
     assert_eq!(witness.repository(), repository);
-    assert_eq!(witness.generation(), source.generation());
+    assert_eq!(witness.generation(), GenerationId::from_bytes([9; 20]));
     assert_eq!(witness.content_hash(), content_hash(ORIGINAL));
     assert!(witness.span().start_byte() <= 580 && witness.span().end_byte() >= 588);
     assert!(!document.occurrences.iter().any(|site| {
@@ -243,4 +271,113 @@ fn original_kotlin_class_and_override_method_keep_names_and_containment() {
             && site.source.span().start_byte() == 667
             && site.source.span().end_byte() == 679
     }));
+}
+
+#[test]
+fn ordinary_function_formals_keep_exact_names_and_function_owners() {
+    let source = concat!(
+        "internal fun zipFiles(destination: File, contents: List<File>) {\r\n",
+        "  ZipOutputStream(BufferedOutputStream(FileOutputStream(destination.absolutePath))).use { out ->\r\n",
+        "  }\r\n",
+        "}\r\n",
+        "fun neighboring(destination: Other, note: String = \"destination\", option: String = defaultOption(destination)) {\n",
+        "    consume(destination, note, option)\n",
+        "    val lambda = { destination: String -> destination }\n",
+        "}\n",
+        "class Holder(val constructorOnly: String)\n",
+    ).as_bytes();
+    let (parsed, document) = analyze(source);
+    let start_of = |needle: &[u8]| {
+        u64::try_from(
+            source
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let zip_start = start_of(b"zipFiles");
+    let zip = definition(
+        &document,
+        source,
+        zip_start,
+        zip_start + 8,
+        "zipFiles",
+        EntityKind::Function,
+    );
+    let neighboring_start = start_of(b"neighboring");
+    let neighboring = definition(
+        &document,
+        source,
+        neighboring_start,
+        neighboring_start + 11,
+        "neighboring",
+        EntityKind::Function,
+    );
+    let expected = [
+        ("destination", b"destination: File".as_slice(), zip),
+        ("contents", b"contents: List".as_slice(), zip),
+        ("note", b"note: String".as_slice(), neighboring),
+        ("destination", b"destination: Other".as_slice(), neighboring),
+        ("option", b"option: String".as_slice(), neighboring),
+    ];
+    for (name, witness, owner) in expected {
+        let start = start_of(witness);
+        let end = start + u64::try_from(name.len()).unwrap();
+        native_definition(parsed.facts(), start, end, "kotlin.parameter.declaration");
+        let parameter = definition(&document, source, start, end, name, EntityKind::Parameter);
+        let entity = document
+            .entities
+            .iter()
+            .find(|entity| entity.id == parameter)
+            .unwrap();
+        assert_eq!(entity.container, Some(ContainerRef::Entity(owner)));
+        let definitions: Vec<_> = document.occurrences.iter().filter(|site| {
+            site.role == OccurrenceRole::Definition
+                && matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == parameter)
+        }).collect();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].enclosing, Some(owner));
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::Contains
+                        && edge.subject == RelationEndpoint::Entity(owner)
+                        && edge.object == RelationEndpoint::Entity(parameter)
+                })
+                .count(),
+            1
+        );
+        assert!(parsed.facts().iter().any(|fact| {
+            fact.kind() == SyntaxFactKind::Signature
+                && fact.syntax_kind().as_str() == "kotlin.parameters.signature"
+                && fact.span().start_byte() <= start
+                && fact.span().end_byte() >= end
+        }));
+    }
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .count(),
+        expected.len()
+    );
+    assert!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .all(|entity| ![
+                "File",
+                "List",
+                "String",
+                "Other",
+                "defaultOption",
+                "constructorOnly"
+            ]
+            .contains(&entity.canonical_name.as_str()))
+    );
 }

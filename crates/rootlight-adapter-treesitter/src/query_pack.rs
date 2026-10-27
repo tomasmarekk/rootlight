@@ -5516,6 +5516,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Kotlin, "object_declaration") => Some("kotlin.object"),
         (GrammarFamily::Kotlin, "function_declaration") => Some("kotlin.function"),
         (GrammarFamily::Kotlin, "property_declaration") => Some("kotlin.property"),
+        (GrammarFamily::Kotlin, "parameter") => Some("kotlin.parameter"),
         (GrammarFamily::Kotlin, "import") => Some("kotlin.import"),
         (GrammarFamily::Kotlin, "function_value_parameters") => Some("kotlin.parameters"),
         (GrammarFamily::Kotlin, "type_parameters") => Some("kotlin.type_parameters"),

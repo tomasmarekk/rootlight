@@ -18,6 +18,10 @@
   (property_declaration (variable_declaration (identifier) @definition))
 ]
 
+(function_declaration
+  (function_value_parameters
+    (parameter (identifier) @definition) @declaration))
+
 (import) @import
 [(function_value_parameters) (type_parameters) (class_parameters)] @signature
 [(block) (class_body)] @scope
