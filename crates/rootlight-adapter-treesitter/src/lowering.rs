@@ -61,6 +61,7 @@ mod javascript_default_class_exports;
 mod javascript_method_vars;
 mod json_schema;
 mod julia;
+mod kotlin_formal_receivers;
 mod lean;
 mod lean_formals;
 mod less;
@@ -3758,6 +3759,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let kotlin_formals = if self.request.language().as_str() == "kotlin"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(kotlin_formal_receivers::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                self.request.source().bytes(),
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let c_variables = if self.request.language().as_str() == "c"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -5533,6 +5556,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("ruby-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(parameters) = &kotlin_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("kotlin-formal-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }

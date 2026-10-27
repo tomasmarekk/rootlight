@@ -4,9 +4,9 @@
 use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
 use rootlight_adapter_sdk::{
-    AnalysisLimits, AnalysisRequest, BatchThresholds, GenerationBoundSnapshot, LanguageId,
-    MemoryAdmissionPolicy, ParseOutput, StreamLimits, SyntaxFact, SyntaxFactKind, execute_analysis,
-    execute_parse,
+    AnalysisLimits, AnalysisRequest, BatchThresholds, EncodingId, GenerationBoundSnapshot,
+    IncludedRange, LanguageId, MemoryAdmissionPolicy, ParseOutput, ParseProvider, StreamLimits,
+    SyntaxFact, SyntaxFactKind, execute_analysis, execute_parse, testkit::MockParseProvider,
 };
 use rootlight_adapter_treesitter::{
     ParserSettings, RuntimeConfig, TreeSitterAnalyzer, TreeSitterProvider,
@@ -90,6 +90,15 @@ fn definition(
 }
 
 fn analyze(source_bytes: &[u8]) -> (ParseOutput, NormalizedIrDocument) {
+    analyze_input(source_bytes, EncodingId::utf8(), &[], None)
+}
+
+fn analyze_input(
+    source_bytes: &[u8],
+    encoding: EncodingId,
+    selected: &[(u64, u64)],
+    replay: Option<Vec<SyntaxFact>>,
+) -> (ParseOutput, NormalizedIrDocument) {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("Source.kt"), source_bytes).unwrap();
     let repository = derive_repository(b"kotlin-original-declaration-contract").id();
@@ -128,19 +137,6 @@ fn analyze(source_bytes: &[u8]) -> (ParseOutput, NormalizedIrDocument) {
         )
         .unwrap(),
     );
-    let analyzer = TreeSitterAnalyzer::new(
-        provider.clone(),
-        ProducerIdentity::new(
-            "kotlin-original-contract",
-            "1.0",
-            content_hash(b"configuration"),
-        )
-        .unwrap(),
-        LanguageId::new("kotlin").unwrap(),
-        "kotlin-original-source-contract",
-        content_hash(b"kotlin-original-contract-binary"),
-    )
-    .unwrap();
     let stream = StreamLimits::new(
         128,
         4096,
@@ -162,9 +158,19 @@ fn analyze(source_bytes: &[u8]) -> (ParseOutput, NormalizedIrDocument) {
         IrLimits::default(),
     )
     .unwrap();
-    let request = AnalysisRequest::new(
+    let request = AnalysisRequest::new_with_parse_context(
         GenerationBoundSnapshot::new(&snapshot, &source).unwrap(),
         LanguageId::new("kotlin").unwrap(),
+        encoding,
+        selected
+            .iter()
+            .map(|&(start, end)| {
+                IncludedRange::new(
+                    SourceSpan::new(snapshot.file(), start, end).unwrap(),
+                    LanguageId::new("kotlin").unwrap(),
+                )
+            })
+            .collect(),
         AnalysisTier::TierD,
         BuildContextIdentity::new(content_hash(b"kotlin-original-contract-context")),
         &limits,
@@ -192,6 +198,28 @@ fn analyze(source_bytes: &[u8]) -> (ParseOutput, NormalizedIrDocument) {
             fact.syntax_kind().as_str()
         );
     }
+    let parser: Arc<dyn ParseProvider> = match replay {
+        Some(facts) => Arc::new(MockParseProvider::new(
+            provider.capabilities().clone(),
+            facts,
+            parsed.diagnostics().to_vec(),
+            parsed.report().coverage().clone(),
+        )),
+        None => provider,
+    };
+    let analyzer = TreeSitterAnalyzer::new(
+        parser,
+        ProducerIdentity::new(
+            "kotlin-original-contract",
+            "1.0",
+            content_hash(b"configuration"),
+        )
+        .unwrap(),
+        LanguageId::new("kotlin").unwrap(),
+        "kotlin-original-source-contract",
+        content_hash(b"kotlin-original-contract-binary"),
+    )
+    .unwrap();
     let output = execute_analysis(
         &analyzer,
         &request,
@@ -357,6 +385,48 @@ fn ordinary_function_formals_keep_exact_names_and_function_owners() {
                 && fact.span().end_byte() >= end
         }));
     }
+    let parameter = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "destination"
+                && entity.container == Some(ContainerRef::Entity(zip))
+        })
+        .unwrap();
+    let start = start_of(b"destination.absolutePath");
+    let references: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == start + 11
+        })
+        .collect();
+    assert_eq!(references.len(), 1);
+    let reference = references[0];
+    assert_eq!(reference.enclosing, Some(zip));
+    assert_eq!(
+        reference.target,
+        OccurrenceTarget::Resolved {
+            symbol: parameter.id
+        }
+    );
+    assert_eq!(reference.source.content_hash(), content_hash(source));
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(reference.id)
+                    && edge.object == RelationEndpoint::Entity(parameter.id)
+                    && edge.evidence.source.as_ref() == Some(&reference.source)
+            })
+            .count(),
+        1
+    );
     assert_eq!(
         document
             .entities
@@ -380,4 +450,311 @@ fn ordinary_function_formals_keep_exact_names_and_function_owners() {
             ]
             .contains(&entity.canonical_name.as_str()))
     );
+}
+
+fn reference_at(
+    document: &NormalizedIrDocument,
+    start: u64,
+    length: u64,
+) -> &rootlight_ir::OccurrenceRecord {
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == start + length
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "one exact receiver Reference at {start}");
+    sites[0]
+}
+
+fn certified_receiver(
+    document: &NormalizedIrDocument,
+    raw: &[u8],
+    parameter_start: u64,
+    usage_start: u64,
+    owner_name: &str,
+) -> SymbolId {
+    let parameter = definition(
+        document,
+        raw,
+        parameter_start,
+        parameter_start + 4,
+        "slot",
+        EntityKind::Parameter,
+    );
+    let entity = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == parameter)
+        .unwrap();
+    let Some(ContainerRef::Entity(owner)) = entity.container else {
+        panic!("function-owned formal")
+    };
+    let function = document
+        .entities
+        .iter()
+        .find(|entity| entity.id == owner)
+        .unwrap();
+    assert_eq!(function.kind, EntityKind::Function);
+    assert_eq!(function.canonical_name, owner_name);
+    assert_eq!(
+        function.container,
+        Some(ContainerRef::File(document.files[0].id))
+    );
+    let site = reference_at(document, usage_start, 4);
+    assert_eq!(site.syntax_kind, "kotlin.identifier.reference");
+    assert_eq!(site.enclosing, Some(owner));
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Resolved { symbol: parameter }
+    );
+    assert_eq!(site.source.content_hash(), content_hash(raw));
+    assert_eq!(site.syntactic_text_hash, content_hash(b"slot"));
+    assert_eq!(site.provenance, entity.provenance);
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.object == RelationEndpoint::Entity(parameter)
+                    && edge.evidence.source.as_ref() == Some(&site.source)
+            })
+            .count(),
+        1
+    );
+    parameter
+}
+
+fn unbound_receiver(document: &NormalizedIrDocument, at: u64) {
+    let site = reference_at(document, at, 4);
+    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(!document.relations.iter().any(|edge| {
+        edge.predicate == RelationPredicate::RefersTo
+            && edge.subject == RelationEndpoint::Occurrence(site.id)
+    }));
+}
+
+#[test]
+fn formal_receiver_bindings_keep_exact_owners_and_later_shadow_boundaries() {
+    let text = concat!(
+        "fun first(slot: File) { consume(slot.path).use { slot -> consume(slot.path) }\n",
+        "  val slot = other\n}\n",
+        "fun second(slot: Other) { consume(slot.path) }\n",
+    );
+    let (_, document) = analyze(text.as_bytes());
+    let uses: Vec<_> = text
+        .match_indices("slot.path")
+        .map(|(at, _)| at as u64)
+        .collect();
+    assert_eq!(uses.len(), 3);
+    let first = certified_receiver(
+        &document,
+        text.as_bytes(),
+        text.find("slot: File").unwrap() as u64,
+        uses[0],
+        "first",
+    );
+    let second = certified_receiver(
+        &document,
+        text.as_bytes(),
+        text.find("slot: Other").unwrap() as u64,
+        uses[2],
+        "second",
+    );
+    assert_ne!(first, second);
+    unbound_receiver(&document, uses[1]);
+    unbound_receiver(&document, uses[0] + 5);
+}
+
+#[test]
+fn formal_receivers_preserve_crlf_bom_and_utf16_physical_evidence() {
+    let text = "// \u{03bb}\u{1f600}\r\nfun owned(slot: File) {\r\n  consume(slot.path)\r\n}\r\n";
+    let parameter = text.find("slot: File").unwrap();
+    let usage = text.find("slot.path").unwrap();
+    for little in [true, false] {
+        let mut raw = if little {
+            vec![0xff, 0xfe]
+        } else {
+            vec![0xfe, 0xff]
+        };
+        for unit in text.encode_utf16() {
+            raw.extend_from_slice(&if little {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            });
+        }
+        let physical = |at| u64::try_from(2 + 2 * text[..at].encode_utf16().count()).unwrap();
+        let (_, document) = analyze_input(
+            &raw,
+            EncodingId::new(if little { "utf-16le" } else { "utf-16be" }).unwrap(),
+            &[],
+            None,
+        );
+        // The helper's ASCII width is four bytes; UTF-16 has eight physical bytes.
+        let symbol = definition(
+            &document,
+            &raw,
+            physical(parameter),
+            physical(parameter + 4),
+            "slot",
+            EntityKind::Parameter,
+        );
+        let site = reference_at(&document, physical(usage), 8);
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol });
+        assert_eq!(site.source.content_hash(), content_hash(&raw));
+        assert_eq!(site.syntactic_text_hash, content_hash(b"slot"));
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::RefersTo
+                        && edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.object == RelationEndpoint::Entity(symbol)
+                        && edge.evidence.source.as_ref() == Some(&site.source)
+                })
+                .count(),
+            1
+        );
+    }
+    let raw = format!("\u{feff}{text}");
+    let (_, document) = analyze(raw.as_bytes());
+    certified_receiver(
+        &document,
+        raw.as_bytes(),
+        parameter as u64 + 3,
+        usage as u64 + 3,
+        "owned",
+    );
+}
+
+#[test]
+fn missing_duplicate_or_reparented_native_witnesses_cannot_bind_formals() {
+    let text = "fun owned(slot: File) { consume(slot.path) }\n";
+    let (parsed, document) = analyze(text.as_bytes());
+    let usage = text.find("slot.path").unwrap() as u64;
+    certified_receiver(
+        &document,
+        text.as_bytes(),
+        text.find("slot: File").unwrap() as u64,
+        usage,
+        "owned",
+    );
+    for (label, start) in [
+        ("kotlin.function.declaration", 0),
+        (
+            "kotlin.identifier.definition",
+            text.find("owned").unwrap() as u64,
+        ),
+        (
+            "kotlin.parameters.signature",
+            text.find('(').unwrap() as u64,
+        ),
+        (
+            "kotlin.parameter.declaration",
+            text.find("slot: File").unwrap() as u64,
+        ),
+        (
+            "kotlin.identifier.definition",
+            text.find("slot: File").unwrap() as u64,
+        ),
+        ("kotlin.block.scope", text.find('{').unwrap() as u64),
+    ] {
+        let witnesses: Vec<_> = parsed
+            .facts()
+            .iter()
+            .filter(|fact| {
+                fact.syntax_kind().as_str() == label && fact.span().start_byte() == start
+            })
+            .collect();
+        assert_eq!(witnesses.len(), 1, "{label}");
+        let witness = witnesses[0];
+        for variant in 0..3 {
+            let mut facts = parsed.facts().to_vec();
+            if variant == 0 {
+                facts.retain(|fact| fact.local_id() != witness.local_id());
+                for fact in &mut facts {
+                    if fact.parent() == Some(witness.local_id()) {
+                        *fact = SyntaxFact::new(
+                            fact.local_id(),
+                            witness.parent(),
+                            fact.kind(),
+                            fact.span(),
+                            fact.depth(),
+                            fact.syntax_kind().clone(),
+                        );
+                    }
+                }
+            } else if variant == 1 {
+                let next = facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1;
+                facts.push(SyntaxFact::new(
+                    next,
+                    witness.parent(),
+                    witness.kind(),
+                    witness.span(),
+                    witness.depth(),
+                    witness.syntax_kind().clone(),
+                ));
+            } else {
+                let index = facts
+                    .iter()
+                    .position(|fact| fact.local_id() == witness.local_id())
+                    .unwrap();
+                facts[index] = SyntaxFact::new(
+                    witness.local_id(),
+                    None,
+                    witness.kind(),
+                    witness.span(),
+                    witness.depth(),
+                    witness.syntax_kind().clone(),
+                );
+            }
+            let (_, document) =
+                analyze_input(text.as_bytes(), EncodingId::utf8(), &[], Some(facts));
+            unbound_receiver(&document, usage);
+        }
+    }
+    let changed = text.replacen("slot: File", "item: File", 1);
+    assert_eq!(changed.len(), text.len());
+    let (_, document) = analyze_input(
+        changed.as_bytes(),
+        EncodingId::utf8(),
+        &[],
+        Some(parsed.facts().to_vec()),
+    );
+    unbound_receiver(&document, usage);
+}
+
+#[test]
+fn unsupported_receiver_scopes_and_selected_views_stay_unbound() {
+    for text in [
+        "fun owned(slot: File) { consume(other.slot) }",
+        "fun owned(slot: File) { consume(0).use { slot -> consume(slot.path) } }",
+        "fun owned(slot: File) { val slot = other; consume(slot.path) }",
+        "fun owned(slot: File) { val local = consume(slot.path) }",
+        "fun File.owned(slot: File) { consume(slot.path) }",
+        "fun <T> owned(slot: File) { consume(slot.path) }",
+        "fun owned(slot: File = fallback) { consume(slot.path) }",
+        "class Holder { fun owned(slot: File) { consume(slot.path) } }",
+    ] {
+        let (_, document) = analyze(text.as_bytes());
+        let usage = text.rfind("slot").unwrap() as u64;
+        unbound_receiver(&document, usage);
+    }
+    let text = "// prefix\nfun owned(slot: File) { consume(slot.path) }\n";
+    let usage = text.find("slot.path").unwrap() as u64;
+    for range in [(0, text.len() as u64), (10, text.len() as u64)] {
+        let (_, document) = analyze_input(text.as_bytes(), EncodingId::utf8(), &[range], None);
+        assert!(!document.occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == usage
+                && matches!(site.target, OccurrenceTarget::Resolved { .. })
+        }));
+    }
 }
