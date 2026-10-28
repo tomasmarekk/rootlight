@@ -19476,6 +19476,10 @@ fn source_language_route<'a>(
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    if is_xml_companion_source(&input.path) {
+        let language = xml_companion_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     // Static template text can contain a complete host document or reader header.
     if source_language_from_path(&input.path) == Some("liquid") {
         return analyzers.contains_key("liquid").then_some("liquid");
@@ -19584,6 +19588,39 @@ fn is_ambiguous_c_header(path: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("h"))
 }
 
+fn is_xml_companion_source(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            [
+                "plist",
+                "xib",
+                "storyboard",
+                "entitlements",
+                "lvproj",
+                "lvlib",
+                "lvclass",
+            ]
+            .iter()
+            .any(|suffix| extension.eq_ignore_ascii_case(suffix))
+        })
+}
+
+fn xml_companion_content_language(input: &ManifestInput) -> Option<&str> {
+    let written = input
+        .language_signals
+        .iter()
+        .find(|signal| signal.evidence == LanguageEvidence::Content && signal.language == "xml")?;
+    // Toolchain manifests do not describe this file's syntax. Other conflicting
+    // evidence cannot promote a conditional companion through a path fallback.
+    (!input
+        .language_signals
+        .iter()
+        .any(|signal| signal.evidence != LanguageEvidence::Manifest && signal.language != "xml"))
+    .then_some(written.language.as_str())
+}
+
 fn has_json_schema_content_signal(input: &ManifestInput) -> bool {
     input.language_signals.iter().any(|signal| {
         signal.language == "json-schema" && signal.evidence == LanguageEvidence::Content
@@ -19689,6 +19726,9 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if let Some(language) = configured.next() {
         return (!configured.any(|other| other.language != language.language))
             .then_some(language.language.as_str());
+    }
+    if is_xml_companion_source(&input.path) {
+        return xml_companion_content_language(input);
     }
     // The outer template format precedes content hints; configuration stays first.
     if source_language_from_path(&input.path) == Some("liquid") {
@@ -36834,6 +36874,229 @@ mod tests {
     }
 
     #[test]
+    fn xml_companion_parser_and_provenance_routes_require_unconflicted_content() {
+        let service = FirstSliceService::new(2).unwrap();
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("xml").is_some());
+        for suffix in [
+            "plist",
+            "xib",
+            "storyboard",
+            "entitlements",
+            "lvproj",
+            "lvlib",
+            "lvclass",
+        ] {
+            let mut input = ManifestInput {
+                file: FileId::from_bytes([3; 20]),
+                path: format!("SOURCE.{}", suffix.to_ascii_uppercase()),
+                content_hash: content_hash(b"<root/>"),
+                bytes: 7,
+                encoding: "utf-8".to_owned(),
+                class: InputClass::Source,
+                language_signals: Vec::new(),
+                project_language_witnesses: Vec::new(),
+                decisive_rule: None,
+            };
+            assert_eq!(detected_source_language(&input), None);
+            assert_eq!(source_language_route(&input, &service.analyzers), None);
+            input
+                .language_signals
+                .push(rootlight_discovery::LanguageSignal {
+                    language: "xml".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                });
+            assert_eq!(detected_source_language(&input), Some("xml"));
+            assert_eq!(
+                source_language_route(&input, &service.analyzers),
+                Some("xml")
+            );
+            assert_eq!(source_language_route(&input, &absent), None);
+            for evidence in [
+                LanguageEvidence::Content,
+                LanguageEvidence::Shebang,
+                LanguageEvidence::Extension,
+            ] {
+                input
+                    .language_signals
+                    .push(rootlight_discovery::LanguageSignal {
+                        language: "html".to_owned(),
+                        evidence,
+                    });
+                assert_eq!(detected_source_language(&input), None);
+                assert_eq!(source_language_route(&input, &service.analyzers), None);
+                input.language_signals.pop();
+            }
+            input.path.push_str(".bak");
+            assert_eq!(source_language_route(&input, &service.analyzers), None);
+        }
+    }
+
+    #[test]
+    fn xml_companion_native_sources_keep_bytes_and_routes_across_noop_and_reopen() {
+        let fixture = TempDir::new().unwrap();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut sources = Vec::new();
+        for (index, (path, root)) in [
+            ("Info.plist", "plist"),
+            ("View.xib", "document"),
+            ("Main.storyboard", "archive"),
+            ("App.entitlements", "plist"),
+            ("Project.lvproj", "Project"),
+            ("Library.lvlib", "Library"),
+            ("Class.lvclass", "LVClass"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let encoding = match index {
+                1 => "utf-16le",
+                2 => "utf-16be",
+                _ => "utf-8",
+            };
+            let text = format!("<?xml version='1.0'?><{root} Value='λ'><Child/></{root}>");
+            let bytes = if index == 1 || index == 2 {
+                std::iter::once(0xfeff_u16)
+                    .chain(text.encode_utf16())
+                    .flat_map(|unit| {
+                        if index == 1 {
+                            unit.to_le_bytes()
+                        } else {
+                            unit.to_be_bytes()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else if index == 0 {
+                [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat()
+            } else {
+                text.into_bytes()
+            };
+            fs::write(fixture.path().join(path), &bytes).unwrap();
+            sources.push((path, root, encoding, bytes));
+        }
+        for (path, text) in [
+            ("OpenStep.plist", "{ Name = value; }"),
+            ("Json.xib", "{\"value\":\"<document/>\"}"),
+            ("Plain.entitlements", "plain text"),
+            ("Html.storyboard", "<!DOCTYPE html><html/>"),
+        ] {
+            fs::write(fixture.path().join(path), text).unwrap();
+        }
+        fs::write(fixture.path().join("binary.plist"), b"bplist00\0binary").unwrap();
+        let mut service =
+            FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        for (path, root, encoding, bytes) in &sources {
+            let file = snapshot
+                .document()
+                .files
+                .iter()
+                .find(|file| file.path == *path)
+                .unwrap();
+            assert_eq!(file.language, "xml");
+            assert_eq!(file.encoding, *encoding);
+            assert_eq!(file.content_hash, content_hash(bytes));
+            assert_eq!(file.byte_length, u64::try_from(bytes.len()).unwrap());
+            let provenance = snapshot
+                .document()
+                .provenance
+                .iter()
+                .find(|record| record.id == file.provenance)
+                .unwrap();
+            assert_eq!(provenance.language, "xml");
+            assert_eq!(
+                provenance.frontend_version.as_deref(),
+                Some("tree-sitter-xml-0.7.0")
+            );
+            assert!(snapshot.document().entities.iter().any(|entity| {
+                entity.canonical_name == *root
+                    && entity.kind == EntityKind::MarkupElement
+                    && entity.evidence.source.as_ref().is_some_and(|source| {
+                        source.span().file() == file.id
+                            && source.content_hash() == file.content_hash
+                    })
+            }));
+            let coverage = service
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .unwrap();
+            assert_eq!(coverage.language, "xml");
+            assert_eq!(coverage.status, CoverageStatus::Bounded);
+        }
+        for path in [
+            "OpenStep.plist",
+            "Json.xib",
+            "Plain.entitlements",
+            "Html.storyboard",
+        ] {
+            let file = snapshot
+                .document()
+                .files
+                .iter()
+                .chain(
+                    snapshot
+                        .source_files()
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.file()),
+                )
+                .find(|file| file.path == path)
+                .unwrap();
+            assert_ne!(file.language, "xml");
+            assert_eq!(
+                service
+                    .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                    .unwrap()
+                    .status,
+                CoverageStatus::Unknown
+            );
+        }
+        assert!(
+            !snapshot
+                .document()
+                .files
+                .iter()
+                .chain(
+                    snapshot
+                        .source_files()
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.file())
+                )
+                .any(|file| file.path == "binary.plist")
+        );
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            receipt
+        );
+        drop(service);
+        let mut reopened =
+            FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            reopened
+                .index_repository(fixture.path(), &deadline())
+                .unwrap(),
+            receipt
+        );
+        let restored = reopened
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        assert_eq!(restored.document(), snapshot.document());
+        for (path, _, _, bytes) in sources {
+            assert_eq!(fs::read(fixture.path().join(path)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn xml_native_source_queries_preserve_written_qnames_and_parent_evidence() {
         for file_path in ["written.xml", "written.resx", "written.svg"] {
             assert_xml_source_path_queries(file_path);
@@ -39829,7 +40092,7 @@ mod tests {
     #[test]
     fn discovery_classification_revision_invalidates_provider_identity() {
         let parser = first_slice_parser_provider_hash().unwrap();
-        for previous_discovery in [b"1.44", b"1.60", b"1.61", b"1.62", b"1.63"] {
+        for previous_discovery in [b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79"] {
             let previous = hash_static_components(&[
                 PROVIDER_SET_SEED,
                 parser.as_bytes(),

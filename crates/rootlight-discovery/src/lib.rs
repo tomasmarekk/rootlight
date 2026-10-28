@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.79";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.80";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2108,7 +2108,9 @@ fn classify_validated_prefix(
     }
     // A complete JSON object has no executable header outside its strings.
     // Generic code hints must not mine schema annotations or example payloads.
-    let content_hint = if json_schema_document || extension == Some("qml") {
+    let content_hint = if let Some(roots) = xml_companion_roots(&normalized) {
+        (validated_text && xml_companion_opening(content, roots)).then_some("xml")
+    } else if json_schema_document || extension == Some("qml") {
         None
     } else if Path::new(&normalized)
         .extension()
@@ -2862,7 +2864,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "xml",
         suffixes: &[".xml", ".resx", ".svg"],
         aliases: &[],
-        detectors: &["extension"],
+        detectors: &["extension", "content"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -3370,6 +3372,155 @@ fn shebang_language(content: &[u8]) -> Option<&'static str> {
 
 fn content_language(content: &[u8]) -> Option<&'static str> {
     content_language_with_scripts(content, false)
+}
+
+// These suffixes also carry binary or alternate text formats, so they must
+// remain outside the unconditional extension-language table.
+fn xml_companion_roots(path: &str) -> Option<&'static [&'static str]> {
+    match path.rsplit_once('.')?.1 {
+        "plist" | "entitlements" => Some(&["plist"]),
+        "xib" | "storyboard" => Some(&["document", "archive"]),
+        "lvproj" => Some(&["Project"]),
+        "lvlib" => Some(&["Library"]),
+        "lvclass" => Some(&["LVClass"]),
+        _ => None,
+    }
+}
+
+fn xml_hint_space(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\r' | '\n')
+}
+
+// A complete known opening permits routing; the native parser still owns
+// document syntax and its explicit namespace/entity/validity gaps.
+fn xml_companion_opening(content: &[u8], roots: &[&str]) -> bool {
+    let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
+    let mut text = match std::str::from_utf8(sample) {
+        Ok(text) => text,
+        Err(error) if error.error_len().is_none() => {
+            let Ok(text) = std::str::from_utf8(&sample[..error.valid_up_to()]) else {
+                return false;
+            };
+            text
+        }
+        Err(_) => return false,
+    };
+    text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    loop {
+        text = text.trim_start_matches(xml_hint_space);
+        if let Some(comment) = text.strip_prefix("<!--") {
+            let Some(end) = comment.find("-->") else {
+                return false;
+            };
+            if comment[..end].contains("--") {
+                return false;
+            }
+            text = &comment[end + 3..];
+        } else if let Some(instruction) = text.strip_prefix("<?") {
+            let Some(end) = instruction.find("?>") else {
+                return false;
+            };
+            let target = instruction[..end]
+                .split(xml_hint_space)
+                .next()
+                .unwrap_or("");
+            if target.is_empty()
+                || !target.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+                })
+                || target.eq_ignore_ascii_case("xml") && target != "xml"
+            {
+                return false;
+            }
+            text = &instruction[end + 2..];
+        } else if let Some(declaration) = text.strip_prefix("<!DOCTYPE") {
+            if !declaration.starts_with(xml_hint_space) {
+                return false;
+            }
+            let declaration = declaration.trim_start_matches(xml_hint_space);
+            if !roots.iter().any(|root| {
+                declaration
+                    .strip_prefix(root)
+                    .is_some_and(|tail| tail.starts_with(xml_hint_space) || tail.starts_with('>'))
+            }) {
+                return false;
+            }
+            let mut quote = None;
+            let mut end = None;
+            for (offset, character) in declaration.char_indices() {
+                if let Some(open) = quote {
+                    if character == open {
+                        quote = None;
+                    }
+                } else if matches!(character, '\'' | '"') {
+                    quote = Some(character);
+                } else if matches!(character, '[' | ']' | '<') {
+                    return false;
+                } else if character == '>' {
+                    end = Some(offset);
+                    break;
+                }
+            }
+            let Some(end) = end else { return false };
+            // Only literal prologue text is inspected; no DTD loading or entity expansion.
+            text = &declaration[end + 1..];
+        } else {
+            break;
+        }
+    }
+    let Some(opening) = text.strip_prefix('<') else {
+        return false;
+    };
+    roots.iter().any(|root| {
+        opening
+            .strip_prefix(root)
+            .is_some_and(xml_companion_attributes)
+    })
+}
+
+fn xml_companion_attributes(mut tail: &str) -> bool {
+    loop {
+        let spaced = tail.trim_start_matches(xml_hint_space);
+        if spaced.starts_with('>') || spaced.starts_with("/>") {
+            return true;
+        }
+        if spaced.len() == tail.len() {
+            return false;
+        }
+        let Some(first) = spaced.bytes().next() else {
+            return false;
+        };
+        if !first.is_ascii_alphabetic() && !matches!(first, b'_' | b':') {
+            return false;
+        }
+        let Some(end) = spaced.bytes().position(|byte| {
+            !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b':' | b'-' | b'.')
+        }) else {
+            return false;
+        };
+        let Some(value) = spaced[end..]
+            .trim_start_matches(xml_hint_space)
+            .strip_prefix('=')
+        else {
+            return false;
+        };
+        let value = value.trim_start_matches(xml_hint_space);
+        let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|character| matches!(character, '\'' | '"'))
+        else {
+            return false;
+        };
+        let value = &value[1..];
+        let Some(end) = value.find(quote) else {
+            return false;
+        };
+        if value[..end].contains('<') {
+            return false;
+        }
+        tail = &value[end + 1..];
+    }
 }
 
 fn content_language_with_scripts(content: &[u8], matlab_scripts: bool) -> Option<&'static str> {
@@ -8527,6 +8678,123 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn xml_companion_content_requires_a_complete_format_root() {
+        for (suffix, root) in [
+            ("plist", "plist"),
+            ("entitlements", "plist"),
+            ("xib", "document"),
+            ("storyboard", "archive"),
+            ("lvproj", "Project"),
+            ("lvlib", "Library"),
+            ("lvclass", "LVClass"),
+        ] {
+            for path in [
+                format!("written.{suffix}"),
+                format!("WRITTEN.{}", suffix.to_ascii_uppercase()),
+            ] {
+                assert_eq!(extension_language(&path), None);
+                let path = RelativePath::parse(Path::new(&path)).unwrap();
+                for source in [
+                    format!("<{root}/>"),
+                    format!(
+                        "\u{feff}<?xml version='1.0'?>\n<!-- written -->\n<{root} name='λ > value'/>"
+                    ),
+                    format!(
+                        "<!DOCTYPE {root} PUBLIC '-//Example//DTD source//EN' 'https://example.invalid/source.dtd'><{root}/>"
+                    ),
+                ] {
+                    let (_, signals) = classify(&path, source.as_bytes());
+                    assert_eq!(
+                        signals,
+                        [LanguageSignal {
+                            language: "xml".to_owned(),
+                            evidence: LanguageEvidence::Content
+                        }],
+                        "{}: {source}",
+                        path.as_str()
+                    );
+                }
+                for source in [
+                    "bplist00\0binary",
+                    "{ Name = value; }",
+                    "{\"value\":\"<plist/>\"}",
+                    "plain text",
+                    "<html><body/></html>",
+                    "<!DOCTYPE html><html/>",
+                    "<unrelated/>",
+                    "<plistSuffix/>",
+                    "<project/>",
+                    "<PLIST/>",
+                    "<plist name=unquoted/>",
+                    "<plist name='unfinished>",
+                    "<!-- unfinished",
+                ] {
+                    let (_, signals) = classify(&path, source.as_bytes());
+                    assert!(
+                        !signals.iter().any(|signal| signal.language == "xml"),
+                        "{}: {source}",
+                        path.as_str()
+                    );
+                }
+                let backup =
+                    RelativePath::parse(Path::new(&format!("{}.bak", path.as_str()))).unwrap();
+                assert!(
+                    !classify(&backup, format!("<{root}/>").as_bytes())
+                        .1
+                        .iter()
+                        .any(|signal| signal.language == "xml")
+                );
+            }
+        }
+        let path = RelativePath::parse(Path::new("Info.plist")).unwrap();
+        assert!(
+            !classify_validated_prefix(&path, b"<plist/>", false, false, false)
+                .1
+                .iter()
+                .any(|signal| signal.language == "xml")
+        );
+    }
+
+    #[test]
+    fn xml_companion_openings_cannot_borrow_a_delimiter_beyond_the_prefix() {
+        let path = RelativePath::parse(Path::new("Info.plist")).unwrap();
+        let root = "<plist key='>'/>";
+        let complete = format!(
+            "{}{root}tail",
+            " ".repeat(MAX_CLASSIFICATION_BYTES - root.len())
+        );
+        assert!(
+            classify(&path, complete.as_bytes())
+                .1
+                .iter()
+                .any(|signal| signal.language == "xml")
+        );
+        let incomplete = format!(
+            "{}{root}",
+            " ".repeat(MAX_CLASSIFICATION_BYTES - root.len() + 1)
+        );
+        assert!(
+            !classify(&path, incomplete.as_bytes())
+                .1
+                .iter()
+                .any(|signal| signal.language == "xml")
+        );
+        for prologue in ["<!--", "<?xml version='1.0'", "<!DOCTYPE plist PUBLIC '"] {
+            let source = format!(
+                "{prologue}{}'><plist/>",
+                " ".repeat(MAX_CLASSIFICATION_BYTES)
+            );
+            assert!(
+                !classify(&path, source.as_bytes())
+                    .1
+                    .iter()
+                    .any(|signal| signal.language == "xml")
+            );
+        }
+        assert!(!xml_companion_opening(b"<plist", &["plist"]));
+    }
+
+    #[test]
     fn xml_and_dtd_suffixes_route_to_distinct_native_families() {
         for (language, suffixes, source) in [
             (
@@ -8542,7 +8810,12 @@ max_source_file_bytes = 2097152
                 .unwrap();
             assert_eq!(capability.suffixes, suffixes);
             assert!(capability.aliases.is_empty());
-            assert_eq!(capability.detectors, ["extension"]);
+            let detectors: &[&str] = if language == "xml" {
+                &["extension", "content"]
+            } else {
+                &["extension"]
+            };
+            assert_eq!(capability.detectors, detectors);
             assert_eq!(capability.maximum_tier, "tier_d");
             assert_eq!(capability.analyzers, ["treesitter"]);
             assert_eq!(canonical_language(language), Some(language));

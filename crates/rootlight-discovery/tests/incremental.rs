@@ -686,6 +686,78 @@ fn conditioned_project_witnesses_follow_incremental_declaration_changes() {
 }
 
 #[test]
+fn xml_companion_content_tracks_source_changes_and_matches_clean_discovery() {
+    let temporary = local_tempdir();
+    let source_path = temporary.path().join("Info.plist");
+    fs::write(temporary.path().join("Library.lvlib"), "<Library/>").unwrap();
+    fs::write(temporary.path().join("binary.plist"), b"bplist00\0binary").unwrap();
+    let root = root(&temporary, b"xml-companion-source-changes");
+    let config = ConfigSnapshot::resolve(&[]).unwrap();
+    let policy = policy();
+    let context = IncrementalDiscoveryContext::new(
+        config.hash(),
+        FactId::from_bytes([7; 20]),
+        content_hash(b"current-provider"),
+    );
+    let cancellation = Cancellation::new();
+    let mut baseline = None;
+    for (source, xml) in [
+        ("{ Name = value; }", false),
+        ("<?xml version='1.0'?><plist><dict/></plist>", true),
+        ("{\"name\":\"<plist/>\"}", false),
+        ("<!-- changed --><plist/>", true),
+    ] {
+        fs::write(&source_path, source).unwrap();
+        let (manifest, incremental) = discover_manifest_and_reconcile_with_progress(
+            &root,
+            &config,
+            ManifestReconcileInputs::new(baseline.as_ref(), context),
+            &policy,
+            limits(),
+            &cancellation,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            manifest,
+            discover(&root, &config, &policy, limits(), &cancellation).unwrap()
+        );
+        let input = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "Info.plist")
+            .unwrap();
+        assert_eq!(input.content_hash, content_hash(source.as_bytes()));
+        assert_eq!(
+            input
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "xml"
+                    && signal.evidence == LanguageEvidence::Content),
+            xml
+        );
+        assert!(
+            manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "Library.lvlib")
+                .unwrap()
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "xml")
+        );
+        assert!(
+            !manifest
+                .inputs
+                .iter()
+                .any(|input| input.path == "binary.plist")
+        );
+        assert!(manifest.coverage.complete);
+        baseline = Some(incremental.baseline().clone());
+    }
+}
+
+#[test]
 fn implicit_fsharp_content_hints_follow_incremental_source_changes() {
     let temporary = local_tempdir();
     let original = b": twice 2 * ;\n";
