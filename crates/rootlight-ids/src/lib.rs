@@ -366,13 +366,33 @@ pub fn derive_file(input: FileIdentity<'_>) -> DerivedId<FileId> {
 /// Derives a fact identity from its domain and canonical semantic payload.
 #[must_use]
 pub fn derive_fact(domain: &str, semantic_payload: &[u8]) -> DerivedId<FactId> {
-    derive(
-        FACT_CONTEXT,
-        |encoder| {
-            encoder.text(domain).bytes(semantic_payload);
-        },
-        FactId::from_bytes,
-    )
+    let mut hasher = blake3::Hasher::new_derive_key(FACT_CONTEXT);
+    for value in [domain.as_bytes(), semantic_payload] {
+        hash_canonical_length(&mut hasher, value.len());
+        hasher.update(value);
+    }
+    let digest = *hasher.finalize().as_bytes();
+    let mut compact_bytes = [0_u8; 20];
+    compact_bytes.copy_from_slice(&digest[..20]);
+    DerivedId {
+        id: FactId::from_bytes(compact_bytes),
+        digest: IdentityDigest::from_bytes(digest),
+    }
+}
+
+fn hash_canonical_length(hasher: &mut blake3::Hasher, value: usize) {
+    match u32::try_from(value) {
+        Ok(value) if value < u32::MAX => {
+            hasher.update(&value.to_be_bytes());
+        }
+        _ => {
+            // UINT32_MAX introduces a 64-bit length even at the threshold itself.
+            hasher.update(&u32::MAX.to_be_bytes());
+            let value =
+                u64::try_from(value).expect("supported Rust targets have at most 64-bit usize");
+            hasher.update(&value.to_be_bytes());
+        }
+    }
 }
 
 /// Computes the immutable content hash for a byte slice.
@@ -945,6 +965,65 @@ mod tests {
         let repository = repository();
         let fact = derive_fact("repository", b"01914f58-0bd1-7f65-b52c-73aebd98c4a1");
         assert_ne!(repository.digest(), fact.digest());
+    }
+
+    #[test]
+    fn streamed_fact_identity_matches_the_concatenated_encoder() {
+        let long_domain = "domain".repeat(1024);
+        for length in [
+            0,
+            1,
+            63,
+            64,
+            65,
+            1023,
+            1024,
+            1025,
+            4095,
+            4096,
+            4097,
+            16 * 1024,
+        ] {
+            let payload = (0..length)
+                .map(|index| u8::try_from(index % 256).unwrap())
+                .collect::<Vec<_>>();
+            for domain in ["", "fact", "kind\0λ", long_domain.as_str()] {
+                let expected = derive(
+                    FACT_CONTEXT,
+                    |encoder| {
+                        encoder.text(domain).bytes(&payload);
+                    },
+                    FactId::from_bytes,
+                );
+                assert_eq!(
+                    derive_fact(domain, &payload),
+                    expected,
+                    "{domain:?}, {length} bytes"
+                );
+            }
+        }
+        assert_ne!(derive_fact("a", b"bc"), derive_fact("ab", b"c"));
+    }
+
+    #[test]
+    fn streamed_length_prefix_matches_inline_and_extended_encoder_frames() {
+        let check = |length| {
+            let mut encoder = CanonicalEncoder::default();
+            encoder.length(length);
+            let mut hasher = blake3::Hasher::new_derive_key(FACT_CONTEXT);
+            hash_canonical_length(&mut hasher, length);
+            assert_eq!(
+                hasher.finalize().as_bytes(),
+                &blake3::derive_key(FACT_CONTEXT, encoder.as_bytes()),
+                "length {length}",
+            );
+        };
+        let escape = usize::try_from(u32::MAX).unwrap();
+        for length in [0, 1, escape - 1, escape, usize::MAX] {
+            check(length);
+        }
+        #[cfg(target_pointer_width = "64")]
+        check(escape + 1);
     }
 
     #[test]
