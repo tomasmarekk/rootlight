@@ -1239,9 +1239,11 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("cpp.call_name.call_name", 1),
             ("cpp.class.declaration", 1),
             ("cpp.comment.documentation", 1),
+            ("cpp.cuda_owned_function.signature", 1),
             ("cpp.declaration_list.scope", 1),
             ("cpp.field_identifier.definition", 1),
             ("cpp.file.root", 1),
+            ("cpp.file.signature", 1),
             ("cpp.function.declaration", 1),
             ("cpp.identifier.reference", 3),
             ("cpp.include.import", 1),
@@ -1278,10 +1280,11 @@ fn golden_label_counts(language: &str) -> BTreeMap<String, usize> {
             ("kotlin.class_body.scope", 1),
             ("kotlin.file.root", 1),
             ("kotlin.function.declaration", 1),
-            ("kotlin.identifier.definition", 2),
-            ("kotlin.identifier.reference", 9),
+            ("kotlin.identifier.definition", 3),
+            ("kotlin.identifier.reference", 8),
             ("kotlin.import.import", 1),
             ("kotlin.package.module", 1),
+            ("kotlin.parameter.declaration", 1),
             ("kotlin.parameters.signature", 1),
             ("kotlin.qualified_identifier.reference", 2),
             ("kotlin.string.string", 1),
@@ -1469,6 +1472,23 @@ fn assert_parent_contract(facts: &[SyntaxFact]) {
             .get(&fact.parent().expect("name/signature has a parent"))
             .expect("name/signature parent resolves");
         if fact.kind() == SyntaxFactKind::Signature {
+            if fact.syntax_kind().as_str() == "cpp.file.signature" {
+                assert_eq!(parent.kind(), SyntaxFactKind::Root);
+                assert_eq!(parent.syntax_kind().as_str(), "cpp.file.root");
+                assert_eq!(parent.span(), fact.span());
+                continue;
+            }
+            if fact.syntax_kind().as_str() == "cpp.cuda_owned_function.signature" {
+                assert_eq!(parent.kind(), SyntaxFactKind::Declaration);
+                assert_eq!(parent.syntax_kind().as_str(), "cpp.function.declaration");
+                assert!(facts.iter().any(|parameters| {
+                    parameters.syntax_kind().as_str() == "cpp.parameters.signature"
+                        && parameters.parent() == fact.parent()
+                        && fact.span().start_byte() <= parameters.span().start_byte()
+                        && parameters.span().end_byte() <= fact.span().end_byte()
+                }));
+                continue;
+            }
             if matches!(
                 fact.syntax_kind().as_str(),
                 "rust.proof_context.signature" | "rust.namespace_barrier.signature"

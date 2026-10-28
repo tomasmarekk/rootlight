@@ -6286,7 +6286,9 @@ fn is_symbol_signature_fact(fact: &SyntaxFact) -> bool {
         && !go::metadata(fact)
         && !matches!(
             fact.syntax_kind().as_str(),
-            "glsl.formal_target.signature"
+            "cpp.file.signature"
+                | "cpp.cuda_owned_function.signature"
+                | "glsl.formal_target.signature"
                 | "glsl.call_target.signature"
                 | "scss.mixin_target.signature"
                 | "scss.parameter_list_unavailable.signature"

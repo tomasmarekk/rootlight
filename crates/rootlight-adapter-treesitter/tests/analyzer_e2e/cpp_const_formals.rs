@@ -784,6 +784,45 @@ fn body_only_function_edits_preserve_identity_with_current_source_and_atomic_ir_
     };
     assert_eq!(identities(&first), identities(&second));
     simple_binding(&second, changed.as_bytes(), &changed);
+    let owner_start = u64::try_from(SIMPLE.find("Owned").unwrap()).unwrap();
+    let owner = entity_at(
+        first.document(),
+        "Owned",
+        EntityKind::Function,
+        owner_start,
+        owner_start + 5,
+    );
+    assert_eq!(
+        entity_at(
+            second.document(),
+            "Owned",
+            EntityKind::Function,
+            owner_start,
+            owner_start + 5,
+        ),
+        owner,
+    );
+    for header_edit in [
+        SIMPLE.replace("const Value &value", "const OtherValue &value"),
+        SIMPLE.replace(
+            "const Value &value",
+            "const Value &value, const Value &other",
+        ),
+    ] {
+        clean(header_edit.as_bytes());
+        let edited = output(CPP, header_edit.as_bytes(), EncodingId::utf8());
+        assert_ne!(
+            entity_at(
+                edited.document(),
+                "Owned",
+                EntityKind::Function,
+                owner_start,
+                owner_start + 5,
+            ),
+            owner,
+            "changed formal headers distinguish function identity: {header_edit}",
+        );
+    }
     let native = Arc::new(provider());
     let frontend = analyzer(&native, CPP);
     let fixture = Fixture::new(CPP, SIMPLE.as_bytes());

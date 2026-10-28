@@ -13431,7 +13431,12 @@ fn is_signature_capture(fact: &SyntaxFact) -> bool {
     if fact.syntax_kind().as_str().starts_with("qsharp.") {
         return qsharp::signature(fact);
     }
+    // C++ aliases authenticate CUDA context, not the callable's parameter header.
     if cuda::metadata(fact)
+        || matches!(
+            fact.syntax_kind().as_str(),
+            "cpp.file.signature" | "cpp.cuda_owned_function.signature"
+        )
         || sed::metadata(fact)
         || idris::metadata(fact)
         || typescript_const::metadata(fact)

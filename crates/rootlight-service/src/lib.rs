@@ -956,7 +956,7 @@ const GENERATED_HEADER_MAX_LINES: usize = 64;
 // Host admission policy must requalify old whole-source fallbacks even when
 // language parsers and resolver facts retain their independent revisions.
 const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/7";
-const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/31";
+const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/32";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
 const PROJECT_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.project-context/1";
@@ -968,7 +968,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/349";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/350";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/155";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/14";
@@ -43638,6 +43638,7 @@ mod tests {
             for revision in [
                 b"rootlight.first-slice.project-provider/16".as_slice(),
                 b"rootlight.first-slice.project-provider/17",
+                b"rootlight.first-slice.project-provider/31",
             ] {
                 let previous = hash_static_components(&[revision, structural.as_bytes(), project])
                     .expect("preceding project context derives");
@@ -43727,6 +43728,7 @@ mod tests {
             b"rootlight.first-slice.treesitter-structural/337",
             b"rootlight.first-slice.treesitter-structural/336",
             b"rootlight.first-slice.treesitter-structural/335",
+            b"rootlight.first-slice.treesitter-structural/349",
         ] {
             let previous_parser = hash_static_components(&[
                 PARSER_PROVIDER_SET_SEED,
