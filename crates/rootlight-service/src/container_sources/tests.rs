@@ -5496,6 +5496,305 @@ fn native_office_metadata_changes_do_not_reuse_foreign_module_kinds() {
     }
 }
 
+fn assert_physical_export(
+    service: &FirstSliceService,
+    generation: GenerationId,
+    path: &str,
+    bytes: &[u8],
+    language: &str,
+) -> FileId {
+    let snapshot = service.loaded_generation_snapshot(generation).unwrap();
+    let document = snapshot.document();
+    let file = document
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .unwrap();
+    assert_eq!(file.language, language);
+    assert_eq!(file.content_hash, content_hash(bytes));
+    assert_eq!(file.byte_length, u64::try_from(bytes.len()).unwrap());
+    assert_eq!(file.encoding, "utf-8");
+    let reference = file.evidence.source.clone().unwrap();
+    let read = service
+        .source_read_with_options_and_budget(
+            generation,
+            vec![reference],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks[0].bytes, bytes);
+    assert!(read.data.chunks[0].extracted_from.is_none());
+    assert_eq!(
+        document.skipped_regions.iter().any(|gap| {
+            gap.source.span().file() == file.id && gap.detail == "visual-basic-dialect-unproven"
+        }),
+        language == "visual-basic-classic"
+    );
+    let local = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity
+                .evidence
+                .source
+                .as_ref()
+                .is_some_and(|source| source.span().file() == file.id)
+        })
+        .collect::<Vec<_>>();
+    assert!(local.iter().any(|entity| entity.canonical_name == "Update"));
+    assert!(local.iter().any(|entity| entity.canonical_name == "value"));
+    assert!(local.iter().all(|entity| entity.language == language));
+    if language == "vba" {
+        let uses = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.file == file.id
+                    && site.syntax_kind == "vba.value_identifier.reference"
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            })
+            .collect::<Vec<_>>();
+        assert!(!uses.is_empty());
+        for site in uses {
+            assert!(document.relations.iter().any(|edge| {
+                edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.predicate == RelationPredicate::RefersTo
+                    && edge.evidence.source.as_ref() == Some(&site.source)
+            }));
+        }
+    }
+    file.id
+}
+
+#[test]
+fn physical_vba_exports_follow_container_replacement_removal_and_restart() {
+    let source = b"Attribute VB_Name = \"Alpha\"\r\nPublic Sub Update(ByVal value As Long)\r\nvalue = value + 1\r\nEnd Sub\r\n";
+    let changed = String::from_utf8(source.to_vec())
+        .unwrap()
+        .replace("+ 1", "+ 2");
+    let matching = fixture::book(&[("Alpha", source)]);
+    let replacement = fixture::book(&[("Alpha", changed.as_bytes())]);
+    let root = tempdir();
+    let storage = tempdir();
+    let paths = rootlight_runtime::RuntimePaths::new(
+        storage.path().join("state"),
+        storage.path().join("runtime"),
+    )
+    .unwrap();
+    paths.prepare_owner().unwrap();
+    fs::write(root.path().join("module.bas"), source).unwrap();
+    let mut file_id = None;
+    let mut previous = None;
+    for (book, vb6, language) in [
+        (Some(&matching), false, "vba"),
+        (Some(&replacement), false, "visual-basic-classic"),
+        (None, false, "visual-basic-classic"),
+        (Some(&matching), false, "vba"),
+        (Some(&matching), true, "visual-basic-classic"),
+        (Some(&matching), false, "vba"),
+    ] {
+        let book_path = root.path().join("book.xlsm");
+        if let Some(bytes) = book {
+            fs::write(&book_path, bytes).unwrap();
+        } else {
+            fs::remove_file(&book_path).unwrap();
+        }
+        let project_path = root.path().join("legacy.vbp");
+        if vb6 {
+            fs::write(
+                &project_path,
+                "Type=Exe\r\nName=\"Legacy\"\r\nModule=Alpha; module.bas\r\n",
+            )
+            .unwrap();
+        } else if project_path.exists() {
+            fs::remove_file(&project_path).unwrap();
+        }
+        let mut service =
+            FirstSliceService::new_durable(16, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+        assert_eq!(
+            service.index_repository(root.path(), &deadline()).unwrap(),
+            receipt
+        );
+        let current_file =
+            assert_physical_export(&service, receipt.generation, "module.bas", source, language);
+        if let Some(expected) = file_id {
+            assert_eq!(
+                current_file, expected,
+                "dialect evidence never changes physical identity"
+            );
+        }
+        file_id = Some(current_file);
+        if let Some((generation, old_language)) = previous {
+            assert_ne!(receipt.generation, generation);
+            if old_language != language {
+                assert!(
+                    service
+                        .incremental_evidence(receipt.generation)
+                        .unwrap()
+                        .parsed_files()
+                        > 0
+                );
+            }
+        }
+        previous = Some((receipt.generation, language));
+        let prepared = service
+            .prepare_repository_with_options(
+                root.path(),
+                FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+                &deadline(),
+            )
+            .unwrap();
+        let clean = service.publish_prepared(prepared, &deadline()).unwrap();
+        assert_eq!(clean.logical_snapshot, receipt.logical_snapshot);
+        drop(service);
+        let reopened = FirstSliceService::new_durable(16, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(
+            assert_physical_export(
+                &reopened,
+                receipt.generation,
+                "module.bas",
+                source,
+                language
+            ),
+            current_file
+        );
+    }
+}
+
+#[test]
+fn physical_vba_exports_require_exact_verified_bytes() {
+    let root = tempdir();
+    let wrong = b"Attribute VB_Name = \"Wrong\"\r\nPublic Sub Hidden()\r\nEnd Sub\r\n";
+    fs::write(
+        root.path().join("book.xlsm"),
+        fixture::typed_book(&[
+            ("Alpha", FIRST, false),
+            ("Beta", SECOND, true),
+            ("Unverified", wrong, false),
+        ]),
+    )
+    .unwrap();
+    let lf = String::from_utf8(FIRST.to_vec())
+        .unwrap()
+        .replace("\r\n", "\n");
+    let changed = String::from_utf8(FIRST.to_vec())
+        .unwrap()
+        .replace("= 1", "= 2");
+    let bom = [b"\xef\xbb\xbf".as_slice(), FIRST].concat();
+    for (path, bytes) in [
+        ("exact.bas", FIRST),
+        ("object.CLS", SECOND),
+        ("changed.bas", changed.as_bytes()),
+        ("lf.bas", lf.as_bytes()),
+        ("bom.bas", bom.as_slice()),
+        ("unverified.bas", wrong),
+    ] {
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    for (path, language) in [
+        ("exact.bas", "vba"),
+        ("object.CLS", "vba"),
+        ("changed.bas", "visual-basic-classic"),
+        ("lf.bas", "visual-basic-classic"),
+        ("bom.bas", "visual-basic-classic"),
+        ("unverified.bas", "visual-basic-classic"),
+    ] {
+        assert_eq!(
+            document
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap()
+                .language,
+            language,
+            "{path}"
+        );
+    }
+    assert!(
+        document
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "container-source-incomplete")
+    );
+}
+
+#[test]
+fn physical_vba_exports_preserve_language_and_project_conflicts() {
+    let cancellation = deadline();
+    let (mut prepared, mut snapshots) = prepared_fixture(
+        &fixture::book(&[("Alpha", FIRST)]),
+        8,
+        100_000,
+        &cancellation,
+    );
+    let repository = RepositoryId::from_bytes([81; 16]);
+    let path = RelativePath::parse(Path::new("module.cls")).unwrap();
+    let file = derive_file(rootlight_ids::FileIdentity {
+        repository,
+        path_identity: path.identity_bytes(),
+    })
+    .id();
+    snapshots.insert(
+        file,
+        SourceSnapshot::from_persisted(repository, path, file, content_hash(FIRST), FIRST.to_vec())
+            .unwrap(),
+    );
+    let input = ManifestInput {
+        file,
+        path: "module.cls".to_owned(),
+        content_hash: content_hash(FIRST),
+        bytes: u64::try_from(FIRST.len()).unwrap(),
+        encoding: "utf-8".to_owned(),
+        class: InputClass::Source,
+        language_signals: vec![LanguageSignal {
+            language: "visual-basic-classic".to_owned(),
+            evidence: LanguageEvidence::Content,
+        }],
+        project_language_witnesses: Vec::new(),
+        decisive_rule: None,
+    };
+    let service = FirstSliceService::new(2).unwrap();
+    for (language, evidence, expected) in [
+        (
+            "visual-basic-classic",
+            LanguageEvidence::Configuration,
+            Some("visual-basic-classic"),
+        ),
+        ("apex", LanguageEvidence::Configuration, Some("apex")),
+        ("apex", LanguageEvidence::Content, None),
+        (
+            "rust",
+            LanguageEvidence::Content,
+            Some("visual-basic-classic"),
+        ),
+    ] {
+        let mut conflicting = input.clone();
+        conflicting.language_signals.push(LanguageSignal {
+            language: language.to_owned(),
+            evidence,
+        });
+        prepared
+            .match_physical_vba_exports(&[conflicting.clone()], &snapshots, &cancellation)
+            .unwrap();
+        assert!(!prepared.physical_vba_exports.contains(&file));
+        assert_eq!(
+            prepared.supported_source_language(&conflicting, &service.analyzers),
+            expected
+        );
+    }
+}
+
 #[test]
 fn derived_modules_survive_edit_noop_rebuild_removal_and_restart() {
     let storage = tempdir();

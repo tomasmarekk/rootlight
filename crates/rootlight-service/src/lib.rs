@@ -9672,7 +9672,7 @@ impl FirstSliceService {
                     && matches!(snapshot.content(),
                         [0xef, 0xbb, 0xbf, ..] | [0xff, 0xfe, ..]
                         | [0xfe, 0xff, ..] | [0, 0, 0xfe, 0xff, ..]);
-                let mut language = supported_source_language(input, &self.analyzers);
+                let mut language = derived.supported_source_language(input, &self.analyzers);
                 let admission = if language.is_none() {
                     self.probe_fsharp_source(repository, generation, input, &snapshot, cancellation)?
                 } else {
@@ -20010,11 +20010,13 @@ fn file_parser_route_hash(
     input: &ManifestInput,
     language: Option<&str>,
 ) -> Result<Option<ContentHash>, FirstSliceError> {
-    if input.path.rsplit_once('.').is_some_and(|(_, suffix)| {
-        suffix.eq_ignore_ascii_case("m")
-            || suffix.eq_ignore_ascii_case("v")
-            || suffix.eq_ignore_ascii_case("vsh")
-    }) {
+    if is_ambiguous_basic_source(&input.path)
+        || input.path.rsplit_once('.').is_some_and(|(_, suffix)| {
+            suffix.eq_ignore_ascii_case("m")
+                || suffix.eq_ignore_ascii_case("v")
+                || suffix.eq_ignore_ascii_case("vsh")
+        })
+    {
         return language
             .map(|language| {
                 hash_static_components(&[b"rootlight.file-parser-route/1", language.as_bytes()])

@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/11";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/12";
 
 mod references;
 
@@ -28,6 +28,7 @@ pub(super) struct PreparedSources {
     pub fingerprints: Vec<InputFingerprint>,
     origins: Vec<(FileId, FileId)>,
     native_vba_modules: BTreeMap<FileId, rootlight_adapter_sdk::NativeVbaModuleKind>,
+    physical_vba_exports: BTreeSet<FileId>,
     incomplete_native_contexts: BTreeSet<FileId>,
     pub(super) native_projects: Vec<rootlight_resolve::NativeClassicProject>,
     issues: Vec<(FileId, String)>,
@@ -119,10 +120,92 @@ pub(super) fn prepare(
             }
         }
     }
+    prepared.match_physical_vba_exports(inputs, snapshots, cancellation)?;
     Ok(prepared)
 }
 
 impl PreparedSources {
+    fn match_physical_vba_exports(
+        &mut self,
+        inputs: &[ManifestInput],
+        snapshots: &BTreeMap<FileId, SourceSnapshot>,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        // VB6 membership is resolved later. Until it can supply a source-bound
+        // conflict witness here, an admitted project blocks this refinement.
+        if inputs.iter().any(|input| {
+            input
+                .path
+                .rsplit_once('.')
+                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("vbp"))
+        }) {
+            return Ok(());
+        }
+        let mut verified = BTreeMap::<(ContentHash, usize), Vec<&SourceSnapshot>>::new();
+        for file in self.native_vba_modules.keys() {
+            check_cancellation(cancellation)?;
+            let snapshot = snapshots.get(file).ok_or(FirstSliceError::DiscoveryDrift)?;
+            let bucket = verified
+                .entry((snapshot.content_hash(), snapshot.content().len()))
+                .or_default();
+            bucket.try_reserve(1).map_err(|_| FirstSliceError::Limits)?;
+            bucket.push(snapshot);
+        }
+        for input in inputs {
+            check_cancellation(cancellation)?;
+            if input.encoding != "utf-8"
+                || !input.path.rsplit_once('.').is_some_and(|(_, suffix)| {
+                    suffix.eq_ignore_ascii_case("bas") || suffix.eq_ignore_ascii_case("cls")
+                })
+                || !input.project_language_witnesses.is_empty()
+                || input.language_signals.is_empty()
+                || !input.language_signals.iter().all(|signal| {
+                    signal.evidence == LanguageEvidence::Content
+                        && signal.language == "visual-basic-classic"
+                })
+            {
+                continue;
+            }
+            let Some(snapshot) = snapshots.get(&input.file) else {
+                continue;
+            };
+            if snapshot.content_hash() != input.content_hash
+                || u64::try_from(snapshot.content().len()).ok() != Some(input.bytes)
+            {
+                return Err(FirstSliceError::DiscoveryDrift);
+            }
+            if verified
+                .get(&(input.content_hash, snapshot.content().len()))
+                .is_some_and(|bucket| {
+                    bucket
+                        .iter()
+                        .any(|module| module.content() == snapshot.content())
+                })
+            {
+                self.physical_vba_exports.insert(input.file);
+            }
+        }
+        Ok(())
+    }
+
+    /// Refines only exact verified export copies; physical sources receive no
+    /// Office membership or native analysis context. Other routes stay unchanged.
+    pub(super) fn supported_source_language<'a>(
+        &self,
+        input: &'a ManifestInput,
+        analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
+    ) -> Option<&'a str> {
+        if self.physical_vba_exports.contains(&input.file) {
+            // Byte equality establishes the dialect, not Office membership,
+            // host objects, compilation constants or native module context.
+            return analyzers
+                .get("vba")?
+                .supports_encoding(&EncodingId::new(&input.encoding).ok()?)
+                .then_some("vba");
+        }
+        supported_source_language(input, analyzers)
+    }
+
     /// Requires the ordinary physical owner to have no future container facts.
     /// Failed extraction can retain issues without producing virtual inputs;
     /// those warnings still need their existing wider atomic owner.
@@ -131,6 +214,7 @@ impl PreparedSources {
             && self.fingerprints.is_empty()
             && self.origins.is_empty()
             && self.native_vba_modules.is_empty()
+            && self.physical_vba_exports.is_empty()
             && self.incomplete_native_contexts.is_empty()
             && self.native_projects.is_empty()
             && self.issues.is_empty()
