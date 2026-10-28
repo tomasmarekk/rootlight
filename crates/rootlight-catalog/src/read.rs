@@ -331,17 +331,22 @@ pub(crate) fn read_generation_with_admission<E>(
     if metadata != expected_metadata || stats != expected_stats {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
-    validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
+    let entity_flag_rows =
+        validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
     let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
-    let memory_plan =
-        oracle_read_memory_plan(metadata.contract_version(), stats, maximum_payload_bytes)?;
+    let memory_plan = oracle_read_memory_plan(
+        metadata.contract_version(),
+        stats,
+        maximum_payload_bytes,
+        entity_flag_rows,
+    )?;
     validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
     validate_source_reference_layout(&transaction, stats.source_refs(), context)?;
     admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
     context.check().map_err(CatalogError::control)?;
     let sources = read_sources(&transaction, stats.source_refs(), context)?;
     let mut evidence = read_evidence(&transaction, context)?;
-    let mut flags = read_flags(&transaction, context)?;
+    let mut flags = read_flags(&transaction, entity_flag_rows, stats.entities(), context)?;
     let mut candidates = read_candidates(&transaction, context)?;
     let mut provenance_sources = read_provenance_sources(&transaction, &sources, context)?;
     let mut provenance_derivations = read_provenance_derivations(&transaction, context)?;
@@ -492,6 +497,7 @@ pub(crate) fn oracle_read_memory_plan(
     contract_version: GenerationContractVersion,
     stats: GenerationStats,
     maximum_payload_bytes: u64,
+    entity_flag_rows: u64,
 ) -> Result<OracleReadMemoryPlan, CatalogError> {
     let logical_rows = [
         stats.files(),
@@ -535,6 +541,11 @@ pub(crate) fn oracle_read_memory_plan(
     let opaque_and_auxiliary_rows = other_rows
         .checked_sub(closed_rows)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let opaque_and_other_auxiliary_rows =
+        opaque_and_auxiliary_rows
+            .checked_sub(entity_flag_rows)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let flag_workspace = flag_workspace_bytes(entity_flag_rows, stats.entities())?;
 
     // Exact buffers are allocated only after the same-transaction census and
     // admission. Canonicalization sorts one collection at a time; its validation
@@ -543,7 +554,9 @@ pub(crate) fn oracle_read_memory_plan(
     // Gap and diagnostic JSON decodes to closed record shapes too. Their text
     // and evidence vectors remain charged through encoded text, while the
     // largest single-payload decoder has its own transient allowance. Other
-    // opaque payloads and child-row maps retain the four-KiB envelope.
+    // opaque payloads and other child-row maps retain the four-KiB envelope.
+    // Flag groups reserve six closed enum slots per owner. Their headers remain
+    // resident while each owned vector moves into its final EntityRecord.
     let id_set = tree_node_bytes::<FactId, ()>()?;
     let file_validation = tree_node_bytes::<FileId, &FileRecord>()?
         .checked_add(tree_node_bytes::<FileId, FileId>()?)
@@ -627,8 +640,9 @@ pub(crate) fn oracle_read_memory_plan(
             )
         })
         .ok_or_else(memory_plan_overflow)?;
-    let record_workspace_bytes = opaque_and_auxiliary_rows
+    let record_workspace_bytes = opaque_and_other_auxiliary_rows
         .checked_mul(4 * 1024)
+        .and_then(|bytes| bytes.checked_add(flag_workspace))
         .and_then(|bytes| bytes.checked_add(retained_record_bytes))
         .and_then(|bytes| bytes.checked_add(temporary_workspace))
         .and_then(|bytes| bytes.checked_add(source_buffers))
@@ -675,6 +689,25 @@ fn typed_record_buffer_bytes<R>(rows: u64) -> Result<u64, CatalogError> {
         u64::try_from(std::mem::size_of::<R>()).map_err(|_| memory_plan_overflow())?;
     rows.checked_add(1)
         .and_then(|rows| rows.checked_mul(record_bytes))
+        .ok_or_else(memory_plan_overflow)
+}
+
+const ENTITY_FLAG_SLOTS: usize = 6;
+
+fn flag_workspace_bytes(flag_rows: u64, entities: u64) -> Result<u64, CatalogError> {
+    if flag_rows > entities.checked_mul(6).ok_or_else(memory_plan_overflow)? {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let groups = flag_rows.min(entities);
+    typed_record_buffer_bytes::<FlagGroup>(groups)?
+        .checked_add(
+            groups
+                .checked_mul(
+                    u64::try_from(ENTITY_FLAG_SLOTS * std::mem::size_of::<EntityFlag>())
+                        .map_err(|_| memory_plan_overflow())?,
+                )
+                .ok_or_else(memory_plan_overflow)?,
+        )
         .ok_or_else(memory_plan_overflow)
 }
 
@@ -857,12 +890,15 @@ fn validate_document_hash(
     Ok(())
 }
 
-fn validate_payload_cardinality(
+pub(crate) fn validate_payload_cardinality(
     connection: &Connection,
     contract_version: GenerationContractVersion,
     stats: GenerationStats,
     context: &GenerationContext<'_>,
-) -> Result<(), CatalogError> {
+) -> Result<u64, CatalogError> {
+    const FLAG_COUNT_SQL: &str = "SELECT count(*) FROM (
+                SELECT 1 FROM entity_flags LIMIT ?1
+             )";
     let identity_rows = [
         1,
         stats.files(),
@@ -916,12 +952,7 @@ fn validate_payload_cardinality(
              )",
             Some(stats.entities()),
         ),
-        (
-            "SELECT count(*) FROM (
-                SELECT 1 FROM entity_flags LIMIT ?1
-             )",
-            None,
-        ),
+        (FLAG_COUNT_SQL, None),
         (
             "SELECT count(*) FROM (
                 SELECT 1 FROM occurrences LIMIT ?1
@@ -1004,6 +1035,7 @@ fn validate_payload_cardinality(
     }
     .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     let mut observed_total = 0_u64;
+    let mut entity_flag_rows = 0_u64;
     for (sql, expected) in tables {
         let remaining = physical_row_limit
             .checked_sub(observed_total)
@@ -1016,6 +1048,9 @@ fn validate_payload_cardinality(
             None => remaining,
         };
         let count = bounded_table_count(connection, sql, maximum, context)?;
+        if sql == FLAG_COUNT_SQL {
+            entity_flag_rows = count;
+        }
         if expected.is_some_and(|expected| expected != count) {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
@@ -1026,7 +1061,8 @@ fn validate_payload_cardinality(
     if observed_total != physical_row_limit {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
-    Ok(())
+    flag_workspace_bytes(entity_flag_rows, stats.entities())?;
+    Ok(entity_flag_rows)
 }
 
 fn bounded_table_count(
@@ -1181,26 +1217,114 @@ fn read_evidence(
     Ok(values)
 }
 
+#[derive(Debug)]
+struct FlagGroup {
+    entity: SymbolId,
+    flags: Vec<EntityFlag>,
+}
+
+#[derive(Debug)]
+struct FlagGroups {
+    groups: Vec<FlagGroup>,
+    next: usize,
+}
+
+impl FlagGroups {
+    fn is_empty(&self) -> bool {
+        self.next == self.groups.len()
+    }
+
+    fn take(&mut self, entity: SymbolId) -> Result<Vec<EntityFlag>, CatalogError> {
+        let Some(group) = self.groups.get_mut(self.next) else {
+            return Ok(Vec::new());
+        };
+        match group.entity.cmp(&entity) {
+            std::cmp::Ordering::Less => Err(CatalogError::new(CatalogErrorKind::Corrupt)),
+            std::cmp::Ordering::Greater => Ok(Vec::new()),
+            std::cmp::Ordering::Equal => {
+                self.next = self.next.checked_add(1).ok_or_else(memory_plan_overflow)?;
+                Ok(std::mem::take(&mut group.flags))
+            }
+        }
+    }
+}
+
 fn read_flags(
     connection: &Connection,
+    expected_rows: u64,
+    expected_entities: u64,
     context: &GenerationContext<'_>,
-) -> Result<BTreeMap<SymbolId, Vec<EntityFlag>>, CatalogError> {
+) -> Result<FlagGroups, CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    flag_workspace_bytes(expected_rows, expected_entities)?;
+    let maximum_groups = expected_rows.min(expected_entities);
+    let mut values: Vec<FlagGroup> = exact_record_buffer(maximum_groups)?;
     let mut statement = connection
         .prepare("SELECT entity_id, flag FROM entity_flags ORDER BY entity_id, flag")
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut values: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    let mut observed_rows = 0_u64;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
-        values
-            .entry(codec::symbol_id(get(row, 0)?)?)
-            .or_default()
-            .push(codec::decode_enum(get(row, 1)?)?);
+        if observed_rows >= expected_rows {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        observed_rows = observed_rows
+            .checked_add(1)
+            .ok_or_else(memory_plan_overflow)?;
+        let raw_id = row.get_ref(0).map_err(CatalogError::sqlite)?;
+        let entity = SymbolId::from_bytes(
+            raw_id
+                .as_blob()
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?,
+        );
+        let raw_flag = row.get_ref(1).map_err(CatalogError::sqlite)?;
+        let flag = match raw_flag.as_str() {
+            Ok("generated") => EntityFlag::Generated,
+            Ok("external") => EntityFlag::External,
+            Ok("test") => EntityFlag::Test,
+            Ok("exported") => EntityFlag::Exported,
+            Ok("deprecated") => EntityFlag::Deprecated,
+            Ok("synthetic") => EntityFlag::Synthetic,
+            _ => return Err(CatalogError::new(CatalogErrorKind::Corrupt)),
+        };
+        match values.last().map(|group| group.entity.cmp(&entity)) {
+            Some(std::cmp::Ordering::Greater) => {
+                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            }
+            Some(std::cmp::Ordering::Equal) => {}
+            Some(std::cmp::Ordering::Less) | None => {
+                check_record_push(values.len(), maximum_groups)?;
+                values.push(FlagGroup {
+                    entity,
+                    flags: exact_record_buffer(
+                        u64::try_from(ENTITY_FLAG_SLOTS).map_err(|_| memory_plan_overflow())?,
+                    )?,
+                });
+            }
+        }
+        let group = values
+            .last_mut()
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        if group.flags.len() >= ENTITY_FLAG_SLOTS || group.flags.contains(&flag) {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        group.flags.push(flag);
     }
-    for flags in values.values_mut() {
-        flags.sort_unstable();
+    if observed_rows != expected_rows {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
-    Ok(values)
+    for group in &mut values {
+        context.check().map_err(CatalogError::control)?;
+        group.flags.sort_unstable();
+    }
+    context.check().map_err(CatalogError::control)?;
+    Ok(FlagGroups {
+        groups: values,
+        next: 0,
+    })
 }
 
 fn read_candidates(
@@ -1398,7 +1522,7 @@ fn read_entities(
     expected_count: u64,
     sources: &[SourceRef],
     evidence: &mut EvidenceMap,
-    flags: &mut BTreeMap<SymbolId, Vec<EntityFlag>>,
+    flags: &mut FlagGroups,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<EntityRecord>, CatalogError> {
     let mut statement = connection
@@ -1430,7 +1554,7 @@ fn read_entities(
             qualified_name: get(row, 8)?,
             container: codec::decode_container(get(row, 9)?, get(row, 10)?)?,
             visibility: codec::decode_enum::<EntityVisibility>(get(row, 11)?)?,
-            flags: flags.remove(&id).unwrap_or_default(),
+            flags: flags.take(id)?,
             provenance: codec::fact_id(get(row, 12)?)?,
             evidence: take_evidence("entity", raw_id, get(row, 13)?, sources, evidence)?,
         });
@@ -1981,6 +2105,12 @@ mod tests {
             metadata.contract_version(),
             written.stats,
             written.maximum_payload_bytes,
+            snapshot
+                .document()
+                .entities
+                .iter()
+                .map(|entity| u64::try_from(entity.flags.len()).unwrap())
+                .sum(),
         )
         .unwrap();
         drop(connection);
@@ -2186,9 +2316,256 @@ mod tests {
     }
 
     #[test]
+    fn bounded_flags_preserve_order_and_move_reserved_vectors() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE entity_flags(entity_id, flag)")
+            .unwrap();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let empty = read_flags(&connection, 0, 3, &context).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.groups.capacity(), 0);
+        let first = SymbolId::from_bytes([1; 20]);
+        let last = SymbolId::from_bytes([3; 20]);
+        let all_flags = [
+            EntityFlag::Generated,
+            EntityFlag::External,
+            EntityFlag::Test,
+            EntityFlag::Exported,
+            EntityFlag::Deprecated,
+            EntityFlag::Synthetic,
+        ];
+        connection
+            .execute(
+                "INSERT INTO entity_flags VALUES (?1, 'synthetic')",
+                [last.as_bytes().as_slice()],
+            )
+            .unwrap();
+        for flag in all_flags.into_iter().rev() {
+            connection
+                .execute(
+                    "INSERT INTO entity_flags VALUES (?1, ?2)",
+                    rusqlite::params![
+                        first.as_bytes().as_slice(),
+                        codec::encode_enum(&flag).unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+        let mut groups = read_flags(&connection, 7, 3, &context).unwrap();
+        assert_eq!(groups.groups.capacity(), 3);
+        assert_eq!(groups.groups.len(), 2);
+        assert!(
+            groups
+                .groups
+                .iter()
+                .all(|group| group.flags.capacity() == 6)
+        );
+        let first_buffer = groups.groups[0].flags.as_ptr();
+        let last_buffer = groups.groups[1].flags.as_ptr();
+        assert!(
+            groups
+                .take(SymbolId::from_bytes([0; 20]))
+                .unwrap()
+                .is_empty()
+        );
+        let flags = groups.take(first).unwrap();
+        assert_eq!(flags, all_flags);
+        assert_eq!(flags.as_ptr(), first_buffer);
+        assert!(groups.groups[0].flags.is_empty());
+        assert!(
+            groups
+                .take(SymbolId::from_bytes([2; 20]))
+                .unwrap()
+                .is_empty()
+        );
+        let flags = groups.take(last).unwrap();
+        assert_eq!(flags, [EntityFlag::Synthetic]);
+        assert_eq!(flags.as_ptr(), last_buffer);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn bounded_flags_reject_hostile_cells_before_owned_scalar_decode() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE entity_flags(entity_id, flag)")
+            .unwrap();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        for (entity, flag) in [
+            ("zeroblob(19)", "'test'"),
+            ("zeroblob(21)", "'test'"),
+            ("zeroblob(1048576)", "'test'"),
+            ("'wrong scalar type'", "'test'"),
+            ("NULL", "'test'"),
+            ("zeroblob(20)", "'unknown'"),
+            ("zeroblob(20)", "zeroblob(1048576)"),
+            ("zeroblob(20)", "CAST(zeroblob(1048576) AS TEXT)"),
+            ("zeroblob(20)", "CAST(x'ff' AS TEXT)"),
+            ("zeroblob(20)", "NULL"),
+        ] {
+            connection.execute("DELETE FROM entity_flags", []).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO entity_flags VALUES ({entity}, {flag})"
+                ))
+                .unwrap();
+            assert_eq!(
+                read_flags(&connection, 1, 1, &context).unwrap_err().kind(),
+                CatalogErrorKind::Corrupt,
+                "{entity}, {flag}",
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_flags_reject_duplicates_excess_owners_counts_and_orphans() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE entity_flags(entity_id, flag);
+                 INSERT INTO entity_flags VALUES (zeroblob(20), 'test')",
+            )
+            .unwrap();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        for expected in [0, 2] {
+            assert_eq!(
+                read_flags(&connection, expected, 1, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt,
+            );
+        }
+        let mut orphan = read_flags(&connection, 1, 1, &context).unwrap();
+        assert!(!orphan.is_empty());
+        assert_eq!(
+            orphan
+                .take(SymbolId::from_bytes([1; 20]))
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt,
+        );
+        for extra in [
+            "INSERT INTO entity_flags VALUES (zeroblob(20), 'test')",
+            "INSERT INTO entity_flags VALUES (x'0101010101010101010101010101010101010101', 'test')",
+        ] {
+            connection.execute_batch(extra).unwrap();
+            assert_eq!(
+                read_flags(&connection, 2, 1, &context).unwrap_err().kind(),
+                CatalogErrorKind::Corrupt,
+            );
+            connection.execute("DELETE FROM entity_flags", []).unwrap();
+            connection
+                .execute_batch("INSERT INTO entity_flags VALUES (zeroblob(20), 'test')")
+                .unwrap();
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO entity_flags VALUES
+                 (zeroblob(20), 'generated'), (zeroblob(20), 'external'),
+                 (zeroblob(20), 'exported'), (zeroblob(20), 'deprecated'),
+                 (zeroblob(20), 'synthetic'), (zeroblob(20), 'test')",
+            )
+            .unwrap();
+        for entities in [1, 2] {
+            assert_eq!(
+                read_flags(&connection, 7, entities, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt,
+            );
+        }
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert_eq!(
+            read_flags(&connection, 7, 2, &context).unwrap_err().kind(),
+            CatalogErrorKind::Cancelled,
+        );
+        let during_query = Cancellation::new();
+        let progress_cancellation = during_query.clone();
+        connection
+            .progress_handler(
+                1,
+                Some(move || {
+                    progress_cancellation.cancel(CancellationReason::ClientRequest);
+                    false
+                }),
+            )
+            .unwrap();
+        let context = GenerationContext::new(&during_query, GenerationBudget::default());
+        assert_eq!(
+            read_flags(&connection, 7, 2, &context).unwrap_err().kind(),
+            CatalogErrorKind::Cancelled,
+        );
+    }
+
+    #[test]
+    fn flag_workspace_changes_only_the_flag_envelope_and_complete_bounded_buffer() {
+        let stats = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 17).unwrap();
+        let baseline = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0).unwrap();
+        let empty_workspace = flag_workspace_bytes(0, 3).unwrap();
+        assert_eq!(
+            empty_workspace,
+            typed_record_buffer_bytes::<FlagGroup>(0).unwrap()
+        );
+        for flag_rows in [1, 6, 18] {
+            let groups = flag_rows.min(stats.entities());
+            let expected_workspace = typed_record_buffer_bytes::<FlagGroup>(groups).unwrap()
+                + groups * u64::try_from(6 * std::mem::size_of::<EntityFlag>()).unwrap();
+            assert_eq!(
+                flag_workspace_bytes(flag_rows, 3).unwrap(),
+                expected_workspace
+            );
+            let plan =
+                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, flag_rows).unwrap();
+            assert_eq!(
+                plan.record_workspace_bytes() + flag_rows * 4096 - expected_workspace,
+                baseline.record_workspace_bytes() - empty_workspace,
+            );
+            assert_eq!(
+                plan.transient_decode_bytes(),
+                baseline.transient_decode_bytes()
+            );
+            assert_eq!(
+                plan.maximum_payload_bytes(),
+                baseline.maximum_payload_bytes()
+            );
+            assert_eq!(plan.stats(), baseline.stats());
+            assert_eq!(plan.physical_rows(), baseline.physical_rows());
+            assert_eq!(
+                plan.identity_registry_rows(),
+                baseline.identity_registry_rows()
+            );
+        }
+        assert_eq!(
+            flag_workspace_bytes(19, 3).unwrap_err().kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert_eq!(
+            flag_workspace_bytes(u64::MAX, u64::MAX).unwrap_err().kind(),
+            CatalogErrorKind::Storage
+        );
+        assert_eq!(
+            exact_record_buffer::<FlagGroup>(u64::MAX)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Storage,
+        );
+        let no_auxiliary = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0).unwrap();
+        assert_eq!(
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 1)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt,
+        );
+    }
+
+    #[test]
     fn memory_plan_separates_closed_records_and_retains_opaque_envelopes() {
         let stats = stats(17, 1024);
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97).unwrap();
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0).unwrap();
         assert_eq!(plan.physical_rows(), 17);
         assert_eq!(plan.identity_registry_rows(), 8);
         assert!(plan.record_workspace_bytes() >= 5 * 4096);
@@ -2207,6 +2584,7 @@ mod tests {
             GenerationContractVersion::new(1, 1),
             self::stats(16, 1024),
             97,
+            0,
         )
         .unwrap();
         assert_eq!(legacy.physical_rows(), plan.physical_rows());
@@ -2216,6 +2594,7 @@ mod tests {
                 GENERATION_CONTRACT_VERSION,
                 self::stats(rows, 1024),
                 payload,
+                0,
             )
             .unwrap_err();
             assert_eq!(error.kind(), CatalogErrorKind::Storage);
@@ -2223,6 +2602,7 @@ mod tests {
         let error = oracle_read_memory_plan(
             GenerationContractVersion::new(1, 1),
             self::stats(u64::MAX, 1024),
+            0,
             0,
         )
         .unwrap_err();
@@ -2247,7 +2627,7 @@ mod tests {
             769_035_567,
         )
         .unwrap();
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636).unwrap();
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0).unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -2265,7 +2645,8 @@ mod tests {
             "closed record and borrowed source workspaces coexist with the resident generation under the unchanged ceiling: {admitted}"
         );
         let oversized =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024).unwrap();
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0)
+                .unwrap();
         assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
         assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
     }
@@ -2288,7 +2669,7 @@ mod tests {
             1_442_569_165,
         )
         .unwrap();
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636).unwrap();
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0).unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -2304,7 +2685,8 @@ mod tests {
         assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
         assert_eq!(plan.stats(), stats);
         let oversized =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024).unwrap();
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0)
+                .unwrap();
         assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
     }
 
@@ -2437,7 +2819,7 @@ mod tests {
         let stats = stats(17, 32_768);
         let maximum = maximum_payload_bytes(&connection, stats, &context).unwrap();
         assert_eq!(maximum, expected_max);
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum).unwrap();
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum, 0).unwrap();
         let factor =
             u64::try_from(4 * (std::mem::size_of::<String>() + std::mem::size_of::<usize>()))
                 .unwrap();

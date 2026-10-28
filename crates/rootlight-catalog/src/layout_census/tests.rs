@@ -6,7 +6,7 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{FactId, SymbolId};
-use rootlight_ir::{CoverageStatus, FactRef, LineRange, OccurrenceTarget, SourceRef};
+use rootlight_ir::{CoverageStatus, EntityFlag, FactRef, LineRange, OccurrenceTarget, SourceRef};
 use rootlight_storage::GenerationBudget;
 
 use super::*;
@@ -56,17 +56,44 @@ fn observed_plan(reader: &OracleReader, context: &GenerationContext<'_>) -> Orac
     observed.unwrap()
 }
 
+fn flag_rows(document: &NormalizedIrDocument) -> u64 {
+    document.entities.iter().fold(0_u64, |rows, entity| {
+        rows.checked_add(u64::try_from(entity.flags.len()).unwrap())
+            .unwrap()
+    })
+}
+
+fn all_flags() -> Vec<EntityFlag> {
+    vec![
+        EntityFlag::Generated,
+        EntityFlag::External,
+        EntityFlag::Test,
+        EntityFlag::Exported,
+        EntityFlag::Deprecated,
+        EntityFlag::Synthetic,
+    ]
+}
+
 fn all_layout_features() -> NormalizedIrDocument {
     let (mut document, _) = fixture_documents();
+    document.entities[0].flags.clear();
     let mut second = document.entities[0].clone();
     second.id = SymbolId::from_bytes([0x79; 20]);
     second.canonical_name = "other".into();
     second.display_name = "Other".into();
     second.qualified_name = "fixture.Other".into();
+    second.flags = vec![EntityFlag::Test];
     document.entities.push(second);
+    let mut third = document.entities[0].clone();
+    third.id = SymbolId::from_bytes([0x78; 20]);
+    third.canonical_name = "all_flags".into();
+    third.display_name = "AllFlags".into();
+    third.qualified_name = "fixture.AllFlags".into();
+    third.flags = all_flags();
+    document.entities.push(third);
     document.occurrences[0].target = OccurrenceTarget::Candidates {
         symbols: document.entities.iter().map(|entity| entity.id).collect(),
-        total_count: 2,
+        total_count: 3,
         completeness: CoverageStatus::Complete,
     };
     document.entities[0]
@@ -144,6 +171,7 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
         insert(&mut census, &fragment, &context);
     }
     let prospective = census.read_memory_plan(&context).unwrap();
+    assert_eq!(census.totals.entity_flag_rows, 7);
     let actual = write::measure(&generation, &context).unwrap();
     assert_eq!(prospective.stats(), actual.stats);
     assert_eq!(
@@ -151,6 +179,7 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
         actual.maximum_payload_bytes
     );
     let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let expected_document = document.clone();
     let reader = OracleWriter::create_in(root.path())
         .unwrap()
         .seal_unverified_for_test(generation, &context)
@@ -159,7 +188,72 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
     drop(reader);
     let reopened = OracleReader::open_in(root.path(), &context).unwrap();
     assert_eq!(prospective, observed_plan(&reopened, &context));
-    reopened.read(&context).unwrap();
+    let restored = reopened.read(&context).unwrap();
+    assert_eq!(restored.document(), &expected_document);
+}
+
+#[test]
+fn flag_only_replacements_additions_and_removals_conserve_committed_and_dropped_totals() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let (template, _) = fixture_documents();
+    let mut document = NormalizedIrDocument::empty(template.repository, template.generation);
+    document.entities = template.entities.clone();
+    document.entities[0].flags.clear();
+    let mut census = OracleLayoutCensus::new(document.repository, document.generation);
+    insert(&mut census, &document, &context);
+
+    for flags in [
+        Some(vec![EntityFlag::External]),
+        Some(all_flags()),
+        Some(Vec::new()),
+        Some(all_flags()),
+        None,
+        Some(all_flags()),
+    ] {
+        let before = census.read_memory_plan(&context).unwrap();
+        let before_rows = flag_rows(&document);
+        let mut replacement = NormalizedIrDocument::empty(template.repository, template.generation);
+        if let Some(flags) = flags {
+            let mut entity = template.entities[0].clone();
+            entity.flags = flags;
+            replacement.entities.push(entity);
+        }
+        let expected_rows = flag_rows(&replacement);
+        let expected = measure(&replacement, &context)
+            .read_memory_plan(&context)
+            .unwrap();
+        {
+            let preview = census
+                .preview(
+                    measure(&document, &context),
+                    measure(&replacement, &context),
+                    0,
+                    &context,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(preview.census.totals.entity_flag_rows, expected_rows);
+            assert_eq!(preview.read_memory_plan(&context).unwrap(), expected);
+        }
+        assert_eq!(census.totals.entity_flag_rows, before_rows);
+        assert_eq!(census.read_memory_plan(&context).unwrap(), before);
+        census
+            .preview(
+                measure(&document, &context),
+                measure(&replacement, &context),
+                0,
+                &context,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .commit();
+        document = replacement;
+        assert_eq!(census.totals.entity_flag_rows, expected_rows);
+        assert_eq!(census.read_memory_plan(&context).unwrap(), expected);
+    }
+
+    assert_eq!(census.totals.entity_flag_rows, 6);
 }
 
 #[test]
@@ -241,7 +335,8 @@ fn removing_and_replacing_maximum_payload_shrinks_the_exact_plan() {
         read::oracle_read_memory_plan(
             GENERATION_CONTRACT_VERSION,
             actual.stats,
-            actual.maximum_payload_bytes
+            actual.maximum_payload_bytes,
+            flag_rows(&document),
         )
         .unwrap()
     );
@@ -496,9 +591,11 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
         GENERATION_CONTRACT_VERSION,
         actual.stats,
         actual.maximum_payload_bytes,
+        flag_rows(document),
     )
     .unwrap();
     assert_eq!(combined.read_memory_plan(&context).unwrap(), expected);
+    assert_eq!(combined.totals.entity_flag_rows, 7);
     let mut peak = 0;
     let duplicate = combined
         .duplicate(17, &context, &mut |bytes| {
@@ -508,6 +605,7 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
         .unwrap();
     assert!(peak >= combined.retained_bytes().unwrap() + duplicate.retained_bytes().unwrap() + 17);
     assert_eq!(duplicate.read_memory_plan(&context).unwrap(), expected);
+    assert_eq!(duplicate.totals.entity_flag_rows, 7);
     let refused = combined.duplicate(0, &context, &mut |_| Err("duplicate workspace refused"));
     assert!(matches!(
         refused,

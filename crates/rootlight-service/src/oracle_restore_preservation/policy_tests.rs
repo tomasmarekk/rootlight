@@ -8,21 +8,36 @@ use std::{cell::Cell, fs};
 
 thread_local! {
     pub(super) static PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
+    pub(super) static FLAGS_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
 }
 
-fn predecessor<T>(operation: impl FnOnce() -> T) -> T {
-    struct Reset(bool);
+fn predecessor<T>(flags_policy: bool, operation: impl FnOnce() -> T) -> T {
+    struct Reset(&'static std::thread::LocalKey<Cell<bool>>, bool);
     impl Drop for Reset {
         fn drop(&mut self) {
-            PREDECESSOR_POLICY.with(|slot| slot.set(self.0));
+            self.0.with(|slot| slot.set(self.1));
         }
     }
-    let _reset = Reset(PREDECESSOR_POLICY.with(|slot| slot.replace(true)));
+    let policy = if flags_policy {
+        &FLAGS_PREDECESSOR_POLICY
+    } else {
+        &PREDECESSOR_POLICY
+    };
+    let _reset = Reset(policy, policy.with(|slot| slot.replace(true)));
     operation()
 }
 
 #[test]
 fn prior_policy_whole_source_fallback_is_requalified_before_new_policy_noop_reuse() {
+    assert_prior_policy_cache_requalification(false);
+}
+
+#[test]
+fn immediate_flag_policy_fence_requalifies_unchanged_capacity_fallback_before_noop_reuse() {
+    assert_prior_policy_cache_requalification(true);
+}
+
+fn assert_prior_policy_cache_requalification(flags_policy: bool) {
     let storage = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let (source, ceiling) = durable::restore_policy_predecessor_fixture();
@@ -38,7 +53,8 @@ fn prior_policy_whole_source_fallback_is_requalified_before_new_policy_noop_reus
         .unwrap()
         .provider_set_hash(FirstSliceIndexMode::Structural)
         .unwrap();
-    let (old, old_policy) = predecessor(|| {
+    let (old, old_policy) = predecessor(flags_policy, || {
+        assert_eq!(PREDECESSOR_POLICY.with(Cell::get), !flags_policy);
         let mut service =
             FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
         let old_policy = service
@@ -72,7 +88,7 @@ fn prior_policy_whole_source_fallback_is_requalified_before_new_policy_noop_reus
     assert_eq!(parser, first_slice_parser_provider_hash().unwrap());
     assert_eq!(resolver, content_hash(RESOLVER_BINARY_SEED));
     assert_eq!(fs::read(root.path().join("lib.rs")).unwrap(), source);
-    predecessor(|| {
+    predecessor(flags_policy, || {
         // The larger test-time ceiling alone does not revisit this unchanged
         // predecessor cache. The host policy fence must cause requalification.
         let mut unchanged =
@@ -114,7 +130,7 @@ fn prior_policy_whole_source_fallback_is_requalified_before_new_policy_noop_reus
     );
     assert_eq!(fs::read(root.path().join("lib.rs")).unwrap(), source);
     drop(current);
-    let reopened = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
+    let mut reopened = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
     assert_eq!(
         reopened.active_generation_for(old.repository),
         Some(requalified.generation)
@@ -126,5 +142,11 @@ fn prior_policy_whole_source_fallback_is_requalified_before_new_policy_noop_reus
             .document()
             .entities
             .is_empty()
+    );
+    assert_eq!(
+        reopened
+            .index_repository(root.path(), &cancellation)
+            .unwrap(),
+        requalified
     );
 }

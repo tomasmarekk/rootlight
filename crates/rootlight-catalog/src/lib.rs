@@ -292,16 +292,27 @@ impl OracleWriter {
         } = self;
         schema::install_generation_cancellation(&connection, context)?;
         let written = write::write_generation_with_metadata(&mut connection, generation, context)?;
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(CatalogError::sqlite)?;
+        let entity_flag_rows = read::validate_payload_cardinality(
+            &transaction,
+            generation.metadata().contract_version(),
+            written.stats,
+            context,
+        )?;
+        let plan = read::oracle_read_memory_plan(
+            generation.metadata().contract_version(),
+            written.stats,
+            written.maximum_payload_bytes,
+            entity_flag_rows,
+        )?;
+        transaction.commit().map_err(CatalogError::sqlite)?;
         drop(connection);
         let reader = OracleReader::open_path(path, context)?;
         if reader.stats != written.stats {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
-        let plan = read::oracle_read_memory_plan(
-            generation.metadata().contract_version(),
-            written.stats,
-            written.maximum_payload_bytes,
-        )?;
         Ok((reader, plan))
     }
 }

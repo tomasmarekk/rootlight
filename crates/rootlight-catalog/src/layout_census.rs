@@ -34,11 +34,12 @@ fn bytes<T>(count: usize) -> Result<u64, CatalogError> {
 struct Totals {
     records: [u64; 10],
     children: u64,
+    entity_flag_rows: u64,
     text: u64,
 }
 
 impl Totals {
-    fn from_stats(stats: GenerationStats) -> Result<Self, CatalogError> {
+    fn from_stats(stats: GenerationStats, entity_flag_rows: u64) -> Result<Self, CatalogError> {
         let records = [
             stats.files(),
             stats.entities(),
@@ -61,11 +62,23 @@ impl Totals {
             .and_then(|n| n.checked_sub(logical.checked_mul(2)?))
             .and_then(|n| n.checked_sub(stats.source_refs()))
             .ok_or_else(invalid)?;
-        Ok(Self {
+        let totals = Self {
             records,
             children,
+            entity_flag_rows,
             text: stats.text_bytes(),
-        })
+        };
+        totals.validate_flags()?;
+        Ok(totals)
+    }
+
+    fn validate_flags(self) -> Result<(), CatalogError> {
+        if self.entity_flag_rows > self.children
+            || self.entity_flag_rows > self.records[1].checked_mul(6).ok_or_else(invalid)?
+        {
+            return Err(invalid());
+        }
+        Ok(())
     }
 
     fn transition(self, removed: Self, added: Self) -> Result<Self, CatalogError> {
@@ -81,15 +94,22 @@ impl Totals {
             .checked_sub(removed.children)
             .and_then(|n| n.checked_add(added.children))
             .ok_or_else(invalid)?;
+        next.entity_flag_rows = self
+            .entity_flag_rows
+            .checked_sub(removed.entity_flag_rows)
+            .and_then(|n| n.checked_add(added.entity_flag_rows))
+            .ok_or_else(invalid)?;
         next.text = self
             .text
             .checked_sub(removed.text)
             .and_then(|n| n.checked_add(added.text))
             .ok_or_else(invalid)?;
+        next.validate_flags()?;
         Ok(next)
     }
 
     fn stats(self, sources: usize) -> Result<GenerationStats, CatalogError> {
+        self.validate_flags()?;
         let sources = u64::try_from(sources).map_err(|_| invalid())?;
         let logical = self
             .records
@@ -161,6 +181,7 @@ impl OracleLayoutFragment {
             GENERATION_CONTRACT_VERSION,
             stats,
             self.payloads.last().map_or(0, |(bytes, _)| *bytes),
+            self.totals.entity_flag_rows,
         )
     }
 
@@ -439,11 +460,19 @@ impl OracleLayoutFragment {
             .try_reserve_exact(payloads)
             .map_err(|_| storage())?;
         let plan = write::measure_view(document, context, Some(&mut auxiliary))?;
+        let entity_flag_rows = document.entities.iter().try_fold(0_u64, |rows, entity| {
+            context.check().map_err(CatalogError::control)?;
+            let flags = u64::try_from(entity.flags.len()).map_err(|_| invalid())?;
+            if flags > 6 {
+                return Err(invalid());
+            }
+            rows.checked_add(flags).ok_or_else(invalid)
+        })?;
         let source_capacity = plan.source_ordinals.capacity();
         let source_counts_capacity = auxiliary.source_counts.capacity();
         let payload_capacity = auxiliary.payloads.capacity();
         let mut fragment = Self::empty(document.repository, document.generation);
-        fragment.totals = Totals::from_stats(plan.stats)?;
+        fragment.totals = Totals::from_stats(plan.stats, entity_flag_rows)?;
         fragment
             .identities
             .try_reserve_exact(logical)
@@ -847,6 +876,7 @@ impl OracleLayoutCensus {
             GENERATION_CONTRACT_VERSION,
             stats,
             self.payloads.last().copied().unwrap_or(0),
+            self.totals.entity_flag_rows,
         )
     }
 
