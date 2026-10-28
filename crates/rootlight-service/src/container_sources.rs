@@ -15,7 +15,7 @@ use rootlight_source::{
     vba_text::TextLimits,
 };
 
-pub(super) const REVISION: &[u8] = b"rootlight.container-sources/12";
+pub(super) const REVISION: &[u8] = b"rootlight.container-sources/13";
 
 mod references;
 
@@ -124,6 +124,14 @@ pub(super) fn prepare(
     Ok(prepared)
 }
 
+fn vba_export_body(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .rposition(|byte| !matches!(*byte, b'\r' | b'\n'))
+        .map_or(0, |index| index + 1);
+    &bytes[..end]
+}
+
 impl PreparedSources {
     fn match_physical_vba_exports(
         &mut self,
@@ -133,23 +141,26 @@ impl PreparedSources {
     ) -> Result<(), FirstSliceError> {
         // VB6 membership is resolved later. Until it can supply a source-bound
         // conflict witness here, an admitted project blocks this refinement.
-        if inputs.iter().any(|input| {
-            input
-                .path
-                .rsplit_once('.')
-                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("vbp"))
-        }) {
+        if self.native_vba_modules.is_empty()
+            || inputs.iter().any(|input| {
+                input
+                    .path
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("vbp"))
+            })
+        {
             return Ok(());
         }
-        let mut verified = BTreeMap::<(ContentHash, usize), Vec<&SourceSnapshot>>::new();
+        let mut verified = BTreeMap::<(ContentHash, usize), Vec<&[u8]>>::new();
         for file in self.native_vba_modules.keys() {
             check_cancellation(cancellation)?;
             let snapshot = snapshots.get(file).ok_or(FirstSliceError::DiscoveryDrift)?;
+            let body = vba_export_body(snapshot.content());
             let bucket = verified
-                .entry((snapshot.content_hash(), snapshot.content().len()))
+                .entry((content_hash(body), body.len()))
                 .or_default();
             bucket.try_reserve(1).map_err(|_| FirstSliceError::Limits)?;
-            bucket.push(snapshot);
+            bucket.push(body);
         }
         for input in inputs {
             check_cancellation(cancellation)?;
@@ -174,13 +185,12 @@ impl PreparedSources {
             {
                 return Err(FirstSliceError::DiscoveryDrift);
             }
+            // Terminal CR/LF changes only the dialect witness comparison.
+            // Source identity and parser input retain every original byte.
+            let body = vba_export_body(snapshot.content());
             if verified
-                .get(&(input.content_hash, snapshot.content().len()))
-                .is_some_and(|bucket| {
-                    bucket
-                        .iter()
-                        .any(|module| module.content() == snapshot.content())
-                })
+                .get(&(content_hash(body), body.len()))
+                .is_some_and(|bucket| bucket.contains(&body))
             {
                 self.physical_vba_exports.insert(input.file);
             }
@@ -188,15 +198,15 @@ impl PreparedSources {
         Ok(())
     }
 
-    /// Refines only exact verified export copies; physical sources receive no
-    /// Office membership or native analysis context. Other routes stay unchanged.
+    /// Refines verified export copies modulo trailing CR/LF. Physical sources
+    /// receive no Office membership or native context; other routes stay unchanged.
     pub(super) fn supported_source_language<'a>(
         &self,
         input: &'a ManifestInput,
         analyzers: &BTreeMap<String, TreeSitterAnalyzer>,
     ) -> Option<&'a str> {
         if self.physical_vba_exports.contains(&input.file) {
-            // Byte equality establishes the dialect, not Office membership,
+            // Export-body equality establishes the dialect, not Office membership,
             // host objects, compilation constants or native module context.
             return analyzers
                 .get("vba")?

@@ -5578,6 +5578,8 @@ fn physical_vba_exports_follow_container_replacement_removal_and_restart() {
         .replace("+ 1", "+ 2");
     let matching = fixture::book(&[("Alpha", source)]);
     let replacement = fixture::book(&[("Alpha", changed.as_bytes())]);
+    let eof_source = [source.as_slice(), b"\n"].concat();
+    assert_ne!(content_hash(source), content_hash(&eof_source));
     let root = tempdir();
     let storage = tempdir();
     let paths = rootlight_runtime::RuntimePaths::new(
@@ -5587,16 +5589,32 @@ fn physical_vba_exports_follow_container_replacement_removal_and_restart() {
     .unwrap();
     paths.prepare_owner().unwrap();
     fs::write(root.path().join("module.bas"), source).unwrap();
+    let mut physical_bytes = source.as_slice();
     let mut file_id = None;
     let mut previous = None;
-    for (book, vb6, language) in [
-        (Some(&matching), false, "vba"),
-        (Some(&replacement), false, "visual-basic-classic"),
-        (None, false, "visual-basic-classic"),
-        (Some(&matching), false, "vba"),
-        (Some(&matching), true, "visual-basic-classic"),
-        (Some(&matching), false, "vba"),
+    for (book, vb6, bytes, language) in [
+        (Some(&matching), false, source.as_slice(), "vba"),
+        (Some(&matching), false, eof_source.as_slice(), "vba"),
+        (
+            Some(&replacement),
+            false,
+            eof_source.as_slice(),
+            "visual-basic-classic",
+        ),
+        (None, false, eof_source.as_slice(), "visual-basic-classic"),
+        (Some(&matching), false, eof_source.as_slice(), "vba"),
+        (
+            Some(&matching),
+            true,
+            eof_source.as_slice(),
+            "visual-basic-classic",
+        ),
+        (Some(&matching), false, eof_source.as_slice(), "vba"),
     ] {
+        if physical_bytes != bytes {
+            fs::write(root.path().join("module.bas"), bytes).unwrap();
+            physical_bytes = bytes;
+        }
         let book_path = root.path().join("book.xlsm");
         if let Some(bytes) = book {
             fs::write(&book_path, bytes).unwrap();
@@ -5621,7 +5639,7 @@ fn physical_vba_exports_follow_container_replacement_removal_and_restart() {
             receipt
         );
         let current_file =
-            assert_physical_export(&service, receipt.generation, "module.bas", source, language);
+            assert_physical_export(&service, receipt.generation, "module.bas", bytes, language);
         if let Some(expected) = file_id {
             assert_eq!(
                 current_file, expected,
@@ -5629,9 +5647,9 @@ fn physical_vba_exports_follow_container_replacement_removal_and_restart() {
             );
         }
         file_id = Some(current_file);
-        if let Some((generation, old_language)) = previous {
+        if let Some((generation, old_language, old_hash)) = previous {
             assert_ne!(receipt.generation, generation);
-            if old_language != language {
+            if old_language != language || old_hash != content_hash(bytes) {
                 assert!(
                     service
                         .incremental_evidence(receipt.generation)
@@ -5641,7 +5659,7 @@ fn physical_vba_exports_follow_container_replacement_removal_and_restart() {
                 );
             }
         }
-        previous = Some((receipt.generation, language));
+        previous = Some((receipt.generation, language, content_hash(bytes)));
         let prepared = service
             .prepare_repository_with_options(
                 root.path(),
@@ -5654,20 +5672,14 @@ fn physical_vba_exports_follow_container_replacement_removal_and_restart() {
         drop(service);
         let reopened = FirstSliceService::new_durable(16, paths.state_dir(), &deadline()).unwrap();
         assert_eq!(
-            assert_physical_export(
-                &reopened,
-                receipt.generation,
-                "module.bas",
-                source,
-                language
-            ),
+            assert_physical_export(&reopened, receipt.generation, "module.bas", bytes, language),
             current_file
         );
     }
 }
 
 #[test]
-fn physical_vba_exports_require_exact_verified_bytes() {
+fn physical_vba_exports_require_exact_verified_body_bytes() {
     let root = tempdir();
     let wrong = b"Attribute VB_Name = \"Wrong\"\r\nPublic Sub Hidden()\r\nEnd Sub\r\n";
     fs::write(
@@ -5686,6 +5698,12 @@ fn physical_vba_exports_require_exact_verified_bytes() {
         .unwrap()
         .replace("= 1", "= 2");
     let bom = [b"\xef\xbb\xbf".as_slice(), FIRST].concat();
+    let extra_lf = [FIRST, b"\n"].concat();
+    let extra_cr = [FIRST, b"\r"].concat();
+    let extra_crlf = [FIRST, b"\r\n"].concat();
+    let no_eol = FIRST.strip_suffix(b"\r\n").unwrap();
+    let space = [FIRST, b" \r\n"].concat();
+    let tab = [FIRST, b"\t\n"].concat();
     for (path, bytes) in [
         ("exact.bas", FIRST),
         ("object.CLS", SECOND),
@@ -5693,6 +5711,12 @@ fn physical_vba_exports_require_exact_verified_bytes() {
         ("lf.bas", lf.as_bytes()),
         ("bom.bas", bom.as_slice()),
         ("unverified.bas", wrong),
+        ("extra-lf.bas", extra_lf.as_slice()),
+        ("extra-cr.bas", extra_cr.as_slice()),
+        ("extra-crlf.bas", extra_crlf.as_slice()),
+        ("no-eol.bas", no_eol),
+        ("space.bas", space.as_slice()),
+        ("tab.bas", tab.as_slice()),
     ] {
         fs::write(root.path().join(path), bytes).unwrap();
     }
@@ -5709,6 +5733,12 @@ fn physical_vba_exports_require_exact_verified_bytes() {
         ("lf.bas", "visual-basic-classic"),
         ("bom.bas", "visual-basic-classic"),
         ("unverified.bas", "visual-basic-classic"),
+        ("extra-lf.bas", "vba"),
+        ("extra-cr.bas", "vba"),
+        ("extra-crlf.bas", "vba"),
+        ("no-eol.bas", "vba"),
+        ("space.bas", "visual-basic-classic"),
+        ("tab.bas", "visual-basic-classic"),
     ] {
         assert_eq!(
             document
@@ -5739,6 +5769,7 @@ fn physical_vba_exports_preserve_language_and_project_conflicts() {
         &cancellation,
     );
     let repository = RepositoryId::from_bytes([81; 16]);
+    let physical = [FIRST, b"\n"].concat();
     let path = RelativePath::parse(Path::new("module.cls")).unwrap();
     let file = derive_file(rootlight_ids::FileIdentity {
         repository,
@@ -5747,14 +5778,20 @@ fn physical_vba_exports_preserve_language_and_project_conflicts() {
     .id();
     snapshots.insert(
         file,
-        SourceSnapshot::from_persisted(repository, path, file, content_hash(FIRST), FIRST.to_vec())
-            .unwrap(),
+        SourceSnapshot::from_persisted(
+            repository,
+            path,
+            file,
+            content_hash(&physical),
+            physical.clone(),
+        )
+        .unwrap(),
     );
     let input = ManifestInput {
         file,
         path: "module.cls".to_owned(),
-        content_hash: content_hash(FIRST),
-        bytes: u64::try_from(FIRST.len()).unwrap(),
+        content_hash: content_hash(&physical),
+        bytes: u64::try_from(physical.len()).unwrap(),
         encoding: "utf-8".to_owned(),
         class: InputClass::Source,
         language_signals: vec![LanguageSignal {
