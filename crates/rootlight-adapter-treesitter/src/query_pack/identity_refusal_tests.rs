@@ -80,32 +80,37 @@ fn native_capture_allowance_accepts_exact_max_and_refuses_the_next_capture() {
 }
 
 #[test]
-fn real_c_formal_refusal_measures_helper_work_separately_from_native_captures() {
+fn real_formal_refusal_measures_helper_work_separately_from_native_captures() {
     // The variable census runs first; a typedef makes it decline without
     // spending the formal helper's independent eight-step allowance.
-    for (source, expected) in [
+    for (family, source, expected) in [
         (
+            GrammarFamily::C,
             b"void forward(int value) { sink(value); }\n".as_slice(),
             "query-identity-c-written-variables-limit",
         ),
         (
+            GrammarFamily::C,
             b"typedef int Alias; void forward(int value) { sink(value); }\n".as_slice(),
             "query-identity-c-formal-reads-limit",
         ),
+        (
+            GrammarFamily::Nix,
+            b"{ first, second, value }: value\n".as_slice(),
+            "query-identity-nix-formal-reads-limit",
+        ),
     ] {
         let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&language_for(GrammarFamily::C))
-            .unwrap();
+        parser.set_language(&language_for(family)).unwrap();
         let tree = parser.parse(source, None).unwrap();
         let registry = QueryPackRegistry::audited().unwrap();
-        let pack = registry.get(GrammarFamily::C).unwrap();
+        let pack = registry.get(family).unwrap();
         let mut witness = None;
         let limit = pack
             .scan_query_with_refusal(
                 &pack.identity_query,
                 QueryInput {
-                    family: GrammarFamily::C,
+                    family,
                     tree: &tree,
                     source,
                     cancellation: &Cancellation::new(),
@@ -121,7 +126,11 @@ fn real_c_formal_refusal_measures_helper_work_separately_from_native_captures() 
             )
             .unwrap();
         assert_eq!(limit, Some(QueryLimit::Capture));
-        let details = witness.unwrap().details();
+        let witness = witness.unwrap();
+        assert!(identity_refusal::IdentityRefusal::recognizes(
+            &witness.error()
+        ));
+        let details = witness.details();
         assert_eq!(details.origin(), expected);
         assert_eq!((details.observed(), details.limit()), (Some(9), Some(8)));
         assert!(details.progress().0.unwrap() < 128);

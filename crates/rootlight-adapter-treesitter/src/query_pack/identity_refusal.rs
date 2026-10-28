@@ -186,8 +186,11 @@ impl RefusalOrigin {
                 | "query-identity-apex-captures-limit"
                 | "query-identity-assembly-captures-limit"
                 | "query-identity-bash-reads-limit"
+                | "query-identity-bash-written-calls-limit"
                 | "query-identity-c-calls-limit"
                 | "query-identity-c-formal-reads-limit"
+                | "query-identity-nix-formal-reads-limit"
+                | "query-identity-c-written-variables-limit"
                 | "query-identity-ruby-receiver-bindings-limit"
                 | "query-identity-ruby-formal-receivers-limit"
                 | "query-identity-chapel-captures-limit"
@@ -208,6 +211,7 @@ impl RefusalOrigin {
                 | "query-identity-glsl-captures-limit"
                 | "query-identity-go-calls-limit"
                 | "query-identity-php-this-calls-limit"
+                | "query-identity-php-ordinary-functions-limit"
                 | "query-identity-go-formal-reads-limit"
                 | "query-identity-hare-captures-limit"
                 | "query-identity-haxe-captures-limit"
@@ -221,6 +225,7 @@ impl RefusalOrigin {
                 | "query-identity-coffeescript-captures-limit"
                 | "query-identity-pug-captures-limit"
                 | "query-identity-liquid-captures-limit"
+                | "query-identity-lean-captures-limit"
                 | "query-identity-wolfram-captures-limit"
                 | "query-identity-sed-captures-limit"
                 | "query-identity-idris-captures-limit"
@@ -244,6 +249,7 @@ impl RefusalOrigin {
                 | "query-identity-typescript-calls-limit"
                 | "query-identity-typescript-const-value-limit"
                 | "query-identity-javascript-method-vars-limit"
+                | "query-identity-javascript-default-class-exports-limit"
                 | "query-identity-javascript-const-receivers-limit"
                 | "query-identity-v-captures-limit"
                 | "query-identity-vhdl-captures-limit"
@@ -450,6 +456,73 @@ impl IdentityRefusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_refusal_recognition_preserves_each_affected_origin() {
+        for (origin, code) in [
+            (
+                RefusalOrigin::BashCalls,
+                "query-identity-bash-written-calls-limit",
+            ),
+            (
+                RefusalOrigin::CVariables,
+                "query-identity-c-written-variables-limit",
+            ),
+            (
+                RefusalOrigin::NixFormalReads,
+                "query-identity-nix-formal-reads-limit",
+            ),
+            (
+                RefusalOrigin::PhpOrdinaryFunctions,
+                "query-identity-php-ordinary-functions-limit",
+            ),
+            (
+                RefusalOrigin::LeanCaptures,
+                "query-identity-lean-captures-limit",
+            ),
+            (
+                RefusalOrigin::JavascriptDefaultClassExports,
+                "query-identity-javascript-default-class-exports-limit",
+            ),
+        ] {
+            let event = IdentityRefusal::helper(origin);
+            assert!(IdentityRefusal::recognizes(&event.error()), "{code}");
+            assert!(event.matches_error(&event.error()));
+            assert_eq!(event.details().origin(), code);
+            assert_eq!(event.details().unit(), "helper-allowance");
+            assert_eq!(
+                (event.details().observed(), event.details().limit()),
+                (None, None)
+            );
+            assert_eq!(event.details().progress(), (None, None, None));
+            assert!(!event.matches_error(&IdentityRefusal::cursor().error()));
+        }
+
+        let checked = IdentityRefusal::checked_helper(RefusalOrigin::NixFormalReads, 8, 0);
+        assert!(IdentityRefusal::recognizes(&checked.error()));
+        assert_eq!(checked.details().unit(), "checked-native-work");
+        assert_eq!(
+            (checked.details().observed(), checked.details().limit()),
+            (Some(9), Some(8))
+        );
+    }
+
+    #[test]
+    fn helper_refusal_recognition_rejects_foreign_and_extended_codes() {
+        for code in [
+            "query-identity-nix-formal-reads-limit-extra",
+            "query-identity-nix-formal-reads",
+            "query-identity-foreign-limit",
+            "nix-formal-reads-limit",
+            "dockerfile-scanner-capacity",
+        ] {
+            let error = AdapterError::ProviderFailed {
+                code: DiagnosticCode::new(code).unwrap(),
+            };
+            assert!(!IdentityRefusal::recognizes(&error), "{code}");
+            assert!(!IdentityRefusal::helper(RefusalOrigin::NixFormalReads).matches_error(&error));
+        }
+    }
 
     #[test]
     fn dockerfile_helper_refusal_preserves_origin_without_scanner_or_capture_counts() {

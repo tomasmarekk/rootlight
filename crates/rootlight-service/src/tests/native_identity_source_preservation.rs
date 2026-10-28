@@ -960,8 +960,29 @@ fn many_native_census_nodes() -> Vec<u8> {
     bytes
 }
 
-fn assert_native_helper_gap(service: &FirstSliceService, receipt: &FirstSliceIndexReceipt) {
-    let reference = source_reference(service, receipt, "values.c");
+// A wide formal list makes the bounded Nix helper scan many candidates per use,
+// reproducing the corpus refusal below native capture and cursor ceilings.
+fn many_nix_formal_comparisons() -> Vec<u8> {
+    let mut source = String::from("/*ababa*/\n{ ");
+    for index in 0..1024 {
+        source.push_str(&format!("item{index:04}, "));
+    }
+    source.push_str("value }: [");
+    for _ in 0..1024 {
+        source.push_str(" value");
+    }
+    source.push_str(" ]\n");
+    source.into_bytes()
+}
+
+fn assert_native_helper_gap(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    path: &str,
+    language: &str,
+    origin: &str,
+) {
+    let reference = source_reference(service, receipt, path);
     let lease = service
         .generation_lease(receipt.generation, &Cancellation::new())
         .unwrap();
@@ -971,7 +992,7 @@ fn assert_native_helper_gap(service: &FirstSliceService, receipt: &FirstSliceInd
         document
             .files
             .iter()
-            .any(|record| record.id == file && record.language == "c")
+            .any(|record| record.id == file && record.language == language)
     );
     assert!(!document.entities.iter().any(|record| {
         record
@@ -1000,11 +1021,7 @@ fn assert_native_helper_gap(service: &FirstSliceService, receipt: &FirstSliceInd
             record.code == "native-query-refusal" && record.source.as_ref() == Some(&reference)
         })
         .unwrap();
-    assert!(
-        diagnostic
-            .message
-            .contains("origin=query-identity-c-formal-reads-limit")
-    );
+    assert!(diagnostic.message.contains(&format!("origin={origin}")));
     assert!(diagnostic.message.contains("unit=checked-native-work"));
     assert!(
         diagnostic
@@ -1049,88 +1066,107 @@ fn assert_native_helper_gap(service: &FirstSliceService, receipt: &FirstSliceInd
 
 #[test]
 fn native_helper_refusal_preserves_source_across_reopen_and_repair() {
-    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-    let storage = durable_test_tempdir();
-    let bytes = many_native_census_nodes();
-    fs::write(root.path().join("values.c"), &bytes).unwrap();
-    fs::write(
-        root.path().join("lib.rs"),
-        b"pub fn retained_sibling() {}\n",
-    )
-    .unwrap();
-    let paths =
-        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
-    paths.prepare_owner().unwrap();
-    let cancellation = Cancellation::new();
-    let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &cancellation).unwrap();
-    let first = service
-        .index_repository(root.path(), &cancellation)
-        .expect("genuine native helper refusal preserves exact captured source");
-    assert_native_helper_gap(&service, &first);
-    assert_source(&service, &first, "values.c", &bytes);
-    assert_eq!(
-        service
-            .index_repository(root.path(), &cancellation)
-            .unwrap(),
-        first
-    );
-    assert_eq!(
-        service
-            .generation_cache
-            .lock()
-            .unwrap()
-            .reserved_memory_bytes()
-            .unwrap(),
-        0
-    );
-    drop(service);
-    let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &cancellation).unwrap();
-    assert_native_helper_gap(&service, &first);
-    assert_source(&service, &first, "values.c", &bytes);
-    let restored = b"void restored_analysis(int value) { sink(value); }\n";
-    fs::write(root.path().join("values.c"), restored).unwrap();
-    let second = service
-        .index_repository(root.path(), &cancellation)
-        .unwrap();
-    assert_eq!(second.parent, Some(first.generation));
-    let lease = service
-        .generation_lease(second.generation, &cancellation)
-        .unwrap();
-    let entity = lease
-        .generation()
-        .document()
-        .entities
-        .iter()
-        .find(|entity| entity.language == "c" && entity.canonical_name == "restored_analysis")
-        .unwrap();
-    let evidence = entity.evidence.source.as_ref().unwrap();
-    assert_eq!(evidence.generation(), second.generation);
-    assert_eq!(evidence.content_hash(), content_hash(restored));
-    assert!(
-        !lease
-            .generation()
-            .document()
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "native-query-refusal")
-    );
-    let reference = source_reference(&service, &second, "values.c");
-    let read = service
-        .source_read_with_options_and_budget(
-            second.generation,
-            vec![reference.clone()],
-            SourceReadOptions::new()
-                .with_context_lines_before(0)
-                .with_context_lines_after(0)
-                .with_encoding(SourceEncoding::Bytes),
-            FirstSliceBudget::default(),
-            &cancellation,
+    for (path, language, origin, bytes, restored) in [
+        (
+            "values.c",
+            "c",
+            "query-identity-c-formal-reads-limit",
+            many_native_census_nodes(),
+            b"void restored_analysis(int value) { sink(value); }\n".as_slice(),
+        ),
+        (
+            "values.nix",
+            "nix",
+            "query-identity-nix-formal-reads-limit",
+            many_nix_formal_comparisons(),
+            b"{ restored_analysis = value: value; }\n".as_slice(),
+        ),
+    ] {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let storage = durable_test_tempdir();
+        fs::write(root.path().join(path), &bytes).unwrap();
+        fs::write(
+            root.path().join("lib.rs"),
+            b"pub fn retained_sibling() {}\n",
         )
         .unwrap();
-    assert_eq!(read.data.chunks.len(), 1);
-    assert_eq!(read.data.chunks[0].reference, reference);
-    assert_eq!(read.data.chunks[0].bytes, restored);
-    assert_source(&service, &first, "values.c", &bytes);
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let cancellation = Cancellation::new();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &cancellation).unwrap();
+        let first = service
+            .index_repository(root.path(), &cancellation)
+            .expect("genuine native helper refusal preserves exact captured source");
+        assert_native_helper_gap(&service, &first, path, language, origin);
+        assert_source(&service, &first, path, &bytes);
+        assert_eq!(
+            service
+                .index_repository(root.path(), &cancellation)
+                .unwrap(),
+            first
+        );
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reserved_memory_bytes()
+                .unwrap(),
+            0
+        );
+        drop(service);
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &cancellation).unwrap();
+        assert_native_helper_gap(&service, &first, path, language, origin);
+        assert_source(&service, &first, path, &bytes);
+        fs::write(root.path().join(path), restored).unwrap();
+        let second = service
+            .index_repository(root.path(), &cancellation)
+            .unwrap();
+        assert_eq!(second.parent, Some(first.generation));
+        let lease = service
+            .generation_lease(second.generation, &cancellation)
+            .unwrap();
+        let entity = lease
+            .generation()
+            .document()
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.language == language && entity.canonical_name == "restored_analysis"
+            })
+            .unwrap();
+        let evidence = entity.evidence.source.as_ref().unwrap();
+        assert_eq!(evidence.generation(), second.generation);
+        assert_eq!(evidence.content_hash(), content_hash(restored));
+        assert!(
+            !lease
+                .generation()
+                .document()
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "native-query-refusal")
+        );
+        let reference = source_reference(&service, &second, path);
+        let read = service
+            .source_read_with_options_and_budget(
+                second.generation,
+                vec![reference.clone()],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0)
+                    .with_encoding(SourceEncoding::Bytes),
+                FirstSliceBudget::default(),
+                &cancellation,
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].reference, reference);
+        assert_eq!(read.data.chunks[0].bytes, restored);
+        assert_source(&service, &first, path, &bytes);
+    }
 }
 
 #[test]
