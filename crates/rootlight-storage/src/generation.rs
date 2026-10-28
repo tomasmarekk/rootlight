@@ -1892,7 +1892,22 @@ fn verify_snapshot_identities(
     let mut aggregate_recovery = None;
     let mut aggregate_origins = BTreeMap::new();
     let mut file_claims = BTreeMap::new();
-    let mut symbol_claims = BTreeMap::new();
+    // Snapshot construction sorts entity and provenance IDs. One coverage byte
+    // per entity survives each decoded claim; its owned text is released immediately.
+    context
+        .check()
+        .map_err(IdentityVerificationError::Control)?;
+    let mut symbol_claims_seen = Vec::<u8>::new();
+    symbol_claims_seen
+        .try_reserve_exact(document.entities.len())
+        .map_err(|_| IdentityVerificationError::ResourceUnavailable)?;
+    for _ in &document.entities {
+        context
+            .check()
+            .map_err(IdentityVerificationError::Control)?;
+        symbol_claims_seen.push(0);
+    }
+    let mut symbol_claim_count = 0_usize;
     let mut lexical_batch_files = None;
     let mut has_unsupported_extension = false;
     for envelope in &document.extensions {
@@ -2054,17 +2069,50 @@ fn verify_snapshot_identities(
                     context.check().is_ok()
                 })
                 .map_err(|error| map_claim_error(error, context))?;
-                let source = envelope.evidence.source.clone().ok_or(
+                let source = envelope.evidence.source.as_ref().ok_or(
                     IdentityVerificationError::IdentityMismatch(
                         IdentityMismatchComponent::ClaimEnvelope,
                     ),
                 )?;
-                if symbol_claims
-                    .insert(claim.symbol, (claim, source))
-                    .is_some()
-                {
+                let ordinal = document
+                    .entities
+                    .binary_search_by_key(&claim.symbol, |entity| entity.id)
+                    .map_err(|_| IdentityVerificationError::MissingClaim)?;
+                let seen = symbol_claims_seen
+                    .get_mut(ordinal)
+                    .ok_or(IdentityVerificationError::MissingClaim)?;
+                if std::mem::replace(seen, 1) != 0 {
                     return Err(IdentityVerificationError::DuplicateClaim);
                 }
+                let entity = document
+                    .entities
+                    .get(ordinal)
+                    .ok_or(IdentityVerificationError::MissingClaim)?;
+                let provenance = document
+                    .provenance
+                    .binary_search_by_key(&entity.provenance, |record| record.id)
+                    .ok()
+                    .and_then(|ordinal| document.provenance.get(ordinal))
+                    .ok_or(IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::SymbolClaim,
+                    ))?;
+                if claim.repository != entity.repository
+                    || claim.language != entity.language
+                    || claim.kind != entity.kind
+                    || claim.container != entity.container
+                    || claim.declared_identity != entity.canonical_name
+                    || !symbol_claim_source_matches(entity, provenance, source)
+                    || claim.build_context_discriminator
+                        != provenance.build_context.digest().as_bytes().as_slice()
+                    || claim.derived_symbol() != entity.id
+                {
+                    return Err(IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::SymbolClaim,
+                    ));
+                }
+                symbol_claim_count = symbol_claim_count
+                    .checked_add(1)
+                    .ok_or(IdentityVerificationError::ResourceUnavailable)?;
                 context
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
@@ -2193,7 +2241,7 @@ fn verify_snapshot_identities(
             _ => has_unsupported_extension = true,
         }
     }
-    if file_claims.len() != document.files.len() || symbol_claims.len() != document.entities.len() {
+    if file_claims.len() != document.files.len() || symbol_claim_count != document.entities.len() {
         return Err(IdentityVerificationError::MissingClaim);
     }
     if has_unsupported_extension {
@@ -2271,48 +2319,6 @@ fn verify_snapshot_identities(
         .map_err(IdentityVerificationError::Control)?;
     if manifest.canonical_hash_with_context(context)? != snapshot.metadata().manifest_hash() {
         return Err(IdentityVerificationError::ManifestMismatch);
-    }
-
-    context
-        .check()
-        .map_err(IdentityVerificationError::Control)?;
-    let mut provenance_by_id = BTreeMap::new();
-    for record in &document.provenance {
-        context
-            .check()
-            .map_err(IdentityVerificationError::Control)?;
-        provenance_by_id.insert(record.id, record);
-        context
-            .check()
-            .map_err(IdentityVerificationError::Control)?;
-    }
-    for entity in &document.entities {
-        context
-            .check()
-            .map_err(IdentityVerificationError::Control)?;
-        let (claim, claim_source) = symbol_claims
-            .get(&entity.id)
-            .ok_or(IdentityVerificationError::MissingClaim)?;
-        let provenance = provenance_by_id.get(&entity.provenance).ok_or(
-            IdentityVerificationError::IdentityMismatch(IdentityMismatchComponent::SymbolClaim),
-        )?;
-        if claim.repository != entity.repository
-            || claim.language != entity.language
-            || claim.kind != entity.kind
-            || claim.container != entity.container
-            || claim.declared_identity != entity.canonical_name
-            || !symbol_claim_source_matches(entity, provenance, claim_source)
-            || claim.build_context_discriminator
-                != provenance.build_context.digest().as_bytes().as_slice()
-            || claim.derived_symbol() != entity.id
-        {
-            return Err(IdentityVerificationError::IdentityMismatch(
-                IdentityMismatchComponent::SymbolClaim,
-            ));
-        }
-        context
-            .check()
-            .map_err(IdentityVerificationError::Control)?;
     }
 
     if let Some((cause, anchor_source)) = aggregate_recovery {
@@ -4952,6 +4958,130 @@ mod tests {
                 ))
             );
         }
+    }
+
+    #[test]
+    fn symbol_claim_verification_uses_canonical_lookups_and_exact_coverage() {
+        use rootlight_ir::{
+            ContainerRef, EntityKind, EntityRecord, EntityVisibility, SymbolIdentityClaim,
+            new_symbol_identity_claim_envelope,
+        };
+        let (metadata, mut document, catalog) = file_only_generation(true);
+        let source = document.files[0].evidence.source.clone().unwrap();
+        let mut other_provenance = document.provenance[0].clone();
+        other_provenance.rule = Some("symbol-claim-fixture".to_owned());
+        other_provenance.id = derive_provenance_record_id(&other_provenance).unwrap();
+        document.provenance.push(other_provenance);
+        for (index, name) in ["third", "first", "second"].into_iter().enumerate() {
+            let provenance = &document.provenance[index % 2];
+            let mut container_identity = vec![0];
+            container_identity.extend_from_slice(source.span().file().as_bytes());
+            let mut claim = SymbolIdentityClaim {
+                symbol: SymbolId::from_bytes([0; 20]),
+                repository: document.repository,
+                language: provenance.language.clone(),
+                kind: EntityKind::Function,
+                container: Some(ContainerRef::File(source.span().file())),
+                container_identity,
+                declared_identity: name.to_owned(),
+                signature_discriminator: name.as_bytes().to_vec(),
+                build_context_discriminator: provenance.build_context.digest().as_bytes().to_vec(),
+            };
+            claim.symbol = claim.derived_symbol();
+            document.entities.push(EntityRecord {
+                id: claim.symbol,
+                repository: document.repository,
+                generation: document.generation,
+                kind: claim.kind,
+                language: claim.language.clone(),
+                tier: provenance.tier,
+                canonical_name: name.to_owned(),
+                display_name: name.to_owned(),
+                qualified_name: name.to_owned(),
+                container: claim.container,
+                visibility: EntityVisibility::Public,
+                flags: Vec::new(),
+                provenance: provenance.id,
+                evidence: FactEvidence {
+                    source: Some(source.clone()),
+                    derivation: Vec::new(),
+                },
+            });
+            document.extensions.push(
+                new_symbol_identity_claim_envelope(
+                    &claim,
+                    document.generation,
+                    provenance.id,
+                    source.clone(),
+                )
+                .unwrap(),
+            );
+        }
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verify = |document: NormalizedIrDocument| {
+            IdentityVerifiedGeneration::verify_with_source_files(
+                metadata,
+                document,
+                catalog.clone(),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+            )
+        };
+        let expected = verify(document.clone()).unwrap();
+        document.entities.reverse();
+        document.provenance.reverse();
+        document.extensions.reverse();
+        assert_eq!(verify(document.clone()).unwrap(), expected);
+        let claim_index = document
+            .extensions
+            .iter()
+            .position(|envelope| envelope.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE)
+            .unwrap();
+        let mut legacy = document.extensions[claim_index].clone();
+        let claim = rootlight_ir::decode_symbol_identity_claim_envelope(&legacy).unwrap();
+        legacy.version = "1.0".to_owned();
+        legacy.payload = serde_json::to_string(&claim).unwrap();
+        let mut recipe = serde_json::to_value(&legacy).unwrap();
+        recipe.as_object_mut().unwrap().remove("id");
+        legacy.id = rootlight_ids::derive_fact(
+            "rootlight.identity-claim-envelope/v1",
+            &serde_json::to_vec(&recipe).unwrap(),
+        )
+        .id();
+        let mut mixed_versions = document.clone();
+        mixed_versions.extensions[claim_index] = legacy.clone();
+        verify(mixed_versions).expect("legacy and current claims share exact entity coverage");
+        let mut duplicate = document.clone();
+        duplicate.extensions.push(legacy.clone());
+        assert_eq!(
+            verify(duplicate),
+            Err(IdentityVerificationError::DuplicateClaim)
+        );
+        let mut missing = document.clone();
+        missing.extensions.remove(claim_index);
+        assert_eq!(
+            verify(missing),
+            Err(IdentityVerificationError::MissingClaim)
+        );
+        let mut missing_and_duplicate = document.clone();
+        let other_claim = missing_and_duplicate
+            .extensions
+            .iter()
+            .position(|envelope| {
+                envelope.namespace == SYMBOL_IDENTITY_CLAIM_NAMESPACE
+                    && envelope.evidence.derivation
+                        != document.extensions[claim_index].evidence.derivation
+            })
+            .unwrap();
+        missing_and_duplicate.extensions.remove(other_claim);
+        // A different carrier version avoids canonical deduplication of equal envelopes.
+        missing_and_duplicate.extensions.push(legacy);
+        assert_eq!(
+            verify(missing_and_duplicate),
+            Err(IdentityVerificationError::DuplicateClaim)
+        );
     }
 
     #[test]
