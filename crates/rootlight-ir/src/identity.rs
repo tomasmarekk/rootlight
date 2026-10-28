@@ -6,7 +6,10 @@ use rootlight_ids::{
     ContentHash, FactId, FileId, FileIdentity, GenerationId, RepositoryId, SymbolId,
     SymbolIdentity, derive_fact, derive_file, derive_symbol,
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    ser::{SerializeSeq, SerializeStruct},
+};
 
 use crate::{
     ContainerRef, CoverageRecord, DiagnosticRecord, EntityKind, ExtensionCriticality,
@@ -1682,15 +1685,185 @@ fn derive_claim_envelope_id_with_checkpoint(
     envelope: &ExtensionEnvelope,
     checkpoint: &mut impl FnMut() -> bool,
 ) -> Result<FactId, IdentityClaimError> {
-    derive_typed_fact_id_with_checkpoint(
-        "rootlight.identity-claim-envelope/v1",
-        envelope,
-        checkpoint,
-    )
-    .map_err(|error| match error {
-        FactRecipeFailure::Encoding => IdentityClaimError::MalformedPayload,
-        FactRecipeFailure::Interrupted => IdentityClaimError::Interrupted,
-    })
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    let recipe = ClaimEnvelopeRecipe(envelope);
+    let length = {
+        let mut counter = ClaimRecipeLength {
+            bytes: 0,
+            checkpoint: &mut *checkpoint,
+            interrupted: false,
+        };
+        if serde_json::to_writer(&mut counter, &recipe).is_err() {
+            return Err(if counter.interrupted {
+                IdentityClaimError::Interrupted
+            } else {
+                IdentityClaimError::MalformedPayload
+            });
+        }
+        counter.bytes
+    };
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| IdentityClaimError::MalformedPayload)?;
+    {
+        let mut writer = ClaimCheckpointWriter::new(&mut bytes, length, checkpoint)?;
+        if serde_json::to_writer(&mut writer, &recipe).is_err() {
+            return Err(if writer.interrupted {
+                IdentityClaimError::Interrupted
+            } else {
+                IdentityClaimError::MalformedPayload
+            });
+        }
+        writer.check()?;
+    }
+    if bytes.len() != length {
+        return Err(IdentityClaimError::MalformedPayload);
+    }
+    let id = derive_fact("rootlight.identity-claim-envelope/v1", &bytes).id();
+    if !checkpoint() {
+        return Err(IdentityClaimError::Interrupted);
+    }
+    Ok(id)
+}
+
+// The legacy Value projection sorted every nested object key. These borrowed
+// serializers preserve that identity recipe without cloning the opaque payload.
+struct ClaimEnvelopeRecipe<'a>(&'a ExtensionEnvelope);
+
+impl Serialize for ClaimEnvelopeRecipe<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = self.0;
+        let mut state = serializer.serialize_struct("ExtensionEnvelope", 8)?;
+        state.serialize_field("criticality", &value.criticality)?;
+        state.serialize_field("evidence", &ClaimEvidenceRecipe(&value.evidence))?;
+        state.serialize_field("generation", &value.generation)?;
+        state.serialize_field("namespace", &value.namespace)?;
+        state.serialize_field("payload", &value.payload)?;
+        state.serialize_field("provenance", &value.provenance)?;
+        state.serialize_field("repository", &value.repository)?;
+        state.serialize_field("version", &value.version)?;
+        state.end()
+    }
+}
+
+struct ClaimEvidenceRecipe<'a>(&'a FactEvidence);
+
+impl Serialize for ClaimEvidenceRecipe<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("FactEvidence", 2)?;
+        state.serialize_field("derivation", &ClaimDerivationRecipe(&self.0.derivation))?;
+        state.serialize_field("source", &self.0.source.as_ref().map(ClaimSourceRecipe))?;
+        state.end()
+    }
+}
+
+struct ClaimDerivationRecipe<'a>(&'a [FactRef]);
+
+impl Serialize for ClaimDerivationRecipe<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for value in self.0 {
+            sequence.serialize_element(&ClaimFactRefRecipe(value))?;
+        }
+        sequence.end()
+    }
+}
+
+struct ClaimFactRefRecipe<'a>(&'a FactRef);
+
+impl Serialize for ClaimFactRefRecipe<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("FactRef", 2)?;
+        let kind = match self.0 {
+            FactRef::File(id) => {
+                state.serialize_field("id", id)?;
+                "file"
+            }
+            FactRef::Entity(id) => {
+                state.serialize_field("id", id)?;
+                "entity"
+            }
+            FactRef::Fact(id) => {
+                state.serialize_field("id", id)?;
+                "fact"
+            }
+        };
+        state.serialize_field("kind", kind)?;
+        state.end()
+    }
+}
+
+struct ClaimSourceRecipe<'a>(&'a SourceRef);
+
+impl Serialize for ClaimSourceRecipe<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = self.0;
+        let mut state = serializer
+            .serialize_struct("SourceRef", if value.line_hint().is_some() { 5 } else { 4 })?;
+        state.serialize_field("content_hash", &value.content_hash())?;
+        state.serialize_field("generation", &value.generation())?;
+        if let Some(lines) = value.line_hint() {
+            state.serialize_field("line_hint", &ClaimLineRecipe(lines))?;
+        }
+        state.serialize_field("repository", &value.repository())?;
+        state.serialize_field("span", &ClaimSpanRecipe(value.span()))?;
+        state.end()
+    }
+}
+
+struct ClaimSpanRecipe(crate::SourceSpan);
+
+impl Serialize for ClaimSpanRecipe {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("SourceSpan", 3)?;
+        state.serialize_field("end_byte", &self.0.end_byte())?;
+        state.serialize_field("file", &self.0.file())?;
+        state.serialize_field("start_byte", &self.0.start_byte())?;
+        state.end()
+    }
+}
+
+struct ClaimLineRecipe(crate::LineRange);
+
+impl Serialize for ClaimLineRecipe {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("LineRange", 2)?;
+        state.serialize_field("end_line", &self.0.end_line())?;
+        state.serialize_field("start_line", &self.0.start_line())?;
+        state.end()
+    }
+}
+
+struct ClaimRecipeLength<'a, F> {
+    bytes: usize,
+    checkpoint: &'a mut F,
+    interrupted: bool,
+}
+
+impl<F: FnMut() -> bool> Write for ClaimRecipeLength<'_, F> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        for chunk in buffer.chunks(4 * 1024) {
+            if !(self.checkpoint)() {
+                self.interrupted = true;
+                return Err(checkpoint_io_error());
+            }
+            self.bytes = self
+                .bytes
+                .checked_add(chunk.len())
+                .ok_or_else(|| io::Error::other("identity claim recipe length overflow"))?;
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn decode_canonical_payload<T>(
@@ -1838,8 +2011,8 @@ where
     F: FnMut() -> bool,
 {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        // Defaulted fields can make canonical JSON longer than its input. Such
-        // payloads are noncanonical without retaining the larger serialization.
+        // Comparison output can expand defaulted fields; recipe output must fit
+        // its counted reservation. Neither path may grow beyond its fixed buffer.
         if self.exceeded
             || self
                 .output
@@ -1913,6 +2086,106 @@ fn require_recipe_checkpoint(
 mod tests {
     use super::*;
     use crate::SourceSpan;
+
+    fn assert_claim_recipe_matches_legacy_value(envelope: &ExtensionEnvelope) -> FactId {
+        let mut value = serde_json::to_value(envelope).unwrap();
+        value.as_object_mut().unwrap().remove("id");
+        let expected_bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&ClaimEnvelopeRecipe(envelope)).unwrap(),
+            expected_bytes
+        );
+        let expected_id = derive_fact("rootlight.identity-claim-envelope/v1", &expected_bytes).id();
+        assert_eq!(derive_claim_envelope_id(envelope).unwrap(), expected_id);
+        expected_id
+    }
+
+    #[test]
+    fn borrowed_claim_recipe_preserves_every_carrier_and_exact_identity_bytes() {
+        for bytes in [
+            Vec::new(),
+            "\"\\\n\0λ".repeat(1024).into_bytes(),
+            vec![0xff; 4097],
+        ] {
+            let (claim, dense) = symbol_claim_fixture(bytes);
+            for envelope in symbol_claim_carriers(&claim, &dense) {
+                assert_eq!(
+                    envelope.id,
+                    assert_claim_recipe_matches_legacy_value(&envelope)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_claim_recipe_preserves_optional_sources_and_all_nested_fields() {
+        let (_, template) = symbol_claim_fixture(Vec::new());
+        let file = FileId::from_bytes([3; 20]);
+        for line_hint in [None, Some(crate::LineRange::new(1, u64::MAX).unwrap())] {
+            for criticality in [
+                ExtensionCriticality::Critical,
+                ExtensionCriticality::Noncritical,
+            ] {
+                for source_present in [false, true] {
+                    let mut envelope = template.clone();
+                    envelope.id = FactId::from_bytes([9; 20]);
+                    envelope.namespace = "example.recipe".to_owned();
+                    envelope.version = "7".to_owned();
+                    envelope.criticality = criticality;
+                    envelope.payload = "\"\\\n\t\0λ".repeat(1024);
+                    envelope.evidence.derivation = vec![
+                        FactRef::Fact(envelope.provenance),
+                        FactRef::Entity(SymbolId::from_bytes([8; 20])),
+                        FactRef::File(file),
+                        FactRef::File(file),
+                    ];
+                    envelope.evidence.source = source_present.then(|| {
+                        SourceRef::new(
+                            envelope.repository,
+                            envelope.generation,
+                            SourceSpan::new(file, u64::MAX - 1, u64::MAX).unwrap(),
+                            rootlight_ids::content_hash(b"source"),
+                            line_hint,
+                        )
+                    });
+                    assert_claim_recipe_matches_legacy_value(&envelope);
+                    if source_present {
+                        envelope.evidence.derivation.clear();
+                        assert_claim_recipe_matches_legacy_value(&envelope);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claim_recipe_counter_checks_chunk_boundaries_overflow_and_cancellation() {
+        let mut checkpoint = || true;
+        let mut counter = ClaimRecipeLength {
+            bytes: 0,
+            checkpoint: &mut checkpoint,
+            interrupted: false,
+        };
+        counter.write_all(&[b'x'; 4097]).unwrap();
+        assert_eq!(counter.bytes, 4097);
+        counter.bytes = usize::MAX;
+        assert!(counter.write(b"x").is_err());
+        assert_eq!(counter.bytes, usize::MAX);
+        assert!(!counter.interrupted);
+        let mut checkpoints = 0;
+        let mut checkpoint = || {
+            checkpoints += 1;
+            checkpoints < 2
+        };
+        let mut counter = ClaimRecipeLength {
+            bytes: 0,
+            checkpoint: &mut checkpoint,
+            interrupted: false,
+        };
+        assert!(counter.write(&[b'x'; 4097]).is_err());
+        assert!(counter.interrupted);
+        assert_eq!(counter.bytes, 4096);
+    }
 
     #[test]
     fn canonical_payload_comparison_rejects_default_expansion_and_preserves_escaping() {
@@ -2822,6 +3095,10 @@ mod tests {
         )
         .expect("file claim envelope is valid");
 
+        assert_eq!(
+            envelope.id,
+            assert_claim_recipe_matches_legacy_value(&envelope)
+        );
         assert_eq!(envelope.version, "1.0");
         assert_eq!(envelope.payload, serde_json::to_string(&claim).unwrap());
         assert_eq!(
