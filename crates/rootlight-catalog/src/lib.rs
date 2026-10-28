@@ -301,11 +301,18 @@ impl OracleWriter {
             written.stats,
             context,
         )?;
+        let symbol_envelopes = read::count_symbol_envelopes(
+            &transaction,
+            generation.metadata(),
+            written.stats.extensions(),
+            context,
+        )?;
         let plan = read::oracle_read_memory_plan(
             generation.metadata().contract_version(),
             written.stats,
             written.maximum_payload_bytes,
             entity_flag_rows,
+            symbol_envelopes,
         )?;
         transaction.commit().map_err(CatalogError::sqlite)?;
         drop(connection);

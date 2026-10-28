@@ -35,11 +35,16 @@ struct Totals {
     records: [u64; 10],
     children: u64,
     entity_flag_rows: u64,
+    symbol_envelopes: u64,
     text: u64,
 }
 
 impl Totals {
-    fn from_stats(stats: GenerationStats, entity_flag_rows: u64) -> Result<Self, CatalogError> {
+    fn from_stats(
+        stats: GenerationStats,
+        entity_flag_rows: u64,
+        symbol_envelopes: u64,
+    ) -> Result<Self, CatalogError> {
         let records = [
             stats.files(),
             stats.entities(),
@@ -66,15 +71,17 @@ impl Totals {
             records,
             children,
             entity_flag_rows,
+            symbol_envelopes,
             text: stats.text_bytes(),
         };
-        totals.validate_flags()?;
+        totals.validate_counts()?;
         Ok(totals)
     }
 
-    fn validate_flags(self) -> Result<(), CatalogError> {
+    fn validate_counts(self) -> Result<(), CatalogError> {
         if self.entity_flag_rows > self.children
             || self.entity_flag_rows > self.records[1].checked_mul(6).ok_or_else(invalid)?
+            || self.symbol_envelopes > self.records[9]
         {
             return Err(invalid());
         }
@@ -99,17 +106,22 @@ impl Totals {
             .checked_sub(removed.entity_flag_rows)
             .and_then(|n| n.checked_add(added.entity_flag_rows))
             .ok_or_else(invalid)?;
+        next.symbol_envelopes = self
+            .symbol_envelopes
+            .checked_sub(removed.symbol_envelopes)
+            .and_then(|n| n.checked_add(added.symbol_envelopes))
+            .ok_or_else(invalid)?;
         next.text = self
             .text
             .checked_sub(removed.text)
             .and_then(|n| n.checked_add(added.text))
             .ok_or_else(invalid)?;
-        next.validate_flags()?;
+        next.validate_counts()?;
         Ok(next)
     }
 
     fn stats(self, sources: usize) -> Result<GenerationStats, CatalogError> {
-        self.validate_flags()?;
+        self.validate_counts()?;
         let sources = u64::try_from(sources).map_err(|_| invalid())?;
         let logical = self
             .records
@@ -182,6 +194,7 @@ impl OracleLayoutFragment {
             stats,
             self.payloads.last().map_or(0, |(bytes, _)| *bytes),
             self.totals.entity_flag_rows,
+            self.totals.symbol_envelopes,
         )
     }
 
@@ -468,11 +481,21 @@ impl OracleLayoutFragment {
             }
             rows.checked_add(flags).ok_or_else(invalid)
         })?;
+        let symbol_envelopes = document
+            .extensions
+            .iter()
+            .try_fold(0_u64, |rows, envelope| {
+                context.check().map_err(CatalogError::control)?;
+                rows.checked_add(u64::from(
+                    envelope.namespace == rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+                ))
+                .ok_or_else(invalid)
+            })?;
         let source_capacity = plan.source_ordinals.capacity();
         let source_counts_capacity = auxiliary.source_counts.capacity();
         let payload_capacity = auxiliary.payloads.capacity();
         let mut fragment = Self::empty(document.repository, document.generation);
-        fragment.totals = Totals::from_stats(plan.stats, entity_flag_rows)?;
+        fragment.totals = Totals::from_stats(plan.stats, entity_flag_rows, symbol_envelopes)?;
         fragment
             .identities
             .try_reserve_exact(logical)
@@ -877,6 +900,7 @@ impl OracleLayoutCensus {
             stats,
             self.payloads.last().copied().unwrap_or(0),
             self.totals.entity_flag_rows,
+            self.totals.symbol_envelopes,
         )
     }
 

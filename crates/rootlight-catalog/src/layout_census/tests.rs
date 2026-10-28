@@ -63,6 +63,17 @@ fn flag_rows(document: &NormalizedIrDocument) -> u64 {
     })
 }
 
+fn symbol_envelopes(document: &NormalizedIrDocument) -> u64 {
+    u64::try_from(
+        document
+            .extensions
+            .iter()
+            .filter(|envelope| envelope.namespace == rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE)
+            .count(),
+    )
+    .unwrap()
+}
+
 fn all_flags() -> Vec<EntityFlag> {
     vec![
         EntityFlag::Generated,
@@ -76,6 +87,7 @@ fn all_flags() -> Vec<EntityFlag> {
 
 fn all_layout_features() -> NormalizedIrDocument {
     let (mut document, _) = fixture_documents();
+    document.extensions[0].namespace = rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE.to_owned();
     document.entities[0].flags.clear();
     let mut second = document.entities[0].clone();
     second.id = SymbolId::from_bytes([0x79; 20]);
@@ -172,6 +184,7 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
     }
     let prospective = census.read_memory_plan(&context).unwrap();
     assert_eq!(census.totals.entity_flag_rows, 7);
+    assert_eq!(census.totals.symbol_envelopes, 1);
     let actual = write::measure(&generation, &context).unwrap();
     assert_eq!(prospective.stats(), actual.stats);
     assert_eq!(
@@ -190,6 +203,80 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
     assert_eq!(prospective, observed_plan(&reopened, &context));
     let restored = reopened.read(&context).unwrap();
     assert_eq!(restored.document(), &expected_document);
+}
+
+#[test]
+fn symbol_envelope_replacements_conserve_preview_commit_and_rollback_counts() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let (template, _) = fixture_documents();
+    let mut document = NormalizedIrDocument::empty(template.repository, template.generation);
+    let mut census = OracleLayoutCensus::new(document.repository, document.generation);
+    insert(&mut census, &document, &context);
+    for count in [3, 1, 0] {
+        let before = census.read_memory_plan(&context).unwrap();
+        let before_count = symbol_envelopes(&document);
+        let mut replacement = NormalizedIrDocument::empty(template.repository, template.generation);
+        for index in 0_u8..4 {
+            let mut envelope = template.extensions[0].clone();
+            envelope.id = FactId::from_bytes([index + 0x60; 20]);
+            envelope.namespace = if index < count {
+                rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE
+            } else {
+                "example.other"
+            }
+            .to_owned();
+            replacement.extensions.push(envelope);
+        }
+        let expected = measure(&replacement, &context)
+            .read_memory_plan(&context)
+            .unwrap();
+        {
+            let preview = census
+                .preview(
+                    measure(&document, &context),
+                    measure(&replacement, &context),
+                    0,
+                    &context,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(preview.census.totals.symbol_envelopes, u64::from(count));
+            assert_eq!(preview.read_memory_plan(&context).unwrap(), expected);
+        }
+        assert_eq!(census.totals.symbol_envelopes, before_count);
+        assert_eq!(census.read_memory_plan(&context).unwrap(), before);
+        census
+            .preview(
+                measure(&document, &context),
+                measure(&replacement, &context),
+                0,
+                &context,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .commit();
+        document = replacement;
+        assert_eq!(census.totals.symbol_envelopes, u64::from(count));
+        assert_eq!(census.read_memory_plan(&context).unwrap(), expected);
+    }
+    let before = census.read_memory_plan(&context).unwrap();
+    let mut invalid_removal = document.clone();
+    invalid_removal.extensions[0].namespace =
+        rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE.to_owned();
+    let error = census
+        .preview(
+            measure(&invalid_removal, &context),
+            empty(&document),
+            0,
+            &context,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, OracleReadAdmissionError::Catalog(ref error) if error.kind() == CatalogErrorKind::InvalidGeneration)
+    );
+    assert_eq!(census.read_memory_plan(&context).unwrap(), before);
 }
 
 #[test]
@@ -337,6 +424,7 @@ fn removing_and_replacing_maximum_payload_shrinks_the_exact_plan() {
             actual.stats,
             actual.maximum_payload_bytes,
             flag_rows(&document),
+            symbol_envelopes(&document),
         )
         .unwrap()
     );
@@ -592,10 +680,12 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
         actual.stats,
         actual.maximum_payload_bytes,
         flag_rows(document),
+        symbol_envelopes(document),
     )
     .unwrap();
     assert_eq!(combined.read_memory_plan(&context).unwrap(), expected);
     assert_eq!(combined.totals.entity_flag_rows, 7);
+    assert_eq!(combined.totals.symbol_envelopes, 1);
     let mut peak = 0;
     let duplicate = combined
         .duplicate(17, &context, &mut |bytes| {
@@ -606,6 +696,7 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
     assert!(peak >= combined.retained_bytes().unwrap() + duplicate.retained_bytes().unwrap() + 17);
     assert_eq!(duplicate.read_memory_plan(&context).unwrap(), expected);
     assert_eq!(duplicate.totals.entity_flag_rows, 7);
+    assert_eq!(duplicate.totals.symbol_envelopes, 1);
     let refused = combined.duplicate(0, &context, &mut |_| Err("duplicate workspace refused"));
     assert!(matches!(
         refused,

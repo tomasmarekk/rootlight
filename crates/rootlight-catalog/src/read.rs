@@ -4,6 +4,7 @@
 //! decoded as hostile input before normalized IR validation runs again.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 
 use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
@@ -334,11 +335,14 @@ pub(crate) fn read_generation_with_admission<E>(
     let entity_flag_rows =
         validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
     let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
+    let symbol_envelopes =
+        count_symbol_envelopes(&transaction, metadata, stats.extensions(), context)?;
     let memory_plan = oracle_read_memory_plan(
         metadata.contract_version(),
         stats,
         maximum_payload_bytes,
         entity_flag_rows,
+        symbol_envelopes,
     )?;
     validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
     validate_source_reference_layout(&transaction, stats.source_refs(), context)?;
@@ -498,7 +502,11 @@ pub(crate) fn oracle_read_memory_plan(
     stats: GenerationStats,
     maximum_payload_bytes: u64,
     entity_flag_rows: u64,
+    symbol_envelopes: u64,
 ) -> Result<OracleReadMemoryPlan, CatalogError> {
+    if symbol_envelopes > stats.extensions() {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
     let logical_rows = [
         stats.files(),
         stats.entities(),
@@ -541,10 +549,10 @@ pub(crate) fn oracle_read_memory_plan(
     let opaque_and_auxiliary_rows = other_rows
         .checked_sub(closed_rows)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
-    let opaque_and_other_auxiliary_rows =
-        opaque_and_auxiliary_rows
-            .checked_sub(entity_flag_rows)
-            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let opaque_and_other_auxiliary_rows = opaque_and_auxiliary_rows
+        .checked_sub(entity_flag_rows)
+        .and_then(|rows| rows.checked_sub(symbol_envelopes))
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     let flag_workspace = flag_workspace_bytes(entity_flag_rows, stats.entities())?;
 
     // Exact buffers are allocated only after the same-transaction census and
@@ -557,6 +565,8 @@ pub(crate) fn oracle_read_memory_plan(
     // opaque payloads and other child-row maps retain the four-KiB envelope.
     // Flag groups reserve six closed enum slots per owner. Their headers remain
     // resident while each owned vector moves into its final EntityRecord.
+    // Symbol claims have closed outer records and sequential bounded decoders;
+    // their opaque text retains the unchanged text and largest-payload charges.
     let id_set = tree_node_bytes::<FactId, ()>()?;
     let file_validation = tree_node_bytes::<FileId, &FileRecord>()?
         .checked_add(tree_node_bytes::<FileId, FileId>()?)
@@ -582,6 +592,7 @@ pub(crate) fn oracle_read_memory_plan(
         typed_record_buffer_bytes::<CoverageRecord>(stats.coverage())?,
         typed_record_buffer_bytes::<SkippedRegion>(stats.skipped_regions())?,
         typed_record_buffer_bytes::<DiagnosticRecord>(stats.diagnostics())?,
+        typed_record_buffer_bytes::<ExtensionEnvelope>(symbol_envelopes)?,
     ];
     let retained_record_bytes = record_buffers
         .into_iter()
@@ -600,6 +611,7 @@ pub(crate) fn oracle_read_memory_plan(
         (stats.coverage(), id_set),
         (stats.skipped_regions(), id_set),
         (stats.diagnostics(), id_set),
+        (symbol_envelopes, id_set),
     ]
     .into_iter()
     .try_fold(0_u64, |total, (rows, bytes)| {
@@ -862,6 +874,68 @@ fn maximum_payload_bytes(
             .map_err(CatalogError::control)?;
     }
     Ok(maximum)
+}
+
+pub(crate) fn count_symbol_envelopes(
+    connection: &Connection,
+    metadata: GenerationMetadata,
+    expected_rows: u64,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let mut statement = connection
+        .prepare("SELECT extension_id, payload FROM extensions ORDER BY extension_id LIMIT ?1")
+        .map_err(CatalogError::sqlite)?;
+    let mut rows = statement
+        .query([codec::sqlite_i64(
+            expected_rows
+                .checked_add(1)
+                .ok_or_else(memory_plan_overflow)?,
+        )?])
+        .map_err(CatalogError::sqlite)?;
+    let mut observed = 0_u64;
+    let mut eligible = 0_u64;
+    let mut prefix = [0_u8; 256];
+    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
+        context.check().map_err(CatalogError::control)?;
+        if observed >= expected_rows {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        observed = observed.checked_add(1).ok_or_else(memory_plan_overflow)?;
+        let raw_id = row.get_ref(0).map_err(CatalogError::sqlite)?;
+        let Some(id) = raw_id
+            .as_blob()
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(FactId::from_bytes)
+        else {
+            continue;
+        };
+        let raw_payload = row.get_ref(1).map_err(CatalogError::sqlite)?;
+        let Ok(payload) = raw_payload.as_str() else {
+            continue;
+        };
+        // Current writer serialization fixes these first four fields. Every ID
+        // is canonical ASCII; a nonmatching representation keeps its coarse charge.
+        let mut cursor = std::io::Cursor::new(prefix.as_mut_slice());
+        write!(
+            cursor,
+            "{{\"id\":\"{id}\",\"repository\":\"{}\",\"generation\":\"{}\",\"namespace\":\"{}\",",
+            metadata.repository(),
+            metadata.generation(),
+            rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE,
+        )
+        .map_err(|_| memory_plan_overflow())?;
+        let length = usize::try_from(cursor.position()).map_err(|_| memory_plan_overflow())?;
+        if payload.as_bytes().starts_with(&prefix[..length]) {
+            eligible = eligible.checked_add(1).ok_or_else(memory_plan_overflow)?;
+        }
+    }
+    if observed != expected_rows {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    context.check().map_err(CatalogError::control)?;
+    Ok(eligible)
 }
 
 fn validate_document_hash(
@@ -2111,6 +2185,17 @@ mod tests {
                 .iter()
                 .map(|entity| u64::try_from(entity.flags.len()).unwrap())
                 .sum(),
+            u64::try_from(
+                snapshot
+                    .document()
+                    .extensions
+                    .iter()
+                    .filter(|envelope| {
+                        envelope.namespace == rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE
+                    })
+                    .count(),
+            )
+            .unwrap(),
         )
         .unwrap();
         drop(connection);
@@ -2504,7 +2589,8 @@ mod tests {
     #[test]
     fn flag_workspace_changes_only_the_flag_envelope_and_complete_bounded_buffer() {
         let stats = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 17).unwrap();
-        let baseline = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0).unwrap();
+        let baseline =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0).unwrap();
         let empty_workspace = flag_workspace_bytes(0, 3).unwrap();
         assert_eq!(
             empty_workspace,
@@ -2519,7 +2605,8 @@ mod tests {
                 expected_workspace
             );
             let plan =
-                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, flag_rows).unwrap();
+                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, flag_rows, 0)
+                    .unwrap();
             assert_eq!(
                 plan.record_workspace_bytes() + flag_rows * 4096 - expected_workspace,
                 baseline.record_workspace_bytes() - empty_workspace,
@@ -2555,7 +2642,7 @@ mod tests {
         );
         let no_auxiliary = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0).unwrap();
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 1)
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 1, 0)
                 .unwrap_err()
                 .kind(),
             CatalogErrorKind::Corrupt,
@@ -2563,9 +2650,208 @@ mod tests {
     }
 
     #[test]
+    fn symbol_envelope_classifier_keeps_noncanonical_and_spoofed_headers_coarse() {
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let metadata = crate::oracle_roundtrip_tests::snapshot(document.clone()).metadata();
+        let mut envelope = document.extensions[0].clone();
+        envelope.namespace = rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE.to_owned();
+        let canonical = serde_json::to_string(&envelope).unwrap();
+        let reordered = serde_json::to_string(&serde_json::to_value(&envelope).unwrap()).unwrap();
+        let escaped = canonical.replacen(
+            "dev.rootlight.identity.symbol",
+            "dev.rootlight.identity.\\u0073ymbol",
+            1,
+        );
+        for text in [&reordered, &escaped] {
+            assert_eq!(
+                decode_extension_envelope_with_checkpoint(
+                    text.as_bytes(),
+                    &IrLimits::default(),
+                    || true
+                )
+                .unwrap(),
+                envelope
+            );
+        }
+        let mut other = envelope.clone();
+        other.namespace.push_str(".other");
+        other.payload = canonical.clone();
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE extensions(extension_id, payload)")
+            .unwrap();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        assert_eq!(
+            count_symbol_envelopes(&connection, metadata, 0, &context).unwrap(),
+            0
+        );
+        for (id, text, expected) in [
+            (envelope.id, canonical.clone(), 1),
+            (envelope.id, reordered, 0),
+            (envelope.id, escaped, 0),
+            (envelope.id, serde_json::to_string(&other).unwrap(), 0),
+            (FactId::from_bytes([9; 20]), canonical.clone(), 0),
+            (
+                envelope.id,
+                canonical.replacen(
+                    &metadata.repository().to_string(),
+                    &RepositoryId::from_bytes([9; 16]).to_string(),
+                    1,
+                ),
+                0,
+            ),
+            (
+                envelope.id,
+                canonical.replacen(
+                    &metadata.generation().to_string(),
+                    &GenerationId::from_bytes([9; 20]).to_string(),
+                    1,
+                ),
+                0,
+            ),
+        ] {
+            connection.execute("DELETE FROM extensions", []).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO extensions VALUES (?1,?2)",
+                    rusqlite::params![id.as_bytes().as_slice(), text],
+                )
+                .unwrap();
+            assert_eq!(
+                count_symbol_envelopes(&connection, metadata, 1, &context).unwrap(),
+                expected
+            );
+        }
+        for sql in [
+            "UPDATE extensions SET extension_id=zeroblob(19)",
+            "UPDATE extensions SET extension_id=1",
+            "UPDATE extensions SET extension_id=zeroblob(20), payload=zeroblob(1024)",
+        ] {
+            connection.execute_batch(sql).unwrap();
+            assert_eq!(
+                count_symbol_envelopes(&connection, metadata, 1, &context).unwrap(),
+                0
+            );
+        }
+        connection.execute("DELETE FROM extensions", []).unwrap();
+        for index in 0_u8..6 {
+            envelope.id = FactId::from_bytes([index; 20]);
+            envelope.namespace = if index < 4 {
+                rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE
+            } else {
+                "example.other"
+            }
+            .to_owned();
+            connection
+                .execute(
+                    "INSERT INTO extensions VALUES (?1,?2)",
+                    rusqlite::params![
+                        envelope.id.as_bytes().as_slice(),
+                        serde_json::to_string(&envelope).unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            count_symbol_envelopes(&connection, metadata, 6, &context).unwrap(),
+            4
+        );
+        for expected_rows in [5, 7] {
+            assert_eq!(
+                count_symbol_envelopes(&connection, metadata, expected_rows, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        assert_eq!(
+            count_symbol_envelopes(&connection, metadata, u64::MAX, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Storage
+        );
+        let progress = cancellation.clone();
+        connection
+            .progress_handler(
+                1,
+                Some(move || {
+                    progress.cancel(CancellationReason::ClientRequest);
+                    false
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            count_symbol_envelopes(&connection, metadata, 6, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+        // A retry must also stop before SQLite work once the token is cancelled.
+        assert_eq!(
+            count_symbol_envelopes(&connection, metadata, 6, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+    }
+
+    #[test]
+    fn symbol_envelope_discount_keeps_other_charges_and_adds_full_typed_workspaces() {
+        let stats =
+            GenerationStats::new(0, 0, 0, 0, 100_000, 0, 0, 0, 0, 32, 0, 200_067, 17).unwrap();
+        let baseline =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 0).unwrap();
+        // This provenance-dense frame keeps validation larger than registry and
+        // sorting, so every added symbol validation node must remain charged.
+        let id_set = tree_node_bytes::<FactId, ()>().unwrap();
+        let validation =
+            100_001 * (2 * id_set + tree_node_bytes::<FactId, &ProvenanceRecord>().unwrap());
+        assert!(validation > 100_034 * tree_node_bytes::<write::RegistryIdentity, ()>().unwrap());
+        assert!(validation > typed_record_buffer_bytes::<ProvenanceRecord>(100_000).unwrap());
+        assert!(validation > typed_record_buffer_bytes::<ExtensionEnvelope>(32).unwrap());
+        for count in [1, 4, 32] {
+            let plan =
+                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, count).unwrap();
+            assert_eq!(
+                plan.record_workspace_bytes() + count * 4096,
+                baseline.record_workspace_bytes()
+                    + count
+                        * (u64::try_from(std::mem::size_of::<ExtensionEnvelope>()).unwrap()
+                            + id_set)
+            );
+            assert_eq!(plan.transient_decode_bytes(), 185 * 128);
+            assert_eq!(plan.stats(), baseline.stats());
+            assert_eq!(
+                plan.identity_registry_rows(),
+                baseline.identity_registry_rows()
+            );
+        }
+        assert_eq!(
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 33)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+        let no_auxiliary = GenerationStats::new(1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0).unwrap();
+        assert_eq!(
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 0, 1)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert_eq!(
+            typed_record_buffer_bytes::<ExtensionEnvelope>(u64::MAX)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Storage
+        );
+    }
+
+    #[test]
     fn memory_plan_separates_closed_records_and_retains_opaque_envelopes() {
         let stats = stats(17, 1024);
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0).unwrap();
+        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0).unwrap();
         assert_eq!(plan.physical_rows(), 17);
         assert_eq!(plan.identity_registry_rows(), 8);
         assert!(plan.record_workspace_bytes() >= 5 * 4096);
@@ -2585,6 +2871,7 @@ mod tests {
             self::stats(16, 1024),
             97,
             0,
+            0,
         )
         .unwrap();
         assert_eq!(legacy.physical_rows(), plan.physical_rows());
@@ -2595,6 +2882,7 @@ mod tests {
                 self::stats(rows, 1024),
                 payload,
                 0,
+                0,
             )
             .unwrap_err();
             assert_eq!(error.kind(), CatalogErrorKind::Storage);
@@ -2602,6 +2890,7 @@ mod tests {
         let error = oracle_read_memory_plan(
             GenerationContractVersion::new(1, 1),
             self::stats(u64::MAX, 1024),
+            0,
             0,
             0,
         )
@@ -2627,7 +2916,8 @@ mod tests {
             769_035_567,
         )
         .unwrap();
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0).unwrap();
+        let plan =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0).unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -2645,7 +2935,7 @@ mod tests {
             "closed record and borrowed source workspaces coexist with the resident generation under the unchanged ceiling: {admitted}"
         );
         let oversized =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0)
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0, 0)
                 .unwrap();
         assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
         assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
@@ -2669,7 +2959,8 @@ mod tests {
             1_442_569_165,
         )
         .unwrap();
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0).unwrap();
+        let plan =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0).unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -2685,7 +2976,7 @@ mod tests {
         assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
         assert_eq!(plan.stats(), stats);
         let oversized =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0)
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0, 0)
                 .unwrap();
         assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
     }
@@ -2819,7 +3110,8 @@ mod tests {
         let stats = stats(17, 32_768);
         let maximum = maximum_payload_bytes(&connection, stats, &context).unwrap();
         assert_eq!(maximum, expected_max);
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum, 0).unwrap();
+        let plan =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum, 0, 0).unwrap();
         let factor =
             u64::try_from(4 * (std::mem::size_of::<String>() + std::mem::size_of::<usize>()))
                 .unwrap();
