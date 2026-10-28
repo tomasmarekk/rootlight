@@ -1291,11 +1291,103 @@ fn declared_vba_references_survive_restart_with_exact_binary_evidence_and_import
     fs::write(root.path().join("book.xlsm"), &book).unwrap();
     let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
     let receipt = service.index_repository(root.path(), &deadline()).unwrap();
-    let mut first_sources = Vec::new();
+    let mut first_sources = Vec::<SourceRef>::new();
     for restart in [false, true] {
         if restart {
             drop(service);
-            service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+            let authority_path = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string())
+                .join("source-authority.json");
+            let wire: serde_json::Value =
+                serde_json::from_slice(&fs::read(authority_path).unwrap()).unwrap();
+            for path in ["book.xlsm", "book.xlsm/@vba/references.bin"] {
+                let entry = wire["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["claim"]["path"] == path)
+                    .unwrap();
+                assert_eq!(entry["encoding"], "binary");
+            }
+            let (mut reopened, deferred) =
+                FirstSliceService::open_durable_deferred(4, paths.state_dir()).unwrap();
+            let (container, derived) = {
+                let lease = reopened
+                    .source_only_lease(receipt.generation, &deadline())
+                    .unwrap()
+                    .unwrap();
+                let metadata = lease
+                    .authority
+                    .find_file(first_sources[0].span().file())
+                    .unwrap();
+                assert_eq!(metadata.encoding, "bytes");
+                assert_eq!(metadata.language, "vba");
+                let container = lease.authority.origin(metadata.id).unwrap().clone();
+                assert_eq!(
+                    lease
+                        .authority
+                        .find_file(container.span().file())
+                        .unwrap()
+                        .encoding,
+                    "bytes"
+                );
+                let backing = crate::source_generation::SourceBacking {
+                    service: &reopened,
+                    lease: &lease,
+                };
+                let source = rootlight_source::SourceService::from_source_authority(
+                    &backing,
+                    &lease.authority,
+                )
+                .unwrap();
+                assert!(matches!(
+                    source.read(
+                        std::slice::from_ref(&container),
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0),
+                        rootlight_source::SourceBudget::default(),
+                        &deadline(),
+                    ),
+                    Err(rootlight_source::SourceError::EncodingUnsupported)
+                ));
+                (container, metadata.evidence.source.clone().unwrap())
+            };
+            let read = reopened
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![container],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, book);
+            assert!(
+                !reopened
+                    .source_only_read_available(
+                        receipt.repository,
+                        receipt.generation,
+                        &[derived],
+                        &deadline(),
+                    )
+                    .unwrap()
+            );
+            assert!(
+                reopened
+                    .loaded_generation_snapshot(receipt.generation)
+                    .is_err()
+            );
+            reopened
+                .restore_deferred_for_queries(&deferred, &deadline())
+                .unwrap();
+            service = reopened;
         }
         assert_eq!(
             service.index_repository(root.path(), &deadline()).unwrap(),

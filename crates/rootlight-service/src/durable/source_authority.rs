@@ -452,7 +452,12 @@ fn restore_authority(
             content_hash: entry.claim.content_hash,
             byte_length: entry.claim.byte_length,
             language: entry.language,
-            encoding: entry.encoding,
+            // Semantic containers retain `binary`; retrieval catalogs use raw `bytes`.
+            encoding: if entry.encoding == "binary" {
+                "bytes".to_owned()
+            } else {
+                entry.encoding
+            },
             generated: entry.generated,
             provenance: entry.provenance,
             evidence: FactEvidence {
@@ -784,6 +789,32 @@ mod tests {
             )
             .is_err()
         );
+        let mut value = original.clone();
+        value["files"][0]["encoding"] = "binary".into();
+        let restored = restore_authority(
+            &serde_json::to_vec(&value).unwrap(),
+            receipt.repository,
+            receipt.generation,
+            receipt.parent,
+            &context,
+        )
+        .unwrap();
+        let file = restored.find_file(reference.span().file()).unwrap();
+        assert_eq!(file.encoding, "bytes");
+        assert_eq!(file.evidence.source.as_ref(), Some(&reference));
+        for encoding in ["unknown", "BINARY", "utf8", ""] {
+            value["files"][0]["encoding"] = encoding.into();
+            assert!(matches!(
+                restore_authority(
+                    &serde_json::to_vec(&value).unwrap(),
+                    receipt.repository,
+                    receipt.generation,
+                    receipt.parent,
+                    &context,
+                ),
+                Err(SourceAuthorityError::Invalid)
+            ));
+        }
         let mut value = original;
         value["files"][0]["claim"]["path"] = "foreign.rs".into();
         assert!(
