@@ -1,6 +1,6 @@
 //! Join native module-read windows to current written Python assignment slots.
-//! The independent flat-RHS lexer excludes lambda/call/member/default contexts;
-//! this proves lexical identity, never an effective value or runtime execution.
+//! Independent assignment/header lexers admit only written operand positions.
+//! This proves lexical identity, never call authority, a value or execution.
 
 use std::collections::{HashMap, HashSet};
 
@@ -84,6 +84,19 @@ fn flat_names(
         return Ok(None);
     }
     at += 1;
+    expression_names(text, at, text.len(), cancel)
+}
+
+fn expression_names(
+    text: &str,
+    start: usize,
+    end: usize,
+    cancel: &Cancellation,
+) -> Result<Option<Vec<(usize, usize)>>, AdapterError> {
+    let Some(raw) = text.as_bytes().get(..end) else {
+        return Ok(None);
+    };
+    let mut at = start;
     let mut names = Vec::new();
     let mut operand = true;
     let mut depth = 0_usize;
@@ -205,11 +218,170 @@ fn flat_names(
     Ok((!operand && depth == 0).then_some(names))
 }
 
+fn ordinary_word(text: &str, at: &mut usize, cancel: &Cancellation) -> Result<bool, AdapterError> {
+    let start = *at;
+    while text
+        .as_bytes()
+        .get(*at)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        cancel.check()?;
+        *at += 1;
+    }
+    Ok(expression_names(text, start, *at, cancel)?
+        .is_some_and(|names| names.as_slice() == [(start, *at)]))
+}
+
+fn horizontal_space(raw: &[u8], at: &mut usize, cancel: &Cancellation) -> Result<(), AdapterError> {
+    while raw
+        .get(*at)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        cancel.check()?;
+        *at += 1;
+    }
+    Ok(())
+}
+
+fn iterable_names(
+    text: &str,
+    cancel: &Cancellation,
+) -> Result<Option<Vec<(usize, usize)>>, AdapterError> {
+    let raw = text.as_bytes();
+    if !raw.starts_with(b"for") || !raw.get(3).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        return Ok(None);
+    }
+    let mut at = 3;
+    horizontal_space(raw, &mut at, cancel)?;
+    if !ordinary_word(text, &mut at, cancel)?
+        || !raw.get(at).is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        return Ok(None);
+    }
+    horizontal_space(raw, &mut at, cancel)?;
+    if raw.get(at..).is_none_or(|tail| !tail.starts_with(b"in")) {
+        return Ok(None);
+    }
+    at += 2;
+    if !raw.get(at).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        return Ok(None);
+    }
+    horizontal_space(raw, &mut at, cancel)?;
+    if !ordinary_word(text, &mut at, cancel)? {
+        return Ok(None);
+    }
+    horizontal_space(raw, &mut at, cancel)?;
+    if raw.get(at) != Some(&b'(') {
+        return Ok(None);
+    }
+    at += 1;
+    let mut begin = at;
+    let mut depth = 0_usize;
+    let mut names = Vec::new();
+    let mut arguments = 0_usize;
+    loop {
+        cancel.check()?;
+        let Some(byte) = raw.get(at).copied() else {
+            return Ok(None);
+        };
+        match byte {
+            b'(' => depth += 1,
+            b')' if depth > 0 => depth -= 1,
+            b',' | b')' if depth == 0 => {
+                let empty = raw
+                    .get(begin..at)
+                    .is_some_and(|part| part.iter().all(|byte| matches!(byte, b' ' | b'\t')));
+                if empty {
+                    if byte != b')' || (arguments == 0 && begin != at) {
+                        return Ok(None);
+                    }
+                } else {
+                    let Some(words) = expression_names(text, begin, at, cancel)? else {
+                        return Ok(None);
+                    };
+                    names
+                        .try_reserve(words.len())
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    names.extend(words);
+                    arguments += 1;
+                }
+                if byte == b')' {
+                    at += 1;
+                    break;
+                }
+                begin = at + 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    horizontal_space(raw, &mut at, cancel)?;
+    Ok((raw.get(at) == Some(&b':') && at + 1 == raw.len()).then_some(names))
+}
+
+// Without a whole-file lexer, multiline literals and continuations before a
+// header remain unproved. One prefix limit also avoids rescanning per use.
+fn iterable_prefix_limit(text: &str, cancel: &Cancellation) -> Result<usize, AdapterError> {
+    let raw = text.as_bytes();
+    let mut quote = None;
+    let mut comment = false;
+    for (chunk_index, chunk) in raw.chunks(64).enumerate() {
+        cancel.check()?;
+        let start = chunk_index * 64;
+        for (offset, byte) in chunk.iter().enumerate() {
+            let at = start + offset;
+            if comment {
+                if *byte == b'\n' {
+                    comment = false;
+                }
+                continue;
+            }
+            if quote.is_none() && *byte == b'#' {
+                comment = true;
+                continue;
+            }
+            let tail = &raw[at..];
+            let quoted = matches!(byte, b'\'' | b'"');
+            let f_string = quote.is_none()
+                && quoted
+                && (at
+                    .checked_sub(1)
+                    .and_then(|index| raw.get(index))
+                    .is_some_and(|byte| matches!(byte, b'f' | b'F'))
+                    || (at
+                        .checked_sub(1)
+                        .and_then(|index| raw.get(index))
+                        .is_some_and(|byte| matches!(byte, b'r' | b'R'))
+                        && at
+                            .checked_sub(2)
+                            .and_then(|index| raw.get(index))
+                            .is_some_and(|byte| matches!(byte, b'f' | b'F'))));
+            if *byte == b'\\'
+                || (quote.is_none()
+                    && (tail.starts_with(&[34, 34, 34]) || tail.starts_with(&[39, 39, 39])))
+                || f_string
+                || (*byte == b'\n' && quote.is_some())
+            {
+                return Ok(at);
+            }
+            if quoted {
+                if quote == Some(*byte) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(*byte);
+                }
+            }
+        }
+    }
+    Ok(raw.len())
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ProofCapacities {
     definitions: usize,
     markers: usize,
     assignment_signatures: usize,
+    iterable_signatures: usize,
     references: usize,
     variables: usize,
 }
@@ -236,6 +408,9 @@ impl ProofCapacities {
                 }
                 (SyntaxFactKind::Signature, "python.assignment_binding_unavailable.signature") => {
                     counts.assignment_signatures += 1;
+                }
+                (SyntaxFactKind::Signature, "python.module_iterable_context.signature") => {
+                    counts.iterable_signatures += 1;
                 }
                 _ => {}
             }
@@ -298,6 +473,7 @@ impl ModuleTargets {
         let mut definitions = HashMap::new();
         let mut markers = HashMap::new();
         let mut assignment_signatures = HashMap::new();
+        let mut iterable_signatures = Vec::new();
         let (mut roots, mut modules, mut contexts) = (Vec::new(), Vec::new(), Vec::new());
         ids.try_reserve(facts.len())
             .map_err(|_| SinkError::AllocationFailed)?;
@@ -309,6 +485,9 @@ impl ModuleTargets {
             .map_err(|_| SinkError::AllocationFailed)?;
         assignment_signatures
             .try_reserve(capacities.assignment_signatures)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        iterable_signatures
+            .try_reserve(capacities.iterable_signatures)
             .map_err(|_| SinkError::AllocationFailed)?;
         counts
             .try_reserve(facts.len())
@@ -360,6 +539,9 @@ impl ModuleTargets {
                 }
                 (SyntaxFactKind::Signature, "python.module_target.signature") => {
                     unique(&mut markers, fact.span().end_byte(), fact)
+                }
+                (SyntaxFactKind::Signature, "python.module_iterable_context.signature") => {
+                    iterable_signatures.push(fact);
                 }
                 (SyntaxFactKind::Signature, "python.assignment_binding_unavailable.signature") => {
                     unique(
@@ -474,6 +656,74 @@ impl ModuleTargets {
                 declaration.span().start_byte(),
             );
         }
+        let mut iterable_positions = HashMap::new();
+        iterable_positions
+            .try_reserve(capacities.references)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        if !iterable_signatures.is_empty() {
+            let module_text = text(root.span())?;
+            let prefix_limit = iterable_prefix_limit(module_text, cancel)?;
+            for header in iterable_signatures {
+                cancel.check()?;
+                if header.parent() != Some(module.local_id())
+                    || counts.get(&(header.kind(), header.span())) != Some(&1)
+                    || !super::span_contains(root.span(), header.span())
+                    || !super::span_contains(source.span(), physical(header.span())?)
+                {
+                    continue;
+                }
+                let Some(start) = header
+                    .span()
+                    .start_byte()
+                    .checked_sub(root.span().start_byte())
+                    .and_then(|offset| usize::try_from(offset).ok())
+                else {
+                    continue;
+                };
+                let Some(end) = header
+                    .span()
+                    .end_byte()
+                    .checked_sub(root.span().start_byte())
+                    .and_then(|offset| usize::try_from(offset).ok())
+                else {
+                    continue;
+                };
+                if start > prefix_limit
+                    || (start > 0 && module_text.as_bytes().get(start - 1) != Some(&b'\n'))
+                {
+                    continue;
+                }
+                let header_text = text(header.span())?;
+                if module_text
+                    .get(start..end)
+                    .is_none_or(|current| current != header_text)
+                {
+                    continue;
+                }
+                let Some(words) = iterable_names(header_text, cancel)? else {
+                    continue;
+                };
+                for (start, end) in words {
+                    cancel.check()?;
+                    let Some(start) = u64::try_from(start)
+                        .ok()
+                        .and_then(|offset| header.span().start_byte().checked_add(offset))
+                    else {
+                        return Err(super::provider_failure("python-module-coordinate-overflow"));
+                    };
+                    let Some(end) = u64::try_from(end)
+                        .ok()
+                        .and_then(|offset| header.span().start_byte().checked_add(offset))
+                    else {
+                        return Err(super::provider_failure("python-module-coordinate-overflow"));
+                    };
+                    iterable_positions
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    unique(&mut iterable_positions, (start, end), header);
+                }
+            }
+        }
         let mut flat = HashMap::new();
         flat.try_reserve(variables.len())
             .map_err(|_| SinkError::AllocationFailed)?;
@@ -486,72 +736,88 @@ impl ModuleTargets {
             let Some(owner_id) = reference.parent() else {
                 continue;
             };
-            let Some(owner_decl) = ids.get(&owner_id).copied() else {
-                continue;
-            };
-            let Some((owner_decl, owner_def, owner, owner_key)) = variables
-                .get(&owner_decl.span().start_byte())
-                .copied()
-                .flatten()
-            else {
-                continue;
-            };
-            if owner_decl.local_id() != owner_id || names.get(&owner_key) != Some(&Some(owner_id)) {
-                continue;
-            }
-            let Some(signature) = assignment_signatures.get(&owner_id).copied().flatten() else {
-                continue;
-            };
-            if signature.span() != owner_decl.span()
-                || counts.get(&(signature.kind(), signature.span())) != Some(&1)
-                || counts.get(&(reference.kind(), reference.span())) != Some(&1)
-            {
-                continue;
-            }
-            if let std::collections::hash_map::Entry::Vacant(entry) = flat.entry(owner_id) {
-                let words = flat_names(
-                    text(owner_decl.span())?,
-                    text(owner_def.span())?.len(),
-                    cancel,
-                )?;
-                let mut positions = HashSet::new();
-                if let Some(words) = &words {
-                    positions
-                        .try_reserve(words.len())
-                        .map_err(|_| SinkError::AllocationFailed)?;
-                    for (start, end) in words {
-                        cancel.check()?;
-                        let Some(start) = u64::try_from(*start)
-                            .ok()
-                            .and_then(|offset| owner_decl.span().start_byte().checked_add(offset))
-                        else {
-                            return Err(super::provider_failure(
-                                "python-module-coordinate-overflow",
-                            ));
-                        };
-                        let Some(end) = u64::try_from(*end)
-                            .ok()
-                            .and_then(|offset| owner_decl.span().start_byte().checked_add(offset))
-                        else {
-                            return Err(super::provider_failure(
-                                "python-module-coordinate-overflow",
-                            ));
-                        };
-                        positions.insert((start, end));
-                    }
+            let (owner_span, owner) = if owner_id == module.local_id() {
+                let Some(header) = iterable_positions
+                    .get(&(reference.span().start_byte(), reference.span().end_byte()))
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                if counts.get(&(reference.kind(), reference.span())) != Some(&1) {
+                    continue;
                 }
-                entry.insert(words.map(|_| positions));
-            }
-            if !flat
-                .get(&owner_id)
-                .and_then(Option::as_ref)
-                .is_some_and(|positions| {
-                    positions
-                        .contains(&(reference.span().start_byte(), reference.span().end_byte()))
-                })
-            {
-                continue;
-            }
+                (header.span(), module_entity)
+            } else {
+                let Some(owner_decl) = ids.get(&owner_id).copied() else {
+                    continue;
+                };
+                let Some((owner_decl, owner_def, owner, owner_key)) = variables
+                    .get(&owner_decl.span().start_byte())
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                if owner_decl.local_id() != owner_id
+                    || names.get(&owner_key) != Some(&Some(owner_id))
+                {
+                    continue;
+                }
+                let Some(signature) = assignment_signatures.get(&owner_id).copied().flatten()
+                else {
+                    continue;
+                };
+                if signature.span() != owner_decl.span()
+                    || counts.get(&(signature.kind(), signature.span())) != Some(&1)
+                    || counts.get(&(reference.kind(), reference.span())) != Some(&1)
+                {
+                    continue;
+                }
+                if let std::collections::hash_map::Entry::Vacant(entry) = flat.entry(owner_id) {
+                    let words = flat_names(
+                        text(owner_decl.span())?,
+                        text(owner_def.span())?.len(),
+                        cancel,
+                    )?;
+                    let mut positions = HashSet::new();
+                    if let Some(words) = &words {
+                        positions
+                            .try_reserve(words.len())
+                            .map_err(|_| SinkError::AllocationFailed)?;
+                        for (start, end) in words {
+                            cancel.check()?;
+                            let Some(start) = u64::try_from(*start).ok().and_then(|offset| {
+                                owner_decl.span().start_byte().checked_add(offset)
+                            }) else {
+                                return Err(super::provider_failure(
+                                    "python-module-coordinate-overflow",
+                                ));
+                            };
+                            let Some(end) = u64::try_from(*end).ok().and_then(|offset| {
+                                owner_decl.span().start_byte().checked_add(offset)
+                            }) else {
+                                return Err(super::provider_failure(
+                                    "python-module-coordinate-overflow",
+                                ));
+                            };
+                            positions.insert((start, end));
+                        }
+                    }
+                    entry.insert(words.map(|_| positions));
+                }
+                if !flat
+                    .get(&owner_id)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|positions| {
+                        positions
+                            .contains(&(reference.span().start_byte(), reference.span().end_byte()))
+                    })
+                {
+                    continue;
+                }
+                (owner_decl.span(), owner)
+            };
             let Some(marker) = markers.get(&reference.span().end_byte()).copied().flatten() else {
                 continue;
             };
@@ -573,10 +839,10 @@ impl ModuleTargets {
                 continue;
             };
             if names.get(&key) != Some(&Some(target_decl.local_id()))
-                || target_decl.span().end_byte() > owner_decl.span().start_byte()
+                || target_decl.span().end_byte() > owner_span.start_byte()
                 || marker.span().end_byte() != reference.span().end_byte()
                 || !super::span_contains(source.span(), physical(marker.span())?)
-                || !super::span_contains(owner_decl.span(), reference.span())
+                || !super::span_contains(owner_span, reference.span())
                 || !equal(text(target_def.span())?, text(reference.span())?, cancel)?
             {
                 continue;
@@ -652,11 +918,15 @@ mod tests {
     }
 
     fn source(at: SourceSpan) -> SourceRef {
+        source_for_text(at, TEXT)
+    }
+
+    fn source_for_text(at: SourceSpan, text: &str) -> SourceRef {
         SourceRef::new(
             RepositoryId::from_bytes([1; 16]),
             GenerationId::from_bytes([2; 20]),
             at,
-            content_hash(TEXT.as_bytes()),
+            content_hash(text.as_bytes()),
             None,
         )
     }
@@ -909,10 +1179,14 @@ mod tests {
     }
 
     fn site(fact: &SyntaxFact, owner: SymbolId) -> OccurrenceRecord {
-        let current = source(fact.span());
+        site_for_text(fact, owner, TEXT)
+    }
+
+    fn site_for_text(fact: &SyntaxFact, owner: SymbolId, text: &str) -> OccurrenceRecord {
+        let current = source_for_text(fact.span(), text);
         let start = usize::try_from(fact.span().start_byte()).unwrap();
         let end = usize::try_from(fact.span().end_byte()).unwrap();
-        let hash = content_hash(&TEXT.as_bytes()[start..end]);
+        let hash = content_hash(&text.as_bytes()[start..end]);
         OccurrenceRecord {
             id: FactId::from_bytes([8; 20]),
             repository: current.repository(),
@@ -1327,6 +1601,7 @@ mod tests {
                 definitions: 5,
                 markers: 1,
                 assignment_signatures: 3,
+                iterable_signatures: 0,
                 references: 1,
                 variables: 3,
             }
@@ -1378,5 +1653,551 @@ mod tests {
                 Err(AdapterError::Cancelled { .. })
             ));
         }
+    }
+
+    const ITERABLE_TEXT: &str =
+        "LIMIT = 4\nOFFSET = 2\nfor slot in producer(LIMIT, (OFFSET + 1)):\n    pass\n";
+
+    fn iterable_fixture(text: &str) -> (Vec<SyntaxFact>, HashMap<u64, MaterializedEntity>) {
+        let limit = text.find("LIMIT =").unwrap();
+        let limit_end = text[limit..].find('\n').unwrap() + limit;
+        let offset = text.find("OFFSET =").unwrap();
+        let offset_end = text[offset..].find('\n').unwrap() + offset;
+        let header = text.find("for slot in").unwrap();
+        let header_end = text[header..].find(':').unwrap() + header + 1;
+        let limit_read = text.rfind("LIMIT").unwrap();
+        let offset_read = text.rfind("OFFSET").unwrap();
+        let facts = vec![
+            fact(
+                1,
+                None,
+                SyntaxFactKind::Root,
+                0,
+                text.len(),
+                "python.module.root",
+            ),
+            fact(
+                2,
+                Some(1),
+                SyntaxFactKind::Module,
+                0,
+                text.len(),
+                "python.file.module",
+            ),
+            fact(
+                3,
+                Some(2),
+                SyntaxFactKind::Signature,
+                0,
+                text.len(),
+                "python.module_binding_context.signature",
+            ),
+            fact(
+                4,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                limit,
+                limit_end,
+                "python.module_variable.declaration",
+            ),
+            fact(
+                5,
+                Some(4),
+                SyntaxFactKind::Occurrence,
+                limit,
+                limit + 5,
+                "python.module_variable_name.definition",
+            ),
+            fact(
+                6,
+                Some(4),
+                SyntaxFactKind::Signature,
+                limit,
+                limit_end,
+                "python.assignment_binding_unavailable.signature",
+            ),
+            fact(
+                7,
+                Some(2),
+                SyntaxFactKind::Declaration,
+                offset,
+                offset_end,
+                "python.module_variable.declaration",
+            ),
+            fact(
+                8,
+                Some(7),
+                SyntaxFactKind::Occurrence,
+                offset,
+                offset + 6,
+                "python.module_variable_name.definition",
+            ),
+            fact(
+                9,
+                Some(7),
+                SyntaxFactKind::Signature,
+                offset,
+                offset_end,
+                "python.assignment_binding_unavailable.signature",
+            ),
+            fact(
+                10,
+                Some(2),
+                SyntaxFactKind::Signature,
+                header,
+                header_end,
+                "python.module_iterable_context.signature",
+            ),
+            fact(
+                11,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                limit_read,
+                limit_read + 5,
+                "python.module_read.reference",
+            ),
+            fact(
+                12,
+                Some(2),
+                SyntaxFactKind::Signature,
+                limit + 5,
+                limit_read + 5,
+                "python.module_target.signature",
+            ),
+            fact(
+                13,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                offset_read,
+                offset_read + 6,
+                "python.module_read.reference",
+            ),
+            fact(
+                14,
+                Some(2),
+                SyntaxFactKind::Signature,
+                offset + 6,
+                offset_read + 6,
+                "python.module_target.signature",
+            ),
+        ];
+        let module = entity(
+            2,
+            EntityKind::Module,
+            "written.py",
+            span(0, text.len()),
+            None,
+            ContainerRef::File(span(0, 0).file()),
+        );
+        let parent = ContainerRef::Entity(module.record.id);
+        let mut records = HashMap::from([
+            (2, module),
+            (
+                4,
+                entity(
+                    4,
+                    EntityKind::Variable,
+                    "LIMIT",
+                    span(limit, limit_end),
+                    Some(5),
+                    parent,
+                ),
+            ),
+            (
+                7,
+                entity(
+                    7,
+                    EntityKind::Variable,
+                    "OFFSET",
+                    span(offset, offset_end),
+                    Some(8),
+                    parent,
+                ),
+            ),
+        ]);
+        for record in records.values_mut() {
+            let at = record.record.evidence.source.as_ref().unwrap().span();
+            record.record.evidence.source = Some(source_for_text(at, text));
+        }
+        (facts, records)
+    }
+
+    fn iterable_targets(
+        text: &str,
+        facts: &[SyntaxFact],
+        records: &HashMap<u64, MaterializedEntity>,
+    ) -> ModuleTargets {
+        ModuleTargets::new(
+            facts,
+            records,
+            &source_for_text(span(0, text.len()), text),
+            |at| {
+                Ok(&text[usize::try_from(at.start_byte()).unwrap()
+                    ..usize::try_from(at.end_byte()).unwrap()])
+            },
+            Ok,
+            &Cancellation::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn current_iterable_lexer_proves_only_positional_operand_ranges() {
+        for header in [
+            "for slot in producer(LIMIT, (OFFSET + 1)):",
+            "for renamed in arbitrary(LIMIT,):",
+            "for n in f (LIMIT / 2e+1):",
+        ] {
+            let names = iterable_names(header, &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert!(!names.is_empty());
+            assert!(
+                names
+                    .iter()
+                    .all(|(start, end)| matches!(&header[*start..*end], "LIMIT" | "OFFSET"))
+            );
+        }
+        for header in [
+            "for slot in producer(stop=LIMIT):",
+            "for slot in producer(*LIMIT):",
+            "for slot in owner.producer(LIMIT):",
+            "for slot in producer(LIMIT[0]):",
+            "for slot in producer(nested(LIMIT)):",
+            "for slot in producer(lambda: LIMIT):",
+            "for slot in producer((LIMIT := 1)):",
+            "for slot in producer([LIMIT for n in values]):",
+            "for slot in producer(LIMIT) + other:",
+            "for slot in producer(LIMIT): pass",
+            "for slot in producer(LIMIT):#comment",
+            "for slot in producer(LIMIT\n):",
+            "for slot in producer(,LIMIT):",
+            "for slot in producer(LIMIT,,OFFSET):",
+            "async for slot in producer(LIMIT):",
+        ] {
+            assert!(
+                iterable_names(header, &Cancellation::new())
+                    .unwrap()
+                    .is_none(),
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn iterable_context_requires_current_header_cardinality_and_exact_operand_positions() {
+        let (original, records) = iterable_fixture(ITERABLE_TEXT);
+        for index in [10, 12] {
+            let reference = &original[index];
+            let expected = if index == 10 {
+                records[&4].record.id
+            } else {
+                records[&7].record.id
+            };
+            let occurrence = site_for_text(reference, records[&2].record.id, ITERABLE_TEXT);
+            assert_eq!(
+                iterable_targets(ITERABLE_TEXT, &original, &records)
+                    .resolve(
+                        reference,
+                        reference.span(),
+                        &occurrence,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        for mutation in 0..10 {
+            let mut facts = original.clone();
+            let reference = &original[10];
+            let start = usize::try_from(reference.span().start_byte()).unwrap();
+            let end = usize::try_from(reference.span().end_byte()).unwrap();
+            let header_start = ITERABLE_TEXT.find("for slot").unwrap();
+            let header_end = ITERABLE_TEXT.find(':').unwrap() + 1;
+            match mutation {
+                0 => {
+                    facts.remove(9);
+                }
+                1 => facts.push(fact(
+                    99,
+                    Some(2),
+                    SyntaxFactKind::Signature,
+                    header_start,
+                    header_end,
+                    "python.module_iterable_context.signature",
+                )),
+                2 => {
+                    facts.remove(11);
+                }
+                3 => facts.push(fact(
+                    99,
+                    Some(2),
+                    SyntaxFactKind::Signature,
+                    5,
+                    end,
+                    "python.module_target.signature",
+                )),
+                4 => {
+                    facts[9] = fact(
+                        10,
+                        Some(4),
+                        SyntaxFactKind::Signature,
+                        header_start,
+                        header_end,
+                        "python.module_iterable_context.signature",
+                    )
+                }
+                5 => {
+                    facts[10] = fact(
+                        11,
+                        Some(4),
+                        SyntaxFactKind::Occurrence,
+                        start,
+                        end,
+                        "python.module_read.reference",
+                    )
+                }
+                6 => {
+                    facts[11] = fact(
+                        12,
+                        Some(2),
+                        SyntaxFactKind::Signature,
+                        4,
+                        end,
+                        "python.module_target.signature",
+                    )
+                }
+                7 => {
+                    facts[9] = fact(
+                        10,
+                        Some(2),
+                        SyntaxFactKind::Signature,
+                        header_start,
+                        header_end + 1,
+                        "python.module_iterable_context.signature",
+                    )
+                }
+                8 => {
+                    facts[9] = fact(
+                        10,
+                        Some(2),
+                        SyntaxFactKind::Signature,
+                        header_start + 4,
+                        header_end,
+                        "python.module_iterable_context.signature",
+                    )
+                }
+                9 => facts.push(fact(
+                    99,
+                    Some(2),
+                    SyntaxFactKind::Occurrence,
+                    start,
+                    end,
+                    "python.foreign.reference",
+                )),
+                _ => unreachable!(),
+            }
+            let occurrence = site_for_text(reference, records[&2].record.id, ITERABLE_TEXT);
+            assert_eq!(
+                iterable_targets(ITERABLE_TEXT, &facts, &records)
+                    .resolve(
+                        reference,
+                        reference.span(),
+                        &occurrence,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                None,
+                "{mutation}"
+            );
+        }
+        for name in ["slot", "producer"] {
+            let mut facts = original.clone();
+            let start = ITERABLE_TEXT.find(name).unwrap();
+            facts[10] = fact(
+                11,
+                Some(2),
+                SyntaxFactKind::Occurrence,
+                start,
+                start + name.len(),
+                "python.module_read.reference",
+            );
+            facts[11] = fact(
+                12,
+                Some(2),
+                SyntaxFactKind::Signature,
+                5,
+                start + name.len(),
+                "python.module_target.signature",
+            );
+            let reference = &facts[10];
+            let occurrence = site_for_text(reference, records[&2].record.id, ITERABLE_TEXT);
+            assert_eq!(
+                iterable_targets(ITERABLE_TEXT, &facts, &records)
+                    .resolve(
+                        reference,
+                        reference.span(),
+                        &occurrence,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn relocated_headers_and_changed_current_arguments_never_inherit_native_authority() {
+        let header = "for slot in producer(LIMIT, (OFFSET + 1)):";
+        let prefix = "LIMIT = 4\nOFFSET = 2\n";
+        let texts = [
+            format!("{prefix}note = \"\"\"\n{header}\n\"\"\"\n"),
+            format!("{prefix}# {header}\n"),
+            format!("{prefix}note = \"{header}\"\n"),
+            format!("{prefix}    {header}\n        pass\n"),
+            format!("{prefix}note = f\"{{1}}\"\n{header}\n    pass\n"),
+            format!("{prefix}for slot in producer(LIMIT, nested(OFFSET)):\n    pass\n"),
+        ];
+        for text in texts {
+            let (facts, records) = iterable_fixture(&text);
+            let reference = &facts[10];
+            let occurrence = site_for_text(reference, records[&2].record.id, &text);
+            assert_eq!(
+                iterable_targets(&text, &facts, &records)
+                    .resolve(
+                        reference,
+                        reference.span(),
+                        &occurrence,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                None,
+                "{text}"
+            );
+        }
+        for prefix in [
+            "note = 'leaf'\n",
+            "note = \"surf\"\n",
+            "# ordinary quotes 'leaf' and \"surf\"\n",
+        ] {
+            let text = format!("{prefix}{ITERABLE_TEXT}");
+            let (facts, records) = iterable_fixture(&text);
+            let reference = &facts[10];
+            let occurrence = site_for_text(reference, records[&2].record.id, &text);
+            assert_eq!(
+                iterable_targets(&text, &facts, &records)
+                    .resolve(
+                        reference,
+                        reference.span(),
+                        &occurrence,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                Some(records[&4].record.id)
+            );
+        }
+    }
+
+    #[test]
+    fn iterable_module_joins_preserve_physical_coordinates_source_and_owner_guards() {
+        let text = format!("note = 'Ω'\n{ITERABLE_TEXT}");
+        let (facts, mut records) = iterable_fixture(&text);
+        let encoded: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        let map = |logical: SourceSpan| {
+            if logical == span(0, text.len()) {
+                return Ok(span(0, encoded.len()));
+            }
+            let begin = usize::try_from(logical.start_byte()).unwrap();
+            let end = usize::try_from(logical.end_byte()).unwrap();
+            Ok(span(
+                2 + text[..begin].encode_utf16().count() * 2,
+                2 + text[..end].encode_utf16().count() * 2,
+            ))
+        };
+        let full = SourceRef::new(
+            source(span(0, 0)).repository(),
+            source(span(0, 0)).generation(),
+            span(0, encoded.len()),
+            content_hash(&encoded),
+            None,
+        );
+        for record in records.values_mut() {
+            let at = map(record.record.evidence.source.as_ref().unwrap().span()).unwrap();
+            record.record.evidence.source = Some(super::super::source_for_span(&full, at));
+        }
+        let proof = ModuleTargets::new(
+            &facts,
+            &records,
+            &full,
+            |at| {
+                Ok(&text[usize::try_from(at.start_byte()).unwrap()
+                    ..usize::try_from(at.end_byte()).unwrap()])
+            },
+            map,
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let reference = &facts[10];
+        let physical = map(reference.span()).unwrap();
+        let mut occurrence = site_for_text(reference, records[&2].record.id, &text);
+        occurrence.source = super::super::source_for_span(&full, physical);
+        occurrence.evidence.source = Some(occurrence.source.clone());
+        assert_eq!(
+            proof
+                .resolve(reference, physical, &occurrence, &Cancellation::new())
+                .unwrap(),
+            Some(records[&4].record.id)
+        );
+        assert_eq!(
+            proof
+                .resolve(
+                    reference,
+                    reference.span(),
+                    &occurrence,
+                    &Cancellation::new()
+                )
+                .unwrap(),
+            None
+        );
+        for mutation in 0..4 {
+            let mut changed = occurrence.clone();
+            match mutation {
+                0 => changed.enclosing = Some(records[&4].record.id),
+                1 => changed.provenance = FactId::from_bytes([9; 20]),
+                2 => changed.source = source_for_text(physical, "different"),
+                3 => changed.generation = GenerationId::from_bytes([9; 20]),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                proof
+                    .resolve(reference, physical, &changed, &Cancellation::new())
+                    .unwrap(),
+                None
+            );
+        }
+        let cancelled = Cancellation::new();
+        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            proof.resolve(reference, physical, &occurrence, &cancelled),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        let bom_text = char::from_u32(0xfeff).unwrap().to_string() + ITERABLE_TEXT;
+        let (facts, records) = iterable_fixture(&bom_text);
+        let reference = &facts[10];
+        let occurrence = site_for_text(reference, records[&2].record.id, &bom_text);
+        assert_eq!(
+            iterable_targets(&bom_text, &facts, &records)
+                .resolve(
+                    reference,
+                    reference.span(),
+                    &occurrence,
+                    &Cancellation::new()
+                )
+                .unwrap(),
+            Some(records[&4].record.id)
+        );
     }
 }

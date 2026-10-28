@@ -26,6 +26,8 @@ pub(super) struct CaptureCache<'source> {
     module_names: HashSet<NameKey>,
     initial_assignments: HashMap<NameKey, Option<(usize, usize)>>,
     flat_rhs: HashMap<usize, bool>,
+    iterable_headers: HashMap<usize, Option<usize>>,
+    iterable_prefix_limit: Option<usize>,
     reads: HashMap<usize, Option<(usize, usize)>>,
 }
 
@@ -45,6 +47,8 @@ impl<'source> CaptureCache<'source> {
             module_names: HashSet::new(),
             initial_assignments: HashMap::new(),
             flat_rhs: HashMap::new(),
+            iterable_headers: HashMap::new(),
+            iterable_prefix_limit: None,
             reads: HashMap::new(),
         }
     }
@@ -375,6 +379,19 @@ impl<'source> CaptureCache<'source> {
         let Some(rhs) = owner.child_by_field_name("right") else {
             return Ok(false);
         };
+        let valid = self.flat_expression(rhs, cancel)?;
+        self.flat_rhs
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        self.flat_rhs.insert(owner.id(), valid);
+        Ok(valid)
+    }
+
+    fn flat_expression(
+        &mut self,
+        rhs: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
         let mut valid = true;
         let mut walk = rhs.walk();
         loop {
@@ -425,19 +442,176 @@ impl<'source> CaptureCache<'source> {
                     break;
                 }
                 if !walk.goto_parent() {
-                    self.flat_rhs
-                        .try_reserve(1)
-                        .map_err(|_| SinkError::AllocationFailed)?;
-                    self.flat_rhs.insert(owner.id(), valid);
                     return Ok(valid);
                 }
             }
         }
-        self.flat_rhs
+        Ok(valid)
+    }
+
+    fn iterable_header(
+        &mut self,
+        owner: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<Option<usize>, AdapterError> {
+        if let Some(end) = self.iterable_headers.get(&owner.id()).copied() {
+            return Ok(end);
+        }
+        let selected = self.inspect_iterable_header(owner, cancel)?;
+        self.iterable_headers
             .try_reserve(1)
             .map_err(|_| SinkError::AllocationFailed)?;
-        self.flat_rhs.insert(owner.id(), valid);
-        Ok(valid)
+        self.iterable_headers.insert(owner.id(), selected);
+        Ok(selected)
+    }
+
+    fn iterable_prefix_limit(
+        &mut self,
+        cancel: &Cancellation,
+    ) -> Result<Option<usize>, AdapterError> {
+        if let Some(limit) = self.iterable_prefix_limit {
+            return Ok(Some(limit));
+        }
+        let raw = self.source;
+        let mut quote = None;
+        let mut comment = false;
+        for (chunk_index, chunk) in raw.chunks(64).enumerate() {
+            if !self.step(cancel)? {
+                return Ok(None);
+            }
+            let start = chunk_index * 64;
+            for (offset, byte) in chunk.iter().enumerate() {
+                let at = start + offset;
+                if comment {
+                    if *byte == b'\n' {
+                        comment = false;
+                    }
+                    continue;
+                }
+                if quote.is_none() && *byte == b'#' {
+                    comment = true;
+                    continue;
+                }
+                let tail = &raw[at..];
+                let quoted = matches!(byte, b'\'' | b'"');
+                let f_string = quote.is_none()
+                    && quoted
+                    && (at
+                        .checked_sub(1)
+                        .and_then(|index| raw.get(index))
+                        .is_some_and(|byte| matches!(byte, b'f' | b'F'))
+                        || (at
+                            .checked_sub(1)
+                            .and_then(|index| raw.get(index))
+                            .is_some_and(|byte| matches!(byte, b'r' | b'R'))
+                            && at
+                                .checked_sub(2)
+                                .and_then(|index| raw.get(index))
+                                .is_some_and(|byte| matches!(byte, b'f' | b'F'))));
+                if *byte == b'\\'
+                    || (quote.is_none()
+                        && (tail.starts_with(&[34, 34, 34]) || tail.starts_with(&[39, 39, 39])))
+                    || f_string
+                    || (*byte == b'\n' && quote.is_some())
+                {
+                    self.iterable_prefix_limit = Some(at);
+                    return Ok(Some(at));
+                }
+                if quoted {
+                    if quote == Some(*byte) {
+                        quote = None;
+                    } else if quote.is_none() {
+                        quote = Some(*byte);
+                    }
+                }
+            }
+        }
+        self.iterable_prefix_limit = Some(raw.len());
+        Ok(Some(raw.len()))
+    }
+
+    fn inspect_iterable_header(
+        &mut self,
+        owner: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<Option<usize>, AdapterError> {
+        if !self.step(cancel)?
+            || owner.kind() != "for_statement"
+            || owner
+                .parent()
+                .is_none_or(|parent| parent.kind() != "module")
+            || owner.child(0).is_none_or(|token| token.kind() != "for")
+        {
+            return Ok(None);
+        }
+        let Some(limit) = self.iterable_prefix_limit(cancel)? else {
+            return Ok(None);
+        };
+        let start = owner.start_byte();
+        let bom_start = start == 3 && self.source.starts_with(b"\xef\xbb\xbf");
+        if start > limit || (start != 0 && !bom_start && self.source.get(start - 1) != Some(&b'\n'))
+        {
+            return Ok(None);
+        }
+        let Some(target) = owner
+            .child_by_field_name("left")
+            .filter(|node| node.kind() == "identifier")
+        else {
+            return Ok(None);
+        };
+        let Some(call) = owner
+            .child_by_field_name("right")
+            .filter(|node| node.kind() == "call")
+        else {
+            return Ok(None);
+        };
+        let Some(function) = call
+            .child_by_field_name("function")
+            .filter(|node| node.kind() == "identifier")
+        else {
+            return Ok(None);
+        };
+        if self.key(target, cancel)?.is_none() || self.key(function, cancel)?.is_none() {
+            return Ok(None);
+        }
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            return Ok(None);
+        };
+        let mut walk = arguments.walk();
+        for argument in arguments.named_children(&mut walk) {
+            if !self.flat_expression(argument, cancel)? {
+                return Ok(None);
+            }
+        }
+        let mut children = owner.walk();
+        let mut header_end = None;
+        for child in owner.children(&mut children) {
+            if !self.step(cancel)? {
+                return Ok(None);
+            }
+            if child.kind() == ":" {
+                header_end = Some(child.end_byte());
+                break;
+            }
+        }
+        let Some(end) = header_end else {
+            return Ok(None);
+        };
+        let Some(header) = self.source.get(owner.start_byte()..end) else {
+            return Ok(None);
+        };
+        // The independent lowering lexer proves one complete physical header.
+        // Continuations and comments cannot borrow its positional-operand proof.
+        for chunk in header.chunks(64) {
+            if !self.step(cancel)?
+                || chunk
+                    .iter()
+                    .any(|byte| matches!(byte, b'\r' | b'\n' | b'\\' | b'#'))
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(end))
     }
 
     fn read_target(
@@ -454,7 +628,7 @@ impl<'source> CaptureCache<'source> {
             return Ok(target);
         }
         let mut current = node;
-        let owner = loop {
+        let (owner, iterable) = loop {
             if !self.step(cancel)? {
                 return Ok(None);
             }
@@ -463,7 +637,17 @@ impl<'source> CaptureCache<'source> {
             };
             if parent.kind() == "assignment" && parent.child_by_field_name("right") == Some(current)
             {
-                break parent;
+                break (parent, false);
+            }
+            if parent.kind() == "argument_list"
+                && let Some(call) = parent.parent().filter(|call| call.kind() == "call")
+                && call.child_by_field_name("arguments") == Some(parent)
+                && let Some(owner) = call.parent().filter(|owner| {
+                    owner.kind() == "for_statement"
+                        && owner.child_by_field_name("right") == Some(call)
+                })
+            {
+                break (owner, true);
             }
             if !matches!(
                 parent.kind(),
@@ -473,14 +657,21 @@ impl<'source> CaptureCache<'source> {
             }
             current = parent;
         };
-        let selected = if Self::direct_module_assignment(owner)
+        let context = if iterable {
+            self.iterable_header(owner, cancel)?.is_some()
+        } else if Self::direct_module_assignment(owner)
             && owner.child_by_field_name("type").is_none()
             && let Some(owner_name) = owner
                 .child_by_field_name("left")
                 .filter(|name| name.kind() == "identifier")
             && let Some(owner_key) = self.key(owner_name, cancel)?
             && self.admitted_assignment(owner, owner_key)
-            && self.flat_rhs(owner, cancel)?
+        {
+            self.flat_rhs(owner, cancel)?
+        } else {
+            false
+        };
+        let selected = if context
             && let Some(key) = self.key(node, cancel)?
             && self.module_names.contains(&key)
             && self.ordinary_bindings.get(&key) == Some(&1)
@@ -534,6 +725,44 @@ impl<'source> CaptureCache<'source> {
             candidate.syntax = "python.module_binding_context";
             candidate.required = true;
             return Ok(true);
+        }
+        if role == StructuralRole::Signature && node.kind() == "for_statement" {
+            let Some(end) = self.iterable_header(node, cancel)? else {
+                return Ok(false);
+            };
+            let arguments = node
+                .child_by_field_name("right")
+                .and_then(|call| call.child_by_field_name("arguments"));
+            let Some(arguments) = arguments else {
+                return Ok(false);
+            };
+            let mut walk = arguments.walk();
+            loop {
+                if !self.step(cancel)? {
+                    return Ok(false);
+                }
+                let operand = walk.node();
+                if operand.kind() == "identifier"
+                    && self.read_target(root, operand, cancel)?.is_some()
+                {
+                    candidate.start = node.start_byte();
+                    candidate.end = end;
+                    candidate.syntax = "python.module_iterable_context";
+                    candidate.required = true;
+                    return Ok(true);
+                }
+                if walk.goto_first_child() {
+                    continue;
+                }
+                loop {
+                    if walk.goto_next_sibling() {
+                        break;
+                    }
+                    if !walk.goto_parent() {
+                        return Ok(false);
+                    }
+                }
+            }
         }
         if role == StructuralRole::Scope && node.kind() == "identifier" {
             if let Some(target) = self.read_target(root, node, cancel)? {
@@ -1333,6 +1562,206 @@ mod module_read_tests {
                     .unwrap(),
                 allowed,
                 "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_module_iterable_operands_keep_exact_assignment_markers() {
+        for source in [
+            "LIMIT = 4\nfor item in producer(LIMIT):\n    unrelated = 1\n",
+            "BASE = 1\nLIMIT = 4\nfor entry in make(BASE, (LIMIT + 1) / 2):\n    pass\n",
+            "LIMIT = 4\nLIMIT += 1\nfor renamed in arbitrary(LIMIT): pass\n",
+            "note = 'leaf'\nLIMIT = 4\nfor item in producer(LIMIT): pass\n",
+            "note = \"surf\"\nLIMIT = 4\nfor item in producer(LIMIT): pass\n",
+            "# quotes \"'''\" are comment text\nLIMIT = 4\nfor item in producer(LIMIT): pass\n",
+        ] {
+            let source = source.as_bytes();
+            let parsed = tree(source);
+            assert!(!parsed.root_node().has_error());
+            let root = parsed.root_node();
+            let start = source
+                .windows(5)
+                .rposition(|part| part == b"LIMIT")
+                .unwrap();
+            let node = root.descendant_for_byte_range(start, start + 5).unwrap();
+            let mut cache = CaptureCache::new(source, 16_384, true);
+            for role in [StructuralRole::Reference, StructuralRole::Scope] {
+                let mut output = candidate(node, role);
+                assert!(
+                    cache
+                        .refine(root, node, role, &mut output, &Cancellation::new())
+                        .unwrap()
+                );
+                assert!(output.required);
+                if role == StructuralRole::Reference {
+                    assert_eq!(output.syntax, "python.module_read");
+                    assert_eq!(output.start..output.end, start..start + 5);
+                } else {
+                    assert_eq!(output.syntax, "python.module_target");
+                    let declaration = source.windows(5).position(|part| part == b"LIMIT").unwrap();
+                    assert_eq!(output.start..output.end, declaration + 5..start + 5);
+                }
+            }
+            let mut owner = node;
+            while owner.kind() != "for_statement" {
+                owner = owner.parent().unwrap();
+            }
+            let mut output = candidate(owner, StructuralRole::Signature);
+            assert!(
+                cache
+                    .refine(
+                        root,
+                        owner,
+                        StructuralRole::Signature,
+                        &mut output,
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+            );
+            assert_eq!(output.syntax, "python.module_iterable_context");
+            assert!(output.required);
+            assert_eq!(
+                source.get(output.start..output.start + 4),
+                Some(b"for ".as_slice())
+            );
+            assert_eq!(source.get(output.end - 1), Some(&b':'));
+            assert!(output.end < owner.end_byte());
+        }
+    }
+
+    #[test]
+    fn module_iterable_context_rejects_shadowed_and_nonflat_operands() {
+        for source in [
+            "LIMIT = 1\nfor LIMIT in producer(LIMIT): pass\n",
+            "LIMIT = 1\nLIMIT = 2\nfor item in producer(LIMIT): pass\n",
+            "for item in producer(LIMIT): pass\nLIMIT = 1\n",
+            "LIMIT = 1\ndef nested():\n    LIMIT = 2\nfor item in producer(LIMIT): pass\n",
+            "LIMIT = 1\nimport other as LIMIT\nfor item in producer(LIMIT): pass\n",
+            "LIMIT = 1\nexec(code)\nfor item in producer(LIMIT): pass\n",
+            "LIMIT = 1\ndef nested():\n    for item in producer(LIMIT): pass\n",
+            "LIMIT = 1\nfor outer in things:\n    for item in producer(LIMIT): pass\n",
+            "LIMIT = 1\nfor item in producer(stop=LIMIT): pass\n",
+            "LIMIT = 1\nfor item in producer(*LIMIT): pass\n",
+            "LIMIT = 1\nfor item in holder.producer(LIMIT): pass\n",
+            "LIMIT = 1\nfor item in producer(LIMIT[0]): pass\n",
+            "LIMIT = 1\nfor item in producer(nested(LIMIT)): pass\n",
+            "LIMIT = 1\nfor item in producer([LIMIT for entry in things]): pass\n",
+            "LIMIT = 1\nfor item in producer((LIMIT := 2)): pass\n",
+            "LIMIT = 1\nfor item in producer(\n    LIMIT\n): pass\n",
+            "LIMIT = 1\nfor item in producer(LIMIT, 'text'): pass\n",
+        ] {
+            let source = source.as_bytes();
+            let parsed = tree(source);
+            assert!(!parsed.root_node().has_error(), "{source:?}");
+            let root = parsed.root_node();
+            let call = source
+                .windows(9)
+                .position(|part| part == b"producer(")
+                .unwrap();
+            let start = call
+                + source[call..]
+                    .windows(5)
+                    .position(|part| part == b"LIMIT")
+                    .unwrap();
+            let node = root.descendant_for_byte_range(start, start + 5).unwrap();
+            let mut cache = CaptureCache::new(source, 16_384, true);
+            let mut output = candidate(node, StructuralRole::Scope);
+            assert!(
+                !cache
+                    .refine(
+                        root,
+                        node,
+                        StructuralRole::Scope,
+                        &mut output,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                "{source:?}"
+            );
+            let mut owner = node;
+            while owner.kind() != "for_statement" {
+                owner = owner.parent().unwrap();
+            }
+            let mut output = candidate(owner, StructuralRole::Signature);
+            assert!(
+                !cache
+                    .refine(
+                        root,
+                        owner,
+                        StructuralRole::Signature,
+                        &mut output,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_iterable_context_preserves_partial_work_and_cancellation_refusals() {
+        let source = b"LIMIT = 4\nfor item in producer(LIMIT): pass\n";
+        let parsed = tree(source);
+        let root = parsed.root_node();
+        let owner = root.named_child(1).unwrap();
+        for (maximum, complete) in [(0, true), (16_384, false)] {
+            let mut cache = CaptureCache::new(source, maximum, complete);
+            let mut output = candidate(owner, StructuralRole::Signature);
+            assert!(
+                !cache
+                    .refine(
+                        root,
+                        owner,
+                        StructuralRole::Signature,
+                        &mut output,
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+            );
+        }
+        let cancellation = Cancellation::new();
+        cancellation.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut cache = CaptureCache::new(source, 16_384, true);
+        let mut output = candidate(owner, StructuralRole::Signature);
+        assert!(matches!(
+            cache.refine(
+                root,
+                owner,
+                StructuralRole::Signature,
+                &mut output,
+                &cancellation
+            ),
+            Err(AdapterError::Cancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn multiline_prefixes_withhold_only_the_new_iterable_context() {
+        for prefix in [
+            "note = \"\"\"closed\"\"\"\n",
+            "note = f\"{1}\"\n",
+            "note = 1 + \\\n    2\n",
+        ] {
+            let source = format!("{prefix}LIMIT = 4\nfor item in producer(LIMIT): pass\n");
+            let parsed = tree(source.as_bytes());
+            assert!(!parsed.root_node().has_error(), "{source}");
+            let root = parsed.root_node();
+            let at = source.rfind("LIMIT").unwrap();
+            let node = root.descendant_for_byte_range(at, at + 5).unwrap();
+            let mut cache = CaptureCache::new(source.as_bytes(), 16_384, true);
+            let mut output = candidate(node, StructuralRole::Scope);
+            assert!(
+                !cache
+                    .refine(
+                        root,
+                        node,
+                        StructuralRole::Scope,
+                        &mut output,
+                        &Cancellation::new()
+                    )
+                    .unwrap(),
+                "{source}"
             );
         }
     }

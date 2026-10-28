@@ -5239,6 +5239,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Rust, "string_literal") => Some("rust.string"),
         (GrammarFamily::Python, "module") => Some("python.module"),
         (GrammarFamily::Python, "assignment") => Some("python.module_variable"),
+        (GrammarFamily::Python, "for_statement") => Some("python.for"),
         (GrammarFamily::Python, "augmented_assignment") => Some("python.augmented_assignment"),
         (GrammarFamily::Python, "function_definition") => Some("python.function"),
         (GrammarFamily::Python, "class_definition") => Some("python.class"),

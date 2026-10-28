@@ -56,6 +56,7 @@
 (module (expression_statement (assignment left: (identifier) @definition)))
 (assignment) @signature
 (augmented_assignment) @signature
+(module (for_statement) @signature)
 
 [(import_statement) (import_from_statement)] @import
 ; The required context witness records the limits of this lexical subset.
