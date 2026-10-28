@@ -15,6 +15,9 @@ const EXPLANATION_BYTES: usize = 109;
 pub(super) struct RefusalObservation {
     scope: &'static str,
     sidecar_input_scope: &'static str,
+    ir_text_scope: &'static str,
+    prospective_ir_string_content_bytes: u64,
+    prospective_ir_extension_payload_bytes: u64,
     repository: RepositoryId,
     generation: GenerationId,
     file: FileId,
@@ -649,9 +652,28 @@ impl Reservation {
         if let Some(refusal) = &refusal {
             with_analysis_profile(|profile| {
                 if profile.first_oracle_restore_refusal.is_none() {
+                    let string_bytes = prepared
+                        .target_usage
+                        .total_string_bytes()
+                        .checked_add(prepared.source_usage.total_string_bytes())
+                        .and_then(|bytes| u64::try_from(bytes).ok());
+                    let payload_bytes = prepared
+                        .target_usage
+                        .total_extension_bytes()
+                        .checked_add(prepared.source_usage.total_extension_bytes())
+                        .and_then(|bytes| u64::try_from(bytes).ok());
+                    let (Some(string_bytes), Some(payload_bytes)) = (string_bytes, payload_bytes)
+                    else {
+                        // Diagnostic accounting must not change the admission result.
+                        profile.counts_complete = false;
+                        return;
+                    };
                     profile.first_oracle_restore_refusal = Some(RefusalObservation {
                         scope: "prospective_cumulative_restore_model_not_heap_or_rss",
                         sidecar_input_scope: "reserved_envelope_not_actual_written_descriptors",
+                        ir_text_scope: "prospective_ir_utf8_content_excludes_sources_catalog_sidecars_allocation_capacity_and_rss",
+                        prospective_ir_string_content_bytes: string_bytes,
+                        prospective_ir_extension_payload_bytes: payload_bytes,
                         repository: target.repository,
                         generation: target.generation,
                         file,

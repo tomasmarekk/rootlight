@@ -514,6 +514,11 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
         observation.sidecar_input_scope,
         "reserved_envelope_not_actual_written_descriptors"
     );
+    assert_eq!(
+        observation.ir_text_scope,
+        "prospective_ir_utf8_content_excludes_sources_catalog_sidecars_allocation_capacity_and_rss"
+    );
+    assert!(observation.prospective_ir_string_content_bytes > 0);
     assert!(observation.memory.total_bytes > ceiling);
     assert!(profile.counts_complete);
     assert!(
@@ -558,6 +563,231 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
     let encoded = serde_json::to_string(&profile).unwrap();
     assert!(!encoded.contains("written-lifecycle"));
     assert!(!encoded.contains("b.cs"));
+    let encoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        encoded["first_oracle_restore_refusal"]["prospective_ir_string_content_bytes"],
+        observation.prospective_ir_string_content_bytes
+    );
+    assert_eq!(
+        encoded["first_oracle_restore_refusal"]["prospective_ir_extension_payload_bytes"],
+        observation.prospective_ir_extension_payload_bytes
+    );
+}
+
+#[test]
+fn first_refusal_text_metrics_match_committed_candidate_after_optional_eviction() {
+    let bytes = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/compatibility/ir/1.1/document.json"
+    ));
+    let rootlight_ir::IrDocument::NormalizedV1_1(mut source) =
+        rootlight_ir::decode_ir_document(bytes, &IrLimits::default(), &ExtensionSupport::default())
+            .unwrap()
+    else {
+        panic!("normalized fixture required");
+    };
+    let manifest_hash = content_hash(b"text-observation-manifest");
+    let configuration_hash = content_hash(b"text-observation-config");
+    let provider_set_hash = content_hash(b"text-observation-provider");
+    let generation = derive_generation(GenerationIdentity {
+        repository: source.repository,
+        parent: None,
+        manifest_hash,
+        config_hash: configuration_hash,
+        provider_set_hash,
+        format_version: generation_format_version(),
+    })
+    .id();
+    let rebound = String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .replace(&source.generation.to_string(), &generation.to_string());
+    let rootlight_ir::IrDocument::NormalizedV1_1(rebound) = rootlight_ir::decode_ir_document(
+        rebound.as_bytes(),
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap() else {
+        panic!("generation-rebound normalized fixture required");
+    };
+    source = rebound;
+    source.source_mappings.clear();
+    assert_eq!(source.files.len(), 1);
+    assert_eq!(source.extensions.len(), 1);
+    let file = source.files[0].clone();
+    let reference = source.occurrences[0].source.clone();
+    let lexical = rootlight_ir::LexicalEvidenceV1::from_complete_text(
+        rootlight_ir::LexicalEvidenceKind::CommentSummary,
+        FactRef::File(file.id),
+        rootlight_ir::LexicalEvidenceFormat::PlainText,
+        "optional prefix text with a UTF-8 symbol: λ",
+    )
+    .unwrap();
+    let optional = rootlight_ir::new_lexical_evidence_envelope(
+        source.repository,
+        source.generation,
+        file.provenance,
+        reference,
+        &lexical,
+    )
+    .unwrap();
+    let optional_id = optional.id;
+    let mut target = NormalizedIrDocument::empty(source.repository, source.generation);
+    let mut coverage = CoverageRecord {
+        id: FactId::from_bytes([0; 20]),
+        repository: source.repository,
+        generation: source.generation,
+        scope: CoverageScope::File(file.id),
+        domain: IrFactDomain::Extensions,
+        tier: AnalysisTier::TierC,
+        status: CoverageStatus::Complete,
+        discovered: 1,
+        indexed: 1,
+        skipped: 0,
+        provenance: file.provenance,
+        evidence: optional.evidence.clone(),
+    };
+    coverage.id = derive_coverage_record_id(&coverage).unwrap();
+    target.coverage_records.push(coverage);
+    target.extensions.push(optional);
+    let before = IrDocumentUsage::measure(&target, &IrLimits::default()).unwrap();
+    assert!(before.total_string_bytes() > 0);
+    assert!(before.total_extension_bytes() > 0);
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let mut floor_document = NormalizedIrDocument::empty(source.repository, source.generation);
+    floor_document.files.push(file.clone());
+    let floor = OracleLayoutFragment::measure(&floor_document, 0, &context, &mut |_| {
+        Ok::<_, FirstSliceError>(())
+    })
+    .unwrap();
+    let floor_bytes = floor.retained_bytes().unwrap();
+    let mut initial = target.clone();
+    initial.files.push(file.clone());
+    let initial =
+        OracleLayoutFragment::measure(&initial, 0, &context, &mut |_| Ok::<_, FirstSliceError>(()))
+            .unwrap();
+    let mut census = OracleLayoutCensus::new(source.repository, source.generation);
+    census
+        .preview(
+            OracleLayoutFragment::empty(source.repository, source.generation),
+            initial,
+            0,
+            &context,
+            &mut |_| Ok::<_, FirstSliceError>(()),
+        )
+        .unwrap()
+        .commit();
+    let metadata = GenerationMetadata::new(
+        source.repository,
+        source.generation,
+        None,
+        manifest_hash,
+        configuration_hash,
+        provider_set_hash,
+    )
+    .unwrap();
+    let claim = FileIdentityClaim {
+        file: file.id,
+        repository: file.repository,
+        path: file.path.clone(),
+        path_identity: RelativePath::parse(Path::new(&file.path))
+            .unwrap()
+            .identity_bytes()
+            .to_vec(),
+        content_hash: file.content_hash,
+        byte_length: file.byte_length,
+    };
+    let envelope = durable::restore_envelope::Envelope::prepare(
+        metadata,
+        &[durable::restore_envelope::Source {
+            claim: &claim,
+            language: &file.language,
+            encoding: &file.encoding,
+            generated: file.generated,
+        }],
+        &cancellation,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    let mut reservation = Reservation {
+        census,
+        floors: vec![Slot {
+            file: file.id,
+            floor: Some(floor),
+        }],
+        floor_bytes,
+        table_bytes: u64::try_from(size_of::<Slot>()).unwrap(),
+        next: 0,
+        workspace: Workspace::default(),
+        host_floor: OracleLayoutFragment::empty(source.repository, source.generation),
+        envelope,
+    };
+    let mut state = DocumentAppendState::from_document(&target).unwrap();
+    let mut limits = IrLimits::default();
+    limits.max_extensions = 1;
+    let prepared = prepare_normalized_document_append(
+        &target,
+        source,
+        &limits,
+        &state,
+        &cancellation,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(prepared.extension_plan.dropped_target_indices, [0]);
+    let (refusal, profile) = capture_first_slice_analysis_profile(|| {
+        durable::with_restore_test_ceiling(1, || {
+            reservation.refusal(
+                &target,
+                &prepared,
+                file.id,
+                &context,
+                &cancellation,
+                &mut |_| Ok(()),
+            )
+        })
+    });
+    assert!(refusal.unwrap().is_some());
+    let observation = profile.first_oracle_restore_refusal.as_ref().unwrap();
+    assert_eq!(observation.file, file.id);
+    assert_eq!(observation.repository, target.repository);
+    assert_eq!(observation.generation, target.generation);
+    assert_eq!(observation.limit, 1);
+    assert!(observation.memory.total_bytes > observation.limit);
+    assert!(profile.counts_complete);
+    assert_eq!(
+        target.extensions[0].id, optional_id,
+        "refusal leaves the prefix untouched"
+    );
+    commit_prepared_document_append(&mut target, prepared, &limits, &mut state, &cancellation)
+        .unwrap();
+    assert_eq!(target.extensions.len(), 1);
+    assert_ne!(target.extensions[0].id, optional_id);
+    let coverage = target
+        .coverage_records
+        .iter()
+        .find(|record| {
+            record.scope == CoverageScope::File(file.id)
+                && record.domain == IrFactDomain::Extensions
+        })
+        .unwrap();
+    assert_eq!(coverage.status, CoverageStatus::Bounded);
+    assert_eq!(
+        (coverage.discovered, coverage.indexed, coverage.skipped),
+        (1, 0, 1)
+    );
+    let actual = IrDocumentUsage::measure(&target, &IrLimits::default()).unwrap();
+    assert_eq!(
+        observation.prospective_ir_string_content_bytes,
+        u64::try_from(actual.total_string_bytes()).unwrap()
+    );
+    assert_eq!(
+        observation.prospective_ir_extension_payload_bytes,
+        u64::try_from(actual.total_extension_bytes()).unwrap()
+    );
+    assert!(actual.total_string_bytes() > 0);
+    assert!(actual.total_extension_bytes() > 0);
 }
 
 #[test]
