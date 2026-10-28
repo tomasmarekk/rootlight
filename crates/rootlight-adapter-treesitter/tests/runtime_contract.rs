@@ -77,7 +77,9 @@ fn incremental_executor_accepts_optional_deadlines_and_explicit_memory_admission
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 100] = [
+    let cases: [(&str, &str, &[u8]); 102] = [
+        ("written.cu", "cuda", b"__global__ void kernel(int value) {}\nvoid launch(int scalar) { int next = scalar * 2; kernel<<<1, 1>>>(next); }\n"),
+        ("written.liquid", "liquid", b"{% for item in entries %}{{ item }}{% endfor %}"),
         ("written.idr", "idris", b"global : Type\nglobal = Type\nreader : Type\nreader = global\n"),
     ("written.sed", "sed", b":entry\r\nb entry\r\n"),
     ("written.wl", "wolfram", b"owned[value_String] := Module[{}, external[value]];\n"),

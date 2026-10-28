@@ -34,7 +34,17 @@ struct LanguageCase {
     source: &'static str,
 }
 
-const CASES: [LanguageCase; 100] = [
+const CASES: [LanguageCase; 102] = [
+    LanguageCase {
+        name: "written.cu",
+        language: "cuda",
+        source: "// marker λ😀\r\n__global__ void kernel(int value) {}\r\nvoid launch(int scalar) { int next = scalar * 2; kernel<<<1, 1>>>(next); }\r\n",
+    },
+    LanguageCase {
+        name: "written.liquid",
+        language: "liquid",
+        source: "{% comment %}marker λ😀{% endcomment %}\r\n{% for item in entries %}{{ item }}{% endfor %}\r\n",
+    },
     LanguageCase {
         name: "written.idr",
         language: "idris",
@@ -570,8 +580,13 @@ fn every_audited_language_preserves_projected_captures_and_original_encoded_evid
         let control_output = parse(&provider, &control, &budget, case.language, "utf-8");
         assert_raw_report(&control_output, &control, case.language);
         assert_no_encoding_or_limit_diagnostics(&control_output, case.language);
-        if matches!(case.language, "modelica" | "json-schema" | "pug" | "idris") {
+        if matches!(
+            case.language,
+            "cuda" | "liquid" | "modelica" | "json-schema" | "pug" | "idris"
+        ) {
             let names: &[&str] = match case.language {
+                "cuda" => &["kernel", "launch", "scalar"],
+                "liquid" => &["item"],
                 "modelica" => &["measure", "value"],
                 "json-schema" => &["Measurement", "value", "result"],
                 "pug" => &["input", "type", "disabled"],
