@@ -1721,10 +1721,13 @@ where
     }
     let mut canonical = Vec::with_capacity(payload.len());
     {
-        let mut writer = ClaimCheckpointWriter::new(&mut canonical, &mut checkpoint)?;
+        let mut writer =
+            ClaimCheckpointWriter::new(&mut canonical, payload.len(), &mut checkpoint)?;
         if serde_json::to_writer(&mut writer, &value).is_err() {
             return if writer.interrupted {
                 Err(IdentityClaimError::Interrupted)
+            } else if writer.exceeded {
+                Err(IdentityClaimError::NoncanonicalPayload)
             } else {
                 Err(IdentityClaimError::MalformedPayload)
             };
@@ -1791,8 +1794,10 @@ where
 
 struct ClaimCheckpointWriter<'output, 'checkpoint, F> {
     output: &'output mut Vec<u8>,
+    maximum_bytes: usize,
     checkpoint: &'checkpoint mut F,
     interrupted: bool,
+    exceeded: bool,
 }
 
 impl<'output, 'checkpoint, F> ClaimCheckpointWriter<'output, 'checkpoint, F>
@@ -1801,12 +1806,15 @@ where
 {
     fn new(
         output: &'output mut Vec<u8>,
+        maximum_bytes: usize,
         checkpoint: &'checkpoint mut F,
     ) -> Result<Self, IdentityClaimError> {
         let mut writer = Self {
             output,
+            maximum_bytes,
             checkpoint,
             interrupted: false,
+            exceeded: false,
         };
         writer.check()?;
         Ok(writer)
@@ -1830,6 +1838,19 @@ where
     F: FnMut() -> bool,
 {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        // Defaulted fields can make canonical JSON longer than its input. Such
+        // payloads are noncanonical without retaining the larger serialization.
+        if self.exceeded
+            || self
+                .output
+                .len()
+                .checked_add(buffer.len())
+                .is_none_or(|length| length > self.maximum_bytes)
+        {
+            self.check().map_err(|_| checkpoint_io_error())?;
+            self.exceeded = true;
+            return Err(io::Error::other("noncanonical identity claim payload"));
+        }
         let mut written = 0;
         for chunk in buffer.chunks(4 * 1024) {
             self.check().map_err(|_| checkpoint_io_error())?;
@@ -1892,6 +1913,60 @@ fn require_recipe_checkpoint(
 mod tests {
     use super::*;
     use crate::SourceSpan;
+
+    #[test]
+    fn canonical_payload_comparison_rejects_default_expansion_and_preserves_escaping() {
+        let (mut claim, _) = symbol_claim_fixture(b"fixture".to_vec());
+        claim.container = None;
+        let canonical = serde_json::to_string(&claim).unwrap();
+        let omitted = canonical.replacen("\"container\":null,", "", 1);
+        assert!(canonical.len() > omitted.len());
+        assert_eq!(
+            decode_canonical_payload::<SymbolIdentityClaim>(&omitted, || true),
+            Err(IdentityClaimError::NoncanonicalPayload),
+        );
+        for text in [
+            String::new(),
+            "x".repeat(4095),
+            "x".repeat(4096),
+            "x".repeat(4097),
+            "\"\\\n\t\0λ".repeat(1024),
+        ] {
+            let payload = serde_json::to_string(&text).unwrap();
+            assert_eq!(
+                decode_canonical_payload::<String>(&payload, || true).unwrap(),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_comparison_writer_checks_the_bound_before_extending() {
+        let mut output = Vec::with_capacity(4097);
+        let mut checkpoint = || true;
+        let mut writer = ClaimCheckpointWriter::new(&mut output, 4097, &mut checkpoint).unwrap();
+        writer.write_all(&[b'x'; 4096]).unwrap();
+        writer.write_all(b"y").unwrap();
+        assert_eq!(writer.output.len(), 4097);
+        let capacity = writer.output.capacity();
+        assert!(writer.write(&[b'z'; 8192]).is_err());
+        assert!(writer.exceeded);
+        assert_eq!(writer.output.len(), 4097);
+        assert_eq!(writer.output.capacity(), capacity);
+
+        let mut output = Vec::with_capacity(2);
+        let mut checkpoints = 0;
+        let mut checkpoint = || {
+            checkpoints += 1;
+            checkpoints < 3
+        };
+        let mut writer = ClaimCheckpointWriter::new(&mut output, 2, &mut checkpoint).unwrap();
+        writer.write_all(b"x").unwrap();
+        assert!(writer.write(b"too long").is_err());
+        assert!(writer.interrupted);
+        assert!(!writer.exceeded);
+        assert_eq!(writer.output.as_slice(), b"x");
+    }
 
     #[test]
     fn fact_recipe_stops_between_canonical_allocations() {
