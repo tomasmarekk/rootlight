@@ -22,8 +22,8 @@ use rootlight_adapter_treesitter::{
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::content_hash;
 use rootlight_ir::{
-    AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionSupport, IrLimits,
-    ProducerIdentity, SourceRef, SourceSpan,
+    AnalysisTier, BuildContextIdentity, CoverageStatus, ExtensionSupport, IrLimits, OccurrenceRole,
+    OccurrenceTarget, ProducerIdentity, SourceRef, SourceSpan,
 };
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
@@ -34,7 +34,9 @@ const MAX_DEPTH: usize = 128;
 const MEMORY_POLICY: MemoryAdmissionPolicy =
     MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback;
 
-const CASES: [(&str, &str, &[u8]); 100] = [
+const CASES: [(&str, &str, &[u8]); 102] = [
+    ("written.cu", "cuda", b"__global__ void kernel(int value) {}\nvoid launch(int scalar) { int next = scalar * 2; kernel<<<1, 1>>>(next); }\n"),
+    ("written.liquid", "liquid", b"{% for item in entries %}{{ item }}{% endfor %}"),
     ("written.idr", "idris", b"global : Type\nglobal = Type\nreader : Type\nreader = global\n"),
     ("written.sed", "sed", b":entry\r\nb entry\r\n"),
     ("written.wl", "wolfram", b"owned[value_String] := Module[{}, external[value]];\n"),
@@ -270,7 +272,18 @@ fn deferred_queries_preserve_every_audited_language_and_normalized_ir() {
     );
     for (name, language, source) in CASES {
         let (parsed, analyzed) = assert_parity(&eager, &deferred, name, language, source);
-        if language == "idris" {
+        if language == "cuda" {
+            for name in ["kernel", "launch", "scalar"] {
+                assert_entity(&analyzed, language, name);
+                assert_written_definition(&parsed, source, name.as_bytes());
+            }
+            assert_resolved_occurrence(&analyzed, language, "scalar", OccurrenceRole::Read);
+            assert_resolved_occurrence(&analyzed, language, "kernel", OccurrenceRole::CallSite);
+        } else if language == "liquid" {
+            assert_entity(&analyzed, language, "item");
+            assert_written_definition(&parsed, source, b"item");
+            assert_resolved_occurrence(&analyzed, language, "item", OccurrenceRole::Read);
+        } else if language == "idris" {
             for name in ["global", "reader"] {
                 assert_entity(&analyzed, language, name);
                 assert_written_definition(&parsed, source, name.as_bytes());
@@ -658,6 +671,26 @@ fn assert_entity(output: &AnalysisOutput, language: &str, name: &str) {
             .iter()
             .any(|entity| { entity.language == language && entity.canonical_name == name }),
         "missing {language} entity {name}"
+    );
+}
+
+fn assert_resolved_occurrence(
+    output: &AnalysisOutput,
+    language: &str,
+    name: &str,
+    role: OccurrenceRole,
+) {
+    let document = output.document();
+    let target = document
+        .entities
+        .iter()
+        .find(|entity| entity.language == language && entity.canonical_name == name)
+        .unwrap();
+    assert!(
+        document.occurrences.iter().any(|site| {
+            site.role == role && site.target == OccurrenceTarget::Resolved { symbol: target.id }
+        }),
+        "missing {language} {role:?} to {name}"
     );
 }
 
