@@ -498,7 +498,7 @@ pub enum EntityFlag {
 }
 
 /// A typed semantic container reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum ContainerRef {
@@ -508,6 +508,131 @@ pub enum ContainerRef {
     File(FileId),
     /// A containing semantic entity.
     Entity(SymbolId),
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "ContainerRef", rename_all = "snake_case")]
+enum ContainerKind {
+    Repository,
+    File,
+    Entity,
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum ContainerField {
+    Kind,
+    Id,
+    #[serde(other)]
+    Ignore,
+}
+
+enum PendingContainerId {
+    Repository(RepositoryId),
+    File(FileId),
+    Entity(SymbolId),
+}
+
+impl PendingContainerId {
+    fn into_container(self, kind: ContainerKind) -> Option<ContainerRef> {
+        match (kind, self) {
+            (ContainerKind::Repository, Self::Repository(id)) => Some(ContainerRef::Repository(id)),
+            (ContainerKind::File, Self::File(id)) => Some(ContainerRef::File(id)),
+            (ContainerKind::Entity, Self::Entity(id)) => Some(ContainerRef::Entity(id)),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PendingContainerId {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct IdVisitor;
+
+        impl de::Visitor<'_> for IdVisitor {
+            type Value = PendingContainerId;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a textual repository, file, or symbol ID")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value.len() {
+                    38 => value.parse().map(PendingContainerId::Repository),
+                    45 => value.parse().map(PendingContainerId::File),
+                    44 => value.parse().map(PendingContainerId::Entity),
+                    _ => return Err(E::custom("invalid container ID length")),
+                }
+                .map_err(E::custom)
+            }
+
+            fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let text = std::str::from_utf8(value)
+                    .map_err(|_| E::custom("container ID must be UTF-8 text"))?;
+                self.visit_str(text)
+            }
+        }
+
+        deserializer.deserialize_string(IdVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContainerRef {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ContainerVisitor;
+
+        impl<'de> de::Visitor<'de> for ContainerVisitor {
+            type Value = ContainerRef;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a container reference with kind and id")
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut kind = None;
+                let mut id = None;
+                while let Some(field) = map.next_key()? {
+                    match field {
+                        ContainerField::Kind => {
+                            if kind.is_some() {
+                                return Err(de::Error::duplicate_field("kind"));
+                            }
+                            kind = Some(map.next_value()?);
+                        }
+                        ContainerField::Id => {
+                            if id.is_some() {
+                                return Err(de::Error::duplicate_field("id"));
+                            }
+                            // ID-first maps must not buffer a generic recursive value.
+                            id = Some(map.next_value::<PendingContainerId>()?);
+                        }
+                        ContainerField::Ignore => {
+                            map.next_value::<de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let kind = kind.ok_or_else(|| de::Error::missing_field("kind"))?;
+                let id = id.ok_or_else(|| de::Error::missing_field("id"))?;
+                id.into_container(kind)
+                    .ok_or_else(|| de::Error::custom("container ID does not match kind"))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let kind = sequence
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let id = sequence
+                    .next_element::<PendingContainerId>()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                id.into_container(kind)
+                    .ok_or_else(|| de::Error::custom("container ID does not match kind"))
+            }
+        }
+
+        deserializer.deserialize_struct("ContainerRef", &["kind", "id"], ContainerVisitor)
+    }
 }
 
 /// A typed endpoint for a normalized relation.
@@ -2666,6 +2791,180 @@ mod tests {
     use rootlight_ids::FactId;
 
     use super::*;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+    enum LegacyContainerRef {
+        Repository(RepositoryId),
+        File(FileId),
+        Entity(SymbolId),
+    }
+
+    impl LegacyContainerRef {
+        fn into_domain(self) -> ContainerRef {
+            match self {
+                Self::Repository(id) => ContainerRef::Repository(id),
+                Self::File(id) => ContainerRef::File(id),
+                Self::Entity(id) => ContainerRef::Entity(id),
+            }
+        }
+    }
+
+    #[test]
+    fn container_streaming_decode_preserves_derived_json_forms_and_serialization() {
+        for (kind, reference) in [
+            (
+                "repository",
+                ContainerRef::Repository(RepositoryId::from_bytes([1; 16])),
+            ),
+            ("file", ContainerRef::File(FileId::from_bytes([2; 20]))),
+            (
+                "entity",
+                ContainerRef::Entity(SymbolId::from_bytes([3; 20])),
+            ),
+        ] {
+            let canonical = serde_json::to_string(&reference).unwrap();
+            let legacy: LegacyContainerRef = serde_json::from_str(&canonical).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&reference).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(
+                rmp_serde::to_vec(&reference).unwrap(),
+                rmp_serde::to_vec(&legacy).unwrap()
+            );
+            let id = serde_json::from_str::<serde_json::Value>(&canonical).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            for encoded in [
+                canonical,
+                format!(r#"{{"id":"{id}","kind":"{kind}"}}"#),
+                format!(
+                    r#"{{"before":[0,{{"x":true}}],"id":"{id}","between":null,"kind":"{kind}","after":false}}"#
+                ),
+                format!(r#"["{kind}","{id}"]"#),
+                format!(r#"{{"id":"{id}","kind":{{"{kind}":null}}}}"#),
+                format!(r#"{{"kind":"{kind}","id":"{id}","id":"{id}"}}"#),
+                format!(r#"{{"kind":"{kind}","kind":"{kind}","id":"{id}"}}"#),
+                format!(r#"{{"id":"{id}"}}"#),
+                format!(r#"{{"kind":"{kind}"}}"#),
+                format!(r#"{{"id":null,"kind":"{kind}"}}"#),
+                format!(r#"{{"id":[0,1,2],"kind":"{kind}"}}"#),
+                format!(r#"{{"id":{{"nested":[0,1]}},"kind":"{kind}"}}"#),
+                format!(r#"{{"id":"{id}","kind":1}}"#),
+                format!(r#"["{kind}","{id}",null]"#),
+                "null".to_owned(),
+            ] {
+                let old = serde_json::from_str::<LegacyContainerRef>(&encoded)
+                    .map(LegacyContainerRef::into_domain)
+                    .ok();
+                let current = serde_json::from_str::<ContainerRef>(&encoded).ok();
+                assert_eq!(current, old, "{encoded}");
+            }
+        }
+    }
+
+    #[test]
+    fn container_streaming_decode_preserves_messagepack_identifiers_and_byte_strings() {
+        for (index, (kind, id)) in [
+            ("repository", RepositoryId::from_bytes([1; 16]).to_string()),
+            ("file", FileId::from_bytes([2; 20]).to_string()),
+            ("entity", SymbolId::from_bytes([3; 20]).to_string()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut binary_id = vec![0xc4, u8::try_from(id.len()).unwrap()];
+            binary_id.extend_from_slice(id.as_bytes());
+            for (kind_key, id_key) in [
+                (
+                    rmp_serde::to_vec("kind").unwrap(),
+                    rmp_serde::to_vec("id").unwrap(),
+                ),
+                (b"\xc4\x04kind".to_vec(), b"\xc4\x02id".to_vec()),
+                (vec![0], vec![1]),
+            ] {
+                for kind_value in [
+                    rmp_serde::to_vec(kind).unwrap(),
+                    vec![u8::try_from(index).unwrap()],
+                ] {
+                    for id_value in [
+                        rmp_serde::to_vec(&id).unwrap(),
+                        binary_id.clone(),
+                        vec![0xc0],
+                        vec![0xc4, 1, 0xff],
+                    ] {
+                        for reversed in [false, true] {
+                            let mut encoded = vec![0x83, 2, 0xc0];
+                            let fields = if reversed {
+                                [(&id_key, &id_value), (&kind_key, &kind_value)]
+                            } else {
+                                [(&kind_key, &kind_value), (&id_key, &id_value)]
+                            };
+                            for (key, value) in fields {
+                                encoded.extend_from_slice(key);
+                                encoded.extend_from_slice(value);
+                            }
+                            let old = rmp_serde::from_slice::<LegacyContainerRef>(&encoded)
+                                .map(LegacyContainerRef::into_domain)
+                                .ok();
+                            let current = rmp_serde::from_slice::<ContainerRef>(&encoded).ok();
+                            assert_eq!(
+                                current, old,
+                                "{kind}, {index}, reversed {reversed}, {encoded:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn container_streaming_decode_rejects_recursive_ids_before_reading_their_content() {
+        struct CountingReader<'a> {
+            input: &'a [u8],
+            consumed: &'a std::cell::Cell<usize>,
+        }
+        impl Read for CountingReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let length = self.input.read(buffer)?;
+                self.consumed.set(self.consumed.get() + length);
+                Ok(length)
+            }
+        }
+        for id in [
+            format!("[{}0]", "0,".repeat(16 * 1024)),
+            format!("{}0{}", "[".repeat(96), "]".repeat(96)),
+        ] {
+            let encoded = format!(r#"{{"id":{id},"kind":"file"}}"#);
+            let consumed = std::cell::Cell::new(0);
+            assert!(
+                serde_json::from_reader::<_, ContainerRef>(CountingReader {
+                    input: encoded.as_bytes(),
+                    consumed: &consumed,
+                })
+                .is_err()
+            );
+            assert!(
+                consumed.get() < 32,
+                "read {} of {} bytes",
+                consumed.get(),
+                encoded.len()
+            );
+        }
+        let encoded = format!(r#"{{"id":"{}","kind":"file"}}"#, "x".repeat(16 * 1024));
+        let consumed = std::cell::Cell::new(0);
+        assert!(
+            serde_json::from_reader::<_, ContainerRef>(CountingReader {
+                input: encoded.as_bytes(),
+                consumed: &consumed,
+            })
+            .is_err()
+        );
+        assert!(consumed.get() >= 16 * 1024);
+    }
 
     const LEGACY_FIXTURE: &[u8] =
         include_bytes!("../../../tests/fixtures/compatibility/ir/1.0/document.json");
