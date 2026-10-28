@@ -177,6 +177,7 @@ impl<'source> CaptureCache<'source> {
         let Some(body) = function.child_by_field_name("body") else {
             return Ok(None);
         };
+        let mut rebound = HashSet::new();
         let mut cursor = body.walk();
         loop {
             if !self.visit(cancel)? {
@@ -278,8 +279,14 @@ impl<'source> CaptureCache<'source> {
                     let Some(written) = self.name(target, cancel)? else {
                         return Ok(None);
                     };
-                    if names.contains(written) || private_name(written) {
+                    if private_name(written) {
                         return Ok(None);
+                    }
+                    if names.contains(written) {
+                        rebound
+                            .try_reserve(1)
+                            .map_err(|_| SinkError::AllocationFailed)?;
+                        rebound.insert(written);
                     }
                 }
             }
@@ -319,6 +326,14 @@ impl<'source> CaptureCache<'source> {
                     break;
                 }
                 if !cursor.goto_parent() {
+                    // Keep the original names through the census so a later call
+                    // through a rebound formal cannot bypass the call barrier.
+                    for name in rebound {
+                        if !self.visit(cancel)? {
+                            return Ok(None);
+                        }
+                        names.remove(name);
+                    }
                     return Ok(Some(names));
                 }
             }
@@ -534,6 +549,61 @@ mod late_work_qualification_tests {
 #[cfg(test)]
 mod expanded_body_work_tests {
     use super::*;
+
+    #[test]
+    fn rebinding_one_formal_preserves_only_other_unassigned_formals() {
+        for binding in [
+            "    weight = weight * now\n",
+            "    weight += now\n",
+            "    for weight in values:\n        pass\n",
+        ] {
+            let source =
+                format!("def written(weight, now):\n    age = now\n{binding}    return now\n");
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_python::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(&source, None).unwrap();
+            assert!(!tree.root_node().has_error());
+            let function = tree.root_node().named_child(0).unwrap();
+            let mut cache = CaptureCache::new(source.as_bytes(), 4096, true);
+            let eligible = cache
+                .inspect(function, &Cancellation::new())
+                .unwrap()
+                .unwrap();
+            assert!(eligible.contains("now"), "{source}");
+            assert!(!eligible.contains("weight"), "{source}");
+        }
+    }
+
+    #[test]
+    fn later_rebinding_withholds_the_written_formal_and_keeps_call_barriers() {
+        for (binding, complete) in [
+            ("    now = other\n", true),
+            ("    now += 1\n", true),
+            ("    for now in values:\n        pass\n", true),
+            ("    weight = other\n    weight()\n", false),
+        ] {
+            let source =
+                format!("def written(weight, now):\n    age = now\n{binding}    return now\n");
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_python::LANGUAGE.into())
+                .unwrap();
+            let tree = parser.parse(&source, None).unwrap();
+            assert!(!tree.root_node().has_error());
+            let function = tree.root_node().named_child(0).unwrap();
+            let mut cache = CaptureCache::new(source.as_bytes(), 4096, true);
+            let eligible = cache.inspect(function, &Cancellation::new()).unwrap();
+            if complete {
+                let eligible = eligible.unwrap();
+                assert!(!eligible.contains("now"), "{source}");
+                assert!(eligible.contains("weight"), "{source}");
+            } else {
+                assert!(eligible.is_none(), "{source}");
+            }
+        }
+    }
 
     #[test]
     fn expanded_async_native_census_obeys_small_work_and_partial_context() {

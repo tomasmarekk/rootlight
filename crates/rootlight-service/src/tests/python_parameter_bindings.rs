@@ -105,3 +105,97 @@ fn original_python_return_references_keep_formal_identity_and_source_reads() {
         .unwrap();
     assert_eq!(repeated.generation, receipt.generation);
 }
+
+#[test]
+fn reassigned_peer_preserves_same_method_formal_reference() {
+    let raw = b"class Node(object):\n    def gossip_in(self, weight, now):\n        age = now - self.ag_since\n        weight = weight * age\n        self.ag_since = now\n        return weight\n    def other(self, now):\n        return now\n";
+    let directory = TempDir::new().unwrap();
+    fs::write(directory.path().join("written.py"), raw).unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(directory.path(), &deadline())
+        .unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let owner = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.language == "python"
+                && entity.kind == EntityKind::Method
+                && entity.canonical_name == "gossip_in"
+        })
+        .unwrap();
+    let parameter = document
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.language == "python"
+                && entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "now"
+                && entity.container == Some(ContainerRef::Entity(owner.id))
+        })
+        .unwrap();
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "python"
+                && entity.kind == EntityKind::Parameter
+                && entity.canonical_name == "now")
+            .count(),
+        2
+    );
+    let start = u64::try_from(raw.windows(5).position(|part| part == b"now -").unwrap()).unwrap();
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == start + 3
+        })
+        .collect();
+    assert_eq!(sites.len(), 1);
+    let site = sites[0];
+    assert_eq!(site.enclosing, Some(owner.id));
+    assert_eq!(
+        site.target,
+        OccurrenceTarget::Resolved {
+            symbol: parameter.id
+        }
+    );
+    assert_eq!(site.source.generation(), receipt.generation);
+    assert_eq!(site.source.content_hash(), content_hash(raw));
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+                && edge.object == rootlight_ir::RelationEndpoint::Entity(parameter.id)
+                && edge.evidence.source.as_ref() == Some(&site.source))
+            .count(),
+        1
+    );
+    let read = service
+        .source_read_with_options_and_budget(
+            receipt.generation,
+            vec![site.source.clone()],
+            SourceReadOptions::new()
+                .with_context_lines_before(0)
+                .with_context_lines_after(0),
+            FirstSliceBudget::default(),
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks.len(), 1);
+    assert_eq!(read.data.chunks[0].reference, site.source);
+    assert_eq!(read.data.chunks[0].bytes, b"now");
+    let repeated = service
+        .index_repository(directory.path(), &deadline())
+        .unwrap();
+    assert_eq!(repeated.generation, receipt.generation);
+}

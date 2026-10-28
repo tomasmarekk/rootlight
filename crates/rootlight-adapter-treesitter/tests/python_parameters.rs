@@ -902,6 +902,86 @@ fn raise_and_plain_attribute_writes_preserve_only_lexical_formal_reads() {
 }
 
 #[test]
+fn rebound_sibling_formals_keep_same_method_reference_targets() {
+    for binding in [
+        "        weight = weight * age\n",
+        "        weight += age\n",
+        "        for weight in values:\n            pass\n",
+    ] {
+        let source = format!(
+            "class Node:\n    def other(self, now):\n        return now\n    def gossip_in(self, weight, now):\n        age = now - self.ag_since\n{binding}        self.ag_since = now\n        return now\n"
+        );
+        let output = analyze(&source);
+        let other_start = source.find("other").unwrap();
+        let other_parameter_start = other_start + source[other_start..].find("now").unwrap();
+        let other_owner = entity_at(&output, "other", EntityKind::Method, other_start, 5);
+        let other_parameter = entity_at(
+            &output,
+            "now",
+            EntityKind::Parameter,
+            other_parameter_start,
+            3,
+        );
+        let other_read = source.find("return now").unwrap() + 7;
+        resolved_formal_read(
+            &output,
+            other_owner,
+            other_parameter,
+            other_read,
+            other_read + 3,
+            source.as_bytes(),
+        );
+        let owner_start = source.find("gossip_in").unwrap();
+        let parameter_start = owner_start + source[owner_start..].find("now").unwrap();
+        let owner = entity_at(&output, "gossip_in", EntityKind::Method, owner_start, 9);
+        let parameter = entity_at(&output, "now", EntityKind::Parameter, parameter_start, 3);
+        assert_ne!(parameter, other_parameter);
+        let body = source.find("age = now").unwrap();
+        for (offset, _) in source[body..].match_indices("now") {
+            let start = body + offset;
+            resolved_formal_read(
+                &output,
+                owner,
+                parameter,
+                start,
+                start + 3,
+                source.as_bytes(),
+            );
+        }
+        assert!(!output.document().occurrences.iter().any(|site| {
+            site.syntax_kind == "python.parameter_body.reference"
+                && site.syntactic_text_hash == content_hash(b"weight")
+        }));
+    }
+}
+
+#[test]
+fn later_formal_rebinding_cannot_borrow_another_methods_certificate() {
+    for binding in [
+        "        now = weight\n",
+        "        now += weight\n",
+        "        for now in values:\n            pass\n",
+    ] {
+        let source = format!(
+            "class Node:\n    def other(self, now):\n        return now\n    def gossip_in(self, weight, now):\n        age = now - self.ag_since\n{binding}        return now\n"
+        );
+        let output = analyze(&source);
+        let body = source.find("age = now").unwrap();
+        assert!(!output.document().occurrences.iter().any(|site| {
+            site.syntax_kind == "python.parameter_body.reference"
+                && site.source.span().start_byte() >= u64::try_from(body).unwrap()
+                && site.syntactic_text_hash == content_hash(b"now")
+        }));
+        let other_start = source.find("other").unwrap();
+        let parameter_start = other_start + source[other_start..].find("now").unwrap();
+        let owner = entity_at(&output, "other", EntityKind::Method, other_start, 5);
+        let parameter = entity_at(&output, "now", EntityKind::Parameter, parameter_start, 3);
+        let read = source.find("return now").unwrap() + 7;
+        resolved_formal_read(&output, owner, parameter, read, read + 3, source.as_bytes());
+    }
+}
+
+#[test]
 fn attribute_write_support_does_not_admit_binding_or_computed_target_scopes() {
     for body in [
         "    style = other\n    return style\n",
