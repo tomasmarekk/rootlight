@@ -390,3 +390,66 @@ def main [arg] { print $arg }
     let arg = raw.windows(3).position(|part| part == b"arg").unwrap() as u64;
     definition(doc, arg, arg + 3, "arg", EntityKind::Parameter);
 }
+
+#[test]
+fn file_module_retains_original_top_level_owners() {
+    let result = output(ORIGINAL);
+    let doc = result.document();
+    let modules: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Module)
+        .collect();
+    assert_eq!(
+        modules.len(),
+        1,
+        "the native file scope must retain its Module"
+    );
+    let module = modules[0];
+    assert_eq!(module.language, "nu");
+    assert_eq!(module.canonical_name, "written.nu");
+    assert!(
+        !doc.occurrences
+            .iter()
+            .any(|site| site.role == OccurrenceRole::Definition
+                && site.target == (OccurrenceTarget::Resolved { symbol: module.id }))
+    );
+    for (start, end, name) in [(5, 19, "nu-complete ps"), (154, 158, "main")] {
+        let symbol = definition(doc, start, end, name, EntityKind::Function);
+        assert!(
+            doc.relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::Contains
+                    && edge.subject == RelationEndpoint::Entity(module.id)
+                    && edge.object == RelationEndpoint::Entity(symbol))
+        );
+    }
+}
+
+#[test]
+fn file_module_survives_unsupported_alias_import_and_external_module_sources() {
+    for source in [
+        &b"export alias bat = ^bat
+"[..],
+        &b"export use after.nu *
+"[..],
+        &b"export module after.nu
+"[..],
+    ] {
+        let result = output(source);
+        let doc = result.document();
+        assert_eq!(
+            doc.entities.len(),
+            1,
+            "unsupported declarations retain only their file Module: {source:?}"
+        );
+        assert_eq!(doc.entities[0].kind, EntityKind::Module);
+        assert_eq!(doc.entities[0].canonical_name, "written.nu");
+        assert_eq!(doc.entities[0].language, "nu");
+        assert!(
+            !doc.occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Definition)
+        );
+    }
+}

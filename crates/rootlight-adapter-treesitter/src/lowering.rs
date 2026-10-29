@@ -3531,6 +3531,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 nushell::CurrentSource {
                     reference: self.full_source,
                     logical: self.source_view.as_bytes(),
+                    path: self.request.source().path().as_str(),
                 },
                 |span| self.text_for_span(span),
                 |span| self.coordinates.physical(span),
@@ -13314,6 +13315,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "nu" || fact.syntax_kind().as_str().starts_with("nu.") {
+        return language == "nu"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "nu.file.module";
+    }
     if language == "handlebars" {
         return fact.kind() == SyntaxFactKind::Module
             && fact.syntax_kind().as_str() == "handlebars.file.module";
@@ -14234,6 +14240,7 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     if fact.syntax_kind().as_str().starts_with("nu.") {
         return match (fact.kind(), fact.syntax_kind().as_str()) {
+            (SyntaxFactKind::Module, "nu.file.module") => Some(EntityKind::Module),
             (SyntaxFactKind::Declaration, "nu.function.declaration") => Some(EntityKind::Function),
             (SyntaxFactKind::Declaration, "nu.namespace.declaration") => {
                 Some(EntityKind::Namespace)
@@ -16252,6 +16259,29 @@ mod tests {
             "typescript"
         ));
         assert!(is_explicit_file_module(&module("ruby.file.module"), "ruby"));
+        assert!(is_explicit_file_module(&module("nu.file.module"), "nu"));
+        assert_eq!(
+            structural_entity_kind(&module("nu.file.module")),
+            Some(EntityKind::Module)
+        );
+        assert!(!is_explicit_file_module(&module("nu.file.module"), "ruby"));
+        assert!(!is_explicit_file_module(&module("ruby.file.module"), "nu"));
+        assert!(!is_explicit_file_module(
+            &module("nu.namespace.module"),
+            "nu"
+        ));
+        for kind in [SyntaxFactKind::Root, SyntaxFactKind::Declaration] {
+            let impostor = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(file, 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new("nu.file.module").unwrap(),
+            );
+            assert!(!is_explicit_file_module(&impostor, "nu"));
+            assert_eq!(structural_entity_kind(&impostor), None);
+        }
         assert!(!is_explicit_file_module(&module("python.module"), "python"));
         assert!(!is_explicit_file_module(
             &module("java.file.module"),

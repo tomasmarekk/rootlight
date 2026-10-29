@@ -312,6 +312,7 @@ pub(super) struct Targets {
 pub(super) struct CurrentSource<'a> {
     pub(super) reference: &'a SourceRef,
     pub(super) logical: &'a [u8],
+    pub(super) path: &'a str,
 }
 
 impl Targets {
@@ -327,6 +328,7 @@ impl Targets {
         let CurrentSource {
             reference: source,
             logical,
+            path,
         } = current;
         let mut result = Self {
             source: source.clone(),
@@ -396,6 +398,22 @@ impl Targets {
             return Ok(result);
         };
         if module.parent() != Some(root.local_id()) || module.depth() != 1 {
+            return Ok(result);
+        }
+        let Some(file_module) = entities.get(&module.local_id()) else {
+            return Ok(result);
+        };
+        if file_module.definition_local_id.is_some()
+            || file_module.record.kind != EntityKind::Module
+            || file_module.record.language != "nu"
+            || file_module.record.canonical_name != path
+            || file_module.record.repository != source.repository()
+            || file_module.record.generation != source.generation()
+            || file_module.direct_parent != ContainerRef::File(file)
+            || file_module.record.container != Some(ContainerRef::File(file))
+            || file_module.record.evidence.source.as_ref()
+                != Some(&source_for_span(source, physical(module.span())?))
+        {
             return Ok(result);
         }
         let scope = |extent, parent| scopes.get(&(extent, Some(parent))).copied().flatten();
@@ -608,7 +626,7 @@ impl Targets {
                     };
                     ContainerRef::Entity(owner_entity.record.id)
                 } else {
-                    ContainerRef::File(file)
+                    ContainerRef::Entity(file_module.record.id)
                 };
                 if entity.direct_parent != parent || entity.record.container != Some(parent) {
                     valid = false;
