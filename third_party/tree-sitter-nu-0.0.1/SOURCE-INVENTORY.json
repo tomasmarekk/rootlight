@@ -1,0 +1,733 @@
+{
+  "schema": "rootlight.nushell-source-inventory/1",
+  "upstream_files": [
+    {
+      "path": ".editorconfig",
+      "retained_path": "upstream/files/.editorconfig",
+      "bytes": 541,
+      "sha256": "90496ff136741e183308ae716913a90325bb20f5a83194b37aee5182501c81ee",
+      "archive_mode": 436
+    },
+    {
+      "path": ".gitattributes",
+      "retained_path": "upstream/files/.gitattributes.upstream",
+      "bytes": 911,
+      "sha256": "a30af6d5459f46ed953b2a97471056135eb812d3d8c7be25ef329f6fd910876f",
+      "archive_mode": 436
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "retained_path": "upstream/files/.github/workflows/ci.yml",
+      "bytes": 1345,
+      "sha256": "fcd2bcc0cc91b8e8b608f60fb0eb42157d0e6b221cbaee2e265bc30b14b3304a",
+      "archive_mode": 436
+    },
+    {
+      "path": ".github/workflows/lint.yml",
+      "retained_path": "upstream/files/.github/workflows/lint.yml",
+      "bytes": 579,
+      "sha256": "1920a0cf338f21a08820f447f032e85a33eff7564a2f6e7e42e38022f5979625",
+      "archive_mode": 436
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "retained_path": "upstream/files/.github/workflows/publish.yml",
+      "bytes": 832,
+      "sha256": "27b9f9e54289e069e22227d9e1d3613068c65249ca22f15d3d9f302a6b4fb8c6",
+      "archive_mode": 436
+    },
+    {
+      "path": ".gitignore",
+      "retained_path": "upstream/files/.gitignore.upstream",
+      "bytes": 411,
+      "sha256": "ed33d9d9a76c2de314c4817bc38642ecf5bee35a33733a58d09e2bafea06b539",
+      "archive_mode": 436
+    },
+    {
+      "path": ".prettierignore",
+      "retained_path": "upstream/files/.prettierignore",
+      "bytes": 39,
+      "sha256": "6dc815e46695f2e64fdee8bdce46bda6f4b25e3621d4eb518595054ebb6fad2f",
+      "archive_mode": 436
+    },
+    {
+      "path": ".prettierrc",
+      "retained_path": "upstream/files/.prettierrc",
+      "bytes": 105,
+      "sha256": "4be0e31dea11dde86c63fcd263d6860b69e1c7b73dbd3d18c3a4a8a58ded922d",
+      "archive_mode": 436
+    },
+    {
+      "path": "CMakeLists.txt",
+      "retained_path": "upstream/files/CMakeLists.txt",
+      "bytes": 2798,
+      "sha256": "39f9894b073a219901d2eb568b56d9e09ab6d548e8bcf77d9910eb179a3f44dd",
+      "archive_mode": 436
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "retained_path": "upstream/files/CONTRIBUTING.md",
+      "bytes": 3995,
+      "sha256": "01ead95a23560b301f0e0486e274d4b2cb919375d5ecba89e6c2738a39c02e7d",
+      "archive_mode": 436
+    },
+    {
+      "path": "Cargo.lock",
+      "retained_path": "upstream/files/Cargo.lock",
+      "bytes": 5619,
+      "sha256": "fe964035a4af83c5336a5fbeb2ec85f531500accb5f758357f072e9ff1511dac",
+      "archive_mode": 436
+    },
+    {
+      "path": "Cargo.toml",
+      "retained_path": "upstream/files/Cargo.toml",
+      "bytes": 717,
+      "sha256": "b17758a5b9bef06df512ac88b8347b9d3e843a81c6ddab58a0bdabc26bdf1a96",
+      "archive_mode": 436
+    },
+    {
+      "path": "LICENSE",
+      "retained_path": "upstream/files/LICENSE",
+      "bytes": 1094,
+      "sha256": "e189616e535e9f7bf410a72e6fc51ad1e0ae461c58d592e186c2669daa5d1e5d",
+      "archive_mode": 436
+    },
+    {
+      "path": "Makefile",
+      "retained_path": "upstream/files/Makefile",
+      "bytes": 3427,
+      "sha256": "de8f7ca793cca72494e3c3fcad6e4617aa9ddd680a4f4a59a8d8604e0478e480",
+      "archive_mode": 436
+    },
+    {
+      "path": "Package.swift",
+      "retained_path": "upstream/files/Package.swift",
+      "bytes": 1087,
+      "sha256": "a6828b12195521d56de18b4300b6dec186b913db71b167785ad1549f9f55af23",
+      "archive_mode": 436
+    },
+    {
+      "path": "README.md",
+      "retained_path": "upstream/files/README.md",
+      "bytes": 679,
+      "sha256": "c3953b46f541c291d88e9a74d9a775e992553fe89574d403ecc36e5173347968",
+      "archive_mode": 436
+    },
+    {
+      "path": "binding.gyp",
+      "retained_path": "upstream/files/binding.gyp",
+      "bytes": 761,
+      "sha256": "29c5a40ffeab0428bdb14ba1e808f672cab2b9464ec829e72e349596b8e0edcc",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/c/tree-sitter-nu.pc.in",
+      "retained_path": "upstream/files/bindings/c/tree-sitter-nu.pc.in",
+      "bytes": 289,
+      "sha256": "c84874857ad3fb3800dea59c6e13d6d31be6fd9b591e88595b19d4e414220b9b",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-nu.h",
+      "retained_path": "upstream/files/bindings/c/tree_sitter/tree-sitter-nu.h",
+      "bytes": 230,
+      "sha256": "45b76d988ca6a25342c65c10802d70b1c098371b75a807f2242c4f3fda0da795",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/go/binding.go",
+      "retained_path": "upstream/files/bindings/go/binding.go",
+      "bytes": 333,
+      "sha256": "0ef5f0ea4f30f3b7ab568f5bc70ba08636f9fb79aac8cf9e52418bfed9e46023",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "retained_path": "upstream/files/bindings/go/binding_test.go",
+      "bytes": 340,
+      "sha256": "88ebce3a75752a3c578ce1925958074fbf8dc3be9911453bb6b4bc8107501abe",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "retained_path": "upstream/files/bindings/node/binding.cc",
+      "bytes": 517,
+      "sha256": "3ca596a1ca0179122a2f4494baed7c4a7ea5ef3d3bfe640c830795775e96f494",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/node/binding_test.js",
+      "retained_path": "upstream/files/bindings/node/binding_test.js",
+      "bytes": 250,
+      "sha256": "c35f2aaec5d06fa42a4cea226fa4cb841a04a7506e70086c2ea5d9fd67d8c482",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "retained_path": "upstream/files/bindings/node/index.d.ts",
+      "bytes": 436,
+      "sha256": "6d2edc31741aa299535a8a1d7c38707cd746da88de2e88f242e8a354f7788eed",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/node/index.js",
+      "retained_path": "upstream/files/bindings/node/index.js",
+      "bytes": 451,
+      "sha256": "2f5d6eaae0e798d7f66048102a18a9b530edc041ed079493db2b1c4d102db296",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/python/tests/test_binding.py",
+      "retained_path": "upstream/files/bindings/python/tests/test_binding.py",
+      "bytes": 308,
+      "sha256": "72f75c31b2880be4c6b96e5ca91a6cdacadcc60870fa65db0d0efd80b81f67d9",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/python/tree_sitter_nu/__init__.py",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_nu/__init__.py",
+      "bytes": 1171,
+      "sha256": "11a47e3a9d841564e28de894e9489f350e0a2775be05d61590be1cef53591916",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/python/tree_sitter_nu/__init__.pyi",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_nu/__init__.pyi",
+      "bytes": 247,
+      "sha256": "a22c459bc957b1965661ae5c4708fa6eb6ea877eff7f3376acb13e7665fdfeb0",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/python/tree_sitter_nu/binding.c",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_nu/binding.c",
+      "bytes": 828,
+      "sha256": "0488381df9e7115ce5b68ee0f404158388a9abc174fe4c4e31e6b0dfb0066275",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/python/tree_sitter_nu/py.typed",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_nu/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "retained_path": "upstream/files/bindings/rust/build.rs",
+      "bytes": 609,
+      "sha256": "3481881d7a3d36a790cd4abf78fe71c614ba0c509f92137c6bce3947d83d7423",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/rust/example/main.rs",
+      "retained_path": "upstream/files/bindings/rust/example/main.rs",
+      "bytes": 3233,
+      "sha256": "6437d4979781326252f3cf0cf4d4adb23d13f8a0d53e0923c56216f1bb7200bc",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "retained_path": "upstream/files/bindings/rust/lib.rs",
+      "bytes": 1818,
+      "sha256": "233906924a29e68b9ed49cf2e540b47e61053d10a3627560815825e299004f86",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/swift/TreeSitterNu/nu.h",
+      "retained_path": "upstream/files/bindings/swift/TreeSitterNu/nu.h",
+      "bytes": 230,
+      "sha256": "45b76d988ca6a25342c65c10802d70b1c098371b75a807f2242c4f3fda0da795",
+      "archive_mode": 436
+    },
+    {
+      "path": "bindings/swift/TreeSitterNuTests/TreeSitterNuTests.swift",
+      "retained_path": "upstream/files/bindings/swift/TreeSitterNuTests/TreeSitterNuTests.swift",
+      "bytes": 351,
+      "sha256": "1d34170f207fb7381e2f5bdc1e098fdba370d2a9b305348706b3d191918cb5a7",
+      "archive_mode": 436
+    },
+    {
+      "path": "eslint.config.mjs",
+      "retained_path": "upstream/files/eslint.config.mjs",
+      "bytes": 84,
+      "sha256": "e7c1ca9bb047b5dbbf3d8c047865e33409e48c56f1ba065dac8bccf5a337f6e8",
+      "archive_mode": 436
+    },
+    {
+      "path": "go.mod",
+      "retained_path": "upstream/files/go.mod",
+      "bytes": 105,
+      "sha256": "085cfc48f97433f070dfa63718544570df0fc0528904f504f54fde7e2ef7ef64",
+      "archive_mode": 436
+    },
+    {
+      "path": "grammar.js",
+      "retained_path": "upstream/files/grammar.js",
+      "bytes": 57428,
+      "sha256": "e916086974c1ad5ef17ce7021e6346401a95a1d32dfbaf80bcc8ba7ef7461344",
+      "archive_mode": 436
+    },
+    {
+      "path": "installation/helix.md",
+      "retained_path": "upstream/files/installation/helix.md",
+      "bytes": 2360,
+      "sha256": "1db0f415a58960de1c62e1e66e08eae7fad606749d8e209d5022f16da16ed4c0",
+      "archive_mode": 436
+    },
+    {
+      "path": "installation/neovim.md",
+      "retained_path": "upstream/files/installation/neovim.md",
+      "bytes": 4394,
+      "sha256": "76e480b7611b63b37ac533eca40bc93c602f195dabcb4c5c15c0657fb8e2ad1c",
+      "archive_mode": 436
+    },
+    {
+      "path": "package-lock.json",
+      "retained_path": "upstream/files/package-lock.json",
+      "bytes": 55442,
+      "sha256": "41f40ed01b8d4f077a062e1a367eab8d9b913fcc9e78fa4740ead06361e3b748",
+      "archive_mode": 436
+    },
+    {
+      "path": "package.json",
+      "retained_path": "upstream/files/package.json",
+      "bytes": 1210,
+      "sha256": "3c48993a0d5e47c3ceea5147edaed52aae8f0aa4299a45348b677d966eab6b90",
+      "archive_mode": 436
+    },
+    {
+      "path": "plugin/init.lua",
+      "retained_path": "upstream/files/plugin/init.lua",
+      "bytes": 223,
+      "sha256": "c3dafbba7e7b3896ce9043cc9a3b39eaa043c92d1736e103a39696a49bb01e7c",
+      "archive_mode": 436
+    },
+    {
+      "path": "pyproject.toml",
+      "retained_path": "upstream/files/pyproject.toml",
+      "bytes": 757,
+      "sha256": "f26c4908db1e2fe54b244a26d9d7d5bce9f40ff9c3329c07ee83b1606e1d3d77",
+      "archive_mode": 436
+    },
+    {
+      "path": "queries/nu/folds.scm",
+      "retained_path": "upstream/files/queries/nu/folds.scm",
+      "bytes": 136,
+      "sha256": "0ad0923003c53520116ff8dd201b6edf2f2bee69c8735726ba28a9a8e80c4dcb",
+      "archive_mode": 436
+    },
+    {
+      "path": "queries/nu/highlights.scm",
+      "retained_path": "upstream/files/queries/nu/highlights.scm",
+      "bytes": 6793,
+      "sha256": "18952440f0a88e8f4ed431d977fac826e110cfb24ec45823edc89142f2181a1e",
+      "archive_mode": 436
+    },
+    {
+      "path": "queries/nu/indents.scm",
+      "retained_path": "upstream/files/queries/nu/indents.scm",
+      "bytes": 244,
+      "sha256": "e315acdf043347e73e8fe745ab886b64c91e06b2e44b0971966fedc32f321b2d",
+      "archive_mode": 436
+    },
+    {
+      "path": "queries/nu/injections.scm",
+      "retained_path": "upstream/files/queries/nu/injections.scm",
+      "bytes": 724,
+      "sha256": "f9f868638a5369c6d7e231d50ad5821987e41d7030110887c0e37949556d24e9",
+      "archive_mode": 436
+    },
+    {
+      "path": "queries/nu/textobjects.scm",
+      "retained_path": "upstream/files/queries/nu/textobjects.scm",
+      "bytes": 1380,
+      "sha256": "e9adf387aff685ca9dd86198b404763dd08e68be653ca73711c374064a7324ed",
+      "archive_mode": 436
+    },
+    {
+      "path": "resources/sample-config.json",
+      "retained_path": "upstream/files/resources/sample-config.json",
+      "bytes": 803,
+      "sha256": "3643e55e7d618a05a7af3db22edd2bd8c07426f8dd5bd5675c7f5e66edd8d4ec",
+      "archive_mode": 436
+    },
+    {
+      "path": "resources/treesitter-nu.readme.1.png",
+      "retained_path": "upstream/files/resources/treesitter-nu.readme.1.png",
+      "bytes": 60019,
+      "sha256": "709389f1d96ea6d907dbd85f21759852409c64335af4463455bd7d3fa0e6a17d",
+      "archive_mode": 436
+    },
+    {
+      "path": "resources/treesitter-nu.readme.2.png",
+      "retained_path": "upstream/files/resources/treesitter-nu.readme.2.png",
+      "bytes": 27104,
+      "sha256": "fd4bd4f6584b1c0515105fc6663779cf042e5cd0e4ff91093fd00487d283b787",
+      "archive_mode": 436
+    },
+    {
+      "path": "resources/treesitter-nu.readme.3.png",
+      "retained_path": "upstream/files/resources/treesitter-nu.readme.3.png",
+      "bytes": 6285,
+      "sha256": "5102fba127b03e6f933a7b842d8e42c1bc15c3e6f8fc87d661434766aeae3d4f",
+      "archive_mode": 436
+    },
+    {
+      "path": "script/known-failures.txt",
+      "retained_path": "upstream/files/script/known-failures.txt",
+      "bytes": 2234,
+      "sha256": "c0b431d2b4554ebcdd83cae88584e313375bc4ae4a4bdea008318679d5e89b95",
+      "archive_mode": 436
+    },
+    {
+      "path": "script/parse-examples",
+      "retained_path": "upstream/files/script/parse-examples",
+      "bytes": 487,
+      "sha256": "ef7709a4edbbeda80cd08befa1a46025b27f58b15b75ba24cdc87ca65118b94b",
+      "archive_mode": 509
+    },
+    {
+      "path": "setup.py",
+      "retained_path": "upstream/files/setup.py",
+      "bytes": 2298,
+      "sha256": "33d524f7e6a9d004b9d6f9e635899cb46bfee4718cd7c801df809e8d413c0509",
+      "archive_mode": 436
+    },
+    {
+      "path": "src/grammar.json",
+      "retained_path": "upstream/files/src/grammar.json",
+      "bytes": 459163,
+      "sha256": "4e87180a5425d9cd07978fec707a7232121502e1cf7bb7ac6635e1aca57fe85f",
+      "archive_mode": 436
+    },
+    {
+      "path": "src/node-types.json",
+      "retained_path": "upstream/files/src/node-types.json",
+      "bytes": 99092,
+      "sha256": "f46e60be399b9d1b43ea7f801c7ed59fd003fd1ed1adb12dba67294382706c14",
+      "archive_mode": 436
+    },
+    {
+      "path": "src/parser.c",
+      "retained_path": "upstream/files/src/parser.c",
+      "bytes": 8700570,
+      "sha256": "7365d87c5c30f2af039963bd163c251dcf70d8f1ed997cb6a7ea399ae837fb58",
+      "archive_mode": 436
+    },
+    {
+      "path": "src/scanner.c",
+      "retained_path": "upstream/files/src/scanner.c",
+      "bytes": 3027,
+      "sha256": "a010ea852dbea82325d84d9d0b29e815c1226df1732badaea30c007cd3742da8",
+      "archive_mode": 436
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "retained_path": "upstream/files/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 436
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "retained_path": "upstream/files/src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
+      "archive_mode": 436
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "retained_path": "upstream/files/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/comment/comment.nu",
+      "retained_path": "upstream/files/test/corpus/comment/comment.nu",
+      "bytes": 1596,
+      "sha256": "7c4a0fadf22fcfab2aa5bc6850e98c417463863f13200220ca697cca5e93dd74",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/ctrl/else.nu",
+      "retained_path": "upstream/files/test/corpus/ctrl/else.nu",
+      "bytes": 2613,
+      "sha256": "ecdfa9c9796165f5fcf186d50a4495eab58051ee4abe06cfce270922dc1efa46",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/ctrl/match.nu",
+      "retained_path": "upstream/files/test/corpus/ctrl/match.nu",
+      "bytes": 9779,
+      "sha256": "58ae9f440ea7b963018e48cba25a91c13e514740de670d88673a35caccd06f8b",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/ctrl/try.nu",
+      "retained_path": "upstream/files/test/corpus/ctrl/try.nu",
+      "bytes": 2016,
+      "sha256": "1569b717bba1cbfd1b026adb7f608fa0bf8099a6daa16da2dc8fda8b7f33ee5d",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/alias.nu",
+      "retained_path": "upstream/files/test/corpus/decl/alias.nu",
+      "bytes": 935,
+      "sha256": "e30438a63cfd50ee59ed9e04d10d7186dada3bc07846f5d262d430ae24bbd771",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/attribute.nu",
+      "retained_path": "upstream/files/test/corpus/decl/attribute.nu",
+      "bytes": 4241,
+      "sha256": "1a1cecaf4a59086585627340255e59182cb07bde4221b1b40552b8508dcd86c2",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/def.nu",
+      "retained_path": "upstream/files/test/corpus/decl/def.nu",
+      "bytes": 22950,
+      "sha256": "0f67e7b88e99c08e47cdc0d5d7fda40497a5ff0e8691c503bd132192165988c0",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/export-env.nu",
+      "retained_path": "upstream/files/test/corpus/decl/export-env.nu",
+      "bytes": 574,
+      "sha256": "4d3b98ae782126cd413db65d31a41534d8b3fa41b08529fe323a441f4120da88",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/extern.nu",
+      "retained_path": "upstream/files/test/corpus/decl/extern.nu",
+      "bytes": 554,
+      "sha256": "e2299db1f6f928f44f8a5850abb428714aa05229401d1343e001306a51980692",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/module.nu",
+      "retained_path": "upstream/files/test/corpus/decl/module.nu",
+      "bytes": 618,
+      "sha256": "0fc15fc0f4b71f14262e879d15840bc2e786d07897df5d4181aaa011e271c7d1",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/script.nu",
+      "retained_path": "upstream/files/test/corpus/decl/script.nu",
+      "bytes": 133,
+      "sha256": "7f549c253b4ba66dc1b0cf6340a9a015fe25db5e0539b27807727d31d8f6bef7",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/decl/use.nu",
+      "retained_path": "upstream/files/test/corpus/decl/use.nu",
+      "bytes": 1063,
+      "sha256": "4251b00d4a6cdbc586e34b0d2166423e77ad294687671c417f3cbc01a5fbd7ee",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/binary-expr.nu",
+      "retained_path": "upstream/files/test/corpus/expr/binary-expr.nu",
+      "bytes": 4778,
+      "sha256": "3ad47502507c3cd9e8a6f3d5405ba78b659264e69bd3875faf6b5cccaef448d8",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/cell_path.nu",
+      "retained_path": "upstream/files/test/corpus/expr/cell_path.nu",
+      "bytes": 3801,
+      "sha256": "a20ead4b6fdb105197e3daac346048dd58a0dad9ee9a165ed1b3c676da57ecc0",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/closure.nu",
+      "retained_path": "upstream/files/test/corpus/expr/closure.nu",
+      "bytes": 4662,
+      "sha256": "ef74eef675b1e9e3f0c00ed47a78d694ab5ba3fae80723287c2627a4769234e1",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/identifier.nu",
+      "retained_path": "upstream/files/test/corpus/expr/identifier.nu",
+      "bytes": 3473,
+      "sha256": "f919bc9ac47c7d4f59e7e2c62b5acb910dde714adaae4576b43d30fd4f3e5b11",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/list.nu",
+      "retained_path": "upstream/files/test/corpus/expr/list.nu",
+      "bytes": 9065,
+      "sha256": "919cd466ed36c9d3d019a2133a0082e21d4692f19745a266ed4b6be46a670044",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/range.nu",
+      "retained_path": "upstream/files/test/corpus/expr/range.nu",
+      "bytes": 15362,
+      "sha256": "357a64c2791e13731d84217d43b87250bd67db492945d4d3083e802af3fcd8b1",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/raw-strings.nu",
+      "retained_path": "upstream/files/test/corpus/expr/raw-strings.nu",
+      "bytes": 1177,
+      "sha256": "4c01ca35b17361f1d2bfd1dd944a4b29133dba776a9783d592b8c1dcc22846f8",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/record.nu",
+      "retained_path": "upstream/files/test/corpus/expr/record.nu",
+      "bytes": 9837,
+      "sha256": "022180d4971d19716c5bec23087b879d3259b9e543e7c7ae1c0ac46606863c24",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/spread-operator.nu",
+      "retained_path": "upstream/files/test/corpus/expr/spread-operator.nu",
+      "bytes": 2368,
+      "sha256": "abfe191cb9b978a24df07d04665976ce0aa51d6ad16b2473b1ecb82754dc3aed",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/subexpr.nu",
+      "retained_path": "upstream/files/test/corpus/expr/subexpr.nu",
+      "bytes": 7258,
+      "sha256": "6e555d3ffbb5d9c8589492ccb4ab0ba29f8ee93c67f630929be61ea8ceba1167",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/table.nu",
+      "retained_path": "upstream/files/test/corpus/expr/table.nu",
+      "bytes": 734,
+      "sha256": "f675f2bcb0ce3a7664e5cfcab2abe71884d67cea32d152119cfcfa62ca6bbd1b",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/unary-expr.nu",
+      "retained_path": "upstream/files/test/corpus/expr/unary-expr.nu",
+      "bytes": 682,
+      "sha256": "72d1fa51688c13dc787ac6853c93655746a7d7abb738768c4894c2eff1be183a",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/units.nu",
+      "retained_path": "upstream/files/test/corpus/expr/units.nu",
+      "bytes": 3124,
+      "sha256": "4fca1d86e4ab2b710e41d520f79ae2fdc3461a2ecbfdff5f513eac039bff19b7",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/expr/values.nu",
+      "retained_path": "upstream/files/test/corpus/expr/values.nu",
+      "bytes": 4824,
+      "sha256": "5339dead21880b5d85eb10c8f7ee601085f58c1dd5b06c7643d374aed72bcda7",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/pipe/blocks.nu",
+      "retained_path": "upstream/files/test/corpus/pipe/blocks.nu",
+      "bytes": 2528,
+      "sha256": "1d30543402963d7fa5105bc6181c9da4296a0fdec26c291f3839046fa05b9e26",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/pipe/commands.nu",
+      "retained_path": "upstream/files/test/corpus/pipe/commands.nu",
+      "bytes": 17647,
+      "sha256": "821abc6383b3f016067e6d3d347c3fdf8a7e07822868eb1b5b7776de93f8b44f",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/pipe/env.nu",
+      "retained_path": "upstream/files/test/corpus/pipe/env.nu",
+      "bytes": 3037,
+      "sha256": "64e09262ba120d7a2a169208ba0149330f9b7c370ad388917a05724b78bb95bf",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/pipe/pipe.nu",
+      "retained_path": "upstream/files/test/corpus/pipe/pipe.nu",
+      "bytes": 8053,
+      "sha256": "fd5d2fe3efeb9b5bc35d40f607e96de606989fb85bbb1f6f802b6db0076afb96",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/pipe/redirection.nu",
+      "retained_path": "upstream/files/test/corpus/pipe/redirection.nu",
+      "bytes": 1513,
+      "sha256": "5a3c4578f4de400d636950c95a15d13206379654f2d8543a00d8e5806dae693a",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/pipe/where.nu",
+      "retained_path": "upstream/files/test/corpus/pipe/where.nu",
+      "bytes": 6244,
+      "sha256": "93a7c1f9c1bd23899384b5027669bf38a40367b8971ab33ac95cf00561f2ba24",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/stmt/assignment.nu",
+      "retained_path": "upstream/files/test/corpus/stmt/assignment.nu",
+      "bytes": 2348,
+      "sha256": "6f2ea191e0558ca27a55783759645ef0b7c2be60847e6e973a247fc14fad3625",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/stmt/const.nu",
+      "retained_path": "upstream/files/test/corpus/stmt/const.nu",
+      "bytes": 1059,
+      "sha256": "38b614d348219fc13533e73cfe43c79210aee3a933f5ac88c387faa5499d33e1",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/stmt/let.nu",
+      "retained_path": "upstream/files/test/corpus/stmt/let.nu",
+      "bytes": 1884,
+      "sha256": "4a4e8389679560a2dcb92c6212329f5ab8e2242af6f5b307e21775fea2aef1c4",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/corpus/stmt/mut.nu",
+      "retained_path": "upstream/files/test/corpus/stmt/mut.nu",
+      "bytes": 566,
+      "sha256": "172b094e05a88858a4b18aad25f77abb279ee1bbe20ef4a4cd9a3663deda4a4a",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/highlight/cellpath.nu",
+      "retained_path": "upstream/files/test/highlight/cellpath.nu",
+      "bytes": 244,
+      "sha256": "9e703f7deec49e0d6f7538dc94ce76ea5367dfc520f3f13caab5aeefe787f260",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/highlight/comma_after_param_completer.nu",
+      "retained_path": "upstream/files/test/highlight/comma_after_param_completer.nu",
+      "bytes": 77,
+      "sha256": "c0b43cd985c9c252fe3795320b0c6c197adc87fdee0f5b3647f7bb08c022cd75",
+      "archive_mode": 436
+    },
+    {
+      "path": "test/highlight/verbose_type_signature.nu",
+      "retained_path": "upstream/files/test/highlight/verbose_type_signature.nu",
+      "bytes": 2626,
+      "sha256": "c1f6303d440a0b11c0a1b8a1c8c89b8c8b3b871225eb4b5756f868038693609e",
+      "archive_mode": 436
+    },
+    {
+      "path": "tree-sitter.json",
+      "retained_path": "upstream/files/tree-sitter.json",
+      "bytes": 742,
+      "sha256": "d27e0b8ee64e6d1ca208c7fef167471a0c2dda5e143f4f28a6903ca1ef02984d",
+      "archive_mode": 436
+    },
+    {
+      "path": "ts.nu",
+      "retained_path": "upstream/files/ts.nu",
+      "bytes": 3425,
+      "sha256": "c3b8c5270245cddd79ef1ef596bcfaa7ac4684ef16411ee9afdaffdf57ba6c8a",
+      "archive_mode": 436
+    }
+  ]
+}

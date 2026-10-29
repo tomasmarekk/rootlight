@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "31dfad20bfe6047dfd8bd1881565c782ab839f37545eb2258b8018fa904f841a";
+    "d9eb918100c7e430b15fc1e92aba8db2e7bd6aa14892668781e33f4420cdab40";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 60] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 61] = [
+    (
+        "tree-sitter-nu",
+        "0.0.1",
+        "third_party/tree-sitter-nu-0.0.1",
+        "a4ca44649c322315171125d5f66ba72e56b2f0e441e2587fe24714a97d06fc92",
+    ),
     (
         "tree-sitter-glimmer",
         "0.0.1",
@@ -763,6 +769,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     )?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-nu-0.0.1-LICENSE",
+        "e189616e535e9f7bf410a72e6fc51ad1e0ae461c58d592e186c2669daa5d1e5d",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-glimmer-0.0.1-LICENSE",
         "748c15c2a285ef74aec280f2e72bd98482b96bd0e2da0d8f0fde934fa88e2e16",
     )?;
@@ -836,7 +847,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 100 {
+    if manifest.grammars.len() != 101 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -869,6 +880,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "pug",
         "liquid",
         "handlebars",
+        "nu",
         "dockerfile",
         "coffeescript",
         "meson",
@@ -1671,7 +1683,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 100")]
+    #[error("grammar lock contains {0} grammars instead of 101")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),
@@ -4226,7 +4238,7 @@ mod tests {
 
     #[test]
     fn source_manifest_digest_binds_paths_and_content_with_portable_framing() {
-        let files = BTreeMap::from([("src/ÃŽÂ».bas".into(), sha256_hex(b"source"))]);
+        let files = BTreeMap::from([("src/\u{3bb}.bas".into(), sha256_hex(b"source"))]);
         // Independently computed from the documented UTF-8/NUL format, not TOML
         // serialization or host-native path separators.
         assert_eq!(
@@ -4237,7 +4249,7 @@ mod tests {
         for changed in [
             BTreeMap::new(),
             BTreeMap::from([("src/other.bas".into(), sha256_hex(b"source"))]),
-            BTreeMap::from([("src/ÃŽÂ».bas".into(), sha256_hex(b"changed"))]),
+            BTreeMap::from([("src/\u{3bb}.bas".into(), sha256_hex(b"changed"))]),
         ] {
             assert_ne!(vendored_source_digest(&changed).unwrap(), digest);
         }

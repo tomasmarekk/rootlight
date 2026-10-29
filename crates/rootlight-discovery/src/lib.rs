@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.81";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.82";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3025,6 +3025,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".nix"],
         aliases: &[],
         detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "nu",
+        suffixes: &[".nu"],
+        aliases: &["nushell"],
+        detectors: &["extension", "shebang", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -7867,6 +7875,129 @@ max_source_file_bytes = 2097152
             .unwrap();
         assert_eq!(capability.analyzers, &["treesitter"]);
         assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn nushell_routes_exact_terminal_suffixes_and_canonical_aliases() {
+        for path in ["commands.nu", "modules/after/after.nu", "themes/MAKE.NU"] {
+            assert_eq!(extension_language(path), Some("nu"), "{path}");
+        }
+        for path in [
+            "commands.nu.bak",
+            "commands.nu.json",
+            "commands.nupkg",
+            "commands.nushell",
+        ] {
+            assert_ne!(extension_language(path), Some("nu"), "{path}");
+        }
+        for name in ["nushell", "nu"] {
+            assert_eq!(canonical_language(name), Some("nu"), "{name}");
+        }
+        assert_eq!(canonical_language("Nu"), None);
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "nu")
+            .unwrap();
+        assert_eq!(
+            capability.detectors,
+            &["extension", "shebang", "configuration"]
+        );
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+    }
+
+    #[test]
+    fn nushell_shebangs_use_only_the_actual_interpreter() {
+        for header in [
+            "#!/usr/bin/nu",
+            "#!/opt/nu --stdin",
+            "#!/usr/bin/env nu",
+            "#!/usr/bin/env -S nu --no-config-file",
+            "#!/usr/bin/env -S -u NU_LOG nu",
+        ] {
+            assert_eq!(shebang_language(header.as_bytes()), Some("nu"), "{header}");
+            let source = format!("{header}\ndef main [] {{}}\n");
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new("scripts/command")).unwrap(),
+                source.as_bytes(),
+            );
+            assert!(
+                signals.iter().any(|signal| {
+                    signal.language == "nu" && signal.evidence == LanguageEvidence::Shebang
+                }),
+                "{header}"
+            );
+        }
+        for header in [
+            "#!/usr/bin/nuget",
+            "#!/usr/bin/nu3",
+            "#!/usr/bin/nushell",
+            "#!/usr/bin/env NU=nu",
+            "#!/usr/bin/env nu --stdin",
+            "#!/usr/bin/env -S tool nu",
+            "#!/usr/bin/env -S ${INTERPRETER} nu",
+        ] {
+            assert_ne!(shebang_language(header.as_bytes()), Some("nu"), "{header}");
+        }
+        assert_eq!(shebang_language(b"#!/usr/bin/python nu\n"), Some("python"));
+    }
+
+    #[test]
+    fn nushell_discovery_preserves_configuration_and_independent_content_hints() {
+        let source =
+            b"#!/usr/bin/env nu\ndef info [msg: string, --no-newline (-n)] { print $msg }\n";
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "make.nu", source);
+        write_fixture(&temporary, "assigned.conf", source);
+        write_fixture(&temporary, "overridden.nu", source);
+        write_fixture(&temporary, "binary.nu", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='nu'\n[extensions.source-languages.data.paths]\n'overridden.nu'='rust'\n",
+        }]).unwrap();
+        let manifest = discover(
+            &fixture_root(&temporary, b"nushell-discovery"),
+            &config,
+            &DiscoveryPolicy::build(Vec::new(), true).unwrap(),
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 3);
+        assert!(
+            manifest.exclusions.iter().any(|entry| {
+                entry.path == "binary.nu" && entry.reason == ExclusionReason::Binary
+            })
+        );
+        for (path, language, evidence) in [
+            ("make.nu", "nu", LanguageEvidence::Extension),
+            ("make.nu", "nu", LanguageEvidence::Shebang),
+            ("assigned.conf", "nu", LanguageEvidence::Configuration),
+            ("overridden.nu", "rust", LanguageEvidence::Configuration),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| { signal.language == language && signal.evidence == evidence }),
+                "{input:?}"
+            );
+            assert_eq!(input.content_hash, content_hash(source));
+            assert_eq!(input.bytes, u64::try_from(source.len()).unwrap());
+        }
+        let original = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "make.nu")
+            .unwrap();
+        assert!(original.language_signals.iter().any(|signal| {
+            signal.language == "python" && signal.evidence == LanguageEvidence::Content
+        }));
     }
 
     #[test]

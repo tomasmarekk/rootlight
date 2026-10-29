@@ -77,6 +77,7 @@ mod mojo_members;
 mod nim;
 mod nix_formal_reads;
 mod nix_paths;
+mod nushell;
 mod ocaml_bindings;
 mod perl;
 mod php_ordinary;
@@ -1873,6 +1874,16 @@ fn preflight_lowering_limits(
                 )?;
                 field_relation_derivations = checked_add(field_relation_derivations, 3)?;
             }
+            if request.language().as_str() == "nu"
+                && fact.syntax_kind().as_str() == nushell::COMPLETER
+            {
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+            }
             if request.language().as_str() == "sed"
                 && fact.syntax_kind().as_str() == "sed.written_branch.reference"
             {
@@ -3512,6 +3523,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let nushell_targets = if self.request.language().as_str() == "nu" {
+            Some(nushell::Targets::new(
+                std::mem::take(&mut entity_plan.nushell),
+                self.coordinates.facts(),
+                &materialized,
+                nushell::CurrentSource {
+                    reference: self.full_source,
+                    logical: self.source_view.as_bytes(),
+                },
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let handlebars_reads = if self.request.language().as_str() == "handlebars" {
             Some(handlebars::Targets::new(
                 self.coordinates.facts(),
@@ -5137,6 +5164,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && fact.syntax_kind().as_str() != html_closing_tags::REFERENCE
                     && !liquid::reference(fact)
                     && !handlebars::reference(fact)
+                    && !nushell::reference(fact)
                 {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
@@ -5333,6 +5361,35 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("liquid-loop-read-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &nushell_targets
+                    && let Some((symbol, subject)) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    if fact.syntax_kind().as_str() == nushell::VALUE {
+                        occurrence.role = OccurrenceRole::Read;
+                    }
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("nu-written-reference-identity"))?;
+                    let mut relation = lexical_reference_relation(&occurrence, symbol)?;
+                    if let Some(subject) = subject {
+                        relation.subject = RelationEndpoint::Entity(subject);
+                        relation.evidence.derivation = vec![
+                            FactRef::Entity(subject),
+                            FactRef::Entity(symbol),
+                            FactRef::Fact(occurrence.id),
+                        ];
+                        relation.evidence.derivation.sort_unstable();
+                        relation.evidence.derivation.dedup();
+                        relation.id = derive_relation_record_id(&relation)
+                            .map_err(|_| provider_failure("nu-completer-relation-identity"))?;
+                    }
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &handlebars_reads
@@ -7809,6 +7866,23 @@ impl<'context, 'source> Lowering<'context, 'source> {
         cancellation: &Cancellation,
         total_string_bytes: &mut usize,
     ) -> Result<EntityPlan, AdapterError> {
+        let nushell = if self.request.language().as_str() == "nu" {
+            nushell::Plan::new(
+                self.full_source,
+                self.request.source().bytes(),
+                self.source_view,
+                self.request.included_ranges().is_empty()
+                    && self.parse_output.report().coverage().status() != CoverageStatus::Unknown,
+                self.request
+                    .limits()
+                    .max_syntax_nodes()
+                    .saturating_mul(128)
+                    .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                cancellation,
+            )?
+        } else {
+            nushell::Plan::default()
+        };
         let php_ordinary = if self.request.language().as_str() == "php"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -8691,6 +8765,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .get(&definition.local_id())
                         .and_then(Option::as_ref)
                         .map(|key| std::borrow::Cow::Borrowed(key.name.as_str()))
+                } else if self.language_for_fact(definition) == "nu" {
+                    nushell.name(
+                        fact,
+                        definition,
+                        kind,
+                        text,
+                        self.request.limits().ir().max_string_bytes,
+                    )
                 } else if definition.syntax_kind().as_str() == "objective_c.method.definition" {
                     rootlight_adapter_sdk::canonical_objective_c_selector(
                         definition,
@@ -9341,6 +9423,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 ))
         });
         Ok(EntityPlan {
+            nushell,
             php_ordinary,
             json_schema,
             rust_bindings,
@@ -9992,6 +10075,7 @@ struct AssociatedCaptures<'a> {
 }
 
 struct EntityPlan {
+    nushell: nushell::Plan,
     php_ordinary: php_ordinary::Plan,
     json_schema: json_schema::Plan,
     rust_bindings: embedded_rust::Plan,
@@ -10825,7 +10909,11 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(haxe::gaps(fact))
         .chain(coffeescript::gaps(fact))
         .chain(pug::gaps(fact))
-        .chain(liquid::gaps(fact).chain(handlebars::gaps(fact)))
+        .chain(
+            liquid::gaps(fact)
+                .chain(handlebars::gaps(fact))
+                .chain(nushell::gaps(fact)),
+        )
         .chain(sed::gaps(fact))
         .chain(idris::gaps(fact))
         .chain(wolfram::gaps(fact))
@@ -11770,6 +11858,16 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "nu" {
+        return matches!(
+            (kind, label),
+            (EntityKind::Function, "nu.function.declaration")
+                | (EntityKind::Namespace, "nu.namespace.declaration")
+                | (EntityKind::Parameter, "nu.parameter.declaration")
+                | (EntityKind::Variable, "nu.variable.declaration")
+        );
+    }
+
     if language == "thinkscript" {
         return matches!(
             (kind, label),
@@ -12327,7 +12425,7 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
-    if liquid::reference(fact) || handlebars::reference(fact) {
+    if liquid::reference(fact) || handlebars::reference(fact) || nushell::reference(fact) {
         return None;
     }
     if fact.syntax_kind().as_str().starts_with("typescript.const_") {
@@ -14134,6 +14232,20 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("nu.") {
+        return match (fact.kind(), fact.syntax_kind().as_str()) {
+            (SyntaxFactKind::Declaration, "nu.function.declaration") => Some(EntityKind::Function),
+            (SyntaxFactKind::Declaration, "nu.namespace.declaration") => {
+                Some(EntityKind::Namespace)
+            }
+            (SyntaxFactKind::Declaration, "nu.parameter.declaration") => {
+                Some(EntityKind::Parameter)
+            }
+            (SyntaxFactKind::Declaration, "nu.variable.declaration") => Some(EntityKind::Variable),
+            _ => None,
+        };
+    }
+
     if fact.kind() == SyntaxFactKind::Declaration
         && fact.syntax_kind().as_str() == "handlebars.block_parameter.declaration"
     {
@@ -14149,6 +14261,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("nu.") {
+        return structural_entity_kind(fact);
+    }
     if fact.syntax_kind().as_str() == "handlebars.block_parameter.declaration" {
         return structural_entity_kind(fact);
     }
@@ -14160,6 +14275,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if nushell::reference(fact) {
+        return Some("nu-current-source-formal-or-completer-binding-unavailable");
+    }
     if handlebars::reference(fact) {
         return Some("handlebars-current-source-block-parameter-binding-unavailable");
     }

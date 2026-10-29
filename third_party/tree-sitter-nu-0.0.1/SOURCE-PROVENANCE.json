@@ -1,0 +1,54 @@
+{
+  "schema": "rootlight.nushell-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/nushell/tree-sitter-nu",
+    "revision": "4f577aaa735154f934594b598a69ed7b1b707cf6",
+    "git_tree": "5bead4df79083f077937f80f5822cdbb1945433b",
+    "archive_url": "https://codeload.github.com/nushell/tree-sitter-nu/tar.gz/4f577aaa735154f934594b598a69ed7b1b707cf6",
+    "archive_sha256": "f7b1b5bedb8eecff0b9ceb70863c4d3ce2fd3766e2ecdc3f02daf0aa28175f00",
+    "files": 104,
+    "bytes": 9721031,
+    "license": "MIT",
+    "upstream_code_or_lifecycle_executed": false,
+    "signature_verified": false
+  },
+  "binding": {
+    "local_unpublished": true,
+    "build_inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ],
+    "network_or_generator_in_build": false
+  },
+  "preferred_source": {
+    "upstream_native_sources_unchanged": true,
+    "abi": 15,
+    "generated_files_hand_edited": false
+  },
+  "active_inputs": {
+    "grammar.js": {
+      "bytes": 57428,
+      "sha256": "e916086974c1ad5ef17ce7021e6346401a95a1d32dfbaf80bcc8ba7ef7461344"
+    },
+    "src/parser.c": {
+      "bytes": 8700570,
+      "sha256": "7365d87c5c30f2af039963bd163c251dcf70d8f1ed997cb6a7ea399ae837fb58"
+    },
+    "src/scanner.c": {
+      "bytes": 3027,
+      "sha256": "a010ea852dbea82325d84d9d0b29e815c1226df1732badaea30c007cd3742da8"
+    },
+    "src/node-types.json": {
+      "bytes": 99092,
+      "sha256": "f46e60be399b9d1b43ea7f801c7ed59fd003fd1ed1adb12dba67294382706c14"
+    },
+    "src/grammar.json": {
+      "bytes": 459163,
+      "sha256": "4e87180a5425d9cd07978fec707a7232121502e1cf7bb7ac6635e1aca57fe85f"
+    }
+  },
+  "product_qualification": false
+}

@@ -13,6 +13,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// Nushell written declarations without shell or completion evaluation.
+    Nushell,
     /// Idris written source; evaluation and dependent-type resolution are separate.
     Idris,
     /// GNU BRE static file-text syntax; written labels/branch bindings remain separate.
@@ -317,6 +319,7 @@ impl GrammarRegistry {
     pub fn audited() -> Result<Self, RegistryError> {
         let mut descriptors = Vec::with_capacity(103);
         for family in [
+            GrammarFamily::Nushell,
             GrammarFamily::Idris,
             GrammarFamily::Sed,
             GrammarFamily::Wolfram,
@@ -521,6 +524,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::Nushell => tree_sitter_nu::LANGUAGE.into(),
         GrammarFamily::Hcl => tree_sitter_hcl::LANGUAGE.into(),
         GrammarFamily::Ada => tree_sitter_ada::LANGUAGE.into(),
         GrammarFamily::Haxe => tree_sitter_haxe::LANGUAGE.into(),
@@ -717,6 +721,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268",
             scanner_sha256: Some(
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
+            ),
+        },
+        GrammarFamily::Nushell => GrammarIdentity {
+            language_id: "nu",
+            grammar_version: "0.0.1",
+            source_package_sha256: "a4ca44649c322315171125d5f66ba72e56b2f0e441e2587fe24714a97d06fc92",
+            parser_sha256: "7365d87c5c30f2af039963bd163c251dcf70d8f1ed997cb6a7ea399ae837fb58",
+            scanner_sha256: Some(
+                "a010ea852dbea82325d84d9d0b29e815c1226df1732badaea30c007cd3742da8",
             ),
         },
         GrammarFamily::Handlebars => GrammarIdentity {
@@ -1541,8 +1554,9 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 103);
+        assert_eq!(registry.descriptors().len(), 104);
         for family in [
+            GrammarFamily::Nushell,
             GrammarFamily::Idris,
             GrammarFamily::Sed,
             GrammarFamily::Wolfram,

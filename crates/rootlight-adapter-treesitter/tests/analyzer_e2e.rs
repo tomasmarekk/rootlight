@@ -4684,3 +4684,6 @@ mod python_module_function_references;
 
 #[path = "analyzer_e2e/html_closing_tags.rs"]
 mod html_closing_tags;
+
+#[path = "analyzer_e2e/nushell.rs"]
+mod nushell;
