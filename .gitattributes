@@ -400,3 +400,6 @@ third_party/tree-sitter-idris-0.0.1/** -text
 /third_party/tree-sitter-nu-0.0.1/upstream/files/resources/*.png binary
 /crates/rootlight-adapter-treesitter/tests/fixtures/nushell/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /adapters/licenses/tree-sitter-nu-0.0.1-* -text
+/third_party/tree-sitter-embedded-template-0.25.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/third_party/tree-sitter-embedded-template-0.25.0/upstream/*.tar.gz binary
+/tests/native-grammars/fixtures/erb/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol

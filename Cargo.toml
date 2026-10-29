@@ -51,6 +51,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "third_party/tree-sitter-embedded-template-0.25.0",
     "third_party/tree-sitter-nu-0.0.1",
     "third_party/tree-sitter-cuda-0.21.2",
     "source-inputs/producers/flux-9eb12f7f4702875e79189789cf9b3ac560499c11/parser",

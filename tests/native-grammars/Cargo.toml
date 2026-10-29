@@ -12,6 +12,8 @@ license = "AGPL-3.0-only"
 resolver = "3"
 
 [dev-dependencies]
+tree-sitter-embedded-template = { path = "../../third_party/tree-sitter-embedded-template-0.25.0", version = "=0.25.0", default-features = false }
+tree-sitter-ruby = { version = "=0.23.1", default-features = false }
 tree-sitter-nu = { path = "../../third_party/tree-sitter-nu-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-glimmer = { path = "../../third_party/tree-sitter-glimmer-0.0.1", version = "=0.0.1", default-features = false }
 regex = "=1.13.0"

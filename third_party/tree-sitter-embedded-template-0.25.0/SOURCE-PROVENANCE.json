@@ -1,0 +1,64 @@
+{
+  "schema": "rootlight.embedded-template-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/tree-sitter/tree-sitter-embedded-template",
+    "revision": "c70c1de07dedd532089c0c90835c8ed9fa694f5c",
+    "git_tree": "0f9f8def62cd151af201ab2f8aa2b22684b45f7c",
+    "archive_sha256": "a7c6b574056a79de046eb73ed1cf7aac5ca1fb281c510a89787f675b484d81b1",
+    "release_archive_sha256": "0bd8eeac93145d0b3b60a064d934d803f6986dff65d6aadb5dc5933de98be8bd",
+    "files": 53,
+    "license": "MIT",
+    "all_git_blob_ids_and_executable_modes_verified": true,
+    "lifecycle_executed_during_acquisition": false,
+    "local_signature_verification": false
+  },
+  "binding": {
+    "local_unpublished": true,
+    "network_or_generator_in_build": false,
+    "build_inputs": [
+      "src/parser.c",
+      "src/tree_sitter/parser.h"
+    ]
+  },
+  "preferred_source": {
+    "upstream_native_sources_unchanged": true,
+    "generated_by": "tree-sitter v0.25.8",
+    "abi": 15,
+    "external_scanner": false
+  },
+  "scope": "Native syntax experiment only; no ERB product qualification.",
+  "active_inputs": {
+    "LICENSE": {
+      "bytes": 1080,
+      "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
+    },
+    "grammar.js": {
+      "bytes": 1053,
+      "sha256": "4f248ec210a5ce4246672f10cafa578a3998d9c9bf0b3c00b2ac2fac2a6f7ba6"
+    },
+    "src/parser.c": {
+      "bytes": 32877,
+      "sha256": "ff1002e8f8c9e0c8dc463af06ac973348a1618ff15fa077d65ba8916fd38ab8d"
+    },
+    "src/grammar.json": {
+      "bytes": 4935,
+      "sha256": "a3798e1783ebbe1ba05b0590ee568d5f5b5d435a86a16f19b6d05da2d5dd78d4"
+    },
+    "src/node-types.json": {
+      "bytes": 2582,
+      "sha256": "664fb0151af64d3eb81081d77797617a6468405a87acf4254130b9f9ef6fe9c7"
+    },
+    "src/tree_sitter/parser.h": {
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    "src/tree_sitter/alloc.h": {
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    "src/tree_sitter/array.h": {
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    }
+  }
+}

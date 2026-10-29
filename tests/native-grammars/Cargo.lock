@@ -162,6 +162,7 @@ dependencies = [
  "tree-sitter-d",
  "tree-sitter-dart",
  "tree-sitter-eiffel",
+ "tree-sitter-embedded-template",
  "tree-sitter-elixir",
  "tree-sitter-fish",
  "tree-sitter-fortran",
@@ -199,6 +200,7 @@ dependencies = [
  "tree-sitter-racket",
  "tree-sitter-ring",
  "tree-sitter-rocq",
+ "tree-sitter-ruby",
  "tree-sitter-sas",
  "tree-sitter-scala",
  "tree-sitter-scheme-native-local",
@@ -449,6 +451,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-eiffel"
 version = "1.0.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-embedded-template"
+version = "0.25.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -751,6 +761,16 @@ dependencies = [
 [[package]]
 name = "tree-sitter-rocq"
 version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-ruby"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95"
 dependencies = [
  "cc",
  "tree-sitter-language",
