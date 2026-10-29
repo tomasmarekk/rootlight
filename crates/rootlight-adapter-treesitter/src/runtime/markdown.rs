@@ -39,6 +39,28 @@ impl TreeSitterProvider {
             &mut context,
             cancellation,
         )?;
+        // Code children can recover independently after the host link census is complete.
+        // Final capture clipping still invalidates this marker at its consumer.
+        if !inline_limited
+            && request.included_ranges().is_empty()
+            && traversal.fully_traversed
+            && traversal.coverage == CoverageStatus::Complete
+        {
+            try_reserve_cancellable(
+                candidates,
+                1,
+                cancellation,
+                "markdown-host-certificate-allocation",
+            )?;
+            candidates.push(QueryCandidate {
+                start: tree.root_node().start_byte(),
+                end: tree.root_node().end_byte(),
+                role: StructuralRole::Signature,
+                syntax: crate::markdown_bindings::HOST_INLINE_COMPLETE,
+                required: true,
+                native_depth: 0,
+            });
+        }
         self.extract_markdown_code(
             tree,
             request,

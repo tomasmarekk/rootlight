@@ -4391,8 +4391,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
         };
 
         let markdown_bindings = if self.request.language().as_str() == "markdown"
-            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
-        {
+            && self.request.included_ranges().is_empty()
+            && crate::markdown_bindings::host_inline_complete(
+                self.coordinates.facts(),
+                self.parse_output.diagnostics(),
+                SourceSpan::new(
+                    self.full_source.span().file(),
+                    0,
+                    u64::try_from(self.source_view.as_bytes().len())
+                        .map_err(|_| SinkError::AccountingOverflow)?,
+                )
+                .map_err(|_| provider_failure("markdown-host-certificate-span"))?,
+                cancellation,
+            )? {
             let symbols = materialized
                 .values()
                 .filter_map(|entity| {

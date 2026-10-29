@@ -4554,6 +4554,191 @@ fn markdown_named_links_and_images_bind_the_first_document_definition() {
 }
 
 #[test]
+fn markdown_host_links_survive_native_nushell_child_recovery() {
+    let themes = concat!(
+        "# Nushell Themes\n\n",
+        "```nu\nsource nu-themes/<theme>.nu\n```\n\n",
+        "```nu\n> use nu-themes/tokyo-night.nu\n> tokyo-night\n```\n\n",
+        "The parent `nu_scripts` package can be installed and updated using [Nupm].\n\n",
+        "1. Install [Nupm] by following the [Nupm instructions]\n\n",
+        "[Nupm]: https://github.com/nushell/nupm\n",
+        "[Nupm instructions]: https://github.com/nushell/nupm#recycle-installation-toc\n",
+    );
+    for (source, count) in [
+        ("[text][Guide] [GUIDE][]\n\n[Guide]: first.md\n\n~~~nu\ndef broken [\n~~~\n\n[guide]: second.md\n".to_owned(), 2),
+        (themes.to_owned(), 3),
+    ] {
+        let provider = Arc::new(provider());
+        let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+        let bounds = limits();
+        let input = request(&fixture.snapshot, &fixture.source, MARKDOWN, &bounds);
+        let parsed = rootlight_adapter_sdk::execute_parse(&*provider, &input.to_parse_request(), MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback, &deadline()).unwrap();
+        assert_eq!(parsed.report().coverage().status(), CoverageStatus::Unknown, "native child diagnostics: {:?}", parsed.diagnostics());
+        let result = analyze(&analyzer(&provider, MARKDOWN), &input, &ExtensionSupport::default());
+        assert!(result.document().diagnostics.iter().any(|diagnostic| diagnostic.code == "syntax-error-recovery"));
+        assert!(result.document().skipped_regions.iter().any(|gap| gap.detail == "markdown-code-parse-unavailable"));
+        let references: Vec<_> = result.document().occurrences.iter().filter(|site| named_markdown_reference(site.syntax_kind.as_str())).collect();
+        assert_eq!(references.len(), count);
+        for site in references {
+            let OccurrenceTarget::Resolved { symbol } = site.target else { panic!("host link lost after foreign recovery: {}", site.syntax_kind) };
+            let definition = result.document().entities.iter().find(|entity| entity.id == symbol).unwrap();
+            assert_eq!(definition.kind, EntityKind::LinkDefinition);
+            assert!(result.document().relations.iter().any(|edge| edge.predicate == RelationPredicate::RefersTo && edge.subject == RelationEndpoint::Occurrence(site.id) && edge.object == RelationEndpoint::Entity(symbol)));
+            if source.contains("first.md") { assert_eq!(definition.canonical_name, "[Guide]"); }
+        }
+    }
+}
+
+fn named_markdown_reference(label: &str) -> bool {
+    matches!(
+        label,
+        "markdown.reference_label.reference"
+            | "markdown.shortcut_link.reference"
+            | "markdown.collapsed_link.reference"
+            | "markdown.shortcut_image.reference"
+            | "markdown.collapsed_image.reference"
+    )
+}
+
+#[test]
+fn markdown_host_certificate_artifacts_reject_changed_source_file_and_context() {
+    let source = "[Guide] [GUIDE][]\n\n[Guide]: first.md\n\n```nu\ndef broken [\n```\n";
+    let provider = Arc::new(provider());
+    let frontend = analyzer(&provider, MARKDOWN);
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, MARKDOWN, &bounds);
+    let (result, artifact) = frontend
+        .analyze_and_capture(
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(artifact.syntax_partition_complete());
+    let resolved = |result: &AnalysisOutput| {
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                named_markdown_reference(site.syntax_kind.as_str())
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            })
+            .count()
+    };
+    assert_eq!(resolved(&result), 2);
+    let next = fixture.next_generation();
+    let rebound = frontend
+        .analyze_from_artifact(
+            &request(&next.snapshot, &next.source, MARKDOWN, &bounds),
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(resolved(&rebound), 2);
+    assert!(
+        rebound
+            .document()
+            .occurrences
+            .iter()
+            .all(|site| site.source.generation() == next.source.generation())
+    );
+    let included = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(MARKDOWN),
+        EncodingId::utf8(),
+        vec![IncludedRange::new(
+            fixture.source.span(),
+            language(MARKDOWN),
+        )],
+        AnalysisTier::TierD,
+        build_context(),
+        &bounds,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    let foreign_case = LanguageCase {
+        path: "docs/other.md",
+        ..MARKDOWN
+    };
+    let foreign = Fixture::new(foreign_case, source.as_bytes());
+    for input in [
+        &included,
+        &request(&foreign.snapshot, &foreign.source, foreign_case, &bounds),
+    ] {
+        assert!(
+            matches!(frontend.analyze_from_artifact(input, &artifact, ExtensionSupport::default(), MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback, &deadline()), Err(AdapterError::ProviderFailed { code }) if code.as_str() == "treesitter-structural-artifact-mismatch")
+        );
+    }
+    let changed = fixture.rewrite(source.replacen("[Guide]", "`Guide`", 1).as_bytes());
+    assert!(
+        matches!(frontend.analyze_from_artifact(&request(&changed.snapshot, &changed.source, MARKDOWN, &bounds), &artifact, ExtensionSupport::default(), MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback, &deadline()), Err(AdapterError::ProviderFailed { code }) if code.as_str() == "treesitter-structural-artifact-mismatch")
+    );
+}
+
+#[test]
+fn markdown_host_marker_cannot_certify_a_later_clipped_capture_partition() {
+    let source = format!(
+        "{}\n\n[Guide]: first.md\n\n```nu\ndef broken [\n```\n",
+        "[Guide] ".repeat(64)
+    );
+    let provider = Arc::new(provider());
+    let fixture = Fixture::new(MARKDOWN, source.as_bytes());
+    let bounds = limits_with_syntax_records(32);
+    let input = request(&fixture.snapshot, &fixture.source, MARKDOWN, &bounds);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &*provider,
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(
+        parsed
+            .facts()
+            .iter()
+            .any(|fact| fact.syntax_kind().as_str() == "markdown.host_inline_complete.signature")
+    );
+    assert!(
+        parsed
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code().as_str() == "syntax-extraction-limit")
+    );
+    let result = analyze(
+        &analyzer(&provider, MARKDOWN),
+        &input,
+        &ExtensionSupport::default(),
+    );
+    let references: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| named_markdown_reference(site.syntax_kind.as_str()))
+        .collect();
+    assert!(
+        !references.is_empty(),
+        "a retained reference exercises the certificate consumer"
+    );
+    assert!(
+        references
+            .iter()
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "markdown-reference-target-unavailable")
+    );
+}
+
+#[test]
 fn markdown_reference_comparison_preserves_unicode_and_container_source() {
     let source = "> [text][Straße\r\n> label] [É] [e\u{301}] [A\u{a0}B] [a b]\r\n\r\n[STRASSE label]: one.md\r\n[é]: two.md\r\n[a b]: three.md\r\n";
     let result = output(source);
@@ -5271,7 +5456,49 @@ fn markdown_required_replay_preserves_ownership_and_scoped_unavailable_analysis(
             .map(|gap| (gap.detail.clone(), gap.domain, gap.source.span()))
             .collect::<BTreeSet<_>>()
     };
-    assert_eq!(gaps(&first), gaps(&replay));
+    let original_gaps = gaps(&first);
+    let replay_gaps = gaps(&replay);
+    assert!(
+        first
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| named_markdown_reference(site.syntax_kind.as_str())
+                && matches!(site.target, OccurrenceTarget::Resolved { .. }))
+    );
+    assert!(
+        replay
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-extraction-limit")
+    );
+    let mut expected_gaps = original_gaps;
+    for reference in replay
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| named_markdown_reference(site.syntax_kind.as_str()))
+    {
+        assert!(matches!(
+            reference.target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+        expected_gaps.insert((
+            "markdown-reference-target-unavailable".to_owned(),
+            FactDomain::Relations,
+            reference.source.span(),
+        ));
+        assert!(
+            !replay
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(reference.id))
+        );
+    }
+    assert_eq!(replay_gaps, expected_gaps);
     for (detail, domain, text) in [
         (
             "markdown-link-resolution-unavailable",
