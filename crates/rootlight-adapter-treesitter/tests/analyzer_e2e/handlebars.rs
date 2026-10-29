@@ -14,6 +14,9 @@ const HANDLEBARS: LanguageCase = LanguageCase {
 };
 const ORIGINAL: &[u8] = include_bytes!("../fixtures/handlebars/open-color.inkscape.hbs");
 const SKETCH_PALETTE: &[u8] = include_bytes!("../fixtures/handlebars/open-color.sketchpalette.hbs");
+const OPENZEPPELIN_CONTRACT: &[u8] =
+    include_bytes!("../fixtures/handlebars/openzeppelin/contract.hbs");
+const OPENZEPPELIN_PAGE: &[u8] = include_bytes!("../fixtures/handlebars/openzeppelin/page.hbs");
 
 fn output(raw: &[u8], encoding: &str) -> AnalysisOutput {
     let provider = Arc::new(provider());
@@ -340,6 +343,151 @@ fn original_sketch_palette_keeps_lexical_parameters_separate_from_parent_data() 
 }
 
 #[test]
+fn original_openzeppelin_templates_retain_modules_and_unresolved_runtime_values() {
+    for (name, source) in [
+        ("contract", OPENZEPPELIN_CONTRACT),
+        ("page", OPENZEPPELIN_PAGE),
+    ] {
+        let result = output(source, "utf-8");
+        let document = result.document();
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Module)
+                .count(),
+            1,
+            "{name}"
+        );
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Parameter),
+            "{name}"
+        );
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Read)
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+            "{name}"
+        );
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo),
+            "{name}"
+        );
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.detail.contains("handlebars") && gap.detail.contains("unavailable")),
+            "{name}"
+        );
+        if name == "contract" {
+            let text = std::str::from_utf8(source).unwrap();
+            let start = u64::try_from(text.find("{{name}}").unwrap() + 2).unwrap();
+            unresolved_data_read(document, start, start + 4);
+        }
+    }
+}
+
+#[test]
+fn triple_values_preserve_shadowing_and_zero_argument_block_scope() {
+    let source = "{{item.name}}{{#each values as |item|}}{{{item.name}}}{{#with item.value as |item|}}{{~{item.name}~}}{{/with}}{{#noop}}{{{item.name}}}{{/noop}}{{item.name}}{{/each}}{{item.name}}";
+    let result = output(source.as_bytes(), "utf-8");
+    let document = result.document();
+    let declarations: Vec<_> = source
+        .match_indices("as |item|")
+        .map(|(start, _)| u64::try_from(start + 4).unwrap())
+        .collect();
+    let outer = definition(document, declarations[0], declarations[0] + 4, "item");
+    let inner = definition(document, declarations[1], declarations[1] + 4, "item");
+    assert_ne!(outer, inner);
+    let uses: Vec<_> = source
+        .match_indices("item.name")
+        .map(|(start, _)| start)
+        .collect();
+    assert_eq!(uses.len(), 6);
+    no_resolved_read_at(document, uses[0]);
+    no_resolved_read_at(document, uses[5]);
+    for (position, target) in [
+        (uses[1], outer),
+        (uses[2], inner),
+        (uses[3], outer),
+        (uses[4], outer),
+    ] {
+        let start = u64::try_from(position).unwrap();
+        read(document, start, start + 4, target);
+        no_resolved_read_at(document, position + 5);
+    }
+    let header = u64::try_from(source.find("with item.value").unwrap() + 5).unwrap();
+    read(document, header, header + 4, outer);
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .count(),
+        2
+    );
+    assert!(
+        !document
+            .relations
+            .iter()
+            .any(|edge| edge.predicate == RelationPredicate::Calls)
+    );
+}
+
+#[test]
+fn escaped_triple_values_stay_literal_beside_a_real_parameter_read() {
+    for (prefix, literal) in [("", false), (r"\", true), (r"\\", false), (r"\\\", false)] {
+        let source = [
+            "{{#each values as |item|}}",
+            prefix,
+            "{{{item.name}}} {{item.name}}{{/each}}",
+        ]
+        .concat();
+        let result = output(source.as_bytes(), "utf-8");
+        let document = result.document();
+        let declaration = u64::try_from(source.find("as |item|").unwrap() + 4).unwrap();
+        let item = definition(document, declaration, declaration + 4, "item");
+        let first = u64::try_from(source.find("item.name").unwrap()).unwrap();
+        let genuine = u64::try_from(source.rfind("item.name").unwrap()).unwrap();
+        read(document, genuine, genuine + 4, item);
+        if !literal {
+            read(document, first, first + 4, item);
+            continue;
+        }
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Read
+                    && site.source.span().start_byte() < first + 4
+                    && site.source.span().end_byte() > first),
+            "{source}"
+        );
+        assert!(
+            !document
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo
+                    && edge.evidence.source.as_ref().is_some_and(|source| source
+                        .span()
+                        .start_byte()
+                        < first + 4
+                        && source.span().end_byte() > first)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn data_paths_stay_unresolved_beside_same_named_lexical_parameters() {
     let source = "{{#each values as |last index|}}{{last}} {{index}} {{@last}} {{@index}} {{@../last}} {{@../../index}}{{/each}}";
     let result = output(source.as_bytes(), "utf-8");
@@ -565,6 +713,13 @@ fn invalid_ambiguous_and_inverse_blocks_keep_source_without_resolved_parameter_r
         "{{#each values as |item|}}{{item.name}}{{else}}{{item.name}}{{/each}}",
         "{{#each values as |item|}}{{item.name}}",
         "{{#each values as |item|}}{{item.name}{{/each}}",
+        "{{#each values as |item|}}{{{item.name}}{{/each}}",
+        "{{#each values as |item|}}{{{}}}{{item.name}}{{/each}}",
+        "{{#each values as |item|}}{{{~item.name}}}{{/each}}",
+        "{{#each values as |item|}}{{{item.name~}}}{{/each}}",
+        "{{#each values as |item|}}{{#noop}}{{item.name}}{{/other}}{{/each}}",
+        "{{#each values as |item item|}}{{{item.name}}}{{/each}}",
+        "{{#each values as |item|}}{{{item.name}}}{{else}}{{item.name}}{{/each}}",
         "<!DOCTYPE palette [<!ENTITY shade \"blue\">]><palette>{{#each values as |item|}}{{item.name}}{{/each}}</palette>",
     ] {
         let result = output(source.as_bytes(), "utf-8");

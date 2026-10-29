@@ -71,7 +71,29 @@
          $.identifier,
        ),
  
-@@ -298,7 +318,7 @@
+@@ -278,10 +298,17 @@
+       seq(field("key", $.identifier), "=", field("value", $._expression)),
+ 
+     mustache_statement: ($) =>
+-      seq(
+-        choice("{{", "{{~"),
+-        choice($._expression, $.helper_invocation),
+-        choice("}}", "~}}"),
++      choice(
++        seq(
++          choice("{{", "{{~"),
++          choice($._expression, $.helper_invocation),
++          choice("}}", "~}}"),
++        ),
++        seq(
++          choice("{{{", "{{~{"),
++          choice($._expression, $.helper_invocation),
++          choice("}}}", "}~}}"),
++        ),
+       ),
+ 
+     sub_expression: ($) =>
+@@ -298,7 +325,7 @@
  
      helper_invocation: ($) =>
        seq(
@@ -80,16 +102,18 @@
          $._arguments,
        ),
  
-@@ -309,7 +329,7 @@
+@@ -309,8 +336,8 @@
      block_statement_start: ($) =>
        seq(
          choice("{{#", "{{~#"),
 -        field("path", $.identifier),
+-        $._arguments,
 +        field("path", choice($.identifier, $.data_path_expression)),
-         $._arguments,
++        optional($._arguments),
          optional($.block_params),
          choice("}}", "~}}"),
-@@ -318,7 +338,7 @@
+       ),
+@@ -318,7 +345,7 @@
      block_statement_end: ($) =>
        seq(
          choice("{{/", "{{~/"),

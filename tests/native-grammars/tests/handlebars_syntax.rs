@@ -12,6 +12,12 @@ const ORIGINAL: &[u8] = include_bytes!(
 const SKETCH_PALETTE: &[u8] = include_bytes!(
     "../../../crates/rootlight-adapter-treesitter/tests/fixtures/handlebars/open-color.sketchpalette.hbs"
 );
+const OPENZEPPELIN_CONTRACT: &[u8] = include_bytes!(
+    "../../../crates/rootlight-adapter-treesitter/tests/fixtures/handlebars/openzeppelin/contract.hbs"
+);
+const OPENZEPPELIN_PAGE: &[u8] = include_bytes!(
+    "../../../crates/rootlight-adapter-treesitter/tests/fixtures/handlebars/openzeppelin/page.hbs"
+);
 
 fn parse(source: &[u8]) -> Tree {
     let mut parser = Parser::new();
@@ -151,6 +157,64 @@ fn original_sketch_palette_preserves_the_parent_data_argument() {
 }
 
 #[test]
+fn original_openzeppelin_templates_parse_completely_without_block_parameters() {
+    for (name, source, bytes) in [
+        ("contract", OPENZEPPELIN_CONTRACT, 2870),
+        ("page", OPENZEPPELIN_PAGE, 137),
+    ] {
+        assert_eq!(source.len(), bytes, "{name}");
+        let tree = clean(source);
+        let all = nodes(&tree);
+        assert!(
+            all.iter().any(|node| node.kind() == "block_statement"),
+            "{name}"
+        );
+        assert!(
+            !all.iter().any(|node| node.kind() == "block_params"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn triple_values_and_zero_argument_blocks_keep_existing_value_node_shapes() {
+    for source in [
+        "{{#noop}}{{{item.name}}}{{/noop}}",
+        "{{~#noop~}}{{~{item.name}~}}{{~/noop~}}",
+    ] {
+        let tree = clean(source.as_bytes());
+        let start = source.find("item.name").unwrap();
+        let head = identifier(&tree, start..start + 4);
+        let path = head.parent().unwrap();
+        assert_eq!(path.kind(), "path_expression");
+        assert_eq!(path.parent().unwrap().kind(), "mustache_statement");
+        assert_eq!(enclosing_block(head).kind(), "block_statement");
+        assert!(
+            !nodes(&tree)
+                .iter()
+                .any(|node| node.kind() == "block_params")
+        );
+    }
+    for (prefix, literal) in [("", false), (r"\", true), (r"\\", false), (r"\\\", false)] {
+        let source = [prefix, "{{{item.name}}} {{{item.name}}}"].concat();
+        let tree = clean(source.as_bytes());
+        let first = source.find("item.name").unwrap();
+        assert_eq!(
+            nodes(&tree)
+                .iter()
+                .filter(
+                    |node| node.kind() == "identifier" && node.byte_range() == (first..first + 4)
+                )
+                .count(),
+            if literal { 0 } else { 1 },
+            "{source}"
+        );
+        let genuine = source.rfind("item.name").unwrap();
+        identifier(&tree, genuine..genuine + 4);
+    }
+}
+
+#[test]
 fn data_paths_keep_their_whole_token_and_reject_incomplete_or_split_forms() {
     for data in ["@last", "@index", "@../last", "@../../index"] {
         let source = ["{{", data, "}}"].concat();
@@ -199,6 +263,11 @@ fn truncated_template_and_markup_require_native_recovery() {
         b"{{#each colors as |color|}}{{color.name}}".as_slice(),
         b"<?xml version=\"1.0\"".as_slice(),
         b"{{#each values as |item|}}{{item.name}{{/each}}".as_slice(),
+        b"{{{item.name}}".as_slice(),
+        b"{{{}}}".as_slice(),
+        b"{{{~item.name}}}".as_slice(),
+        b"{{{item.name~}}}".as_slice(),
+        b"{{#noop}}{{item.name}}".as_slice(),
         br#"<!DOCTYPE palette [<!ENTITY shade "blue">]><palette/>"#.as_slice(),
     ] {
         let tree = parse(source);

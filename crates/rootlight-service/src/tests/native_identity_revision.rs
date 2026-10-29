@@ -73,6 +73,19 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         predecessor_parent_data_grammar.as_bytes(),
     ])
     .unwrap();
+    let predecessor_triple_block_grammar = handlebars_grammar(Some((
+        "d0fc746399aaaa9476a76e8873ff2da190d23bce0d7b6880933343f8f87215a2",
+        "2419bda4ca199228bc47a1ad621585578e9a98b70b7e795f678c9012a0aa05db",
+    )));
+    assert_ne!(predecessor_triple_block_grammar, grammar);
+    let predecessor_triple_block_parser = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        ANALYZER_BINARY_SEED,
+        predecessor_triple_block_grammar.as_bytes(),
+    ])
+    .unwrap();
     let predecessor_parser = hash_static_components(&[
         PARSER_PROVIDER_SET_SEED,
         TREE_SITTER_ADAPTER_VERSION.as_bytes(),
@@ -223,6 +236,16 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
     for (changed_key, predecessor, expected) in [
         (
             grammar_key,
+            predecessor_triple_block_grammar,
+            ArtifactDecisionKind::Rebuild,
+        ),
+        (
+            adapter_key,
+            predecessor_triple_block_parser,
+            ArtifactDecisionKind::Rebuild,
+        ),
+        (
+            grammar_key,
             predecessor_parent_data_grammar,
             ArtifactDecisionKind::Rebuild,
         ),
@@ -331,8 +354,12 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         .unwrap();
         if changed_key == grammar_key {
             assert!(
-                [predecessor_escaped_grammar, predecessor_parent_data_grammar]
-                    .contains(&predecessor)
+                [
+                    predecessor_escaped_grammar,
+                    predecessor_parent_data_grammar,
+                    predecessor_triple_block_grammar,
+                ]
+                .contains(&predecessor)
             );
             assert_eq!(
                 previous.iter().find(|input| input.key() == grammar_key),

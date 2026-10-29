@@ -22,6 +22,10 @@ without identifier children. Query captures retain unavailable runtime reads;
 their data names do not participate in lexical block-parameter binding. This
 does not add ordinary relative paths or evaluate runtime data values.
 
+Triple-stash expressions retain the same value node shape with paired raw-output
+delimiters, including their written strip markers. Block headers may omit
+arguments. Neither syntax form establishes helper dispatch or runtime values.
+
 The grammar does not verify matching block names or template runtime behavior.
 The adapter separately validates block names and scopes before admitting block
 parameters and lexical reads. Helper dispatch, property identity, inverse

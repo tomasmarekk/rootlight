@@ -298,10 +298,17 @@ export default grammar({
       seq(field("key", $.identifier), "=", field("value", $._expression)),
 
     mustache_statement: ($) =>
-      seq(
-        choice("{{", "{{~"),
-        choice($._expression, $.helper_invocation),
-        choice("}}", "~}}"),
+      choice(
+        seq(
+          choice("{{", "{{~"),
+          choice($._expression, $.helper_invocation),
+          choice("}}", "~}}"),
+        ),
+        seq(
+          choice("{{{", "{{~{"),
+          choice($._expression, $.helper_invocation),
+          choice("}}}", "}~}}"),
+        ),
       ),
 
     sub_expression: ($) =>
@@ -330,7 +337,7 @@ export default grammar({
       seq(
         choice("{{#", "{{~#"),
         field("path", choice($.identifier, $.data_path_expression)),
-        $._arguments,
+        optional($._arguments),
         optional($.block_params),
         choice("}}", "~}}"),
       ),

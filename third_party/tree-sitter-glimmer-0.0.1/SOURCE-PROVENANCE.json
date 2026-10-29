@@ -24,12 +24,13 @@
   "product_qualification": false,
   "preferred_source": {
     "patch": "patches/written-prologue.patch",
-    "purpose": "Retain opaque written processing instructions and simple DOCTYPE declarations; separate strip delimiters from names; distinguish inline escaped starts from active mustaches under official trailing-backslash rules; tokenize contiguous runtime data paths without lexical identifier children. Internal subsets remain unsupported.",
+    "purpose": "Retain opaque written processing instructions and simple DOCTYPE declarations; separate strip delimiters from names; distinguish inline escaped starts from active mustaches under official trailing-backslash rules; tokenize contiguous runtime data paths without lexical identifier children; admit paired triple-stash expressions and argumentless block headers. Internal subsets remain unsupported.",
     "abi": 15,
     "generated_files_hand_edited": false,
     "escape_rule_reference": "https://github.com/handlebars-lang/handlebars-parser/blob/c3c048f8fdd5039840351ef81aaa45309c9c66e1/src/handlebars.l",
     "escape_test_reference": "https://github.com/handlebars-lang/handlebars.js/blob/13a7a679910d2adbfe7f6fad61ce8f98426b0378/spec/basic.js",
-    "data_path_reference": "https://github.com/handlebars-lang/handlebars-parser/blob/c3c048f8fdd5039840351ef81aaa45309c9c66e1/src/handlebars.yy"
+    "data_path_reference": "https://github.com/handlebars-lang/handlebars-parser/blob/c3c048f8fdd5039840351ef81aaa45309c9c66e1/src/handlebars.yy",
+    "delimiter_rule_reference": "https://github.com/handlebars-lang/handlebars-parser/blob/c3c048f8fdd5039840351ef81aaa45309c9c66e1/src/handlebars.l"
   },
   "generation": {
     "tool": "tree-sitter-cli",
@@ -45,24 +46,24 @@
   },
   "active_inputs": {
     "grammar.js": {
-      "bytes": 10453,
-      "sha256": "2d872d0e5b7b67f89772ac2b0c607aa2db9563281b7eec1912a553514a2379ba"
+      "bytes": 10640,
+      "sha256": "df1f55bb0dcb6b30ba7320ab19ac9c0be7bfd31d8e44e7d633b4d90630f20d94"
     },
     "src/parser.c": {
-      "bytes": 214119,
-      "sha256": "2419bda4ca199228bc47a1ad621585578e9a98b70b7e795f678c9012a0aa05db"
+      "bytes": 256413,
+      "sha256": "324f36fea21e2ca04094714b8aa918ded6703852e35d5206842823d60e438da3"
     },
     "src/scanner.c": {
       "bytes": 6078,
       "sha256": "02e501be6b35c5be5650174974db9b0fc6aacc567285a6e2de7f408079651f68"
     },
     "src/node-types.json": {
-      "bytes": 15642,
-      "sha256": "f810d87cb502d335232559f8b9999c926b84f2b07286d2714ce129c6b9ed38bb"
+      "bytes": 15832,
+      "sha256": "577a049404ea2edef89b1b885d5e83a281538daa0af4bbc8a27b5f153f9804aa"
     },
     "src/grammar.json": {
-      "bytes": 30665,
-      "sha256": "1fde1e2f29e7a9f5450a77156485091668e5b57bffd4e54c2405d673bb74fb9a"
+      "bytes": 32109,
+      "sha256": "35724a3801a13c6fc6b3b2ec99099499b7d4d87ed437c307798fb23161d272ed"
     }
   }
 }
