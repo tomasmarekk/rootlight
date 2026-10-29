@@ -3,6 +3,262 @@
 //! a type query still refers to a value, not a same-named type declaration.
 
 use super::*;
+use rootlight_adapter_sdk::testkit::MockParseProvider;
+
+#[test]
+fn javascript_plain_formal_receivers_resolve_only_their_own_lexical_binding() {
+    let case = *CASES.iter().find(|case| case.name == "javascript").unwrap();
+    for (source, name, owner, receiver) in [
+        (
+            "function capitalize(text){\n    return text.charAt(0).toUpperCase() + text.slice(1);\n}\n\nmodule.exports = {capitalize};\n",
+            "text",
+            "capitalize",
+            "text.charAt",
+        ),
+        (
+            "function sendJson(response, status, value, contentType) {\n  response.writeHead(status, {\n    \"content-type\": `${contentType ?? \"application/json\"}; charset=utf-8`,\n    \"cache-control\": \"no-store\",\n  });\n  response.end(JSON.stringify(value));\n}\n",
+            "response",
+            "sendJson",
+            "response.writeHead",
+        ),
+        (
+            "const text = 0; function first(text) { return text.first(\"eval(code); with(other){}\"); } function second(text) { return text.second(); }",
+            "text",
+            "first",
+            "text.first",
+        ),
+        (
+            "const text = 0; function first(text) { return text.first(\"eval(code); with(other){}\"); } function second(text) { return text.second(); }",
+            "text",
+            "second",
+            "text.second",
+        ),
+    ] {
+        let provider = Arc::new(provider());
+        let analyzer = analyzer(&provider, case);
+        let fixture = Fixture::new(case, source.as_bytes());
+        let budget = limits();
+        let input = request(&fixture.snapshot, &fixture.source, case, &budget);
+        let (result, artifact) = analyzer
+            .analyze_and_capture(
+                &input,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let document = result.document();
+        let function = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == owner)
+            .unwrap();
+        let parameter = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.canonical_name == name
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(function.id))
+            })
+            .unwrap();
+        assert_eq!(
+            parameter.container,
+            Some(rootlight_ir::ContainerRef::Entity(function.id))
+        );
+        let start = u64::try_from(source.find(receiver).unwrap()).unwrap();
+        let end = start + u64::try_from(name.len()).unwrap();
+        let references = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 1);
+        let reference = references[0];
+        assert_eq!(
+            reference.target,
+            OccurrenceTarget::Resolved {
+                symbol: parameter.id
+            },
+            "{source}"
+        );
+        assert_eq!(reference.enclosing, Some(function.id));
+        assert_eq!(
+            reference.source.content_hash(),
+            content_hash(source.as_bytes())
+        );
+        assert!(document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(reference.id)
+                && edge.object == RelationEndpoint::Entity(parameter.id)
+                && edge.evidence.source.as_ref() == Some(&reference.source)
+        }));
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::CallSite
+                    || site.syntax_kind == "javascript.member_name.reference")
+                .all(|site| site.target
+                    != (OccurrenceTarget::Resolved {
+                        symbol: parameter.id
+                    }))
+        );
+        assert!(
+            document
+                .relations
+                .iter()
+                .all(|edge| edge.predicate != RelationPredicate::Calls)
+        );
+        let next = fixture.next_generation();
+        let next_input = request(&next.snapshot, &next.source, case, &budget);
+        let replay = analyzer
+            .analyze_from_artifact(
+                &next_input,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        let fresh = analyze(&analyzer, &next_input, &ExtensionSupport::default());
+        assert_eq!(replay.document(), fresh.document());
+        assert_eq!(replay.report(), fresh.report());
+    }
+}
+
+#[test]
+fn javascript_plain_formal_receivers_refuse_shadow_write_dynamic_and_nonordinary_bodies() {
+    let case = *CASES.iter().find(|case| case.name == "javascript").unwrap();
+    for source in [
+        "function read(text, text) { return text.charAt(0); }",
+        "function read(text = other) { return text.charAt(0); }",
+        "function read(...text) { return text.charAt(0); }",
+        "function read({text}) { return text.charAt(0); }",
+        "function read(text: string) { return text.charAt(0); }",
+        "function read(text) { var text = other; return text.charAt(0); }",
+        "function read(text) { const {text} = other; return text.charAt(0); }",
+        "function read(text) { text = other; return text.charAt(0); }",
+        "function read(text) { text += other; return text.charAt(0); }",
+        "function read(text) { text++; return text.charAt(0); }",
+        "function read(text) { ({text} = other); return text.charAt(0); }",
+        "function read(text) { { let text = other; text.charAt(0); } return text.charAt(0); }",
+        "function read(text) { try {} catch (text) { text.charAt(0); } return text.charAt(0); }",
+        "function read(text) { function nested(text) { return text.charAt(0); } return text.charAt(0); }",
+        "function read(text) { const nested = (text) => text.charAt(0); return text.charAt(0); }",
+        "function read(text) { eval(code); return text.charAt(0); }",
+        "function read(text) { \\u0065val(code); return text.charAt(0); }",
+        "function read(text) { with (other) {} return text.charAt(0); }",
+        "function read(text) { type text = string; return text.charAt(0); }",
+        "function read(text) { return text.charAt(0) + ; }",
+        "async function read(text) { return text.charAt(0); }",
+        "const read = function named(text) { return text.charAt(0); };",
+        "function same(text) { return text.charAt(0); } function same(text) { return text.slice(0); }",
+    ] {
+        let native = Arc::new(provider());
+        let fixture = Fixture::new(case, source.as_bytes());
+        let result = analyze(
+            &analyzer(&native, case),
+            &request(&fixture.snapshot, &fixture.source, case, &limits()),
+            &ExtensionSupport::default(),
+        );
+        assert!(
+            result
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| site.role == OccurrenceRole::Reference)
+                .all(|site| { !matches!(site.target, OccurrenceTarget::Resolved { .. }) }),
+            "{source}: {:#?}",
+            result.document().occurrences
+        );
+    }
+}
+
+#[test]
+fn javascript_plain_formal_receivers_require_complete_current_source() {
+    let case = *CASES.iter().find(|case| case.name == "javascript").unwrap();
+    let original = b"function read(text) { harmless(); return text.charAt(0); }";
+    let native = Arc::new(provider());
+    let fixture = Fixture::new(case, original);
+    let budget = limits();
+    let input = request(&fixture.snapshot, &fixture.source, case, &budget);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        native.as_ref(),
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let frontend = analyzer(&native, case);
+    let (_, artifact) = frontend
+        .analyze_and_capture(
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let changed = fixture.rewrite(b"function read(text) { eval(code); return text.charAt(0); }");
+    let stale_parser = MockParseProvider::new(
+        native.capabilities().clone(),
+        parsed.facts().to_vec(),
+        parsed.diagnostics().to_vec(),
+        parsed.report().coverage().clone(),
+    );
+    let stale = TreeSitterAnalyzer::new(
+        Arc::new(stale_parser),
+        producer_identity(),
+        language(case),
+        case.frontend,
+        content_hash(BINARY_SEED),
+    )
+    .unwrap();
+    let current = request(&changed.snapshot, &changed.source, case, &budget);
+    let result = execute_analysis(
+        &stale,
+        &current,
+        ExtensionSupport::default(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Reference)
+            .all(|site| !matches!(site.target, OccurrenceTarget::Resolved { .. }))
+    );
+    assert!(
+        matches!(frontend.analyze_from_artifact(&current, &artifact, ExtensionSupport::default(), MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback, &deadline()), Err(AdapterError::ProviderFailed { code }) if code.as_str() == "treesitter-structural-artifact-mismatch")
+    );
+    let included = AnalysisRequest::new_with_parse_context(
+        GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+        language(case),
+        EncodingId::utf8(),
+        vec![IncludedRange::new(fixture.source.span(), language(case))],
+        AnalysisTier::TierD,
+        build_context(),
+        &budget,
+    )
+    .unwrap()
+    .with_generated_status(false);
+    let result = analyze(&frontend, &included, &ExtensionSupport::default());
+    assert!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Reference)
+            .all(|site| !matches!(site.target, OccurrenceTarget::Resolved { .. }))
+    );
+}
 
 #[test]
 fn ecmascript_escaped_definitions_preserve_authored_spans_and_replay() {

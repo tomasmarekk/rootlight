@@ -58,6 +58,7 @@ mod java_local_receivers;
 mod java_parameters;
 mod javascript_const_receivers;
 mod javascript_default_class_exports;
+mod javascript_formal_receivers;
 mod javascript_method_vars;
 mod json_schema;
 mod julia;
@@ -1880,6 +1881,13 @@ fn preflight_lowering_limits(
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
                 field_relation_derivations = checked_add(field_relation_derivations, 3)?;
             }
+            if request.language().as_str() == "javascript"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && javascript_formal_receivers::candidate(fact)
+            {
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+            }
             if let Some(detail) = source_reference_gap(fact) {
                 if parse_output.report().coverage().status() == CoverageStatus::Complete
                     || (request.language().as_str() == "html"
@@ -3152,6 +3160,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 &facts_by_id,
                 self.full_source,
                 |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let javascript_formal_receivers = if self.request.language().as_str() == "javascript"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(javascript_formal_receivers::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                javascript_formal_receivers::CurrentSource {
+                    reference: self.full_source,
+                    view: self.source_view,
+                    original: self.request.source().bytes(),
+                    maximum: self
+                        .request
+                        .limits()
+                        .max_syntax_nodes()
+                        .saturating_mul(128)
+                        .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                },
                 cancellation,
             )?)
         } else {
@@ -5176,6 +5207,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence).map_err(|_| {
                         provider_failure("javascript-default-class-export-reference-identity")
                     })?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(targets) = &javascript_formal_receivers
+                    && let Some(symbol) = targets.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("javascript-formal-receiver-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
