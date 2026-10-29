@@ -26,6 +26,56 @@ pub(super) struct RefusalObservation {
     limit: u64,
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct ResolutionRefusalObservation {
+    scope: &'static str,
+    sidecar_input_scope: &'static str,
+    repository: RepositoryId,
+    generation: GenerationId,
+    before: ResolutionPlanObservation,
+    rejected: ResolutionPlanObservation,
+    reserved_sidecars: durable::restore_envelope::ReservedSidecarInputs,
+    limit: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolutionPlanObservation {
+    files: u64,
+    entities: u64,
+    occurrences: u64,
+    relations: u64,
+    provenance: u64,
+    source_mappings: u64,
+    coverage: u64,
+    skipped_regions: u64,
+    diagnostics: u64,
+    extensions: u64,
+    source_refs: u64,
+    identity_registry_rows: u64,
+    memory: durable::OracleRestoreMemoryBreakdown,
+}
+
+impl ResolutionPlanObservation {
+    fn new(plan: OracleReadMemoryPlan, memory: durable::OracleRestoreMemoryBreakdown) -> Self {
+        let stats = plan.stats();
+        Self {
+            files: stats.files(),
+            entities: stats.entities(),
+            occurrences: stats.occurrences(),
+            relations: stats.relations(),
+            provenance: stats.provenance(),
+            source_mappings: stats.source_mappings(),
+            coverage: stats.coverage(),
+            skipped_regions: stats.skipped_regions(),
+            diagnostics: stats.diagnostics(),
+            extensions: stats.extensions(),
+            source_refs: stats.source_refs(),
+            identity_registry_rows: plan.identity_registry_rows(),
+            memory,
+        }
+    }
+}
+
 pub(super) struct FileRestoreCapacity {
     file: FileId,
     observed: u64,
@@ -855,6 +905,23 @@ impl FinalAdmission {
                 map_resolution_error(ResolutionError::InvalidDocument(error), cancellation)
             })?;
         check_cancellation(cancellation)?;
+        // The extra census is opt-in telemetry; its workspace obeys the same
+        // admission controls and is released before the undo owner is captured.
+        let before = if analysis_profile_enabled() {
+            let measured = OracleLayoutFragment::measure(&document, 0, context, &mut |bytes| {
+                self.workspace.admit(bytes, admission)
+            })
+            .map_err(|error| catalog(error, cancellation))?;
+            let plan = measured
+                .read_memory_plan(context)
+                .map_err(|error| map_catalog_error(&error, cancellation))?;
+            Some(ResolutionPlanObservation::new(
+                plan,
+                self.envelope.breakdown(plan)?,
+            ))
+        } else {
+            None
+        };
         let mut undo_bytes = 0_u64;
         let undo = resolver_restore_undo::Undo::capture(&document, cancellation, &mut |bytes| {
             undo_bytes = undo_bytes
@@ -886,11 +953,10 @@ impl FinalAdmission {
                 self.workspace.admit(bytes, admission)
             })
             .map_err(|error| catalog(error, cancellation))?;
-        let observed = self.envelope.observed(
-            measured
-                .read_memory_plan(context)
-                .map_err(|error| map_catalog_error(&error, cancellation))?,
-        )?;
+        let rejected_plan = measured
+            .read_memory_plan(context)
+            .map_err(|error| map_catalog_error(&error, cancellation))?;
+        let observed = self.envelope.observed(rejected_plan)?;
         drop(measured);
         if observed <= durable::oracle_restore_memory_limit() {
             drop(undo);
@@ -943,6 +1009,24 @@ impl FinalAdmission {
         )?;
         if observed > durable::oracle_restore_memory_limit() {
             return Err(FirstSliceError::Identity);
+        }
+        if let Some(before) = before {
+            let observation = ResolutionRefusalObservation {
+                scope: "prospective_full_restore_model_not_heap_or_rss",
+                sidecar_input_scope: "reserved_envelope_not_actual_written_descriptors",
+                repository: document.repository,
+                generation: document.generation,
+                before,
+                rejected: ResolutionPlanObservation::new(
+                    rejected_plan,
+                    self.envelope.breakdown(rejected_plan)?,
+                ),
+                reserved_sidecars: self.envelope.reserved_sidecar_inputs(),
+                limit: durable::oracle_restore_memory_limit(),
+            };
+            with_analysis_profile(|profile| {
+                profile.resolution_restore_refusal = Some(observation);
+            });
         }
         Ok(document)
     }

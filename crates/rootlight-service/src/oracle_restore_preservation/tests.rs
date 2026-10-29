@@ -1046,6 +1046,17 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
     let limit = envelope
         .observed(before.read_memory_plan(&context).unwrap())
         .unwrap();
+    let original_plan =
+        OracleLayoutFragment::measure(
+            &original,
+            0,
+            &context,
+            &mut |_| Ok::<_, FirstSliceError>(()),
+        )
+        .unwrap()
+        .read_memory_plan(&context)
+        .unwrap();
+    let expected_before = serde_json::to_value(envelope.breakdown(original_plan).unwrap()).unwrap();
     let limits = resolution_limits_for_occurrences(original.occurrences.len()).unwrap();
     let candidate = apply_bounded_resolution(
         original.clone(),
@@ -1059,9 +1070,10 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
         Ok::<_, FirstSliceError>(())
     })
     .unwrap();
-    let observed = envelope
-        .observed(after.read_memory_plan(&context).unwrap())
-        .unwrap();
+    let rejected_plan = after.read_memory_plan(&context).unwrap();
+    let observed = envelope.observed(rejected_plan).unwrap();
+    let expected_rejected =
+        serde_json::to_value(envelope.breakdown(rejected_plan).unwrap()).unwrap();
     assert!(
         observed > limit,
         "actual resolver growth must exceed its bounded warning floor: {observed} <= {limit}"
@@ -1071,8 +1083,9 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
         workspace: Workspace::default(),
         expected_final_plan: None,
     };
-    let mut charged = 0;
-    let restored = durable::with_restore_test_ceiling(limit, || {
+    assert!(!analysis_profile_enabled());
+    let mut unprofiled_charge = 0;
+    let unprofiled = durable::with_restore_test_ceiling(limit, || {
         admission.resolve(
             original.clone(),
             limits,
@@ -1081,13 +1094,34 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
             &context,
             &cancellation,
             &mut |bytes| {
-                charged += bytes;
+                unprofiled_charge += bytes;
                 Ok(())
             },
         )
     })
     .unwrap();
+    admission.workspace = Workspace::default();
+    let mut charged = 0;
+    let (restored, profile) = capture_first_slice_analysis_profile(|| {
+        durable::with_restore_test_ceiling(limit, || {
+            admission.resolve(
+                original.clone(),
+                limits,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+                &cancellation,
+                &mut |bytes| {
+                    charged += bytes;
+                    Ok(())
+                },
+            )
+        })
+        .unwrap()
+    });
     assert!(charged > 0);
+    assert_eq!(charged, unprofiled_charge);
+    assert_eq!(restored, unprofiled);
     assert_eq!(restored.files, original.files);
     assert_eq!(restored.entities, original.entities);
     assert_eq!(restored.occurrences, original.occurrences);
@@ -1095,6 +1129,87 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
     assert_eq!(restored.provenance, original.provenance);
     assert_eq!(restored.source_mappings, original.source_mappings);
     assert_eq!(restored.extensions, original.extensions);
+    let observation = profile.resolution_restore_refusal.as_ref().unwrap();
+    assert_eq!(observation.repository, original.repository);
+    assert_eq!(observation.generation, original.generation);
+    assert_eq!(observation.limit, limit);
+    assert!(observation.before.memory.total_bytes <= limit);
+    assert_eq!(observation.rejected.memory.total_bytes, observed);
+    assert!(observation.rejected.relations > observation.before.relations);
+    assert!(observation.rejected.provenance > observation.before.provenance);
+    let encoded = serde_json::to_value(&profile).unwrap();
+    let refusal = &encoded["resolution_restore_refusal"];
+    assert_eq!(refusal["before"]["memory"], expected_before);
+    assert_eq!(refusal["rejected"]["memory"], expected_rejected);
+    for (key, before, rejected) in [
+        (
+            "files",
+            original_plan.stats().files(),
+            rejected_plan.stats().files(),
+        ),
+        (
+            "entities",
+            original_plan.stats().entities(),
+            rejected_plan.stats().entities(),
+        ),
+        (
+            "occurrences",
+            original_plan.stats().occurrences(),
+            rejected_plan.stats().occurrences(),
+        ),
+        (
+            "relations",
+            original_plan.stats().relations(),
+            rejected_plan.stats().relations(),
+        ),
+        (
+            "provenance",
+            original_plan.stats().provenance(),
+            rejected_plan.stats().provenance(),
+        ),
+        (
+            "source_mappings",
+            original_plan.stats().source_mappings(),
+            rejected_plan.stats().source_mappings(),
+        ),
+        (
+            "coverage",
+            original_plan.stats().coverage(),
+            rejected_plan.stats().coverage(),
+        ),
+        (
+            "skipped_regions",
+            original_plan.stats().skipped_regions(),
+            rejected_plan.stats().skipped_regions(),
+        ),
+        (
+            "diagnostics",
+            original_plan.stats().diagnostics(),
+            rejected_plan.stats().diagnostics(),
+        ),
+        (
+            "extensions",
+            original_plan.stats().extensions(),
+            rejected_plan.stats().extensions(),
+        ),
+        (
+            "source_refs",
+            original_plan.stats().source_refs(),
+            rejected_plan.stats().source_refs(),
+        ),
+        (
+            "identity_registry_rows",
+            original_plan.identity_registry_rows(),
+            rejected_plan.identity_registry_rows(),
+        ),
+    ] {
+        assert_eq!(refusal["before"][key], before, "{key}");
+        assert_eq!(refusal["rejected"][key], rejected, "{key}");
+    }
+    let encoded = serde_json::to_string(&profile).unwrap();
+    for file in &original.files {
+        assert!(!encoded.contains(&file.path));
+    }
     assert!(
         restored
             .diagnostics
@@ -1120,4 +1235,38 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
                 CoverageStatus::Unknown | CoverageStatus::Bounded
             ))
     );
+    let (accepted, profile) = capture_first_slice_analysis_profile(|| {
+        durable::with_restore_test_ceiling(observed, || {
+            admission.resolve(
+                original.clone(),
+                limits,
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+                &cancellation,
+                &mut |_| Ok(()),
+            )
+        })
+        .unwrap()
+    });
+    assert_eq!(accepted, candidate);
+    assert!(profile.resolution_restore_refusal.is_none());
+}
+
+#[test]
+fn unchanged_index_has_no_resolution_restore_refusal_observation() {
+    let (_storage, root, paths) = fixture();
+    let cancellation = Cancellation::new();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &cancellation).unwrap();
+    let first = service
+        .index_repository(root.path(), &cancellation)
+        .unwrap();
+    let (unchanged, profile) = capture_first_slice_analysis_profile(|| {
+        service
+            .index_repository(root.path(), &cancellation)
+            .unwrap()
+    });
+    assert_eq!(unchanged, first);
+    assert!(profile.resolution_restore_refusal.is_none());
+    assert!(serde_json::to_value(profile).unwrap()["resolution_restore_refusal"].is_null());
 }
