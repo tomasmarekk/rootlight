@@ -9,6 +9,9 @@ use tree_sitter::{Node, Parser, Tree};
 const ORIGINAL: &[u8] = include_bytes!(
     "../../../crates/rootlight-adapter-treesitter/tests/fixtures/handlebars/open-color.inkscape.hbs"
 );
+const SKETCH_PALETTE: &[u8] = include_bytes!(
+    "../../../crates/rootlight-adapter-treesitter/tests/fixtures/handlebars/open-color.sketchpalette.hbs"
+);
 
 fn parse(source: &[u8]) -> Tree {
     let mut parser = Parser::new();
@@ -118,6 +121,58 @@ fn original_template_preserves_exact_block_parameters_and_read_shapes() {
     );
     assert_eq!(helper.parent().unwrap().kind(), "sub_expression");
     assert_eq!(enclosing_block(hex), blocks[2]);
+}
+
+#[test]
+fn original_sketch_palette_preserves_the_parent_data_argument() {
+    assert_eq!(SKETCH_PALETTE.len(), 372);
+    let tree = clean(SKETCH_PALETTE);
+    let parent_data: Vec<_> = nodes(&tree)
+        .into_iter()
+        .filter(|node| node.is_named() && node.byte_range() == (297..305))
+        .collect();
+    assert_eq!(parent_data.len(), 1);
+    assert_eq!(parent_data[0].kind(), "data_path_expression");
+    assert_eq!(
+        parent_data[0].utf8_text(SKETCH_PALETTE).unwrap(),
+        "@../last"
+    );
+    assert_eq!(parent_data[0].parent().unwrap().kind(), "helper_invocation");
+    for (span, name) in [
+        (78..83, "color"),
+        (84..94, "colorIndex"),
+        (126..129, "hex"),
+        (169..172, "rgb"),
+    ] {
+        let parameter = identifier(&tree, span);
+        assert_eq!(parameter.utf8_text(SKETCH_PALETTE).unwrap(), name);
+        assert_eq!(parameter.parent().unwrap().kind(), "block_params");
+    }
+}
+
+#[test]
+fn data_paths_keep_their_whole_token_and_reject_incomplete_or_split_forms() {
+    for data in ["@last", "@index", "@../last", "@../../index"] {
+        let source = ["{{", data, "}}"].concat();
+        let tree = clean(source.as_bytes());
+        let paths: Vec<_> = nodes(&tree)
+            .into_iter()
+            .filter(|node| node.kind() == "data_path_expression")
+            .collect();
+        assert_eq!(paths.len(), 1, "{source}");
+        assert_eq!(paths[0].byte_range(), 2..2 + data.len(), "{source}");
+        assert_eq!(paths[0].utf8_text(source.as_bytes()).unwrap(), data);
+        assert_eq!(paths[0].parent().unwrap().kind(), "mustache_statement");
+    }
+    for data in ["@", "@../", "@.. /last", "@../ last", "@@last"] {
+        let source = ["{{", data, "}}"].concat();
+        let tree = parse(source.as_bytes());
+        assert!(
+            tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+    }
 }
 
 #[test]

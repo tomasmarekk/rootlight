@@ -13,6 +13,7 @@ const HANDLEBARS: LanguageCase = LanguageCase {
     body_after: "",
 };
 const ORIGINAL: &[u8] = include_bytes!("../fixtures/handlebars/open-color.inkscape.hbs");
+const SKETCH_PALETTE: &[u8] = include_bytes!("../fixtures/handlebars/open-color.sketchpalette.hbs");
 
 fn output(raw: &[u8], encoding: &str) -> AnalysisOutput {
     let provider = Arc::new(provider());
@@ -131,6 +132,40 @@ fn no_resolved_read_at(document: &rootlight_ir::NormalizedIrDocument, start: usi
         site.role == OccurrenceRole::Read
             && site.source.span().start_byte() == u64::try_from(start).unwrap()
             && matches!(site.target, OccurrenceTarget::Resolved { .. })
+    }));
+}
+
+fn unresolved_data_read(document: &rootlight_ir::NormalizedIrDocument, start: u64, end: u64) {
+    let sites: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Read
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == end
+        })
+        .collect();
+    assert_eq!(sites.len(), 1, "one full-token data Read@{start}..{end}");
+    assert_eq!(
+        sites[0].syntax_kind,
+        "handlebars.runtime_value_unavailable.reference"
+    );
+    assert!(matches!(
+        sites[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+    assert!(!document.occurrences.iter().any(|site| {
+        site.role == OccurrenceRole::Read
+            && site.source.span().start_byte() < end
+            && site.source.span().end_byte() > start
+            && matches!(site.target, OccurrenceTarget::Resolved { .. })
+    }));
+    assert!(!document.relations.iter().any(|edge| {
+        edge.predicate == RelationPredicate::RefersTo
+            && (edge.subject == RelationEndpoint::Occurrence(sites[0].id)
+                || edge.evidence.source.as_ref().is_some_and(|source| {
+                    source.span().start_byte() < end && source.span().end_byte() > start
+                }))
     }));
 }
 
@@ -264,6 +299,94 @@ fn original_template_retains_three_parameter_definitions_and_authored_read_relat
             .iter()
             .any(|gap| { gap.detail.contains("handlebars") && gap.detail.contains("unavailable") })
     );
+}
+
+#[test]
+fn original_sketch_palette_keeps_lexical_parameters_separate_from_parent_data() {
+    assert_eq!(SKETCH_PALETTE.len(), 372);
+    let result = output(SKETCH_PALETTE, "utf-8");
+    let document = result.document();
+    let color = definition(document, 78, 83, "color");
+    let color_index = definition(document, 84, 94, "colorIndex");
+    let hex = definition(document, 126, 129, "hex");
+    let rgb = definition(document, 169, 172, "rgb");
+    assert_eq!(
+        [color, color_index, hex, rgb]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        4
+    );
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .count(),
+        4
+    );
+    for (start, end, symbol) in [
+        (112, 117, color),
+        (160, 163, hex),
+        (203, 206, rgb),
+        (229, 232, rgb),
+        (254, 257, rgb),
+    ] {
+        read(document, start, end, symbol);
+    }
+    for (start, end) in [(291, 296), (297, 305)] {
+        unresolved_data_read(document, start, end);
+    }
+}
+
+#[test]
+fn data_paths_stay_unresolved_beside_same_named_lexical_parameters() {
+    let source = "{{#each values as |last index|}}{{last}} {{index}} {{@last}} {{@index}} {{@../last}} {{@../../index}}{{/each}}";
+    let result = output(source.as_bytes(), "utf-8");
+    let document = result.document();
+    let declaration = u64::try_from(source.find("as |last index|").unwrap() + 4).unwrap();
+    let last = definition(document, declaration, declaration + 4, "last");
+    let index = definition(document, declaration + 5, declaration + 10, "index");
+    for (token, symbol) in [("{{last}}", last), ("{{index}}", index)] {
+        let start = u64::try_from(source.find(token).unwrap() + 2).unwrap();
+        read(
+            document,
+            start,
+            start + u64::try_from(token.len() - 4).unwrap(),
+            symbol,
+        );
+    }
+    for data in ["@last", "@index", "@../last", "@../../index"] {
+        let start = u64::try_from(source.find(data).unwrap()).unwrap();
+        unresolved_data_read(document, start, start + u64::try_from(data.len()).unwrap());
+    }
+}
+
+#[test]
+fn malformed_data_paths_refuse_lexical_binding_for_the_file() {
+    for data in ["@", "@../", "@.. /last", "@../ last", "@@last"] {
+        let source = [
+            "{{#each values as |item|}}{{",
+            data,
+            "}} {{item.name}}{{/each}}",
+        ]
+        .concat();
+        let result = output(source.as_bytes(), "utf-8");
+        let document = result.document();
+        assert!(
+            !document.occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::Read
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            }),
+            "{source}"
+        );
+        assert!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.detail.contains("handlebars") && gap.detail.contains("unavailable")
+            }),
+            "{source}"
+        );
+    }
 }
 
 #[test]

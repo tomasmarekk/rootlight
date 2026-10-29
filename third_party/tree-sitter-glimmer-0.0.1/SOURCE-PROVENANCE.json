@@ -24,11 +24,12 @@
   "product_qualification": false,
   "preferred_source": {
     "patch": "patches/written-prologue.patch",
-    "purpose": "Retain opaque written processing instructions and simple DOCTYPE declarations; separate strip delimiters from names; distinguish inline escaped starts from active mustaches under the official trailing-backslash rules. Internal subsets remain unsupported.",
+    "purpose": "Retain opaque written processing instructions and simple DOCTYPE declarations; separate strip delimiters from names; distinguish inline escaped starts from active mustaches under official trailing-backslash rules; tokenize contiguous runtime data paths without lexical identifier children. Internal subsets remain unsupported.",
     "abi": 15,
     "generated_files_hand_edited": false,
     "escape_rule_reference": "https://github.com/handlebars-lang/handlebars-parser/blob/c3c048f8fdd5039840351ef81aaa45309c9c66e1/src/handlebars.l",
-    "escape_test_reference": "https://github.com/handlebars-lang/handlebars.js/blob/13a7a679910d2adbfe7f6fad61ce8f98426b0378/spec/basic.js"
+    "escape_test_reference": "https://github.com/handlebars-lang/handlebars.js/blob/13a7a679910d2adbfe7f6fad61ce8f98426b0378/spec/basic.js",
+    "data_path_reference": "https://github.com/handlebars-lang/handlebars-parser/blob/c3c048f8fdd5039840351ef81aaa45309c9c66e1/src/handlebars.yy"
   },
   "generation": {
     "tool": "tree-sitter-cli",
@@ -44,24 +45,24 @@
   },
   "active_inputs": {
     "grammar.js": {
-      "bytes": 10098,
-      "sha256": "aafbf637a43de53192f4ded8ffd1f9333075700278d9fe6dfb8d390082e6c7bb"
+      "bytes": 10453,
+      "sha256": "2d872d0e5b7b67f89772ac2b0c607aa2db9563281b7eec1912a553514a2379ba"
     },
     "src/parser.c": {
-      "bytes": 214830,
-      "sha256": "e673a66615c1837468316407d2ddc9d250b3ae48371e68e8dcb2496f52118be9"
+      "bytes": 214119,
+      "sha256": "2419bda4ca199228bc47a1ad621585578e9a98b70b7e795f678c9012a0aa05db"
     },
     "src/scanner.c": {
       "bytes": 6078,
       "sha256": "02e501be6b35c5be5650174974db9b0fc6aacc567285a6e2de7f408079651f68"
     },
     "src/node-types.json": {
-      "bytes": 14835,
-      "sha256": "965eb528614f4778ef326e3411718257ed02643318e64b2ea8faa88a777a8bd8"
+      "bytes": 15642,
+      "sha256": "f810d87cb502d335232559f8b9999c926b84f2b07286d2714ce129c6b9ed38bb"
     },
     "src/grammar.json": {
-      "bytes": 29112,
-      "sha256": "ce73ac330938d88f8c044dc325994f093a449002803f50069abdc10f3b154093"
+      "bytes": 30665,
+      "sha256": "1fde1e2f29e7a9f5450a77156485091668e5b57bffd4e54c2405d673bb74fb9a"
     }
   }
 }

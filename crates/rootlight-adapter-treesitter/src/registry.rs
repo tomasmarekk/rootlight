@@ -722,8 +722,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Handlebars => GrammarIdentity {
             language_id: "handlebars",
             grammar_version: "0.0.1",
-            source_package_sha256: "66550dc98880d297b2ee7de9e90528c5ce38ed1906f703d4c9fb02d5cd2d0805",
-            parser_sha256: "e673a66615c1837468316407d2ddc9d250b3ae48371e68e8dcb2496f52118be9",
+            source_package_sha256: "d0fc746399aaaa9476a76e8873ff2da190d23bce0d7b6880933343f8f87215a2",
+            parser_sha256: "2419bda4ca199228bc47a1ad621585578e9a98b70b7e795f678c9012a0aa05db",
             scanner_sha256: Some(
                 "02e501be6b35c5be5650174974db9b0fc6aacc567285a6e2de7f408079651f68",
             ),

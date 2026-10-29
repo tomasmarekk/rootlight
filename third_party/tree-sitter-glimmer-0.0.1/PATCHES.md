@@ -17,6 +17,11 @@ backslashes leave the following mustache active, matching the pinned official
 lexer reference in `SOURCE-PROVENANCE.json`. The same boundary applies inside
 quoted attribute text. No template evaluation runs during indexing.
 
+Contiguous `@data` paths, including parent-depth forms, have a distinct token
+without identifier children. Query captures retain unavailable runtime reads;
+their data names do not participate in lexical block-parameter binding. This
+does not add ordinary relative paths or evaluate runtime data values.
+
 The grammar does not verify matching block names or template runtime behavior.
 The adapter separately validates block names and scopes before admitting block
 parameters and lexical reads. Helper dispatch, property identity, inverse

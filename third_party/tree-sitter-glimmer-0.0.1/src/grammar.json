@@ -984,7 +984,7 @@
     },
     "identifier": {
       "type": "PATTERN",
-      "value": "[^<>\"'/={}()\\s\\.,!|~]+"
+      "value": "[^<>\"'/={}()\\s\\.,!|~@]+"
     },
     "path_expression": {
       "type": "SEQ",
@@ -1010,6 +1010,45 @@
           }
         }
       ]
+    },
+    "data_path_expression": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "@"
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "STRING",
+              "value": "../"
+            }
+          },
+          {
+            "type": "PATTERN",
+            "value": "[^\\s!\"#%-,\\.\\/;->@\\[-\\^`\\{-~]+"
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "."
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "[^\\s!\"#%-,\\.\\/;->@\\[-\\^`\\{-~]+"
+                }
+              ]
+            }
+          }
+        ]
+      }
     },
     "_expression": {
       "type": "CHOICE",
@@ -1037,6 +1076,10 @@
         {
           "type": "SYMBOL",
           "name": "path_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "data_path_expression"
         },
         {
           "type": "SYMBOL",
@@ -1206,6 +1249,10 @@
               {
                 "type": "SYMBOL",
                 "name": "path_expression"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "data_path_expression"
               }
             ]
           }
@@ -1236,8 +1283,17 @@
           "type": "FIELD",
           "name": "path",
           "content": {
-            "type": "SYMBOL",
-            "name": "identifier"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "identifier"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "data_path_expression"
+              }
+            ]
           }
         },
         {
@@ -1291,8 +1347,17 @@
           "type": "FIELD",
           "name": "path",
           "content": {
-            "type": "SYMBOL",
-            "name": "identifier"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "identifier"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "data_path_expression"
+              }
+            ]
           }
         },
         {

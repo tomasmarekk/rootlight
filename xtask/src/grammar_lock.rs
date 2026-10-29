@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "ff4ce100e5ea0ef8640ba5d1359ab04ae17d25410a840ae030aeadc40a7e1a1e";
+    "f74d83ce7336c4e9159a705390a22e018726017d42eb989f34e1bf8ff0782476";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -226,7 +226,7 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 60] = [
         "tree-sitter-glimmer",
         "0.0.1",
         "third_party/tree-sitter-glimmer-0.0.1",
-        "66550dc98880d297b2ee7de9e90528c5ce38ed1906f703d4c9fb02d5cd2d0805",
+        "d0fc746399aaaa9476a76e8873ff2da190d23bce0d7b6880933343f8f87215a2",
     ),
     (
         "tree-sitter-liquid",
@@ -4226,7 +4226,7 @@ mod tests {
 
     #[test]
     fn source_manifest_digest_binds_paths_and_content_with_portable_framing() {
-        let files = BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"source"))]);
+        let files = BTreeMap::from([("src/ÃŽÂ».bas".into(), sha256_hex(b"source"))]);
         // Independently computed from the documented UTF-8/NUL format, not TOML
         // serialization or host-native path separators.
         assert_eq!(
@@ -4237,7 +4237,7 @@ mod tests {
         for changed in [
             BTreeMap::new(),
             BTreeMap::from([("src/other.bas".into(), sha256_hex(b"source"))]),
-            BTreeMap::from([("src/λ.bas".into(), sha256_hex(b"changed"))]),
+            BTreeMap::from([("src/ÃŽÂ».bas".into(), sha256_hex(b"changed"))]),
         ] {
             assert_ne!(vendored_source_digest(&changed).unwrap(), digest);
         }

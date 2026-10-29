@@ -103,6 +103,13 @@ pub(super) fn candidate(
         StructuralRole::Definition if cache.definitions.contains(&key) => {
             (role, "handlebars.block_name")
         }
+        StructuralRole::Reference
+            if cache.admitted
+                && node.kind() == "data_path_expression"
+                && crate::handlebars_bindings::value_identifier(node) =>
+        {
+            (role, "handlebars.runtime_value_unavailable")
+        }
         StructuralRole::Reference if cache.reads.contains(&key) => (role, "handlebars.block_value"),
         StructuralRole::Reference
             if cache.admitted && crate::handlebars_bindings::value_identifier(node) =>

@@ -1,6 +1,12 @@
 --- a/grammar.js
 +++ b/grammar.js
-@@ -10,6 +10,10 @@
+@@ -1,3 +1,5 @@
++const DATA_NAME = /[^\s!"#%-,\.\/;->@\[-\^`\{-~]+/;
++
+ export default grammar({
+   name: "glimmer",
+ 
+@@ -10,6 +12,10 @@
      // Each individual "thing" in the file
      _declaration: ($) =>
        choice(
@@ -11,7 +17,7 @@
          alias($.comment, $.comment_statement),
          $.mustache_statement,
          $.block_statement,
-@@ -27,7 +31,14 @@
+@@ -27,7 +33,14 @@
      // Match anything that doesn't start with
      // - An open/close HTML delimiter (<, >)
      // - An open/close Mustache delimiter ({, })
@@ -27,7 +33,7 @@
  
      // A lone `{` or `}` that isn't part of a `{{ ... }}` delimiter is rendered
      // by Glimmer as literal text (e.g. the trailing `}}` left over when a
-@@ -225,6 +236,8 @@
+@@ -225,6 +238,8 @@
          repeat(
            choice(
              $._mustache_safe_single_quote_string_literal_content,
@@ -36,7 +42,7 @@
              $.mustache_statement,
            ),
          ),
-@@ -236,6 +249,8 @@
+@@ -236,6 +251,8 @@
          repeat(
            choice(
              $._mustache_safe_double_quote_string_literal_content,
@@ -45,12 +51,50 @@
              $.mustache_statement,
            ),
          ),
-@@ -256,7 +271,7 @@
+@@ -256,8 +273,10 @@
  
      block_params: ($) => seq("as", "|", repeat($.identifier), "|"),
  
 -    identifier: () => /[^<>"'/={}()\s\.,!|]+/,
-+    identifier: () => /[^<>"'/={}()\s\.,!|~]+/,
++    identifier: () => /[^<>"'/={}()\s\.,!|~@]+/,
      path_expression: ($) => seq($.identifier, repeat1(seq(".", $.identifier))),
++    // A data path is one contiguous token, not lexical identifier children.
++    data_path_expression: () => token(seq("@", repeat("../"), DATA_NAME, repeat(seq(".", DATA_NAME)))),
  
      // Represents anything that can be a "value"; things like
+     // - Strings
+@@ -271,6 +290,7 @@
+         $.boolean_literal,
+         $.sub_expression,
+         $.path_expression,
++        $.data_path_expression,
+         $.identifier,
+       ),
+ 
+@@ -298,7 +318,7 @@
+ 
+     helper_invocation: ($) =>
+       seq(
+-        field("helper", choice($.identifier, $.path_expression)),
++        field("helper", choice($.identifier, $.path_expression, $.data_path_expression)),
+         $._arguments,
+       ),
+ 
+@@ -309,7 +329,7 @@
+     block_statement_start: ($) =>
+       seq(
+         choice("{{#", "{{~#"),
+-        field("path", $.identifier),
++        field("path", choice($.identifier, $.data_path_expression)),
+         $._arguments,
+         optional($.block_params),
+         choice("}}", "~}}"),
+@@ -318,7 +338,7 @@
+     block_statement_end: ($) =>
+       seq(
+         choice("{{/", "{{~/"),
+-        field("path", $.identifier),
++        field("path", choice($.identifier, $.data_path_expression)),
+         choice("}}", "~}}"),
+       ),
+ 

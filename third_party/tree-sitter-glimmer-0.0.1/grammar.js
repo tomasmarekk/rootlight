@@ -1,3 +1,5 @@
+const DATA_NAME = /[^\s!"#%-,\.\/;->@\[-\^`\{-~]+/;
+
 export default grammar({
   name: "glimmer",
 
@@ -271,8 +273,10 @@ export default grammar({
 
     block_params: ($) => seq("as", "|", repeat($.identifier), "|"),
 
-    identifier: () => /[^<>"'/={}()\s\.,!|~]+/,
+    identifier: () => /[^<>"'/={}()\s\.,!|~@]+/,
     path_expression: ($) => seq($.identifier, repeat1(seq(".", $.identifier))),
+    // A data path is one contiguous token, not lexical identifier children.
+    data_path_expression: () => token(seq("@", repeat("../"), DATA_NAME, repeat(seq(".", DATA_NAME)))),
 
     // Represents anything that can be a "value"; things like
     // - Strings
@@ -286,6 +290,7 @@ export default grammar({
         $.boolean_literal,
         $.sub_expression,
         $.path_expression,
+        $.data_path_expression,
         $.identifier,
       ),
 
@@ -313,7 +318,7 @@ export default grammar({
 
     helper_invocation: ($) =>
       seq(
-        field("helper", choice($.identifier, $.path_expression)),
+        field("helper", choice($.identifier, $.path_expression, $.data_path_expression)),
         $._arguments,
       ),
 
@@ -324,7 +329,7 @@ export default grammar({
     block_statement_start: ($) =>
       seq(
         choice("{{#", "{{~#"),
-        field("path", $.identifier),
+        field("path", choice($.identifier, $.data_path_expression)),
         $._arguments,
         optional($.block_params),
         choice("}}", "~}}"),
@@ -333,7 +338,7 @@ export default grammar({
     block_statement_end: ($) =>
       seq(
         choice("{{/", "{{~/"),
-        field("path", $.identifier),
+        field("path", choice($.identifier, $.data_path_expression)),
         choice("}}", "~}}"),
       ),
 

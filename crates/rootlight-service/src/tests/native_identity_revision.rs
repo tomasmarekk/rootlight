@@ -16,7 +16,7 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         derive_fact("rootlight.first-slice.grammar-input", GRAMMAR_REVISION_SEED).id(),
     );
     let grammar = first_slice_grammar_revision_hash().unwrap();
-    let handlebars_grammar = |predecessor: bool| {
+    let handlebars_grammar = |predecessor: Option<(&str, &str)>| {
         let registry = GrammarRegistry::audited().unwrap();
         let mut hasher = blake3::Hasher::new();
         hash_component(&mut hasher, GRAMMAR_REVISION_SEED).unwrap();
@@ -24,17 +24,9 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         for descriptor in registry.descriptors() {
             hash_component(&mut hasher, descriptor.language().as_str().as_bytes()).unwrap();
             hash_component(&mut hasher, descriptor.grammar_version().as_bytes()).unwrap();
-            let old = predecessor && descriptor.language().as_str() == "handlebars";
-            let source = if old {
-                "73e92995115833b45caaf919f30b293c6f41c64dbb1593e3548cda983082ab79"
-            } else {
-                descriptor.grammar_source_sha256()
-            };
-            let parser = if old {
-                "ca3c5080a4b1771bcd36738b7ec525e2af8197b5c63321e60fed8434c5e8a92a"
-            } else {
-                descriptor.parser_sha256()
-            };
+            let old = predecessor.filter(|_| descriptor.language().as_str() == "handlebars");
+            let source = old.map_or(descriptor.grammar_source_sha256(), |(source, _)| source);
+            let parser = old.map_or(descriptor.parser_sha256(), |(_, parser)| parser);
             hash_component(&mut hasher, source.as_bytes()).unwrap();
             hash_component(&mut hasher, parser.as_bytes()).unwrap();
             match descriptor.scanner_sha256() {
@@ -54,8 +46,11 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         }
         ContentHash::from_bytes(*hasher.finalize().as_bytes())
     };
-    assert_eq!(handlebars_grammar(false), grammar);
-    let predecessor_escaped_grammar = handlebars_grammar(true);
+    assert_eq!(handlebars_grammar(None), grammar);
+    let predecessor_escaped_grammar = handlebars_grammar(Some((
+        "73e92995115833b45caaf919f30b293c6f41c64dbb1593e3548cda983082ab79",
+        "ca3c5080a4b1771bcd36738b7ec525e2af8197b5c63321e60fed8434c5e8a92a",
+    )));
     assert_ne!(predecessor_escaped_grammar, grammar);
     let predecessor_escaped_parser = hash_static_components(&[
         PARSER_PROVIDER_SET_SEED,
@@ -63,6 +58,19 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         TREE_SITTER_RUNTIME_VERSION.as_bytes(),
         ANALYZER_BINARY_SEED,
         predecessor_escaped_grammar.as_bytes(),
+    ])
+    .unwrap();
+    let predecessor_parent_data_grammar = handlebars_grammar(Some((
+        "66550dc98880d297b2ee7de9e90528c5ce38ed1906f703d4c9fb02d5cd2d0805",
+        "e673a66615c1837468316407d2ddc9d250b3ae48371e68e8dcb2496f52118be9",
+    )));
+    assert_ne!(predecessor_parent_data_grammar, grammar);
+    let predecessor_parent_data_parser = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        ANALYZER_BINARY_SEED,
+        predecessor_parent_data_grammar.as_bytes(),
     ])
     .unwrap();
     let predecessor_parser = hash_static_components(&[
@@ -215,6 +223,16 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
     for (changed_key, predecessor, expected) in [
         (
             grammar_key,
+            predecessor_parent_data_grammar,
+            ArtifactDecisionKind::Rebuild,
+        ),
+        (
+            adapter_key,
+            predecessor_parent_data_parser,
+            ArtifactDecisionKind::Rebuild,
+        ),
+        (
+            grammar_key,
             predecessor_escaped_grammar,
             ArtifactDecisionKind::Rebuild,
         ),
@@ -312,12 +330,13 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         )
         .unwrap();
         if changed_key == grammar_key {
+            assert!(
+                [predecessor_escaped_grammar, predecessor_parent_data_grammar]
+                    .contains(&predecessor)
+            );
             assert_eq!(
                 previous.iter().find(|input| input.key() == grammar_key),
-                Some(InputFingerprint::new(
-                    grammar_key,
-                    predecessor_escaped_grammar
-                ))
+                Some(InputFingerprint::new(grammar_key, predecessor))
             );
         } else {
             assert_eq!(
