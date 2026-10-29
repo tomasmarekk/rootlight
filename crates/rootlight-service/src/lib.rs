@@ -40170,7 +40170,9 @@ mod tests {
     #[test]
     fn discovery_classification_revision_invalidates_provider_identity() {
         let parser = first_slice_parser_provider_hash().unwrap();
-        for previous_discovery in [b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79"] {
+        for previous_discovery in [
+            b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79", b"1.83",
+        ] {
             let previous = hash_static_components(&[
                 PROVIDER_SET_SEED,
                 parser.as_bytes(),
@@ -46521,8 +46523,167 @@ mod tests {
     }
 
     #[test]
+    fn ruby_dsl_original_sources_keep_native_facts_through_noop_and_restore() {
+        use rootlight_ir::{ContainerRef, OccurrenceRole};
+
+        type RubyDslFixture = (
+            &'static str,
+            &'static [u8],
+            &'static [&'static str],
+            &'static [&'static str],
+        );
+        let sources: [RubyDslFixture; 2] = [
+            (
+                "config.ru",
+                include_bytes!("../tests/fixtures/ruby_dsl/config.ru"),
+                &["require_relative", "run Rails.application"],
+                &["\"config/environment\""],
+            ),
+            (
+                "formatted_fragment_cached.xml.builder",
+                include_bytes!("../tests/fixtures/ruby_dsl/formatted_fragment_cached.xml.builder"),
+                &["xml.body", "cache(\"fragment\")", "xml.p \"Builder\""],
+                &["\"fragment\"", "\"Builder\""],
+            ),
+        ];
+        let fixture = durable_test_tempdir();
+        for (path, source, _, _) in &sources {
+            fs::write(fixture.path().join(path), source).unwrap();
+        }
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_eq!(receipt.indexed_files, 2);
+        let assert_native = |service: &FirstSliceService| {
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let document = snapshot.document();
+            assert_eq!(document.files.len(), 2);
+            assert!(
+                !document
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "unsupported-language")
+            );
+            assert!(
+                !document
+                    .occurrences
+                    .iter()
+                    .any(|site| site.role == OccurrenceRole::Definition)
+            );
+            for (path, raw, calls, strings) in &sources {
+                let file = document
+                    .files
+                    .iter()
+                    .find(|file| file.path == *path)
+                    .unwrap();
+                assert_eq!(file.language, "ruby");
+                assert_eq!(file.content_hash, content_hash(raw));
+                assert_eq!(file.byte_length, u64::try_from(raw.len()).unwrap());
+                let source = file.evidence.source.as_ref().unwrap();
+                let modules: Vec<_> = document
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        entity.kind == EntityKind::Module
+                            && entity.language == "ruby"
+                            && entity.container == Some(ContainerRef::File(file.id))
+                    })
+                    .collect();
+                assert_eq!(modules.len(), 1, "{path}");
+                assert_eq!(modules[0].evidence.source.as_ref(), Some(source));
+                assert_eq!(source.span().start_byte(), 0);
+                assert_eq!(source.span().end_byte(), file.byte_length);
+                let read = service
+                    .source_read(receipt.generation, vec![source.clone()], &deadline())
+                    .unwrap();
+                assert_eq!(read.data.chunks.len(), 1);
+                assert_eq!(read.data.chunks[0].bytes, *raw);
+                assert_eq!(read.data.chunks[0].language, "ruby");
+                let written = |site: &rootlight_ir::OccurrenceRecord| {
+                    let span = site.source.span();
+                    raw.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap(),
+                    )
+                    .unwrap()
+                };
+                let native: Vec<_> = document
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.source.span().file() == file.id
+                            && site.syntax_kind.starts_with("ruby.")
+                    })
+                    .collect();
+                for call in *calls {
+                    assert!(
+                        native.iter().any(|site| {
+                            site.role == OccurrenceRole::CallSite
+                                && written(site).starts_with(call.as_bytes())
+                        }),
+                        "native call {call}: {path}"
+                    );
+                }
+                for string in *strings {
+                    assert!(
+                        native.iter().any(|site| {
+                            site.role == OccurrenceRole::StringEvidence
+                                && written(site) == string.as_bytes()
+                        }),
+                        "native string {string}: {path}"
+                    );
+                }
+                assert!(native.iter().all(|site| {
+                    site.source.repository() == document.repository
+                        && site.source.generation() == document.generation
+                        && site.source.content_hash() == file.content_hash
+                }));
+            }
+            assert_eq!(
+                service
+                    .generation_metadata(receipt.generation)
+                    .unwrap()
+                    .provider_set_hash(),
+                service
+                    .provider_set_hash(FirstSliceIndexMode::Structural)
+                    .unwrap()
+            );
+        };
+        assert_native(&service);
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap()
+                .generation,
+            receipt.generation
+        );
+        drop(service);
+        let mut restored =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        assert_native(&restored);
+        assert_eq!(
+            restored
+                .index_repository(fixture.path(), &deadline())
+                .unwrap()
+                .generation,
+            receipt.generation
+        );
+        assert_native(&restored);
+    }
+
+    #[test]
     fn ruby_published_declarations_preserve_symbols_and_exact_source() {
         for file_path in [
+            "store.ru",
+            "store.builder",
             "store.rb",
             "store.ruby",
             "store.podspec",
@@ -46678,6 +46839,13 @@ mod tests {
             .expect("Ruby capability exists");
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, ["treesitter"]);
+        assert!(capability.suffixes.iter().any(|suffix| suffix == ".ru"));
+        assert!(
+            capability
+                .suffixes
+                .iter()
+                .any(|suffix| suffix == ".builder")
+        );
     }
 
     #[test]

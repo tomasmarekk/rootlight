@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.83";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.84";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3150,7 +3150,9 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     },
     LanguageCapability {
         language: "ruby",
-        suffixes: &[".rb", ".ruby", ".podspec", ".gemspec", ".rake"],
+        suffixes: &[
+            ".rb", ".ruby", ".podspec", ".gemspec", ".rake", ".ru", ".builder",
+        ],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -4194,6 +4196,8 @@ mod tests {
             "misleading.podspec",
             "misleading.gemspec",
             "misleading.rake",
+            "misleading.ru",
+            "misleading.builder",
         ] {
             write_fixture(&temporary, path, pdf);
         }
@@ -4213,6 +4217,8 @@ mod tests {
             "misleading.podspec",
             "misleading.gemspec",
             "misleading.rake",
+            "misleading.ru",
+            "misleading.builder",
             "archive.txt",
         ] {
             assert!(
@@ -9042,7 +9048,9 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn ruby_dsl_suffixes_use_the_ruby_source_route() {
-        let suffixes = [".rb", ".ruby", ".podspec", ".gemspec", ".rake"];
+        let suffixes = [
+            ".rb", ".ruby", ".podspec", ".gemspec", ".rake", ".ru", ".builder",
+        ];
         let capability = language_capabilities()
             .iter()
             .find(|entry| entry.language == "ruby")
@@ -9071,7 +9079,19 @@ max_source_file_bytes = 2097152
             assert_eq!(extension_language(&format!("written{suffix}.bak")), None);
         }
         assert_eq!(extension_language("written.podspec.json"), Some("json"));
+        assert_eq!(extension_language("config.ru.json"), Some("json"));
+        assert_eq!(extension_language("view.builder.erb"), Some("erb"));
         assert_eq!(extension_language("written.erb"), Some("erb"));
+        for path in [
+            "config.ru.bak",
+            "config.rubyconfig",
+            "view.builder.bak",
+            "view.builderx",
+            "config.ru.tt",
+            "view.builder.tt",
+        ] {
+            assert_eq!(extension_language(path), None, "{path}");
+        }
     }
 
     #[test]
