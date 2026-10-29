@@ -37,6 +37,7 @@ mod eiffel_formal_reads;
 mod elixir;
 mod embedded;
 mod embedded_rust;
+mod erb;
 mod fish;
 mod flux;
 mod fortran_calls;
@@ -3523,6 +3524,32 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let erb_reads = if self.request.language().as_str() == "erb" {
+            Some(erb::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                erb::CurrentSource {
+                    reference: self.full_source,
+                    original: self.request.source().bytes(),
+                    view: self.source_view,
+                    path: self.request.source().path().as_str(),
+                    complete: self.request.included_ranges().is_empty()
+                        && self.parse_output.report().coverage().status()
+                            == CoverageStatus::Complete
+                        && self.parse_output.diagnostics().is_empty(),
+                    maximum: self
+                        .request
+                        .limits()
+                        .max_syntax_nodes()
+                        .saturating_mul(128)
+                        .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                    max_ranges: self.request.limits().max_embedded_ranges(),
+                },
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let nushell_targets = if self.request.language().as_str() == "nu" {
             Some(nushell::Targets::new(
                 std::mem::take(&mut entity_plan.nushell),
@@ -5367,6 +5394,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("liquid-loop-read-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &erb_reads
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.role = OccurrenceRole::Read;
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("erb-block-read-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -10776,13 +10818,15 @@ fn jsx_identity_declaration(fact: &SyntaxFact) -> bool {
 
 fn erb_host_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
     let detail = match (fact.kind(), fact.syntax_kind().as_str()) {
-        (SyntaxFactKind::Root, "erb.template.root") => {
-            Some("erb-native-host-and-ruby-syntax-only-binding-and-rendering-unavailable")
-        }
+        (SyntaxFactKind::Root, "erb.template.root") => Some(
+            "erb-native-host-ruby-syntax-and-plain-block-parameter-reads-only-rendering-and-runtime-unavailable",
+        ),
         (
             SyntaxFactKind::Signature,
             "erb.statement_ruby_parsed.expression" | "erb.output_ruby_parsed.expression",
-        ) => Some("erb-native-ruby-syntax-without-runtime-or-helper-binding"),
+        ) => Some(
+            "erb-ruby-plain-block-parameter-reads-only-helper-property-and-runtime-binding-unavailable",
+        ),
         (
             SyntaxFactKind::Signature,
             "erb.statement_ruby_error.expression" | "erb.output_ruby_error.expression",
