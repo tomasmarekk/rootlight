@@ -28,13 +28,15 @@ use std::{
 
 use rootlight_ids::{ContentHash, FactId, FileId, SymbolId};
 use rootlight_ir::{
-    CoverageRecord, EntityRecord, FileRecord, OccurrenceRecord, ProvenanceRecord, RelationRecord,
+    CoverageRecord, EntityRecord, ExtensionEnvelope, FileRecord, OccurrenceRecord,
+    ProvenanceRecord, RelationRecord,
 };
 use rootlight_storage::{
     CoverageReadRequest, GENERATION_CONTRACT_VERSION, GenerationContext, GenerationControlError,
-    GenerationMetadata, GenerationReader, GenerationResource, GenerationSnapshot, GenerationStats,
-    GenerationValidationError, GenerationWriter, IdentityVerificationError,
-    IdentityVerifiedGeneration, OccurrenceReadRequest, ReadPage, RelationReadRequest,
+    GenerationMetadata, GenerationReadLimit, GenerationReader, GenerationResource,
+    GenerationSnapshot, GenerationStats, GenerationValidationError, GenerationWriter,
+    IdentityVerificationError, IdentityVerifiedGeneration, OccurrenceReadRequest, ReadPage,
+    RelationReadRequest,
 };
 use rusqlite::Connection;
 
@@ -722,6 +724,24 @@ impl GenerationReader for OracleReader {
         })
     }
 
+    fn extensions(
+        &self,
+        after: Option<FactId>,
+        limit: GenerationReadLimit,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<ExtensionEnvelope>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::extensions(
+                connection,
+                self.metadata,
+                self.stats.extensions(),
+                after,
+                limit,
+                context,
+            )
+        })
+    }
+
     fn read_generation(
         &self,
         context: &GenerationContext<'_>,
@@ -1023,6 +1043,24 @@ impl GenerationReader for EphemeralOracleReader {
                 self.metadata,
                 self.stats.coverage(),
                 request,
+                context,
+            )
+        })
+    }
+
+    fn extensions(
+        &self,
+        after: Option<FactId>,
+        limit: GenerationReadLimit,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<ExtensionEnvelope>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            indexed_read::extensions(
+                connection,
+                self.metadata,
+                self.stats.extensions(),
+                after,
+                limit,
                 context,
             )
         })

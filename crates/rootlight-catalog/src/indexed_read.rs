@@ -8,10 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use rootlight_ids::{FactId, FileId, SymbolId};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageScope, CoverageStatus, EntityFlag,
-    EntityKind, EntityRecord, EntityVisibility, EvidenceKind, FactDomain, FactEvidence, FactRef,
-    FilePathLocator, FilePathLocatorEncoding, FileRecord, OccurrenceRecord, OccurrenceRole,
-    OccurrenceTarget, ProducerIdentity, ProducerKind, ProvenanceRecord, RelationEndpoint,
-    RelationPredicate, RelationRecord, SourceRef, derive_coverage_record_id_with_checkpoint,
+    EntityKind, EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope, FactDomain,
+    FactEvidence, FactRef, FilePathLocator, FilePathLocatorEncoding, FileRecord, IrLimits,
+    OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
+    decode_extension_envelope_with_checkpoint, derive_coverage_record_id_with_checkpoint,
     derive_occurrence_record_id_with_checkpoint, derive_provenance_record_id_with_checkpoint,
     derive_relation_record_id_with_checkpoint,
 };
@@ -22,7 +23,7 @@ use rootlight_storage::{
 };
 use rusqlite::{
     Connection, Params, Row, params, params_from_iter,
-    types::{FromSql, Value},
+    types::{FromSql, Value, ValueRef},
 };
 
 use crate::{CatalogError, CatalogErrorKind, codec};
@@ -414,6 +415,137 @@ pub(crate) fn coverage(
         );
     }
     ReadPage::from_limit_plus_one(records, total, request.limit(), |record| record.id)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+pub(crate) fn extensions(
+    connection: &Connection,
+    metadata: GenerationMetadata,
+    expected_total: u64,
+    after: Option<FactId>,
+    limit: GenerationReadLimit,
+    context: &GenerationContext<'_>,
+) -> Result<ReadPage<ExtensionEnvelope>, CatalogError> {
+    let mut state = IndexedReadState::new(context)?;
+    let total = query_count(
+        connection,
+        "SELECT count(*) FROM extensions",
+        &[],
+        &mut state,
+        context,
+    )?;
+    if total != expected_total {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let mut parameters = Vec::new();
+    let mut sql = "SELECT extension_id FROM extensions".to_owned();
+    if let Some(after) = after {
+        sql.push_str(" WHERE extension_id > ?");
+        parameters.push(Value::Blob(after.as_bytes().to_vec()));
+    }
+    sql.push_str(" ORDER BY extension_id LIMIT ?");
+    parameters.push(Value::Integer(limit_plus_one(limit)));
+    let ids = query_list(
+        connection,
+        &sql,
+        params_from_iter(parameters.iter()),
+        &mut state,
+        context,
+        |row| Ok(FactId::from_bytes(fixed_blob(row, 0)?)),
+    )?;
+    let mut records = Vec::new();
+    records
+        .try_reserve_exact(ids.len())
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+    let mut encoded_bytes = 0_u64;
+    let mut sources = BTreeSet::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT extension_id, repository_id, generation_id, provenance_id, payload
+         FROM extensions WHERE extension_id = ?1 LIMIT 2",
+        )
+        .map_err(CatalogError::sqlite)?;
+    for id in ids {
+        context.check().map_err(CatalogError::control)?;
+        let mut rows = statement
+            .query(params![id.as_bytes().as_slice()])
+            .map_err(CatalogError::sqlite)?;
+        let row = rows
+            .next()
+            .map_err(CatalogError::sqlite)?
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        state.observe_row(context)?;
+        let stored_id = FactId::from_bytes(fixed_blob(row, 0)?);
+        let repository = rootlight_ids::RepositoryId::from_bytes(fixed_blob(row, 1)?);
+        let generation = rootlight_ids::GenerationId::from_bytes(fixed_blob(row, 2)?);
+        let provenance = FactId::from_bytes(fixed_blob(row, 3)?);
+        require_owner(metadata, repository, generation)?;
+        let ValueRef::Text(encoded) = row.get_ref(4).map_err(CatalogError::sqlite)? else {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        };
+        encoded_bytes = encoded_bytes
+            .checked_add(
+                u64::try_from(encoded.len())
+                    .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
+            )
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        context
+            .require(GenerationResource::EncodedTextBytes, encoded_bytes)
+            .map_err(CatalogError::control)?;
+        // Borrow SQLite's encoded cell; only this bounded page's decoded envelopes survive.
+        let record =
+            decode_extension_envelope_with_checkpoint(encoded, &IrLimits::default(), || {
+                context.check().is_ok()
+            })
+            .map_err(|_| {
+                context.check().map_or_else(CatalogError::control, |()| {
+                    CatalogError::new(CatalogErrorKind::Corrupt)
+                })
+            })?;
+        if stored_id != id
+            || record.id != id
+            || record.repository != repository
+            || record.generation != generation
+            || record.provenance != provenance
+        {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        state.observe_text(&record.namespace, context)?;
+        state.observe_text(&record.version, context)?;
+        state.observe_text(&record.payload, context)?;
+        if let Some(source) = &record.evidence.source {
+            require_owner(metadata, source.repository(), source.generation())?;
+            if sources.insert(source.clone()) {
+                state.observe_row(context)?;
+                context
+                    .require(
+                        GenerationResource::SourceReferences,
+                        u64::try_from(sources.len())
+                            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
+                    )
+                    .map_err(CatalogError::control)?;
+            }
+        }
+        for _ in &record.evidence.derivation {
+            context.check().map_err(CatalogError::control)?;
+            state.observe_row(context)?;
+        }
+        if rows.next().map_err(CatalogError::sqlite)?.is_some() {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        records.push(record);
+    }
+    context.check().map_err(CatalogError::control)?;
+    ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+fn fixed_blob<const N: usize>(row: &Row<'_>, column: usize) -> Result<[u8; N], CatalogError> {
+    let ValueRef::Blob(bytes) = row.get_ref(column).map_err(CatalogError::sqlite)? else {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    };
+    bytes
+        .try_into()
         .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
 }
 

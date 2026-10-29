@@ -7,8 +7,8 @@ use std::error::Error;
 
 use rootlight_ids::{FactId, FileId, SymbolId};
 use rootlight_ir::{
-    CoverageRecord, CoverageScope, EntityRecord, FileRecord, OccurrenceRecord, ProvenanceRecord,
-    RelationEndpoint, RelationPredicate, RelationRecord,
+    CoverageRecord, CoverageScope, EntityRecord, ExtensionEnvelope, FileRecord, OccurrenceRecord,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord,
 };
 
 use crate::{GenerationContext, GenerationMetadata, GenerationStats, IdentityVerifiedGeneration};
@@ -478,6 +478,23 @@ pub trait GenerationReader: Send + Sync {
         request: &CoverageReadRequest,
         context: &GenerationContext<'_>,
     ) -> Result<ReadPage<CoverageRecord>, Self::Error>;
+
+    /// Reads extension envelopes in ascending stable-ID order without materializing the generation.
+    ///
+    /// The cursor is exclusive. The returned total covers every extension independently
+    /// of the cursor, and the backend may decode at most the page limit plus one probe.
+    /// Encoded input and decoded text use the backend's separate generation budgets;
+    /// the record limit alone is not an envelope byte limit.
+    ///
+    /// # Errors
+    /// Returns the backend error for cancellation, budget, compatibility,
+    /// corruption, or storage failures.
+    fn extensions(
+        &self,
+        after: Option<FactId>,
+        limit: GenerationReadLimit,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<ExtensionEnvelope>, Self::Error>;
 
     /// Materializes the complete identity-verified generation.
     ///

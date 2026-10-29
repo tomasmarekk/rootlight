@@ -294,6 +294,10 @@ fn indexed_fixture_snapshot() -> GenerationSnapshot {
     for record in &mut document.extensions {
         record.provenance = provenance_id;
     }
+    let mut second_extension = document.extensions[0].clone();
+    second_extension.id = FactId::from_bytes([240; 20]);
+    second_extension.payload = r#"{"marker":"second"}"#.to_owned();
+    document.extensions.push(second_extension);
 
     let mut second_occurrence = document.occurrences[0].clone();
     second_occurrence.role = OccurrenceRole::Reference;
@@ -436,6 +440,38 @@ fn assert_indexed_conformance<R>(
     let mut observed_coverage = first_coverage.into_items();
     observed_coverage.extend(second_coverage.into_items());
     assert_eq!(observed_coverage, document.coverage_records);
+
+    let first_extensions = reader
+        .extensions(None, limit, context)
+        .expect("first extension page reads");
+    assert_eq!(first_extensions.total_available(), 2);
+    assert_eq!(
+        first_extensions.completeness(),
+        ReadPageCompleteness::Truncated
+    );
+    assert_eq!(first_extensions.items(), &document.extensions[..1]);
+    let extension_cursor = first_extensions
+        .next_cursor()
+        .expect("truncated extension page has a cursor");
+    let second_extensions = reader
+        .extensions(Some(extension_cursor), limit, context)
+        .expect("second extension page reads");
+    assert_eq!(second_extensions.total_available(), 2);
+    assert_eq!(
+        second_extensions.completeness(),
+        ReadPageCompleteness::Complete
+    );
+    assert_eq!(second_extensions.next_cursor(), None);
+    let mut observed_extensions = first_extensions.into_items();
+    observed_extensions.extend(second_extensions.into_items());
+    assert_eq!(observed_extensions, document.extensions);
+    let exhausted = reader
+        .extensions(Some(document.extensions[1].id), limit, context)
+        .expect("exhausted extension cursor reads");
+    assert!(exhausted.items().is_empty());
+    assert_eq!(exhausted.total_available(), 2);
+    assert_eq!(exhausted.completeness(), ReadPageCompleteness::Complete);
+    assert_eq!(exhausted.next_cursor(), None);
 }
 
 #[test]
@@ -587,6 +623,39 @@ fn indexed_readers_share_bounded_stable_cursor_semantics() {
     assert_indexed_conformance(&path_reader, &expected, &context);
     assert_indexed_conformance(&ephemeral_reader, &expected, &context);
 
+    let limit = GenerationReadLimit::new(1).unwrap();
+    let defaults = GenerationBudget::default();
+    let page_context = GenerationContext::new(
+        &cancellation,
+        GenerationBudget::new(
+            8,
+            defaults.limit(GenerationResource::SourceReferences),
+            defaults.limit(GenerationResource::TextBytes),
+        )
+        .unwrap(),
+    );
+    assert!(path_reader.stats().stored_rows() > 8);
+    for page in [
+        path_reader.extensions(None, limit, &page_context).unwrap(),
+        ephemeral_reader
+            .extensions(None, limit, &page_context)
+            .unwrap(),
+    ] {
+        assert_eq!(page.items(), &expected.document().extensions[..1]);
+    }
+    for error in [
+        path_reader.read_generation(&page_context).unwrap_err(),
+        ephemeral_reader.read_generation(&page_context).unwrap_err(),
+    ] {
+        assert!(matches!(
+            error.kind(),
+            CatalogErrorKind::BudgetExceeded {
+                resource: GenerationResource::Rows,
+                ..
+            }
+        ));
+    }
+
     let file = expected.document().files[0].id;
     let cancelled = Cancellation::new();
     assert!(cancelled.cancel(CancellationReason::ClientRequest));
@@ -598,6 +667,12 @@ fn indexed_readers_share_bounded_stable_cursor_semantics() {
         ephemeral_reader
             .file(file, &cancelled_context)
             .expect_err("ephemeral indexed read observes cancellation"),
+        path_reader
+            .extensions(None, limit, &cancelled_context)
+            .expect_err("path extension page observes cancellation"),
+        ephemeral_reader
+            .extensions(None, limit, &cancelled_context)
+            .expect_err("ephemeral extension page observes cancellation"),
     ] {
         assert_eq!(error.kind(), CatalogErrorKind::Cancelled);
     }
@@ -619,6 +694,139 @@ fn indexed_readers_share_bounded_stable_cursor_semantics() {
             error.kind(),
             CatalogErrorKind::BudgetExceeded { .. }
         ));
+    }
+    for error in [
+        path_reader
+            .extensions(None, limit, &constrained_context)
+            .unwrap_err(),
+        ephemeral_reader
+            .extensions(None, limit, &constrained_context)
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error.kind(),
+            CatalogErrorKind::BudgetExceeded {
+                resource: GenerationResource::Rows,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn extension_pages_enforce_encoded_text_before_decoding_malformed_payloads() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = indexed_fixture_snapshot();
+    let reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+    connection
+        .execute(
+            "UPDATE extensions SET payload = ?1 WHERE extension_id = ?2",
+            rusqlite::params![
+                "{".repeat(4096),
+                expected.document().extensions[0].id.as_bytes().as_slice()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let tiny_text =
+        GenerationContext::new(&cancellation, GenerationBudget::new(100, 100, 1).unwrap());
+    let limit = GenerationReadLimit::new(1).unwrap();
+    let expected_limit = tiny_text
+        .budget()
+        .limit(GenerationResource::EncodedTextBytes);
+    let error = reader.extensions(None, limit, &tiny_text).unwrap_err();
+    assert!(
+        matches!(error.kind(), CatalogErrorKind::BudgetExceeded {
+            resource: GenerationResource::EncodedTextBytes,
+            observed: 4096,
+            limit,
+        } if limit == expected_limit),
+        "{error:?}"
+    );
+    assert_eq!(
+        reader.extensions(None, limit, &context).unwrap_err().kind(),
+        CatalogErrorKind::Corrupt
+    );
+}
+
+#[test]
+fn extension_pages_reject_payload_and_row_identity_mismatches() {
+    for field in [
+        "id",
+        "repository",
+        "generation",
+        "provenance",
+        "row_repository",
+        "row_generation",
+        "row_provenance",
+    ] {
+        let directory = TempDir::new().unwrap();
+        let cancellation = Cancellation::new();
+        let context = default_context(&cancellation);
+        let expected = indexed_fixture_snapshot();
+        let reader = OracleWriter::create_in(directory.path())
+            .unwrap()
+            .seal_unverified_for_test(expected.clone(), &context)
+            .unwrap();
+        let original = &expected.document().extensions[0];
+        let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        if let Some(column) = field.strip_prefix("row_") {
+            let sql = match column {
+                "repository" => {
+                    "UPDATE extensions SET repository_id = zeroblob(16) WHERE extension_id = ?1"
+                }
+                "generation" => {
+                    "UPDATE extensions SET generation_id = zeroblob(20) WHERE extension_id = ?1"
+                }
+                "provenance" => {
+                    "UPDATE extensions SET provenance_id = zeroblob(20) WHERE extension_id = ?1"
+                }
+                _ => unreachable!(),
+            };
+            connection
+                .execute(sql, [original.id.as_bytes().as_slice()])
+                .unwrap();
+        } else {
+            let mut changed = original.clone();
+            match field {
+                "id" => changed.id = FactId::from_bytes([201; 20]),
+                "repository" => {
+                    changed.repository = rootlight_ids::RepositoryId::from_bytes([201; 16])
+                }
+                "generation" => {
+                    changed.generation = rootlight_ids::GenerationId::from_bytes([201; 20])
+                }
+                "provenance" => changed.provenance = FactId::from_bytes([201; 20]),
+                _ => unreachable!(),
+            }
+            connection
+                .execute(
+                    "UPDATE extensions SET payload = ?1 WHERE extension_id = ?2",
+                    rusqlite::params![
+                        serde_json::to_string(&changed).unwrap(),
+                        original.id.as_bytes().as_slice()
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        assert_eq!(
+            reader
+                .extensions(None, GenerationReadLimit::new(1).unwrap(), &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt,
+            "{field}"
+        );
     }
 }
 

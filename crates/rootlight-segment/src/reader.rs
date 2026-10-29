@@ -7,13 +7,14 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use rootlight_ids::{FactId, FileId, SymbolId};
 use rootlight_ir::{
-    CoverageRecord, EntityRecord, FactEvidence, FileRecord, NormalizedIrDocument, OccurrenceRecord,
-    OccurrenceTarget, ProvenanceRecord, RelationRecord, SourceRef,
+    CoverageRecord, EntityRecord, ExtensionEnvelope, FactEvidence, FileRecord,
+    NormalizedIrDocument, OccurrenceRecord, OccurrenceTarget, ProvenanceRecord, RelationRecord,
+    SourceRef,
 };
 use rootlight_storage::{
-    CoverageReadRequest, GenerationContext, GenerationMetadata, GenerationReader,
-    GenerationResource, GenerationStats, IdentityVerifiedGeneration, OccurrenceReadRequest,
-    ReadPage, RelationReadDirection, RelationReadRequest,
+    CoverageReadRequest, GenerationContext, GenerationMetadata, GenerationReadLimit,
+    GenerationReader, GenerationResource, GenerationStats, IdentityVerifiedGeneration,
+    OccurrenceReadRequest, ReadPage, RelationReadDirection, RelationReadRequest,
 };
 
 use crate::{
@@ -255,6 +256,37 @@ impl GenerationReader for SegmentReader {
             }
         }
         ReadPage::from_limit_plus_one(records, total, request.limit(), |record| record.id)
+            .map_err(SegmentError::from)
+    }
+
+    fn extensions(
+        &self,
+        after: Option<FactId>,
+        limit: GenerationReadLimit,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<ExtensionEnvelope>, Self::Error> {
+        context.check()?;
+        let extensions = &self.document().extensions;
+        let start = after.map_or(0, |after| {
+            extensions.partition_point(|record| record.id <= after)
+        });
+        let mut records = probe_buffer(limit.get())?;
+        let mut meter = ReadMeter::new(context)?;
+        for record in extensions
+            .iter()
+            .skip(start)
+            .take(usize::from(limit.get()) + 1)
+        {
+            context.check()?;
+            meter.rows(1)?;
+            meter.text(&record.namespace)?;
+            meter.text(&record.version)?;
+            meter.text(&record.payload)?;
+            meter.evidence(&record.evidence)?;
+            records.push(record.clone());
+        }
+        let total = u64::try_from(extensions.len()).map_err(|_| SegmentError::Corrupt)?;
+        ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
             .map_err(SegmentError::from)
     }
 
