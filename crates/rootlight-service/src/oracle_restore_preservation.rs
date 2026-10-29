@@ -830,6 +830,11 @@ pub(super) struct FinalAdmission {
 }
 
 impl FinalAdmission {
+    /// Returns the final candidate plan that is later checked against its writer.
+    pub(super) fn final_read_plan(&self) -> Option<OracleReadMemoryPlan> {
+        self.expected_final_plan
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "owned resolution pins its restore and host admission contexts"

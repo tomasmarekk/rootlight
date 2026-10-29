@@ -201,6 +201,10 @@ impl TemporaryPeak {
 pub(super) struct ProjectionPeak {
     /// Exact complete normalized-document serialization size.
     pub(super) document_bytes: u64,
+    /// Typed record and transient workspace, or zero for the legacy proxy.
+    pub(super) document_materialization_bytes: u64,
+    /// Retained text allowance, or complete serialized bytes for the legacy proxy.
+    pub(super) retained_text_bytes: u64,
     /// Additional source lexical-coverage allowance.
     pub(super) lexical_coverage_bytes: u64,
     /// Compact graph workspace allowance.
@@ -211,7 +215,7 @@ pub(super) struct ProjectionPeak {
     pub(super) structural_cache_bytes: u64,
     /// Explain-index construction peak allowance.
     pub(super) explain_index_bytes: u64,
-    /// Three document/lexical allowances plus the remaining components.
+    /// Document materialization plus three text/lexical allowances and other owners.
     pub(super) peak_bytes: u64,
 }
 
@@ -226,9 +230,10 @@ struct TemporaryReservation {
 impl ProjectionPeak {
     fn validate(self) -> Result<(), FirstSliceError> {
         let peak = self
-            .document_bytes
+            .retained_text_bytes
             .checked_add(self.lexical_coverage_bytes)
             .and_then(|bytes| bytes.checked_mul(3))
+            .and_then(|bytes| bytes.checked_add(self.document_materialization_bytes))
             .and_then(|bytes| bytes.checked_add(self.workspace_bytes))
             .and_then(|bytes| bytes.checked_add(self.snapshot_metadata_bytes))
             .and_then(|bytes| bytes.checked_add(self.structural_cache_bytes))
@@ -1229,6 +1234,8 @@ mod tests {
         observe_temporary_peak(peak);
         let projection = ProjectionPeak {
             document_bytes: 2,
+            document_materialization_bytes: 0,
+            retained_text_bytes: 2,
             lexical_coverage_bytes: 1,
             workspace_bytes: 3,
             snapshot_metadata_bytes: 0,
@@ -1276,7 +1283,7 @@ mod tests {
         );
         assert_eq!(
             ProjectionPeak {
-                document_bytes: u64::MAX,
+                retained_text_bytes: u64::MAX,
                 ..projection
             }
             .validate(),
@@ -1368,6 +1375,8 @@ mod projection_metadata_tests {
     fn snapshot_metadata_is_conserved_in_projection_peak_and_overflow_is_strict() {
         let peak = ProjectionPeak {
             document_bytes: 2,
+            document_materialization_bytes: 0,
+            retained_text_bytes: 2,
             lexical_coverage_bytes: 1,
             workspace_bytes: 3,
             snapshot_metadata_bytes: 7,
@@ -1376,6 +1385,21 @@ mod projection_metadata_tests {
             peak_bytes: 28,
         };
         assert_eq!(peak.validate(), Ok(()));
+        let typed = ProjectionPeak {
+            document_bytes: 1_000,
+            document_materialization_bytes: 23,
+            peak_bytes: 51,
+            ..peak
+        };
+        assert_eq!(typed.validate(), Ok(()));
+        assert_eq!(
+            ProjectionPeak {
+                peak_bytes: 28,
+                ..typed
+            }
+            .validate(),
+            Err(FirstSliceError::Identity)
+        );
         assert_eq!(
             ProjectionPeak {
                 peak_bytes: 21,

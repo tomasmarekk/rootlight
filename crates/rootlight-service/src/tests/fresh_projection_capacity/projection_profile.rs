@@ -12,7 +12,16 @@ fn assert_components(
         observed.scope,
         "computed_conservative_modeled_bytes_not_rss_or_allocation_measurement"
     );
-    assert_eq!(observed.model, "3*(D+L)+W+M+A+I");
+    match observed.model {
+        "B+3*(T+L)+W+M+A+I" => {
+            assert!(observed.document_materialization_bytes > 0);
+        }
+        "3*(D+L)+W+M+A+I" => {
+            assert_eq!(observed.document_materialization_bytes, 0);
+            assert_eq!(observed.retained_text_bytes, observed.document_bytes);
+        }
+        other => panic!("unexpected projection admission model: {other}"),
+    }
     assert_eq!(
         observed.stage,
         "fresh_final_projection_admission_not_cold_reload"
@@ -24,10 +33,12 @@ fn assert_components(
     assert_eq!(
         observed.total_bytes,
         observed
-            .document_bytes
+            .retained_text_bytes
             .checked_add(observed.lexical_coverage_bytes)
             .unwrap()
             .checked_mul(3)
+            .unwrap()
+            .checked_add(observed.document_materialization_bytes)
             .unwrap()
             .checked_add(observed.workspace_bytes)
             .unwrap()
@@ -75,6 +86,7 @@ fn actual_fresh_projection_profile_includes_metadata_and_noop_has_no_new_project
             .unwrap()
     });
     let observed = assert_components(&profile);
+    assert_eq!(observed.model, "B+3*(T+L)+W+M+A+I");
     assert_eq!(
         observed.ceiling_bytes,
         MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES

@@ -8,6 +8,8 @@ pub(super) struct Observation {
     pub(super) model: &'static str,
     pub(super) stage: &'static str,
     pub(super) document_bytes: u64,
+    pub(super) document_materialization_bytes: u64,
+    pub(super) retained_text_bytes: u64,
     pub(super) lexical_coverage_bytes: u64,
     pub(super) workspace_bytes: u64,
     pub(super) snapshot_metadata_bytes: u64,

@@ -955,7 +955,7 @@ const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
 // Host admission policy must requalify old whole-source fallbacks even when
 // language parsers and resolver facts retain their independent revisions.
-const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/8";
+const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/9";
 const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/32";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
@@ -10894,8 +10894,12 @@ impl FirstSliceService {
                     &GenerationContext::new(cancellation, GenerationBudget::default()),
                 )
                 .map_err(|_| current_cancellation(cancellation).unwrap_or(FirstSliceError::Limits))?;
+            let projection_document = ProjectionDocumentMemory::from_final_plan(
+                serialized_document_bytes,
+                restore_final.as_ref().and_then(oracle_restore_preservation::FinalAdmission::final_read_plan),
+            );
             let logical_staged_memory_bytes =
-                logical_projection_staged_memory_bytes(memory_bytes, logical_workspace_bytes)?
+                projection_document.staged(lexical_coverage_bytes, logical_workspace_bytes)?
                     .checked_add(normal_metadata_bytes).ok_or(FirstSliceError::Limits)?
                     .checked_add(
                         u64::try_from(structural_artifacts.accounted_bytes)
@@ -10905,9 +10909,15 @@ impl FirstSliceService {
                     .ok_or(FirstSliceError::Limits)?;
             projection_profile::observe(projection_profile::Observation {
                 scope: "computed_conservative_modeled_bytes_not_rss_or_allocation_measurement",
-                model: "3*(D+L)+W+M+A+I",
+                model: if projection_document.materialization_bytes == 0 {
+                    "3*(D+L)+W+M+A+I"
+                } else {
+                    "B+3*(T+L)+W+M+A+I"
+                },
                 stage: "fresh_final_projection_admission_not_cold_reload",
                 document_bytes: serialized_document_bytes,
+                document_materialization_bytes: projection_document.materialization_bytes,
+                retained_text_bytes: projection_document.text_bytes,
                 lexical_coverage_bytes,
                 workspace_bytes: logical_workspace_bytes,
                 snapshot_metadata_bytes: normal_metadata_bytes,
@@ -10927,6 +10937,8 @@ impl FirstSliceService {
                 generation_admission_observation::observe_projection_peak(
                     generation_admission_observation::ProjectionPeak {
                         document_bytes: serialized_document_bytes,
+                        document_materialization_bytes: projection_document.materialization_bytes,
+                        retained_text_bytes: projection_document.text_bytes,
                         lexical_coverage_bytes,
                         workspace_bytes: logical_workspace_bytes,
                         snapshot_metadata_bytes: normal_metadata_bytes,
@@ -19230,6 +19242,9 @@ fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
         b"rootlight.first-slice.providers/5".as_slice()
     } else if oracle_restore_policy_tests::TEXT_PREDECESSOR_POLICY.with(std::cell::Cell::get) {
         b"rootlight.first-slice.providers/7".as_slice()
+    } else if oracle_restore_policy_tests::PROJECTION_PREDECESSOR_POLICY.with(std::cell::Cell::get)
+    {
+        b"rootlight.first-slice.providers/8".as_slice()
     } else {
         policy_seed
     };
@@ -21159,6 +21174,63 @@ fn logical_projection_staged_memory_bytes(
         .checked_mul(3)
         .and_then(|documents| documents.checked_add(compact_graph_workspace_bytes))
         .ok_or(FirstSliceError::Limits)
+}
+
+struct ProjectionDocumentMemory {
+    materialization_bytes: u64,
+    text_bytes: u64,
+}
+
+impl ProjectionDocumentMemory {
+    fn from_final_plan(
+        serialized_document_bytes: u64,
+        final_plan: Option<rootlight_catalog::OracleReadMemoryPlan>,
+    ) -> Self {
+        // JSON counting streams bytes; it does not retain three serialized graphs.
+        // This plan belongs to the final canonical candidate and is checked again
+        // against the sealed writer. Paths without that census keep the proxy.
+        if let Some(plan) = final_plan {
+            return Self {
+                materialization_bytes: plan.materialization_bytes(),
+                text_bytes: plan.retained_text_bytes(),
+            };
+        }
+        Self {
+            materialization_bytes: 0,
+            text_bytes: serialized_document_bytes,
+        }
+    }
+
+    fn footprint(&self, lexical_coverage_bytes: u64) -> Result<u64, FirstSliceError> {
+        self.materialization_bytes
+            .checked_add(self.text_bytes)
+            .and_then(|bytes| bytes.checked_add(lexical_coverage_bytes))
+            .ok_or(FirstSliceError::Limits)
+    }
+
+    fn staged(
+        &self,
+        lexical_coverage_bytes: u64,
+        workspace_bytes: u64,
+    ) -> Result<u64, FirstSliceError> {
+        if self.materialization_bytes == 0 {
+            return logical_projection_staged_memory_bytes(
+                self.text_bytes
+                    .checked_add(lexical_coverage_bytes)
+                    .ok_or(FirstSliceError::Limits)?,
+                workspace_bytes,
+            );
+        }
+        self.footprint(lexical_coverage_bytes)?
+            .checked_add(
+                self.text_bytes
+                    .checked_add(lexical_coverage_bytes)
+                    .and_then(|bytes| bytes.checked_mul(2))
+                    .ok_or(FirstSliceError::Limits)?,
+            )
+            .and_then(|bytes| bytes.checked_add(workspace_bytes))
+            .ok_or(FirstSliceError::Limits)
+    }
 }
 
 fn project_context_manifest(

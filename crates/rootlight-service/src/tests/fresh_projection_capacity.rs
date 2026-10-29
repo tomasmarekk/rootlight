@@ -68,9 +68,107 @@ fn capture<T>(operation: impl FnOnce() -> T) -> (T, (u64, u64)) {
     )
 }
 
+#[test]
+fn typed_projection_uses_final_owned_records_and_text_without_changing_wire_bytes() {
+    use rootlight_catalog::{OracleLayoutFragment, OracleReadAdmissionError};
+
+    let root = durable_test_tempdir();
+    fs::write(root.path().join("lib.rs"), "pub fn sample() {}\n").unwrap();
+    let cancellation = Cancellation::new();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(root.path(), &cancellation)
+        .unwrap();
+    let baseline = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let metadata = baseline.metadata();
+    let mut document = baseline.document().clone();
+    let file = document.files[0].clone();
+    for ordinal in 0..512 {
+        let mut region = SkippedRegion {
+            id: FactId::from_bytes([0; 20]),
+            repository: document.repository,
+            generation: document.generation,
+            source: file.evidence.source.clone().unwrap(),
+            domain: IrFactDomain::Entities,
+            reason: SkippedRegionReason::UnsupportedConstruct,
+            detail: format!("bounded omission {ordinal}"),
+            provenance: file.provenance,
+            evidence: FactEvidence {
+                source: file.evidence.source.clone(),
+                derivation: Vec::new(),
+            },
+        };
+        region.id = derive_skipped_region_id(&region).unwrap();
+        document.skipped_regions.push(region);
+    }
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let verified = IdentityVerifiedGeneration::verify(
+        metadata,
+        document,
+        service.analysis_limits.ir(),
+        &service.extensions,
+        &context,
+    )
+    .unwrap();
+    let serialized = normalized_document_serialized_bytes(verified.document()).unwrap();
+    let prospective =
+        OracleLayoutFragment::measure(verified.document(), 0, &context, &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .read_memory_plan(&context)
+            .unwrap();
+    let oracle = durable_test_tempdir();
+    let (reader, verified, written) = OracleWriter::create_in(oracle.path())
+        .unwrap()
+        .seal_preserving_verified_with_read_plan(verified, &context)
+        .unwrap();
+    assert_eq!(prospective, written);
+    drop(reader);
+    let reopened = rootlight_catalog::OracleReader::open_in(oracle.path(), &context).unwrap();
+    let mut observed = None;
+    assert!(matches!(
+        reopened.read_with_admission(&context, |plan| {
+            observed = Some(plan);
+            Err::<(), _>(())
+        }),
+        Err(OracleReadAdmissionError::Admission(()))
+    ));
+    let plan = observed.unwrap();
+    assert_eq!(plan, prospective);
+    let restored = reopened.read(&context).unwrap();
+    assert_eq!(restored.document(), verified.document());
+    assert_eq!(
+        normalized_document_serialized_bytes(restored.document()).unwrap(),
+        serialized
+    );
+    let (lexical, workspace) = (31, 97);
+    let typed = ProjectionDocumentMemory::from_final_plan(serialized, Some(plan));
+    assert_eq!(
+        typed.footprint(lexical).unwrap(),
+        plan.materialization_bytes() + plan.retained_text_bytes() + lexical
+    );
+    assert_eq!(
+        typed.staged(lexical, workspace).unwrap(),
+        plan.materialization_bytes() + 3 * (plan.retained_text_bytes() + lexical) + workspace
+    );
+    let legacy = ProjectionDocumentMemory::from_final_plan(serialized, None);
+    assert_eq!(legacy.footprint(lexical).unwrap(), serialized + lexical);
+    assert_eq!(
+        legacy.staged(lexical, workspace).unwrap(),
+        3 * (serialized + lexical) + workspace
+    );
+    assert!(legacy.staged(lexical, workspace).unwrap() > typed.staged(lexical, workspace).unwrap());
+    assert!(typed.footprint(u64::MAX).is_err());
+    assert!(typed.staged(u64::MAX, workspace).is_err());
+    assert!(legacy.staged(u64::MAX, workspace).is_err());
+    let overflowing = ProjectionDocumentMemory::from_final_plan(u64::MAX, None);
+    assert!(overflowing.footprint(1).is_err());
+}
+
 fn authored(file: usize) -> Vec<u8> {
     let mut source = String::from("// ababa\n");
-    for ordinal in 0..256 {
+    for ordinal in 0..512 {
         use std::fmt::Write as _;
         writeln!(
             source,
@@ -1216,13 +1314,14 @@ mod projection_profile;
 fn resource_fallback_loaded_catalog_uses_one_operation_index_for_source_accounting_reads() {
     let measured = measured();
     let (_storage, root, paths) = fixture();
-    let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(120));
+    let cancellation = Cancellation::new();
     let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
     let receipt = with_ceiling(measured.ceiling, || {
         service
             .index_repository(root.path(), &cancellation)
             .unwrap()
     });
+    let cancellation = Cancellation::with_deadline(Instant::now() + Duration::from_secs(120));
     let lease = service
         .generation_lease(receipt.generation, &cancellation)
         .unwrap();
