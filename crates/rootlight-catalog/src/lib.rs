@@ -307,13 +307,16 @@ impl OracleWriter {
             written.stats.extensions(),
             context,
         )?;
+        let skipped_metadata_bytes =
+            read::skipped_metadata_bytes(&transaction, written.stats, context)?;
         let plan = read::oracle_read_memory_plan(
             generation.metadata().contract_version(),
             written.stats,
             written.maximum_payload_bytes,
             entity_flag_rows,
             symbol_envelopes,
-        )?;
+        )?
+        .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
         transaction.commit().map_err(CatalogError::sqlite)?;
         drop(connection);
         let reader = OracleReader::open_path(path, context)?;
@@ -360,6 +363,7 @@ pub struct OracleReader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OracleReadMemoryPlan {
     stats: GenerationStats,
+    retained_text_bytes: u64,
     physical_rows: u64,
     identity_registry_rows: u64,
     record_workspace_bytes: u64,
@@ -373,6 +377,27 @@ impl OracleReadMemoryPlan {
     #[must_use]
     pub const fn stats(self) -> GenerationStats {
         self.stats
+    }
+
+    /// Returns conservative retained text, excluding eligible inline JSON metadata.
+    ///
+    /// Persisted statistics continue to count complete encoded payloads. Escaping
+    /// overhead remains in this allowance, as do all nonempty derivation payloads.
+    #[must_use]
+    pub const fn retained_text_bytes(self) -> u64 {
+        self.retained_text_bytes
+    }
+
+    pub(crate) fn with_skipped_metadata_bytes(
+        mut self,
+        metadata_bytes: u64,
+    ) -> Result<Self, CatalogError> {
+        self.retained_text_bytes = self
+            .stats
+            .text_bytes()
+            .checked_sub(metadata_bytes)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        Ok(self)
     }
 
     /// Returns the actual physical census, including the legacy seal adjustment.

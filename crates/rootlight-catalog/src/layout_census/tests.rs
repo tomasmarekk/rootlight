@@ -206,6 +206,148 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
 }
 
 #[test]
+fn skipped_metadata_detail_text_and_wire_stats_survive_seal_and_reopen() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    for detail in [
+        "",
+        "ordinary omission",
+        "detail λ 雪 🦀",
+        r#"quoted "detail" with ,"provenance":" inside"#,
+        r#"one trailing \"#,
+        r#"two trailing \\"#,
+        r#"three trailing \\\"#,
+        r#"four trailing \\\\"#,
+        "\0\n\r\t\u{0008}\u{000c}",
+    ] {
+        for derived in [false, true] {
+            let (mut document, _) = fixture_documents();
+            assert_eq!(document.skipped_regions.len(), 1);
+            let region = &mut document.skipped_regions[0];
+            region.detail = detail.to_owned();
+            region.evidence.derivation.clear();
+            if derived {
+                region
+                    .evidence
+                    .derivation
+                    .push(FactRef::File(document.files[0].id));
+            }
+            let wire_bytes = u64::try_from(serde_json::to_vec(region).unwrap().len()).unwrap();
+            let detail_bytes =
+                u64::try_from(serde_json::to_vec(detail).unwrap().len() - 2).unwrap();
+            let generation = snapshot(document);
+            let expected_document = generation.document().clone();
+            let prospective = measure(generation.document(), &context)
+                .read_memory_plan(&context)
+                .unwrap();
+            let actual = write::measure(&generation, &context).unwrap();
+            assert_eq!(prospective.stats(), actual.stats);
+            let expected_text = if derived {
+                actual.stats.text_bytes()
+            } else {
+                actual.stats.text_bytes() - wire_bytes + detail_bytes
+            };
+            assert_eq!(
+                prospective.retained_text_bytes(),
+                expected_text,
+                "{detail:?}"
+            );
+            assert_eq!(
+                prospective.maximum_payload_bytes(),
+                actual.maximum_payload_bytes
+            );
+            let transient_factor =
+                u64::try_from(4 * (size_of::<String>() + size_of::<usize>())).unwrap();
+            assert_eq!(
+                prospective.transient_decode_bytes(),
+                actual.maximum_payload_bytes * transient_factor
+            );
+            let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+            let reader = OracleWriter::create_in(root.path())
+                .unwrap()
+                .seal_unverified_for_test(generation, &context)
+                .unwrap();
+            assert_eq!(prospective, observed_plan(&reader, &context));
+            drop(reader);
+            let reopened = OracleReader::open_in(root.path(), &context).unwrap();
+            assert_eq!(prospective, observed_plan(&reopened, &context));
+            assert_eq!(
+                reopened.read(&context).unwrap().document(),
+                &expected_document
+            );
+        }
+    }
+}
+
+#[test]
+fn skipped_metadata_replacements_restore_committed_and_dropped_preview_charges() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let (mut document, _) = fixture_documents();
+    document.skipped_regions[0].evidence.derivation.clear();
+    let eligible = document.clone();
+    let mut census = OracleLayoutCensus::new(document.repository, document.generation);
+    insert(&mut census, &document, &context);
+    assert!(
+        census
+            .read_memory_plan(&context)
+            .unwrap()
+            .retained_text_bytes()
+            < census
+                .read_memory_plan(&context)
+                .unwrap()
+                .stats()
+                .text_bytes()
+    );
+    for derived in [true, false] {
+        let before = census.read_memory_plan(&context).unwrap();
+        let mut replacement = eligible.clone();
+        if derived {
+            replacement.skipped_regions[0]
+                .evidence
+                .derivation
+                .push(FactRef::File(document.files[0].id));
+        }
+        let expected = measure(&replacement, &context)
+            .read_memory_plan(&context)
+            .unwrap();
+        if derived {
+            assert_eq!(
+                expected.retained_text_bytes(),
+                expected.stats().text_bytes()
+            );
+        } else {
+            assert!(expected.retained_text_bytes() < expected.stats().text_bytes());
+        }
+        {
+            let preview = census
+                .preview(
+                    measure(&document, &context),
+                    measure(&replacement, &context),
+                    0,
+                    &context,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(preview.read_memory_plan(&context).unwrap(), expected);
+        }
+        assert_eq!(census.read_memory_plan(&context).unwrap(), before);
+        census
+            .preview(
+                measure(&document, &context),
+                measure(&replacement, &context),
+                0,
+                &context,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .commit();
+        document = replacement;
+        assert_eq!(census.read_memory_plan(&context).unwrap(), expected);
+    }
+}
+
+#[test]
 fn symbol_envelope_replacements_conserve_preview_commit_and_rollback_counts() {
     let cancellation = Cancellation::new();
     let context = GenerationContext::new(&cancellation, GenerationBudget::default());
@@ -417,17 +559,21 @@ fn removing_and_replacing_maximum_payload_shrinks_the_exact_plan() {
     preview.commit();
     document.diagnostics = addition.diagnostics;
     let actual = write::measure_document(&document, &context, None).unwrap();
+    let prospective = census.read_memory_plan(&context).unwrap();
+    assert_eq!(prospective.stats(), actual.stats);
     assert_eq!(
-        census.read_memory_plan(&context).unwrap(),
-        read::oracle_read_memory_plan(
-            GENERATION_CONTRACT_VERSION,
-            actual.stats,
-            actual.maximum_payload_bytes,
-            flag_rows(&document),
-            symbol_envelopes(&document),
-        )
-        .unwrap()
+        prospective.maximum_payload_bytes(),
+        actual.maximum_payload_bytes
     );
+    let generation = snapshot(document);
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let reader = OracleWriter::create_in(root.path())
+        .unwrap()
+        .seal_unverified_for_test(generation, &context)
+        .unwrap();
+    drop(reader);
+    let reopened = OracleReader::open_in(root.path(), &context).unwrap();
+    assert_eq!(prospective, observed_plan(&reopened, &context));
 }
 
 #[test]

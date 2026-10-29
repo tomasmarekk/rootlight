@@ -10,6 +10,7 @@ thread_local! {
     pub(super) static PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
     pub(super) static FLAGS_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
     pub(super) static SYMBOL_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
+    pub(super) static TEXT_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
 }
 
 fn predecessor<T>(
@@ -39,6 +40,11 @@ fn immediate_flag_policy_fence_requalifies_unchanged_capacity_fallback_before_no
 #[test]
 fn immediate_symbol_policy_fence_requalifies_unchanged_capacity_fallback_before_noop_reuse() {
     assert_prior_policy_cache_requalification(&SYMBOL_PREDECESSOR_POLICY);
+}
+
+#[test]
+fn skipped_text_policy_fence_requalifies_unchanged_capacity_fallback_before_noop_reuse() {
+    assert_prior_policy_cache_requalification(&TEXT_PREDECESSOR_POLICY);
 }
 
 fn assert_prior_policy_cache_requalification(policy: &'static std::thread::LocalKey<Cell<bool>>) {

@@ -146,6 +146,7 @@ pub(crate) fn measure<'a>(
 pub(crate) struct AuxiliaryCensus {
     pub(crate) source_counts: Vec<u64>,
     pub(crate) payloads: Vec<u64>,
+    pub(crate) skipped_metadata_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -353,6 +354,20 @@ pub(crate) fn measure_view<'a>(
         collect_source(&region.source, &mut sources, context)?;
         collect_opaque_evidence_source(&region.evidence, &mut sources, context)?;
         let bytes = add_serialized_text(&mut text_bytes, region, context)?;
+        if region.evidence.derivation.is_empty()
+            && let Some(census) = auxiliary.as_deref_mut()
+        {
+            let mut detail_bytes = 0;
+            add_serialized_text(&mut detail_bytes, &region.detail, context)?;
+            let metadata_bytes = detail_bytes
+                .checked_sub(2)
+                .and_then(|detail| bytes.checked_sub(detail))
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+            census.skipped_metadata_bytes = census
+                .skipped_metadata_bytes
+                .checked_add(metadata_bytes)
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+        }
         record_payload(&mut auxiliary, bytes)?;
         maximum_payload_bytes = maximum_payload_bytes.max(bytes);
     }

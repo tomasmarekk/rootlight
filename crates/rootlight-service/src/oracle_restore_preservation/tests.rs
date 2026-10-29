@@ -540,8 +540,9 @@ fn ordinary_restore_limit_preserves_prefix_later_files_metadata_and_exact_source
     );
     assert_eq!(
         memory.text_memory_bytes,
-        memory.text_bytes * memory.text_copies
+        memory.retained_text_bytes * memory.text_copies
     );
+    assert!(memory.retained_text_bytes <= memory.text_bytes);
     assert_eq!(memory.text_copies, 6);
     assert_eq!(
         memory.total_bytes,

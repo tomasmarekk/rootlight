@@ -7363,6 +7363,7 @@ pub(super) struct OracleRestoreMemoryBreakdown {
     pub(super) index_build_bytes_per_row: u64,
     pub(super) index_build_bytes: u64,
     pub(super) text_bytes: u64,
+    pub(super) retained_text_bytes: u64,
     pub(super) text_copies: u64,
     pub(super) text_memory_bytes: u64,
     pub(super) sidecar_staging_bytes: u64,
@@ -7385,8 +7386,7 @@ pub(super) fn oracle_restore_memory_breakdown(
         .checked_mul(index_build_bytes_per_row)
         .ok_or(FirstSliceError::Limits)?;
     let text_memory_bytes = plan
-        .stats()
-        .text_bytes()
+        .retained_text_bytes()
         .checked_mul(text_copies)
         .ok_or(FirstSliceError::Limits)?;
     let total_bytes = plan
@@ -7404,6 +7404,7 @@ pub(super) fn oracle_restore_memory_breakdown(
         index_build_bytes_per_row,
         index_build_bytes,
         text_bytes: plan.stats().text_bytes(),
+        retained_text_bytes: plan.retained_text_bytes(),
         text_copies,
         text_memory_bytes,
         sidecar_staging_bytes: staging_bytes,

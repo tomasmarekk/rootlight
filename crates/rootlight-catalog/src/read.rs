@@ -337,13 +337,15 @@ pub(crate) fn read_generation_with_admission<E>(
     let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
     let symbol_envelopes =
         count_symbol_envelopes(&transaction, metadata, stats.extensions(), context)?;
+    let skipped_metadata_bytes = skipped_metadata_bytes(&transaction, stats, context)?;
     let memory_plan = oracle_read_memory_plan(
         metadata.contract_version(),
         stats,
         maximum_payload_bytes,
         entity_flag_rows,
         symbol_envelopes,
-    )?;
+    )?
+    .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
     validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
     validate_source_reference_layout(&transaction, stats.source_refs(), context)?;
     admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
@@ -677,6 +679,7 @@ pub(crate) fn oracle_read_memory_plan(
         .ok_or_else(memory_plan_overflow)?;
     Ok(OracleReadMemoryPlan {
         stats,
+        retained_text_bytes: stats.text_bytes(),
         physical_rows,
         identity_registry_rows,
         record_workspace_bytes,
@@ -874,6 +877,121 @@ fn maximum_payload_bytes(
             .map_err(CatalogError::control)?;
     }
     Ok(maximum)
+}
+
+pub(crate) fn skipped_metadata_bytes(
+    connection: &Connection,
+    stats: GenerationStats,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    let mut statement = connection
+        .prepare("SELECT payload FROM skipped_regions ORDER BY skipped_region_id LIMIT ?1")
+        .map_err(CatalogError::sqlite)?;
+    let mut rows = statement
+        .query([codec::sqlite_i64(
+            stats
+                .skipped_regions()
+                .checked_add(1)
+                .ok_or_else(memory_plan_overflow)?,
+        )?])
+        .map_err(CatalogError::sqlite)?;
+    let mut observed = 0_u64;
+    let mut metadata_bytes = 0_u64;
+    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
+        context.check().map_err(CatalogError::control)?;
+        observed = observed.checked_add(1).ok_or_else(memory_plan_overflow)?;
+        if observed > stats.skipped_regions() {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        let raw = row.get_ref(0).map_err(CatalogError::sqlite)?;
+        if let Ok(payload) = raw.as_str() {
+            metadata_bytes = metadata_bytes
+                .checked_add(canonical_skipped_metadata_bytes(payload, context)?)
+                .ok_or_else(memory_plan_overflow)?;
+        }
+    }
+    if observed != stats.skipped_regions() || metadata_bytes > stats.text_bytes() {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    context.check().map_err(CatalogError::control)?;
+    Ok(metadata_bytes)
+}
+
+fn canonical_skipped_metadata_bytes(
+    payload: &str,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    const DETAIL: &[u8] = b",\"detail\":\"";
+    let bytes = payload.as_bytes();
+    if !bytes.starts_with(b"{\"id\":\"") || !bytes.ends_with(b",\"derivation\":[]}}") {
+        return Ok(0);
+    }
+    // This shape recognizer credits the top-level detail/empty-derivation envelope.
+    // Strict decoding remains authoritative. Valid closed records
+    // own detail alone when derivation is empty; strict decode still rejects
+    // malformed rows before retention. Its unchanged largest-payload allowance
+    // covers that one row. This scan borrows bytes and allocates no decoder state.
+    let mut depth = 0_usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut detail_start = None;
+    let mut detail_bytes = None;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if index % write::JSON_CHECKPOINT_BYTES == 0 {
+            context.check().map_err(CatalogError::control)?;
+        }
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+                if let Some(start) = detail_start
+                    && index >= start
+                {
+                    if !bytes[index + 1..].starts_with(b",\"provenance\":\"") {
+                        return Ok(0);
+                    }
+                    detail_bytes = Some(index - start);
+                    detail_start = None;
+                }
+            }
+            continue;
+        }
+        if depth == 1 && bytes[index..].starts_with(DETAIL) {
+            if detail_start.is_some() || detail_bytes.is_some() {
+                return Ok(0);
+            }
+            detail_start = Some(index + DETAIL.len());
+        }
+        match byte {
+            b'"' => quoted = true,
+            b'{' | b'[' => {
+                depth = depth.checked_add(1).ok_or_else(memory_plan_overflow)?;
+                if depth > 128 {
+                    return Ok(0);
+                }
+            }
+            b'}' | b']' => {
+                let Some(next) = depth.checked_sub(1) else {
+                    return Ok(0);
+                };
+                depth = next;
+                if depth == 0 && index + 1 != bytes.len() {
+                    return Ok(0);
+                }
+            }
+            _ => {}
+        }
+    }
+    if quoted || depth != 0 || detail_start.is_some() {
+        return Ok(0);
+    }
+    let Some(detail_bytes) = detail_bytes else {
+        return Ok(0);
+    };
+    u64::try_from(bytes.len() - detail_bytes).map_err(|_| memory_plan_overflow())
 }
 
 pub(crate) fn count_symbol_envelopes(
@@ -2068,6 +2186,124 @@ mod tests {
     }
 
     #[test]
+    fn skipped_metadata_keeps_nested_spoofs_and_nonempty_derivation_coarse() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let mut region = document.skipped_regions[0].clone();
+        region.evidence.derivation.clear();
+        region.detail = "detail with \\\"quote\\\" and trailing \\".into();
+        let encoded = serde_json::to_string(&region).unwrap();
+        let expected = encoded.len() - (serde_json::to_vec(&region.detail).unwrap().len() - 2);
+        assert_eq!(
+            canonical_skipped_metadata_bytes(&encoded, &context).unwrap(),
+            u64::try_from(expected).unwrap()
+        );
+        let reordered = serde_json::to_string(&serde_json::to_value(&region).unwrap()).unwrap();
+        let spaced = encoded.replacen(",\"detail\":\"", ",\"detail\": \"", 1);
+        for alternate in [&reordered, &spaced] {
+            assert_eq!(
+                decode_skipped_region_with_checkpoint(
+                    alternate.as_bytes(),
+                    &IrLimits::default(),
+                    || true
+                )
+                .unwrap(),
+                region
+            );
+            assert_eq!(
+                canonical_skipped_metadata_bytes(alternate, &context).unwrap(),
+                0
+            );
+        }
+        region
+            .evidence
+            .derivation
+            .push(FactRef::File(document.files[0].id));
+        let derived = serde_json::to_string(&region).unwrap();
+        let duplicate =
+            encoded.replacen(",\"detail\":\"", ",\"detail\":\"spoof\",\"detail\":\"", 1);
+        for rejected in [
+            derived.as_str(),
+            duplicate.as_str(),
+            r#"{"id":"x","source":{"detail":"nested","provenance":"x"},"evidence":{"source":null,"derivation":[]}}"#,
+            r#"{"id":"x","detail":"unterminated,"provenance":"x","evidence":{"source":null,"derivation":[]}}"#,
+        ] {
+            assert_eq!(
+                canonical_skipped_metadata_bytes(rejected, &context).unwrap(),
+                0
+            );
+        }
+        assert!(
+            decode_skipped_region_with_checkpoint(
+                duplicate.as_bytes(),
+                &IrLimits::default(),
+                || true
+            )
+            .is_err()
+        );
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert_eq!(
+            canonical_skipped_metadata_bytes(&encoded, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+    }
+
+    #[test]
+    fn skipped_metadata_credit_never_removes_malformed_payload_transients() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let mut region = document.skipped_regions[0].clone();
+        region.evidence.derivation.clear();
+        let encoded = serde_json::to_string(&region).unwrap();
+        let malformed = encoded.replacen(",\"detail\":", ",\"extra\":[],\"detail\":", 1);
+        assert!(
+            decode_skipped_region_with_checkpoint(
+                malformed.as_bytes(),
+                &IrLimits::default(),
+                || true
+            )
+            .is_err()
+        );
+        let maximum = u64::try_from(malformed.len()).unwrap();
+        let before = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats(17, maximum + 1024),
+            maximum,
+            0,
+            0,
+        )
+        .unwrap();
+        let credit = canonical_skipped_metadata_bytes(&malformed, &context).unwrap();
+        assert!(credit > 0);
+        let after = before.with_skipped_metadata_bytes(credit).unwrap();
+        assert_eq!(
+            after.maximum_payload_bytes(),
+            before.maximum_payload_bytes()
+        );
+        assert_eq!(
+            after.transient_decode_bytes(),
+            before.transient_decode_bytes()
+        );
+        assert_eq!(
+            after.record_workspace_bytes(),
+            before.record_workspace_bytes()
+        );
+        assert_eq!(
+            after.materialization_bytes(),
+            before.materialization_bytes()
+        );
+        assert!(
+            before
+                .with_skipped_metadata_bytes(before.stats().text_bytes() + 1)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn sealed_write_read_plan_matches_independent_reader() {
         let cancellation = Cancellation::new();
         let context = GenerationContext::new(&cancellation, GenerationBudget::default());
@@ -2175,6 +2411,23 @@ mod tests {
             written.maximum_payload_bytes,
             u64::try_from(expected_maximum).unwrap()
         );
+        let skipped_metadata =
+            snapshot
+                .document()
+                .skipped_regions
+                .iter()
+                .fold(0_u64, |total, region| {
+                    if region.evidence.derivation.is_empty() {
+                        total
+                            + u64::try_from(
+                                serde_json::to_vec(region).unwrap().len()
+                                    - (serde_json::to_vec(&region.detail).unwrap().len() - 2),
+                            )
+                            .unwrap()
+                    } else {
+                        total
+                    }
+                });
         let measured = oracle_read_memory_plan(
             metadata.contract_version(),
             written.stats,
@@ -2197,6 +2450,8 @@ mod tests {
             )
             .unwrap(),
         )
+        .unwrap()
+        .with_skipped_metadata_bytes(skipped_metadata)
         .unwrap();
         drop(connection);
         let reader = OracleReader::open_in(directory.path(), &context).unwrap();

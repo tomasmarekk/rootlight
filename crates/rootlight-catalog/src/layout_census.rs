@@ -37,6 +37,7 @@ struct Totals {
     entity_flag_rows: u64,
     symbol_envelopes: u64,
     text: u64,
+    skipped_metadata_bytes: u64,
 }
 
 impl Totals {
@@ -73,6 +74,7 @@ impl Totals {
             entity_flag_rows,
             symbol_envelopes,
             text: stats.text_bytes(),
+            skipped_metadata_bytes: 0,
         };
         totals.validate_counts()?;
         Ok(totals)
@@ -82,6 +84,7 @@ impl Totals {
         if self.entity_flag_rows > self.children
             || self.entity_flag_rows > self.records[1].checked_mul(6).ok_or_else(invalid)?
             || self.symbol_envelopes > self.records[9]
+            || self.skipped_metadata_bytes > self.text
         {
             return Err(invalid());
         }
@@ -115,6 +118,11 @@ impl Totals {
             .text
             .checked_sub(removed.text)
             .and_then(|n| n.checked_add(added.text))
+            .ok_or_else(invalid)?;
+        next.skipped_metadata_bytes = self
+            .skipped_metadata_bytes
+            .checked_sub(removed.skipped_metadata_bytes)
+            .and_then(|n| n.checked_add(added.skipped_metadata_bytes))
             .ok_or_else(invalid)?;
         next.validate_counts()?;
         Ok(next)
@@ -195,7 +203,8 @@ impl OracleLayoutFragment {
             self.payloads.last().map_or(0, |(bytes, _)| *bytes),
             self.totals.entity_flag_rows,
             self.totals.symbol_envelopes,
-        )
+        )?
+        .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
     }
 
     /// Copies fixed-layout accounting keys while retaining the original owner.
@@ -496,6 +505,8 @@ impl OracleLayoutFragment {
         let payload_capacity = auxiliary.payloads.capacity();
         let mut fragment = Self::empty(document.repository, document.generation);
         fragment.totals = Totals::from_stats(plan.stats, entity_flag_rows, symbol_envelopes)?;
+        fragment.totals.skipped_metadata_bytes = auxiliary.skipped_metadata_bytes;
+        fragment.totals.validate_counts()?;
         fragment
             .identities
             .try_reserve_exact(logical)
@@ -901,7 +912,8 @@ impl OracleLayoutCensus {
             self.payloads.last().copied().unwrap_or(0),
             self.totals.entity_flag_rows,
             self.totals.symbol_envelopes,
-        )
+        )?
+        .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
     }
 
     /// Previews an owned record transition without committing its matching document.
