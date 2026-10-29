@@ -21,10 +21,16 @@
     ]
   },
   "preferred_source": {
-    "upstream_native_sources_unchanged": true,
-    "generated_by": "tree-sitter v0.25.8",
+    "upstream_native_sources_unchanged": false,
+    "archival_upstream_sources_unchanged": true,
+    "patch": "patches/erb-delimiters.patch",
+    "documentation": "patches/erb-delimiters.md",
+    "purpose": "Preserve ERB statement/output distinctions and authored Ruby bytes instead of consuming foreign template delimiters.",
+    "generated_by": "tree-sitter v0.26.8",
+    "generated_files_hand_edited": false,
     "abi": 15,
-    "external_scanner": false
+    "external_scanner": false,
+    "configuration": "tree-sitter.json"
   },
   "scope": "Native syntax experiment only; no ERB product qualification.",
   "active_inputs": {
@@ -33,20 +39,20 @@
       "sha256": "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78"
     },
     "grammar.js": {
-      "bytes": 1053,
-      "sha256": "4f248ec210a5ce4246672f10cafa578a3998d9c9bf0b3c00b2ac2fac2a6f7ba6"
+      "bytes": 915,
+      "sha256": "49340308c7c668092b3ca6b279b7e2659f3292bccc17ff92e24c5d606dc28c83"
     },
     "src/parser.c": {
-      "bytes": 32877,
-      "sha256": "ff1002e8f8c9e0c8dc463af06ac973348a1618ff15fa077d65ba8916fd38ab8d"
+      "bytes": 21536,
+      "sha256": "85f1e912aaaf8bd424180e7712720a2b59f5ccbca3249044f17fa82d07b5614b"
     },
     "src/grammar.json": {
-      "bytes": 4935,
-      "sha256": "a3798e1783ebbe1ba05b0590ee568d5f5b5d435a86a16f19b6d05da2d5dd78d4"
+      "bytes": 3930,
+      "sha256": "e9e302f6e255209270e1224101bcd9618e9a5b95fef5c52c0daa26bb950f705b"
     },
     "src/node-types.json": {
-      "bytes": 2582,
-      "sha256": "664fb0151af64d3eb81081d77797617a6468405a87acf4254130b9f9ef6fe9c7"
+      "bytes": 1865,
+      "sha256": "f7264d21ca17a1468f51c4f5f93f70064928a9371a70121810f13e68a2b8ed43"
     },
     "src/tree_sitter/parser.h": {
       "bytes": 7624,
@@ -57,8 +63,27 @@
       "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
     },
     "src/tree_sitter/array.h": {
-      "bytes": 10431,
-      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    "tree-sitter.json": {
+      "bytes": 1399,
+      "sha256": "4f9be7ac5ceaadfc89a988d853c4b5f8ba325ff9e17e3b6b03bef562c9fb4b01"
     }
+  },
+  "generation": {
+    "tool": "tree-sitter-cli",
+    "version": "0.26.8",
+    "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "command": [
+      "generate",
+      "--js-runtime",
+      "native",
+      "--abi",
+      "15"
+    ],
+    "working_directory": "third_party/tree-sitter-embedded-template-0.25.0",
+    "exit_code": 0,
+    "network_or_generator_in_build": false
   }
 }

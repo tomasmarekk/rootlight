@@ -21,10 +21,6 @@
           },
           {
             "type": "SYMBOL",
-            "name": "graphql_directive"
-          },
-          {
-            "type": "SYMBOL",
             "name": "content"
           }
         ]
@@ -78,73 +74,6 @@
             },
             {
               "type": "STRING",
-              "value": "<%_"
-            },
-            {
-              "type": "STRING",
-              "value": "<%|"
-            },
-            {
-              "type": "STRING",
-              "value": "<%~"
-            }
-          ]
-        },
-        {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "SYMBOL",
-              "name": "code"
-            },
-            {
-              "type": "BLANK"
-            }
-          ]
-        },
-        {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "STRING",
-              "value": "%>"
-            },
-            {
-              "type": "STRING",
-              "value": "-%>"
-            },
-            {
-              "type": "STRING",
-              "value": "_%>"
-            }
-          ]
-        }
-      ]
-    },
-    "output_directive": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "STRING",
-              "value": "<%="
-            },
-            {
-              "type": "STRING",
-              "value": "<%=="
-            },
-            {
-              "type": "STRING",
-              "value": "<%|="
-            },
-            {
-              "type": "STRING",
-              "value": "<%|=="
-            },
-            {
-              "type": "STRING",
               "value": "<%-"
             }
           ]
@@ -171,10 +100,49 @@
             {
               "type": "STRING",
               "value": "-%>"
+            }
+          ]
+        }
+      ]
+    },
+    "output_directive": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "<%="
             },
             {
               "type": "STRING",
-              "value": "=%>"
+              "value": "<%=="
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "code"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "%>"
+            },
+            {
+              "type": "STRING",
+              "value": "-%>"
             }
           ]
         }
@@ -205,33 +173,17 @@
           ]
         },
         {
-          "type": "STRING",
-          "value": "%>"
-        }
-      ]
-    },
-    "graphql_directive": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "<%graphql"
-        },
-        {
           "type": "CHOICE",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "code"
+              "type": "STRING",
+              "value": "%>"
             },
             {
-              "type": "BLANK"
+              "type": "STRING",
+              "value": "-%>"
             }
           ]
-        },
-        {
-          "type": "STRING",
-          "value": "%>"
         }
       ]
     }

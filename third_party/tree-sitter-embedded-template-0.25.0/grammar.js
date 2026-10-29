@@ -1,5 +1,5 @@
 /**
- * @file Embedded Template grammar for tree-sitter
+ * @file ERB delimiter profile of the retained Embedded Template grammar
  * @author Max Brunsfeld <maxbrunsfeld@gmail.com>
  * @license MIT
  */
@@ -17,7 +17,6 @@ module.exports = grammar({
       $.directive,
       $.output_directive,
       $.comment_directive,
-      $.graphql_directive,
       $.content,
     )),
 
@@ -26,27 +25,21 @@ module.exports = grammar({
     content: _ => prec.right(repeat1(choice(/[^<]+|</, '<%%'))),
 
     directive: $ => seq(
-      choice('<%', '<%_', '<%|', '<%~'),
+      choice('<%', '<%-'),
       optional($.code),
-      choice('%>', '-%>', '_%>'),
+      choice('%>', '-%>'),
     ),
 
     output_directive: $ => seq(
-      choice('<%=', '<%==', '<%|=', '<%|==', '<%-'),
+      choice('<%=', '<%=='),
       optional($.code),
-      choice('%>', '-%>', '=%>'),
+      choice('%>', '-%>'),
     ),
 
     comment_directive: $ => seq(
       '<%#',
       optional(alias($.code, $.comment)),
-      '%>',
-    ),
-
-    graphql_directive: $ => seq(
-      '<%graphql',
-      optional($.code),
-      '%>',
+      choice('%>', '-%>'),
     ),
   },
 });

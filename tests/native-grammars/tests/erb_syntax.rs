@@ -1,4 +1,4 @@
-//! Stock template-host and combined Ruby syntax experiments on original ERB.
+//! ERB delimiter and combined Ruby syntax experiments on original source.
 //! These tests never render templates and do not qualify the ERB product route.
 
 use tree_sitter::{Node, Parser, Range, Tree};
@@ -142,4 +142,91 @@ fn original_comment_and_literal_fake_declarations_do_not_become_ruby_code() {
     let fake = host(b"<%# def ghost; end %><%%= def future; end %>");
     assert!(!fake.root_node().has_error());
     assert!(nodes(&fake, "code").is_empty());
+}
+
+#[test]
+fn erb_trim_opener_remains_a_statement_across_one_ruby_block() {
+    let source = b"<%- items.each do |item| -%><%= item %><%- end -%>";
+    let template = host(source);
+    assert!(!template.root_node().has_error());
+    assert_eq!(
+        nodes(&template, "directive").len(),
+        2,
+        "ERB left trim does not imply output"
+    );
+    assert_eq!(nodes(&template, "output_directive").len(), 1);
+    let combined = ruby(source, &nodes(&template, "code"));
+    assert!(
+        !combined.root_node().has_error(),
+        "{}",
+        combined.root_node().to_sexp()
+    );
+    assert_eq!(nodes(&combined, "do_block").len(), 1);
+}
+
+#[test]
+fn erb_preserves_ruby_underscore_tilde_and_ordinary_closer_source() {
+    for (source, expected) in [
+        (b"<%_value = 3%>".as_slice(), b"_value = 3".as_slice()),
+        (b"<%~value%>".as_slice(), b"~value".as_slice()),
+        (b"<% value_%>".as_slice(), b" value_".as_slice()),
+    ] {
+        let template = host(source);
+        assert!(!template.root_node().has_error());
+        assert_eq!(nodes(&template, "directive").len(), 1);
+        let ranges = nodes(&template, "code");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            &source[ranges[0].start_byte..ranges[0].end_byte],
+            expected,
+            "ERB cannot consume Ruby bytes as a foreign dialect delimiter"
+        );
+        assert!(!ruby(source, &ranges).root_node().has_error());
+    }
+}
+
+#[test]
+fn foreign_delimiters_do_not_manufacture_clean_ruby_or_output_tags() {
+    for (source, expected) in [
+        (b"<%|= value %>".as_slice(), b"|= value ".as_slice()),
+        (b"<%|== value %>".as_slice(), b"|== value ".as_slice()),
+        (b"<%= value =%>".as_slice(), b" value =".as_slice()),
+    ] {
+        let template = host(source);
+        assert!(!template.root_node().has_error());
+        let ranges = nodes(&template, "code");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(&source[ranges[0].start_byte..ranges[0].end_byte], expected);
+        if source.starts_with(b"<%|") {
+            assert!(nodes(&template, "output_directive").is_empty());
+        }
+        assert!(
+            ruby(source, &ranges).root_node().has_error(),
+            "authored Ruby is incomplete or invalid; the host must not erase the offending bytes"
+        );
+    }
+}
+
+#[test]
+fn rails_raw_output_and_ordinary_graphql_named_ruby_keep_their_exact_code() {
+    let source = b"<%= nil %><%== nil %><%graphql value %>";
+    let template = host(source);
+    assert!(!template.root_node().has_error());
+    assert_eq!(nodes(&template, "output_directive").len(), 2);
+    assert_eq!(nodes(&template, "directive").len(), 1);
+    assert!(nodes(&template, "graphql_directive").is_empty());
+    let ranges = nodes(&template, "code");
+    let code: Vec<_> = ranges
+        .iter()
+        .map(|range| &source[range.start_byte..range.end_byte])
+        .collect();
+    assert_eq!(
+        code,
+        [
+            b" nil ".as_slice(),
+            b" nil ".as_slice(),
+            b"graphql value ".as_slice()
+        ]
+    );
+    assert!(!ruby(source, &ranges).root_node().has_error());
 }
