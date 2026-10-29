@@ -11,6 +11,12 @@ cannot become part of a lexical name. `patches/written-prologue.patch` records
 these preferred-source changes. ABI15 outputs are generated with the pinned
 Tree-sitter CLI recorded in `SOURCE-PROVENANCE.json`; builds never run it.
 
+Inline escaped mustache starts are literal tokens, including escaped block
+headers and closers. A single adjacent backslash escapes the start; two or more
+backslashes leave the following mustache active, matching the pinned official
+lexer reference in `SOURCE-PROVENANCE.json`. The same boundary applies inside
+quoted attribute text. No template evaluation runs during indexing.
+
 The grammar does not verify matching block names or template runtime behavior.
 The adapter separately validates block names and scopes before admitting block
 parameters and lexical reads. Helper dispatch, property identity, inverse

@@ -12,6 +12,8 @@ export default grammar({
       choice(
         $.processing_instruction,
         $.doctype_declaration,
+        $.escaped_mustache_start,
+        alias($.literal_backslashes, $.text_node),
         alias($.comment, $.comment_statement),
         $.mustache_statement,
         $.block_statement,
@@ -29,7 +31,12 @@ export default grammar({
     // Match anything that doesn't start with
     // - An open/close HTML delimiter (<, >)
     // - An open/close Mustache delimiter ({, })
-    text_node: () => token(/[^<>{}]+/),
+    text_node: () => token(/[^<>{}\\]+/),
+    // Handlebars' lexer checks a trailing pair before a single backslash:
+    // only one escapes a mustache; longer runs precede an active mustache.
+    // https://github.com/handlebars-lang/handlebars-parser/blob/c3c048f8fdd5039840351ef81aaa45309c9c66e1/src/handlebars.l
+    escaped_mustache_start: () => token("\\{{"),
+    literal_backslashes: () => token(/\\+/),
     processing_instruction: () => token(seq("<?", /[^?]*/, "?>")),
     doctype_declaration: () => token(seq("<!DOCTYPE", /[^>\[]*/, ">")),
 
@@ -229,6 +236,8 @@ export default grammar({
         repeat(
           choice(
             $._mustache_safe_single_quote_string_literal_content,
+            $.escaped_mustache_start,
+            alias($.literal_backslashes, $.text_node),
             $.mustache_statement,
           ),
         ),
@@ -240,6 +249,8 @@ export default grammar({
         repeat(
           choice(
             $._mustache_safe_double_quote_string_literal_content,
+            $.escaped_mustache_start,
+            alias($.literal_backslashes, $.text_node),
             $.mustache_statement,
           ),
         ),

@@ -71,6 +71,10 @@
             "named": true
           },
           {
+            "type": "escaped_mustache_start",
+            "named": true
+          },
+          {
             "type": "mustache_statement",
             "named": true
           },
@@ -198,7 +202,15 @@
       "required": false,
       "types": [
         {
+          "type": "escaped_mustache_start",
+          "named": true
+        },
+        {
           "type": "mustache_statement",
+          "named": true
+        },
+        {
+          "type": "text_node",
           "named": true
         }
       ]
@@ -238,6 +250,10 @@
         },
         {
           "type": "element_node_void",
+          "named": true
+        },
+        {
+          "type": "escaped_mustache_start",
           "named": true
         },
         {
@@ -658,6 +674,10 @@
           "named": true
         },
         {
+          "type": "escaped_mustache_start",
+          "named": true
+        },
+        {
           "type": "mustache_statement",
           "named": true
         },
@@ -734,6 +754,10 @@
   },
   {
     "type": "doctype_declaration",
+    "named": true
+  },
+  {
+    "type": "escaped_mustache_start",
     "named": true
   },
   {

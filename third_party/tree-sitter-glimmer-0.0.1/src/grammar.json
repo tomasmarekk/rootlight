@@ -21,6 +21,19 @@
           "name": "doctype_declaration"
         },
         {
+          "type": "SYMBOL",
+          "name": "escaped_mustache_start"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "literal_backslashes"
+          },
+          "named": true,
+          "value": "text_node"
+        },
+        {
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
@@ -84,7 +97,21 @@
       "type": "TOKEN",
       "content": {
         "type": "PATTERN",
-        "value": "[^<>{}]+"
+        "value": "[^<>{}\\\\]+"
+      }
+    },
+    "escaped_mustache_start": {
+      "type": "TOKEN",
+      "content": {
+        "type": "STRING",
+        "value": "\\{{"
+      }
+    },
+    "literal_backslashes": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "\\\\+"
       }
     },
     "processing_instruction": {
@@ -810,6 +837,19 @@
               },
               {
                 "type": "SYMBOL",
+                "name": "escaped_mustache_start"
+              },
+              {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "literal_backslashes"
+                },
+                "named": true,
+                "value": "text_node"
+              },
+              {
+                "type": "SYMBOL",
                 "name": "mustache_statement"
               }
             ]
@@ -836,6 +876,19 @@
               {
                 "type": "SYMBOL",
                 "name": "_mustache_safe_double_quote_string_literal_content"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "escaped_mustache_start"
+              },
+              {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "literal_backslashes"
+                },
+                "named": true,
+                "value": "text_node"
               },
               {
                 "type": "SYMBOL",

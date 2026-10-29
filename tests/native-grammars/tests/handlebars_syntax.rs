@@ -169,3 +169,93 @@ fn inline_value_strip_is_a_delimiter_outside_the_identifier() {
     assert_eq!(value.parent().unwrap().kind(), "mustache_statement");
     assert_eq!(value.next_sibling().unwrap().kind(), "~}}");
 }
+
+#[test]
+fn inline_escapes_preserve_literal_heads_and_real_block_topology() {
+    for (prefix, literal) in [
+        ("", false),
+        (r"\", true),
+        (r"\\", false),
+        (r"\\\", false),
+        (r"\\\\", false),
+        (r"\ ", false),
+        (r"\\ ", false),
+    ] {
+        let source = [
+            "{{#each values as |item|}}",
+            prefix,
+            "{{item.name}} {{item.name}}{{/each}}",
+        ]
+        .concat();
+        let tree = clean(source.as_bytes());
+        let all = nodes(&tree);
+        let first = source.find("item.name").unwrap();
+        assert_eq!(
+            all.iter()
+                .filter(
+                    |node| node.kind() == "identifier" && node.byte_range() == (first..first + 4)
+                )
+                .count(),
+            if literal { 0 } else { 1 },
+            "{source}"
+        );
+        let genuine = source.rfind("item.name").unwrap();
+        identifier(&tree, genuine..genuine + 4);
+        assert_eq!(
+            all.iter()
+                .filter(|node| node.kind() == "block_statement")
+                .count(),
+            1,
+            "{source}"
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|node| node.kind() == "block_params")
+                .count(),
+            1,
+            "{source}"
+        );
+    }
+    for body in [
+        r"\{{#with other as |ghost|}}\{{/with}}\{{/each}}",
+        r"\{{~#with other as |ghost|~}}\{{~/with~}}\{{~/each~}}",
+        r#"<span data-name="\{{item.name}}"></span>"#,
+    ] {
+        let source = [
+            "{{#each values as |item|}}{{item.name}} ",
+            body,
+            " {{item.name}}{{/each}}",
+        ]
+        .concat();
+        let tree = clean(source.as_bytes());
+        let all = nodes(&tree);
+        assert_eq!(
+            all.iter()
+                .filter(|node| node.kind() == "block_statement")
+                .count(),
+            1,
+            "{source}"
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|node| node.kind() == "block_params")
+                .count(),
+            1,
+            "{source}"
+        );
+        assert!(
+            !all.iter().any(|node| node.kind() == "identifier"
+                && node.utf8_text(source.as_bytes()).unwrap() == "ghost"),
+            "{source}"
+        );
+        if let Some(escaped) = source.find(r"\{{item.name}}") {
+            let start = escaped + 3;
+            assert!(
+                !all.iter()
+                    .any(|node| node.kind() == "identifier"
+                        && node.byte_range() == (start..start + 4)),
+                "{source}"
+            );
+        }
+    }
+}

@@ -352,6 +352,89 @@ fn raw_host_text_keeps_only_handlebars_parameter_and_read_semantics() {
 }
 
 #[test]
+fn escaped_mustache_stays_literal_while_the_following_value_read_resolves() {
+    for (prefix, suffix, literal) in [
+        ("", "", false),
+        (r"\", "", true),
+        (r"\\", "", false),
+        (r"\\\", "", false),
+        (r"\\\\", "", false),
+        (r"\ ", "", false),
+        (r"\\ ", "", false),
+        (r#"<span data-name="\"#, r#""></span>"#, true),
+    ] {
+        let source = [
+            "{{#each values as |item|}}",
+            prefix,
+            "{{item.name}}",
+            suffix,
+            " {{item.name}}{{/each}}",
+        ]
+        .concat();
+        let result = output(source.as_bytes(), "utf-8");
+        let document = result.document();
+        let declaration = u64::try_from(source.find("as |item|").unwrap() + 4).unwrap();
+        let item = definition(document, declaration, declaration + 4, "item");
+        let first = u64::try_from(source.find("item.name").unwrap()).unwrap();
+        let genuine = u64::try_from(source.rfind("item.name").unwrap()).unwrap();
+        read(document, genuine, genuine + 4, item);
+        if !literal {
+            read(document, first, first + 4, item);
+            continue;
+        }
+        let overlaps_literal =
+            |span: SourceSpan| span.start_byte() < first + 4 && first < span.end_byte();
+        assert!(
+            !document.occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::Read && overlaps_literal(site.source.span())
+            }),
+            "escaped mustache must remain literal text: {source}"
+        );
+        assert!(
+            !document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge
+                        .evidence
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| overlaps_literal(source.span()))
+            }),
+            "escaped mustache must not acquire a lexical relation: {source}"
+        );
+    }
+}
+
+#[test]
+fn escaped_block_headers_and_closes_do_not_change_real_outer_parameter_scope() {
+    for body in [
+        r"\{{#with other as |ghost|}}\{{/with}}\{{/each}}",
+        r"\{{~#with other as |ghost|~}}\{{~/with~}}\{{~/each~}}",
+    ] {
+        let source = [
+            "{{#each values as |item|}}{{item.name}} ",
+            body,
+            " {{item.name}}{{/each}}",
+        ]
+        .concat();
+        let result = output(source.as_bytes(), "utf-8");
+        let document = result.document();
+        let declaration = u64::try_from(source.find("as |item|").unwrap() + 4).unwrap();
+        let item = definition(document, declaration, declaration + 4, "item");
+        let parameters: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Parameter)
+            .map(|entity| entity.canonical_name.as_str())
+            .collect();
+        assert_eq!(parameters, ["item"], "{source}");
+        for (position, _) in source.match_indices("item.name") {
+            let start = u64::try_from(position).unwrap();
+            read(document, start, start + 4, item);
+        }
+    }
+}
+
+#[test]
 fn invalid_ambiguous_and_inverse_blocks_keep_source_without_resolved_parameter_reads() {
     for source in [
         "{{#each values as |item|}}{{item.name}}{{/with}}",

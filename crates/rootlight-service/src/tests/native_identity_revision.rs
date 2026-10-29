@@ -16,6 +16,55 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         derive_fact("rootlight.first-slice.grammar-input", GRAMMAR_REVISION_SEED).id(),
     );
     let grammar = first_slice_grammar_revision_hash().unwrap();
+    let handlebars_grammar = |predecessor: bool| {
+        let registry = GrammarRegistry::audited().unwrap();
+        let mut hasher = blake3::Hasher::new();
+        hash_component(&mut hasher, GRAMMAR_REVISION_SEED).unwrap();
+        hash_component(&mut hasher, TREE_SITTER_RUNTIME_VERSION.as_bytes()).unwrap();
+        for descriptor in registry.descriptors() {
+            hash_component(&mut hasher, descriptor.language().as_str().as_bytes()).unwrap();
+            hash_component(&mut hasher, descriptor.grammar_version().as_bytes()).unwrap();
+            let old = predecessor && descriptor.language().as_str() == "handlebars";
+            let source = if old {
+                "73e92995115833b45caaf919f30b293c6f41c64dbb1593e3548cda983082ab79"
+            } else {
+                descriptor.grammar_source_sha256()
+            };
+            let parser = if old {
+                "ca3c5080a4b1771bcd36738b7ec525e2af8197b5c63321e60fed8434c5e8a92a"
+            } else {
+                descriptor.parser_sha256()
+            };
+            hash_component(&mut hasher, source.as_bytes()).unwrap();
+            hash_component(&mut hasher, parser.as_bytes()).unwrap();
+            match descriptor.scanner_sha256() {
+                Some(scanner) => {
+                    hash_component(&mut hasher, b"scanner").unwrap();
+                    hash_component(&mut hasher, scanner.as_bytes()).unwrap();
+                }
+                None => hash_component(&mut hasher, b"no-scanner").unwrap(),
+            }
+            hash_component(
+                &mut hasher,
+                &u64::try_from(descriptor.abi_version())
+                    .unwrap()
+                    .to_be_bytes(),
+            )
+            .unwrap();
+        }
+        ContentHash::from_bytes(*hasher.finalize().as_bytes())
+    };
+    assert_eq!(handlebars_grammar(false), grammar);
+    let predecessor_escaped_grammar = handlebars_grammar(true);
+    assert_ne!(predecessor_escaped_grammar, grammar);
+    let predecessor_escaped_parser = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        ANALYZER_BINARY_SEED,
+        predecessor_escaped_grammar.as_bytes(),
+    ])
+    .unwrap();
     let predecessor_parser = hash_static_components(&[
         PARSER_PROVIDER_SET_SEED,
         TREE_SITTER_ADAPTER_VERSION.as_bytes(),
@@ -165,6 +214,16 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
 
     for (changed_key, predecessor, expected) in [
         (
+            grammar_key,
+            predecessor_escaped_grammar,
+            ArtifactDecisionKind::Rebuild,
+        ),
+        (
+            adapter_key,
+            predecessor_escaped_parser,
+            ArtifactDecisionKind::Rebuild,
+        ),
+        (
             adapter_key,
             predecessor_handlebars_parser,
             ArtifactDecisionKind::Rebuild,
@@ -252,10 +311,26 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
             &cancellation,
         )
         .unwrap();
-        assert_eq!(
-            previous.iter().find(|input| input.key() == grammar_key),
-            current.iter().find(|input| input.key() == grammar_key)
-        );
+        if changed_key == grammar_key {
+            assert_eq!(
+                previous.iter().find(|input| input.key() == grammar_key),
+                Some(InputFingerprint::new(
+                    grammar_key,
+                    predecessor_escaped_grammar
+                ))
+            );
+        } else {
+            assert_eq!(
+                previous.iter().find(|input| input.key() == grammar_key),
+                current.iter().find(|input| input.key() == grammar_key)
+            );
+        }
+        for input in current.iter().filter(|input| input.key() != changed_key) {
+            assert_eq!(
+                previous.iter().find(|value| value.key() == input.key()),
+                Some(input)
+            );
+        }
         let parent = summary(previous);
         let plan = plan_invalidation(&parent, &current, &graph, limits, &cancellation).unwrap();
         assert_eq!(
@@ -270,7 +345,7 @@ fn native_analyzer_and_resolver_predecessors_invalidate_same_grammar_cache() {
         assert_eq!(plan.artifact_decisions().len(), 1);
         assert_eq!(plan.artifact_decisions()[0].artifact(), artifact_id);
         assert_eq!(plan.artifact_decisions()[0].kind(), expected);
-        if changed_key == adapter_key {
+        if changed_key == adapter_key || changed_key == grammar_key {
             assert!(plan.invalidated_nodes().any(|node|
                 node == FactNode::new(file_analysis_unit(file), FactDomain::Syntax)));
         } else {
