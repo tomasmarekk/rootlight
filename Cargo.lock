@@ -1751,6 +1751,7 @@ dependencies = [
  "tree-sitter-fortran",
  "tree-sitter-fsharp",
  "tree-sitter-gdscript",
+ "tree-sitter-glimmer",
  "tree-sitter-glsl",
  "tree-sitter-go",
  "tree-sitter-graphql",
@@ -1767,6 +1768,7 @@ dependencies = [
  "tree-sitter-julia",
  "tree-sitter-kotlin-ng",
  "tree-sitter-lean",
+ "tree-sitter-liquid",
  "tree-sitter-lua",
  "tree-sitter-matlab",
  "tree-sitter-md",
@@ -1783,7 +1785,6 @@ dependencies = [
  "tree-sitter-pony",
  "tree-sitter-powershell",
  "tree-sitter-proto",
- "tree-sitter-liquid",
  "tree-sitter-pug",
  "tree-sitter-python",
  "tree-sitter-qmljs",
@@ -3338,6 +3339,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-gdscript"
 version = "6.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-glimmer"
+version = "0.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",

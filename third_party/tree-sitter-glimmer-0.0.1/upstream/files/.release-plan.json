@@ -1,0 +1,18 @@
+{
+  "solution": {
+    "tree-sitter-glimmer": {
+      "impact": "minor",
+      "oldVersion": "1.5.0",
+      "newVersion": "1.6.0",
+      "tagName": "latest",
+      "constraints": [
+        {
+          "impact": "minor",
+          "reason": "Appears in changelog section :rocket: Enhancement"
+        }
+      ],
+      "pkgJSONPath": "./package.json"
+    }
+  },
+  "description": "## Release (2026-01-12)\n\n* tree-sitter-glimmer 1.6.0 (minor)\n\n#### :rocket: Enhancement\n* `tree-sitter-glimmer`\n  * [#187](https://github.com/ember-tooling/tree-sitter-glimmer/pull/187) Update injections ([@NullVoxPopuli](https://github.com/NullVoxPopuli))\n\n#### Committers: 1\n- [@NullVoxPopuli](https://github.com/NullVoxPopuli)\n"
+}

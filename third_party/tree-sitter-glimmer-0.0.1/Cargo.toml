@@ -1,0 +1,21 @@
+# Local static binding for the retained MIT Glimmer written-template grammar.
+# Source preparation is separate; builds never acquire or generate code.
+[package]
+name = "tree-sitter-glimmer"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/ember-tooling/tree-sitter-glimmer"
+description = "Pinned Glimmer grammar with local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

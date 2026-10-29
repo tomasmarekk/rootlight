@@ -103,6 +103,7 @@ exclude = [
     "third_party/tree-sitter-wgsl-0.0.9",
     "third_party/tree-sitter-capnp-1.5.0",
     "third_party/tree-sitter-xml-0.7.0",
+    "third_party/tree-sitter-glimmer-0.0.1",
     "third_party/tree-sitter-cmake-0.7.5",
     "third_party/tree-sitter-julia-0.25.0",
     "third_party/tree-sitter-eiffel-1.0.0",
@@ -228,6 +229,7 @@ tree-sitter-glsl = { path = "third_party/tree-sitter-glsl-0.2.0", version = "=0.
 tree-sitter-hlsl = { path = "third_party/tree-sitter-hlsl-0.2.0", version = "=0.2.0", default-features = false }
 tree-sitter-wgsl = { path = "third_party/tree-sitter-wgsl-0.0.9", version = "=0.0.9", default-features = false }
 tree-sitter-xml = { path = "third_party/tree-sitter-xml-0.7.0", version = "=0.7.0", default-features = false }
+tree-sitter-glimmer = { path = "third_party/tree-sitter-glimmer-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-cmake = { path = "third_party/tree-sitter-cmake-0.7.5", version = "=0.7.5", default-features = false }
 tree-sitter-julia = { path = "third_party/tree-sitter-julia-0.25.0", version = "=0.25.0", default-features = false }
 tree-sitter-eiffel = { path = "third_party/tree-sitter-eiffel-1.0.0", version = "=1.0.0", default-features = false }

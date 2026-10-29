@@ -1,0 +1,29 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -10,6 +10,8 @@
+     // Each individual "thing" in the file
+     _declaration: ($) =>
+       choice(
++        $.processing_instruction,
++        $.doctype_declaration,
+         alias($.comment, $.comment_statement),
+         $.mustache_statement,
+         $.block_statement,
+@@ -28,6 +30,8 @@
+     // - An open/close HTML delimiter (<, >)
+     // - An open/close Mustache delimiter ({, })
+     text_node: () => token(/[^<>{}]+/),
++    processing_instruction: () => token(seq("<?", /[^?]*/, "?>")),
++    doctype_declaration: () => token(seq("<!DOCTYPE", /[^>\[]*/, ">")),
+ 
+     // A lone `{` or `}` that isn't part of a `{{ ... }}` delimiter is rendered
+     // by Glimmer as literal text (e.g. the trailing `}}` left over when a
+@@ -256,7 +260,7 @@
+ 
+     block_params: ($) => seq("as", "|", repeat($.identifier), "|"),
+ 
+-    identifier: () => /[^<>"'/={}()\s\.,!|]+/,
++    identifier: () => /[^<>"'/={}()\s\.,!|~]+/,
+     path_expression: ($) => seq($.identifier, repeat1(seq(".", $.identifier))),
+ 
+     // Represents anything that can be a "value"; things like

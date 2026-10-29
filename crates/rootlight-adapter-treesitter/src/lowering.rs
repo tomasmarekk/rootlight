@@ -46,6 +46,7 @@ mod go_call_formals;
 mod go_calls;
 mod go_formal_reads;
 mod graphql;
+mod handlebars;
 mod hare;
 mod haskell_modules;
 mod haskell_record_fields;
@@ -818,6 +819,7 @@ fn required_syntax_fact_count_from_output(
             || ruby_formal_receivers::required(fact)
             || html_closing_tags::required(fact)
             || liquid::required(fact)
+            || handlebars::required(fact)
         {
             declarations.push((fact.span().start_byte(), fact.span().end_byte()));
         }
@@ -968,6 +970,7 @@ fn required_syntax_fact_count_from_output(
             || bash_calls::required(fact)
             || html_closing_tags::required(fact)
             || liquid::required(fact)
+            || handlebars::required(fact)
             || bash_module_references::required(fact)
             || go_calls::package_candidate(fact)
             || php_this_calls::required(fact)
@@ -1927,10 +1930,10 @@ fn preflight_lowering_limits(
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && astro_reads::required(fact))
-                    || (request.language().as_str() == "liquid"
+                    || (matches!(request.language().as_str(), "liquid" | "handlebars")
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
-                        && liquid::required(fact))
+                        && (liquid::required(fact) || handlebars::required(fact)))
                     || (request.language().as_str() == "scala"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -3488,6 +3491,32 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.coordinates.facts(),
                 &materialized,
                 liquid::CurrentSource {
+                    reference: self.full_source,
+                    logical: self.source_view.as_bytes(),
+                    original: self.request.source().bytes(),
+                    encoding: self.request.encoding().as_str(),
+                    complete: self.request.included_ranges().is_empty()
+                        && self.parse_output.report().coverage().status()
+                            != CoverageStatus::Unknown,
+                    maximum: self
+                        .request
+                        .limits()
+                        .max_syntax_nodes()
+                        .saturating_mul(128)
+                        .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                },
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let handlebars_reads = if self.request.language().as_str() == "handlebars" {
+            Some(handlebars::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                handlebars::CurrentSource {
                     reference: self.full_source,
                     logical: self.source_view.as_bytes(),
                     original: self.request.source().bytes(),
@@ -5107,6 +5136,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && !bash_module_references::required(fact)
                     && fact.syntax_kind().as_str() != html_closing_tags::REFERENCE
                     && !liquid::reference(fact)
+                    && !handlebars::reference(fact)
                 {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
@@ -5302,6 +5332,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("liquid-loop-read-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &handlebars_reads
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("handlebars-loop-read-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -10781,7 +10825,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(haxe::gaps(fact))
         .chain(coffeescript::gaps(fact))
         .chain(pug::gaps(fact))
-        .chain(liquid::gaps(fact))
+        .chain(liquid::gaps(fact).chain(handlebars::gaps(fact)))
         .chain(sed::gaps(fact))
         .chain(idris::gaps(fact))
         .chain(wolfram::gaps(fact))
@@ -11751,6 +11795,9 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
     if language == "idris" {
         return idris::written_identity(kind, label);
     }
+    if language == "handlebars" {
+        return handlebars::written_identity(kind, label);
+    }
     if language == "liquid" {
         return liquid::written_identity(kind, label);
     }
@@ -12280,7 +12327,7 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
-    if liquid::reference(fact) {
+    if liquid::reference(fact) || handlebars::reference(fact) {
         return None;
     }
     if fact.syntax_kind().as_str().starts_with("typescript.const_") {
@@ -13169,6 +13216,10 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "handlebars" {
+        return fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "handlebars.file.module";
+    }
     if language == "liquid" || fact.syntax_kind().as_str().starts_with("liquid.") {
         return language == "liquid"
             && fact.kind() == SyntaxFactKind::Module
@@ -13799,6 +13850,9 @@ fn supports_declaration_signature(
             && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str())
             && definition.is_some_and(|definition| definition.span() != declaration.span());
     }
+    if language == "handlebars" {
+        return kind == EntityKind::Parameter;
+    }
     if language == "xml" {
         return declaration.kind() == SyntaxFactKind::Declaration
             && uses_written_source_identity(language, kind, declaration.syntax_kind().as_str());
@@ -13982,6 +14036,9 @@ fn supports_signature(kind: EntityKind, language: &str) -> bool {
                 | EntityKind::TypeAlias
         ) || (language == "ocaml" && kind == EntityKind::Parameter);
     }
+    if language == "handlebars" {
+        return kind == EntityKind::Parameter;
+    }
     if language == "xml" {
         return matches!(
             kind,
@@ -14078,6 +14135,11 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     if fact.kind() == SyntaxFactKind::Declaration
+        && fact.syntax_kind().as_str() == "handlebars.block_parameter.declaration"
+    {
+        return Some(EntityKind::Parameter);
+    }
+    if fact.kind() == SyntaxFactKind::Declaration
         && fact.syntax_kind().as_str() == "php.ordinary_parameter.declaration"
     {
         Some(EntityKind::Parameter)
@@ -14087,6 +14149,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str() == "handlebars.block_parameter.declaration" {
+        return structural_entity_kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("php.ordinary_") {
         structural_entity_kind(fact)
     } else {
@@ -14095,6 +14160,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if handlebars::reference(fact) {
+        return Some("handlebars-current-source-block-parameter-binding-unavailable");
+    }
     if liquid::reference(fact) {
         return Some("liquid-current-source-local-value-binding-unavailable");
     }
@@ -14664,7 +14732,7 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
-    if liquid::reference(fact) {
+    if liquid::reference(fact) || handlebars::reference(fact) {
         return Some(OccurrenceRole::Read);
     }
     if ruby_bindings::required(fact) || ruby_formal_receivers::required(fact) {

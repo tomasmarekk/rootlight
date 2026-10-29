@@ -12,6 +12,7 @@ mod groovy_bindings;
 mod groovy_callables;
 mod groovy_calls;
 mod groovy_members;
+mod handlebars_bindings;
 mod haskell_bindings;
 mod html_closing_tags;
 mod incremental;

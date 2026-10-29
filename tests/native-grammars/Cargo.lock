@@ -167,6 +167,7 @@ dependencies = [
  "tree-sitter-fortran",
  "tree-sitter-fsharp",
  "tree-sitter-gdscript",
+ "tree-sitter-glimmer",
  "tree-sitter-graphql",
  "tree-sitter-gsed",
  "tree-sitter-hare",
@@ -178,6 +179,7 @@ dependencies = [
  "tree-sitter-json",
  "tree-sitter-julia",
  "tree-sitter-kotlin-ng",
+ "tree-sitter-liquid",
  "tree-sitter-matlab",
  "tree-sitter-md",
  "tree-sitter-meson",
@@ -189,7 +191,6 @@ dependencies = [
  "tree-sitter-pascal",
  "tree-sitter-pony",
  "tree-sitter-powershell",
- "tree-sitter-liquid",
  "tree-sitter-pug",
  "tree-sitter-qmljs",
  "tree-sitter-qsharp",
@@ -494,6 +495,14 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-graphql"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-glimmer"
 version = "0.0.1"
 dependencies = [
  "cc",

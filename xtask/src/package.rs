@@ -61,7 +61,7 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 71] = [
+const DISTRIBUTION_LICENSES: [&str; 72] = [
     "tree-sitter-cuda-0.21.2-LICENSE",
     "tree-sitter-cuda-0.21.2-Cpp-generation-LICENSE",
     "tree-sitter-cuda-0.21.2-Cpp-gitlink-LICENSE",
@@ -102,6 +102,7 @@ const DISTRIBUTION_LICENSES: [&str; 71] = [
     "tree-sitter-cmake-0.7.5-LICENSE",
     "tree-sitter-julia-0.25.0-LICENSE",
     "tree-sitter-xml-0.7.0-LICENSE",
+    "tree-sitter-glimmer-0.0.1-LICENSE",
     "tree-sitter-0.26.11-LICENSE",
     "tree-sitter-wgsl-0.0.9-LICENSE.md",
     "tree-sitter-wgsl-0.0.9-GPUWeb-BSD-LICENSE.txt",

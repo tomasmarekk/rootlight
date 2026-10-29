@@ -23,6 +23,8 @@ pub enum GrammarFamily {
     Pug,
     /// Liquid written loop items and scoped local value reads without evaluation.
     Liquid,
+    /// Handlebars written block parameters without helper or property evaluation.
+    Handlebars,
     /// Lean written direct definitions and explicit typed formals.
     Lean,
     /// Dockerfile written stages and clean literal prior-stage references.
@@ -313,13 +315,14 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(102);
+        let mut descriptors = Vec::with_capacity(103);
         for family in [
             GrammarFamily::Idris,
             GrammarFamily::Sed,
             GrammarFamily::Wolfram,
             GrammarFamily::Pug,
             GrammarFamily::Liquid,
+            GrammarFamily::Handlebars,
             GrammarFamily::Lean,
             GrammarFamily::Dockerfile,
             GrammarFamily::Coffeescript,
@@ -529,6 +532,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Wolfram => tree_sitter_wolfram::LANGUAGE.into(),
         GrammarFamily::Pug => tree_sitter_pug::LANGUAGE.into(),
         GrammarFamily::Liquid => tree_sitter_liquid::LANGUAGE.into(),
+        GrammarFamily::Handlebars => tree_sitter_glimmer::LANGUAGE.into(),
         GrammarFamily::Lean => tree_sitter_lean::LANGUAGE.into(),
         GrammarFamily::Coffeescript => tree_sitter_coffeescript::LANGUAGE.into(),
         GrammarFamily::Meson => tree_sitter_meson::LANGUAGE.into(),
@@ -713,6 +717,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268",
             scanner_sha256: Some(
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
+            ),
+        },
+        GrammarFamily::Handlebars => GrammarIdentity {
+            language_id: "handlebars",
+            grammar_version: "0.0.1",
+            source_package_sha256: "73e92995115833b45caaf919f30b293c6f41c64dbb1593e3548cda983082ab79",
+            parser_sha256: "ca3c5080a4b1771bcd36738b7ec525e2af8197b5c63321e60fed8434c5e8a92a",
+            scanner_sha256: Some(
+                "02e501be6b35c5be5650174974db9b0fc6aacc567285a6e2de7f408079651f68",
             ),
         },
         GrammarFamily::Liquid => GrammarIdentity {
@@ -1528,13 +1541,14 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 102);
+        assert_eq!(registry.descriptors().len(), 103);
         for family in [
             GrammarFamily::Idris,
             GrammarFamily::Sed,
             GrammarFamily::Wolfram,
             GrammarFamily::Pug,
             GrammarFamily::Liquid,
+            GrammarFamily::Handlebars,
             GrammarFamily::Lean,
             GrammarFamily::Dockerfile,
             GrammarFamily::Coffeescript,
@@ -1908,6 +1922,11 @@ mod tests {
             (GrammarFamily::Wolfram, "wolfram", "tree-sitter-wolfram"),
             (GrammarFamily::Pug, "pug", "tree-sitter-pug"),
             (GrammarFamily::Liquid, "liquid", "tree-sitter-liquid"),
+            (
+                GrammarFamily::Handlebars,
+                "handlebars",
+                "tree-sitter-glimmer",
+            ),
             (GrammarFamily::Lean, "lean", "tree-sitter-lean"),
             (GrammarFamily::Meson, "meson", "tree-sitter-meson"),
             (GrammarFamily::Gdscript, "gdscript", "tree-sitter-gdscript"),
@@ -2068,6 +2087,7 @@ mod tests {
                                 | GrammarFamily::Coffeescript
                                 | GrammarFamily::Pug
                                 | GrammarFamily::Liquid
+                                | GrammarFamily::Handlebars
                                 | GrammarFamily::Wolfram
                                 | GrammarFamily::Lean
                                 | GrammarFamily::Idris

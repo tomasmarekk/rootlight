@@ -12,6 +12,7 @@ license = "AGPL-3.0-only"
 resolver = "3"
 
 [dev-dependencies]
+tree-sitter-glimmer = { path = "../../third_party/tree-sitter-glimmer-0.0.1", version = "=0.0.1", default-features = false }
 regex = "=1.13.0"
 tree-sitter-asm = { path = "../../third_party/tree-sitter-asm-0.24.0", version = "=0.24.0", default-features = false }
 tree-sitter-cuda = { path = "../../third_party/tree-sitter-cuda-0.21.2", version = "=0.21.2", default-features = false }

@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.80";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.81";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2963,6 +2963,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["native"],
+    },
+    LanguageCapability {
+        language: "handlebars",
+        suffixes: &[".hbs"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
     },
     LanguageCapability {
         language: "liquid",
@@ -7837,6 +7845,28 @@ max_source_file_bytes = 2097152
             assert_ne!(extension_language(path), Some("make"), "{path}");
         }
         assert_eq!(canonical_language("make"), Some("make"));
+    }
+
+    #[test]
+    fn handlebars_routes_only_exact_terminal_template_suffixes() {
+        for path in ["templates/palette.hbs", "palette.json.hbs", "STYLE.CSS.HBS"] {
+            assert_eq!(extension_language(path), Some("handlebars"), "{path}");
+        }
+        for path in [
+            "palette.hbs.bak",
+            "palette.hbs.json",
+            "palette.handlebars",
+            "palette.mustache",
+        ] {
+            assert_ne!(extension_language(path), Some("handlebars"), "{path}");
+        }
+        assert_eq!(canonical_language("handlebars"), Some("handlebars"));
+        let capability = LANGUAGE_CAPABILITIES
+            .iter()
+            .find(|entry| entry.language == "handlebars")
+            .unwrap();
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
     }
 
     #[test]

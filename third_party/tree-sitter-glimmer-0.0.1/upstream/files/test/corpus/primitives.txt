@@ -1,0 +1,73 @@
+==================
+Double-Quote String
+==================
+{{"foo"}}
+{{""}}
+---
+
+(template
+  (mustache_statement
+    (string_literal))
+  (text_node)
+  (mustache_statement
+    (string_literal)))
+
+==================
+Single-Quote String
+==================
+{{'foo'}}
+{{''}}
+---
+
+(template
+  (mustache_statement
+    (string_literal))
+  (text_node)
+  (mustache_statement
+    (string_literal)))
+
+==================
+Number
+==================
+{{12}}
+---
+
+(template
+  (mustache_statement
+    (number_literal)))
+
+==================
+Number with decimal
+==================
+{{1.5}}
+---
+
+(template
+  (mustache_statement
+    (number_literal)))
+
+==================
+Number with decimal as helper argument
+==================
+{{fixed 1.5}}
+---
+
+(template
+  (mustache_statement
+    (helper_invocation
+      helper: (identifier)
+      argument: (number_literal))))
+
+==================
+Boolean
+==================
+{{true}}
+{{false}}
+---
+
+(template
+  (mustache_statement
+    (boolean_literal))
+  (text_node)
+  (mustache_statement
+    (boolean_literal)))

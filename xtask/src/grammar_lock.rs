@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "de0e21c50f37e396fd6bd4750f349f1e17bba6fff98eee812c819294b3147a10";
+    "a88a5f2c1474fe9cdc97e840b3d26c17f094add287f196badce52b023aff2f9f";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 59] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 60] = [
+    (
+        "tree-sitter-glimmer",
+        "0.0.1",
+        "third_party/tree-sitter-glimmer-0.0.1",
+        "73e92995115833b45caaf919f30b293c6f41c64dbb1593e3548cda983082ab79",
+    ),
     (
         "tree-sitter-liquid",
         "0.0.1",
@@ -757,6 +763,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     )?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-glimmer-0.0.1-LICENSE",
+        "748c15c2a285ef74aec280f2e72bd98482b96bd0e2da0d8f0fde934fa88e2e16",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-xml-0.7.0-LICENSE",
         "3297073719030b7261afd78b7267931ccc03a27f7a65ca6fc644316180f71bf6",
     )?;
@@ -825,7 +836,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 99 {
+    if manifest.grammars.len() != 100 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -857,6 +868,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "wolfram",
         "pug",
         "liquid",
+        "handlebars",
         "dockerfile",
         "coffeescript",
         "meson",
@@ -1659,7 +1671,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 99")]
+    #[error("grammar lock contains {0} grammars instead of 100")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),

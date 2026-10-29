@@ -1,0 +1,65 @@
+{
+  "schema": "rootlight.glimmer-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/ember-tooling/tree-sitter-glimmer",
+    "revision": "c67a73679db2945a686ca45d3e5318d86138e72a",
+    "git_tree": "39b16b1af584e4aa1c5b2e5eabef14be3df0c27e",
+    "archive_url": "https://codeload.github.com/ember-tooling/tree-sitter-glimmer/tar.gz/c67a73679db2945a686ca45d3e5318d86138e72a",
+    "archive_sha256": "08317ab3ad18196c025f2d58e00e0eb95d55591fba6d201f4b7677333b4cea28",
+    "files": 86,
+    "bytes": 506910,
+    "license": "MIT",
+    "upstream_code_or_lifecycle_executed": false,
+    "signature_verified": false
+  },
+  "binding": {
+    "local_unpublished": true,
+    "build_inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h"
+    ],
+    "network_or_generator_in_build": false
+  },
+  "product_qualification": false,
+  "preferred_source": {
+    "patch": "patches/written-prologue.patch",
+    "purpose": "Retain opaque written processing instructions and simple DOCTYPE declarations without evaluation; separate whitespace-strip delimiters from lexical identifiers. Internal subsets remain unsupported.",
+    "abi": 15,
+    "generated_files_hand_edited": false
+  },
+  "generation": {
+    "tool": "tree-sitter-cli",
+    "version": "0.26.8",
+    "sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "command": [
+      "generate",
+      "--abi",
+      "15"
+    ],
+    "exit_code": 0,
+    "network_or_generator_in_build": false
+  },
+  "active_inputs": {
+    "grammar.js": {
+      "bytes": 9457,
+      "sha256": "e3eb3690118d4b43cc67df2e67579414a9464e3b3f916e254186d5590e31ca5b"
+    },
+    "src/parser.c": {
+      "bytes": 206201,
+      "sha256": "ca3c5080a4b1771bcd36738b7ec525e2af8197b5c63321e60fed8434c5e8a92a"
+    },
+    "src/scanner.c": {
+      "bytes": 6078,
+      "sha256": "02e501be6b35c5be5650174974db9b0fc6aacc567285a6e2de7f408079651f68"
+    },
+    "src/node-types.json": {
+      "bytes": 14330,
+      "sha256": "9e77a336534efef959abfe0048d7e78bcceed343675d378632a7c47b7b8cf7ce"
+    },
+    "src/grammar.json": {
+      "bytes": 27763,
+      "sha256": "3a3ad5e9c8180c217315cc87a2e6a61eac43922aa7a6ccd0b1f0bcaf7b970465"
+    }
+  }
+}
