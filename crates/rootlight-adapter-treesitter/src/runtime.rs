@@ -22,6 +22,7 @@ mod dockerfile_cache_tests;
 mod dockerfile_callback_owner_tests;
 mod dockerfile_scope;
 mod embedded;
+mod erb;
 mod expression;
 mod fortran;
 mod fsharp_admission;

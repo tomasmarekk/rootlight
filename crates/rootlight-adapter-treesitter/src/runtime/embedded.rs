@@ -18,6 +18,17 @@ impl TreeSitterProvider {
         max_facts: Option<usize>,
         cancellation: &Cancellation,
     ) -> Result<EmbeddedExtractionLimits, AdapterError> {
+        if request.language().as_str() == "erb" {
+            return self.extract_erb(
+                tree,
+                request,
+                source,
+                traversal,
+                candidates,
+                max_facts,
+                cancellation,
+            );
+        }
         if request.language().as_str() == "cmake" && request.included_ranges().is_empty() {
             let remaining_nodes = request
                 .limits()

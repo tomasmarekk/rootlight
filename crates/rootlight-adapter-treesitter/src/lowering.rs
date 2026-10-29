@@ -5063,7 +5063,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .and_then(|local_id| facts_by_id.get(local_id))
                     .map(|terminal| self.text_for_span(terminal.span()))
                     .transpose()?;
-                let resolution_text = if is_patch_documentary_fact(fact) {
+                let resolution_text = if self.request.language().as_str() == "erb"
+                    && fact.syntax_kind().as_str().starts_with("ruby.")
+                {
+                    None
+                } else if is_patch_documentary_fact(fact) {
                     Some(std::borrow::Cow::Borrowed(text))
                 } else if fact.syntax_kind().as_str() == "fsharp.qualified_body_read.reference" {
                     fsharp_bindings
@@ -5166,6 +5170,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && !liquid::reference(fact)
                     && !handlebars::reference(fact)
                     && !nushell::reference(fact)
+                    && !(self.request.language().as_str() == "erb"
+                        && fact.syntax_kind().as_str().starts_with("ruby."))
                 {
                     // An undecodable name is not an alternative raw spelling. Keep its
                     // source, but prevent name-only resolution from guessing a target.
@@ -10771,7 +10777,18 @@ fn jsx_identity_declaration(fact: &SyntaxFact) -> bool {
 fn erb_host_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
     let detail = match (fact.kind(), fact.syntax_kind().as_str()) {
         (SyntaxFactKind::Root, "erb.template.root") => {
-            Some("erb-native-host-only-embedded-ruby-and-rendering-unavailable")
+            Some("erb-native-host-and-ruby-syntax-only-binding-and-rendering-unavailable")
+        }
+        (
+            SyntaxFactKind::Signature,
+            "erb.statement_ruby_parsed.expression" | "erb.output_ruby_parsed.expression",
+        ) => Some("erb-native-ruby-syntax-without-runtime-or-helper-binding"),
+        (
+            SyntaxFactKind::Signature,
+            "erb.statement_ruby_error.expression" | "erb.output_ruby_error.expression",
+        ) => Some("erb-native-ruby-error-recovery-incomplete"),
+        (SyntaxFactKind::Signature, "erb.embedded_limit.expression") => {
+            Some("erb-combined-ruby-context-limit")
         }
         (SyntaxFactKind::Signature, "erb.statement_unavailable.expression") => {
             Some("erb-statement-ruby-analysis-unavailable")
@@ -13217,6 +13234,9 @@ fn language_for_fact_with_ranges<'a>(
     fact: &'a SyntaxFact,
     ranges: &'a [rootlight_adapter_sdk::IncludedRange],
 ) -> &'a str {
+    if request.language().as_str() == "erb" && fact.syntax_kind().as_str().starts_with("ruby.") {
+        return "ruby";
+    }
     if request.language().as_str() == "cmake" && fact.syntax_kind().as_str().starts_with("patch.") {
         return "diff";
     }

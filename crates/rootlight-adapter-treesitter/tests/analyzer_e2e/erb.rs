@@ -1,4 +1,4 @@
-//! Native ERB host routing and source-owned modules before Ruby integration.
+//! Native ERB hosts and one combined Ruby syntax tree at original coordinates.
 
 use super::*;
 
@@ -54,12 +54,17 @@ fn output(
     let doc = result.document();
     assert_eq!(doc.files.len(), 1);
     assert_eq!(doc.files[0].content_hash, content_hash(raw));
+    let modules: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Module && entity.language == "erb")
+        .collect();
     assert_eq!(
-        doc.entities.len(),
+        modules.len(),
         1,
-        "only a source-owned ERB host Module is admitted"
+        "one source-owned ERB host Module is preserved"
     );
-    let module = &doc.entities[0];
+    let module = modules[0];
     assert_eq!(module.kind, EntityKind::Module);
     assert_eq!(module.language, "erb");
     assert_eq!(module.canonical_name, path);
@@ -94,22 +99,61 @@ fn original_host_module_keeps_erb_identity_and_explicit_ruby_gaps() {
             parsed
                 .facts()
                 .iter()
-                .filter(|fact| fact.syntax_kind().as_str() == "erb.output_unavailable.expression")
+                .filter(|fact| fact.syntax_kind().as_str() == "erb.output_ruby_parsed.expression")
                 .count(),
             2
         );
-        assert_eq!(parsed.facts().iter().filter(|fact| fact.syntax_kind().as_str() == "erb.statement_unavailable.expression").count(), 1);
+        assert_eq!(parsed.facts().iter().filter(|fact| fact.syntax_kind().as_str() == "erb.statement_ruby_parsed.expression").count(), 1);
+        let doc = result.document();
+        let parameter = doc
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Parameter
+                    && entity.language == "ruby"
+                    && entity.canonical_name == "customer"
+            })
+            .expect("native cross-tag block parameter");
         assert!(
-            result.document().occurrences.is_empty(),
-            "Ruby occurrences await combined native integration"
+            doc.occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Definition
+                    && site.source.span().start_byte() == 43
+                    && site.source.span().end_byte() == 51
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: parameter.id
+                        })
         );
-        assert!(result.document().skipped_regions.iter().any(|gap| gap.detail == "erb-output-ruby-analysis-and-rendered-values-unavailable"));
+        assert!(
+            doc.occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == 59
+                    && site.source.span().end_byte() == 67
+                    && matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        assert!(
+            doc.occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::CallSite
+                    && site.syntax_kind.starts_with("ruby."))
+        );
+        assert!(
+            doc.occurrences
+                .iter()
+                .filter(|site| site.role != OccurrenceRole::Definition)
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+            "syntax alone cannot bind helper dispatch or cross-tag values"
+        );
+        assert!(doc.skipped_regions.iter().any(|gap| gap.detail == "erb-native-ruby-syntax-without-runtime-or-helper-binding"));
     }
 }
 
 #[test]
 fn escaped_future_tags_and_comments_never_create_ruby_or_html_entities() {
     let (escaped, parsed) = output(ESCAPED, "future.html.erb", "utf-8");
+    assert_eq!(escaped.document().entities.len(), 1);
     assert!(
         escaped
             .document()
@@ -121,7 +165,7 @@ fn escaped_future_tags_and_comments_never_create_ruby_or_html_entities() {
     );
     assert!(!parsed.facts().iter().any(|fact| matches!(
         fact.syntax_kind().as_str(),
-        "erb.output_unavailable.expression" | "erb.statement_unavailable.expression"
+        "erb.output_ruby_parsed.expression" | "erb.statement_ruby_parsed.expression"
     )));
     let (comment, parsed) = output(COMMENT, "comment.erb", "utf-8");
     let comments: Vec<_> = parsed
@@ -134,11 +178,13 @@ fn escaped_future_tags_and_comments_never_create_ruby_or_html_entities() {
     let end = COMMENT.windows(2).position(|part| part == b"%>").unwrap() as u64 + 2;
     assert_eq!(comments[0].span().end_byte(), end);
     assert!(
-        comment.document().occurrences.iter().all(|site| matches!(
-            site.role,
-            OccurrenceRole::Documentation | OccurrenceRole::StringEvidence
-        )),
-        "comment/text evidence does not imply Ruby semantics"
+        comment
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.syntax_kind.starts_with("ruby."))
+            .all(|site| site.source.span().start_byte() >= end),
+        "comment body never enters Ruby source"
     );
 }
 
