@@ -3,6 +3,265 @@
 
 use super::*;
 
+#[test]
+fn markdown_handlebars_fences_own_written_parameters_in_physical_body_frames() {
+    const BODY: &str = "{{#each values as |item|}}{{item}}{{/each}}";
+    let mut text = String::from("# Examples λ😀\r\n\r\n");
+    let mut frames = Vec::new();
+    for _ in 0..2 {
+        let start = text.len();
+        text.push_str("```handlebars\r\n");
+        let body_start = text.len();
+        text.push_str(BODY);
+        text.push_str("\r\n");
+        let body_end = text.len();
+        text.push_str("```\r\n");
+        frames.push((start..text.len(), body_start..body_end));
+        text.push_str("\r\n");
+    }
+    for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+        let mut raw = match encoding {
+            "utf-8" => Vec::new(),
+            "utf-16le" => vec![0xff, 0xfe],
+            "utf-16be" => vec![0xfe, 0xff],
+            _ => unreachable!(),
+        };
+        if encoding == "utf-8" {
+            raw.extend_from_slice(text.as_bytes());
+        } else {
+            for unit in text.encode_utf16() {
+                raw.extend_from_slice(&if encoding == "utf-16le" {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+        }
+        let physical = |offset| {
+            u64::try_from(if encoding == "utf-8" {
+                offset
+            } else {
+                2 + 2 * text.get(..offset).unwrap().encode_utf16().count()
+            })
+            .unwrap()
+        };
+        let provider = Arc::new(provider());
+        let fixture = Fixture::new(MARKDOWN, &raw);
+        let budget = limits();
+        let request = AnalysisRequest::new_with_parse_context(
+            GenerationBoundSnapshot::new(&fixture.snapshot, &fixture.source).unwrap(),
+            language(MARKDOWN),
+            EncodingId::new(encoding).unwrap(),
+            Vec::new(),
+            AnalysisTier::TierD,
+            build_context(),
+            &budget,
+        )
+        .unwrap()
+        .with_generated_status(false);
+        let result = analyze(
+            &analyzer(&provider, MARKDOWN),
+            &request,
+            &ExtensionSupport::default(),
+        );
+        let document = result.document();
+        validate_ir_document(document, budget.ir(), &ExtensionSupport::default()).unwrap();
+        assert_eq!(document.files.len(), 1);
+        assert_eq!(document.files[0].language, "markdown");
+        let modules: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| entity.language == "handlebars" && entity.kind == EntityKind::Module)
+            .collect();
+        assert_eq!(modules.len(), 2, "{encoding}: {:?}", document.entities);
+        let mut identities = BTreeSet::new();
+        for (fence, body) in &frames {
+            let span = |start, end| {
+                SourceSpan::new(fixture.source.span().file(), physical(start), physical(end))
+                    .unwrap()
+            };
+            let module = modules
+                .iter()
+                .find(|module| {
+                    module.evidence.source.as_ref().unwrap().span() == span(body.start, body.end)
+                })
+                .unwrap();
+            assert!(identities.insert(module.id));
+            let Some(rootlight_ir::ContainerRef::Entity(code_id)) = module.container else {
+                panic!("a fenced Handlebars module must own only its code body");
+            };
+            assert!(identities.insert(code_id));
+            let code = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == code_id)
+                .unwrap();
+            assert_eq!(code.kind, EntityKind::Module);
+            assert_eq!(code.language, "markdown");
+            assert_eq!(code.canonical_name, "<code-block>");
+            assert_eq!(
+                code.evidence.source.as_ref().unwrap().span(),
+                span(fence.start, fence.end)
+            );
+            let parameters: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Parameter
+                        && entity.language == "handlebars"
+                        && entity.container == Some(rootlight_ir::ContainerRef::Entity(module.id))
+                })
+                .collect();
+            assert_eq!(parameters.len(), 1);
+            let parameter = parameters[0];
+            assert!(identities.insert(parameter.id));
+            assert_eq!(parameter.canonical_name, "item");
+            let definition_span = span(body.start + 19, body.start + 23);
+            let definitions: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Definition && site.source.span() == definition_span
+                })
+                .collect();
+            assert_eq!(definitions.len(), 1);
+            let definition = definitions[0];
+            assert_eq!(definition.syntax_kind, "handlebars.block_name.definition");
+            assert_eq!(
+                definition.target,
+                OccurrenceTarget::Resolved {
+                    symbol: parameter.id
+                }
+            );
+            assert_eq!(definition.enclosing, Some(module.id));
+            assert_eq!(parameter.evidence.source.as_ref(), Some(&definition.source));
+            assert_eq!(definition.syntactic_text_hash, content_hash(b"item"));
+            for source in [module.evidence.source.as_ref().unwrap(), &definition.source] {
+                assert_eq!(source.repository(), fixture.source.repository());
+                assert_eq!(source.generation(), fixture.source.generation());
+                assert_eq!(source.content_hash(), content_hash(&raw));
+            }
+            let use_span = span(body.start + 28, body.start + 32);
+            let references: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.syntax_kind == "handlebars.block_value.reference"
+                        && site.source.span() == use_span
+                })
+                .collect();
+            assert_eq!(references.len(), 1);
+            assert_eq!(references[0].role, OccurrenceRole::Read);
+            assert_eq!(references[0].enclosing, Some(module.id));
+            assert!(matches!(
+                references[0].target,
+                OccurrenceTarget::Unresolved { .. }
+            ));
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.detail == "handlebars-current-source-block-parameter-binding-unavailable"
+                    && gap.source.span() == use_span
+            }));
+            assert!(!document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(references[0].id)
+            }));
+        }
+        assert_eq!(identities.len(), 6);
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Parameter)
+                .count(),
+            2
+        );
+    }
+}
+
+#[test]
+fn markdown_handlebars_incomplete_and_disjoint_fences_cannot_borrow_a_binding_census() {
+    for prefix in [
+        concat!(
+            "```handlebars\n{{#each values as |item|}}\n```\n\n",
+            "```handlebars\n{{item}}{{/each}}\n```\n\n",
+        ),
+        concat!(
+            "> ```handlebars\n",
+            "> {{#each values as |item|}}\n",
+            "> {{item}}\n",
+            "> {{/each}}\n",
+            "> ```\n\n",
+        ),
+    ] {
+        let mut text = String::from(prefix);
+        text.push_str("```handlebars\n");
+        let complete_start = u64::try_from(text.len()).unwrap();
+        text.push_str("{{#each values as |item|}}{{item}}{{/each}}\n```\n");
+        let result = output(&text);
+        let document = result.document();
+        let parameters: Vec<_> = document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Parameter && entity.language == "handlebars"
+            })
+            .collect();
+        assert_eq!(parameters.len(), 1, "{prefix:?}: {:?}", document.entities);
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Parameter)
+                .count(),
+            1
+        );
+        assert_eq!(parameters[0].canonical_name, "item");
+        assert_eq!(
+            parameters[0]
+                .evidence
+                .source
+                .as_ref()
+                .unwrap()
+                .span()
+                .start_byte(),
+            complete_start + 19
+        );
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.syntax_kind == "handlebars.block_name.definition"
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(
+            definitions[0].source.span().start_byte(),
+            complete_start + 19
+        );
+        assert_eq!(
+            definitions[0].target,
+            OccurrenceTarget::Resolved {
+                symbol: parameters[0].id
+            }
+        );
+        assert!(
+            document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.syntax_kind.starts_with("handlebars.")
+                        && site.role != OccurrenceRole::Definition
+                })
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+        );
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.detail == "markdown-code-semantics-unavailable"
+                || gap.detail == "markdown-code-parse-unavailable"
+        }));
+    }
+}
+
 const MARKDOWN: LanguageCase = LanguageCase {
     name: "markdown",
     path: "docs/storage.md",

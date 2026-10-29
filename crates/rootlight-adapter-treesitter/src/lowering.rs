@@ -13341,7 +13341,7 @@ fn markdown_language_for_syntax(syntax: &str) -> Option<&str> {
         | "dockerfile" | "meson" | "gdscript" | "chapel" | "qsharp" | "mojo" | "ring" | "hare"
         | "haxe" | "qml" | "modelica" | "ada" | "hcl" | "d" | "zig" | "crystal" | "cue"
         | "pony" | "fish" | "nim" | "clojure" | "racket" | "vhdl" | "graphql" | "elixir"
-        | "protobuf" | "thrift" | "capnp" => Some(language),
+        | "protobuf" | "thrift" | "capnp" | "handlebars" => Some(language),
         _ => None,
     }
 }
@@ -16231,8 +16231,22 @@ mod tests {
     #[test]
     fn markdown_native_prefixes_keep_declared_languages() {
         for language in [
-            "fortran", "plsql", "sas", "apex", "pascal", "assembly", "scheme", "glsl", "hlsl",
-            "wgsl", "xml", "dtd", "rust", "python", "ocaml",
+            "fortran",
+            "plsql",
+            "sas",
+            "apex",
+            "pascal",
+            "assembly",
+            "scheme",
+            "glsl",
+            "hlsl",
+            "wgsl",
+            "xml",
+            "dtd",
+            "rust",
+            "python",
+            "ocaml",
+            "handlebars",
         ] {
             assert_eq!(
                 markdown_language_for_syntax(&format!("{language}.name.definition")),
