@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.82";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.83";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3025,6 +3025,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".nix"],
         aliases: &[],
         detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "erb",
+        suffixes: &[".erb"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -7907,6 +7915,30 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn erb_routes_terminal_suffixes_without_forcing_html_or_foreign_dialects() {
+        for path in [
+            "views/page.html.erb",
+            "message.text.erb",
+            "update.js.erb",
+            "template.erb",
+            "TEMPLATE.ERB",
+        ] {
+            assert_eq!(extension_language(path), Some("erb"), "{path}");
+        }
+        for path in ["page.erb.bak", "page.erb.rb", "page.ejs", "page.html"] {
+            assert_ne!(extension_language(path), Some("erb"), "{path}");
+        }
+        assert_eq!(canonical_language("erb"), Some("erb"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "erb")
+            .unwrap();
+        assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.detectors, &["extension", "configuration"]);
+    }
+
+    #[test]
     fn nushell_shebangs_use_only_the_actual_interpreter() {
         for header in [
             "#!/usr/bin/nu",
@@ -9039,7 +9071,7 @@ max_source_file_bytes = 2097152
             assert_eq!(extension_language(&format!("written{suffix}.bak")), None);
         }
         assert_eq!(extension_language("written.podspec.json"), Some("json"));
-        assert_eq!(extension_language("written.erb"), None);
+        assert_eq!(extension_language("written.erb"), Some("erb"));
     }
 
     #[test]

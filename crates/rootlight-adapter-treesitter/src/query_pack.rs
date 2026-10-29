@@ -83,6 +83,7 @@ pub use identity_refusal::NativeIdentityRefusalDetails;
 use identity_refusal::{IdentityRefusal, RefusalOrigin};
 mod coffeescript;
 mod dockerfile;
+mod erb;
 mod handlebars;
 mod idris;
 mod java_local_receivers;
@@ -612,6 +613,9 @@ impl QueryPack {
         }
         if matches!(family, GrammarFamily::Liquid | GrammarFamily::Handlebars) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
+        }
+        if family == GrammarFamily::Erb {
+            expected = vec!["comment", "expression", "module", "root", "string"];
         }
         if family == GrammarFamily::Nushell {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
@@ -2051,6 +2055,10 @@ impl QueryPack {
                     if let Some(candidate) = candidate {
                         retain(candidate)?;
                     }
+                    continue;
+                }
+                if input.family == GrammarFamily::Erb {
+                    retain(erb::candidate(capture.node, role, input.cancellation)?)?;
                     continue;
                 }
                 if input.family == GrammarFamily::Nushell {
@@ -4482,6 +4490,7 @@ fn candidate_for_capture(
             _ => return Err(query_failure("query-call-name-family")),
         },
         StructuralRole::Call => match family {
+            GrammarFamily::Erb => return Err(query_failure("query-erb-call-unproven")),
             GrammarFamily::Nushell => return Err(query_failure("query-nu-call-unproven")),
             GrammarFamily::Clojure => return Err(query_failure("query-clojure-unproven-call")),
             GrammarFamily::Racket => return Err(query_failure("query-racket-unproven-call")),
@@ -5638,7 +5647,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(103);
+        let mut packs = Vec::with_capacity(107);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5756,6 +5765,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Idris, include_str!("../queries/idris.scm")),
             (GrammarFamily::Sed, include_str!("../queries/sed.scm")),
             (GrammarFamily::Pug, include_str!("../queries/pug.scm")),
+            (GrammarFamily::Erb, include_str!("../queries/erb.scm")),
             (GrammarFamily::Nushell, include_str!("../queries/nu.scm")),
             (GrammarFamily::Liquid, include_str!("../queries/liquid.scm")),
             (
@@ -5964,10 +5974,11 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 106);
+        assert_eq!(registry.len(), 107);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
+            GrammarFamily::Erb,
             GrammarFamily::Nushell,
             GrammarFamily::Clojure,
             GrammarFamily::Racket,
@@ -6073,6 +6084,9 @@ mod tests {
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Erb {
+                expected = vec!["comment", "expression", "module", "root", "string"];
+            }
             if family == GrammarFamily::Nushell {
                 expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
                 expected.push("expression");

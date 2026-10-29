@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "d9eb918100c7e430b15fc1e92aba8db2e7bd6aa14892668781e33f4420cdab40";
+    "6d6b621c7c0f313622976eee407b08b2aa1d7b9be836cc10574bd36ddbd9a74c";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 61] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 62] = [
+    (
+        "tree-sitter-embedded-template",
+        "0.25.0",
+        "third_party/tree-sitter-embedded-template-0.25.0",
+        "2925854e6ac4bb6ed993d60532116419dfd42e5d915fbec78aad899df033f9c5",
+    ),
     (
         "tree-sitter-nu",
         "0.0.1",
@@ -769,6 +775,11 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     )?;
     validate_local_license(
         root,
+        "adapters/licenses/tree-sitter-embedded-template-0.25.0-LICENSE",
+        "c5cfb43042b6b72045f4ba997834d0a7786d2793d91680868b5815b39f14fc78",
+    )?;
+    validate_local_license(
+        root,
         "adapters/licenses/tree-sitter-nu-0.0.1-LICENSE",
         "e189616e535e9f7bf410a72e6fc51ad1e0ae461c58d592e186c2669daa5d1e5d",
     )?;
@@ -847,7 +858,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 101 {
+    if manifest.grammars.len() != 102 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -872,6 +883,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "erb",
         "cuda",
         "idris",
         "lean",
@@ -1683,7 +1695,7 @@ pub(crate) enum GrammarLockError {
     InvalidDigest { label: &'static str },
     #[error("grammar lock field {0} must not be empty")]
     EmptyField(&'static str),
-    #[error("grammar lock contains {0} grammars instead of 101")]
+    #[error("grammar lock contains {0} grammars instead of 102")]
     GrammarCount(usize),
     #[error("grammar lock repeats language {0}")]
     DuplicateLanguage(String),

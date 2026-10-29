@@ -90,6 +90,8 @@ mod ecmascript_references;
 mod eiffel_formal_receivers;
 #[path = "analyzer_e2e/eiffel_native.rs"]
 mod eiffel_native;
+#[path = "analyzer_e2e/erb.rs"]
+mod erb;
 #[path = "analyzer_e2e/glsl_native.rs"]
 mod glsl_native;
 #[path = "analyzer_e2e/graphql_native.rs"]

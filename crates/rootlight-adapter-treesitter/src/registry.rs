@@ -13,6 +13,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// ERB host syntax; embedded Ruby and rendering are separately qualified.
+    Erb,
     /// Nushell written declarations without shell or completion evaluation.
     Nushell,
     /// Idris written source; evaluation and dependent-type resolution are separate.
@@ -317,8 +319,9 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(103);
+        let mut descriptors = Vec::with_capacity(105);
         for family in [
+            GrammarFamily::Erb,
             GrammarFamily::Nushell,
             GrammarFamily::Idris,
             GrammarFamily::Sed,
@@ -524,6 +527,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::Erb => tree_sitter_embedded_template::LANGUAGE.into(),
         GrammarFamily::Nushell => tree_sitter_nu::LANGUAGE.into(),
         GrammarFamily::Hcl => tree_sitter_hcl::LANGUAGE.into(),
         GrammarFamily::Ada => tree_sitter_ada::LANGUAGE.into(),
@@ -722,6 +726,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             scanner_sha256: Some(
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
             ),
+        },
+        GrammarFamily::Erb => GrammarIdentity {
+            language_id: "erb",
+            grammar_version: "0.25.0",
+            source_package_sha256: "2925854e6ac4bb6ed993d60532116419dfd42e5d915fbec78aad899df033f9c5",
+            parser_sha256: "85f1e912aaaf8bd424180e7712720a2b59f5ccbca3249044f17fa82d07b5614b",
+            scanner_sha256: None,
         },
         GrammarFamily::Nushell => GrammarIdentity {
             language_id: "nu",
@@ -1554,8 +1565,9 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 104);
+        assert_eq!(registry.descriptors().len(), 105);
         for family in [
+            GrammarFamily::Erb,
             GrammarFamily::Nushell,
             GrammarFamily::Idris,
             GrammarFamily::Sed,
@@ -1916,6 +1928,7 @@ mod tests {
 
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
         for (family, language, package) in [
+            (GrammarFamily::Erb, "erb", "tree-sitter-embedded-template"),
             (GrammarFamily::Hcl, "hcl", "tree-sitter-hcl"),
             (GrammarFamily::Ada, "ada", "tree-sitter-ada"),
             (GrammarFamily::Haxe, "haxe", "tree-sitter-haxe"),
@@ -2093,7 +2106,8 @@ mod tests {
                     ) || family.is_cobol()
                         || matches!(
                             family,
-                            GrammarFamily::Cuda
+                            GrammarFamily::Erb
+                                | GrammarFamily::Cuda
                                 | GrammarFamily::Haxe
                                 | GrammarFamily::Qml
                                 | GrammarFamily::Ring

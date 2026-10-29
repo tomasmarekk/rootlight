@@ -10768,6 +10768,28 @@ fn jsx_identity_declaration(fact: &SyntaxFact) -> bool {
         )
 }
 
+fn erb_host_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
+    let detail = match (fact.kind(), fact.syntax_kind().as_str()) {
+        (SyntaxFactKind::Root, "erb.template.root") => {
+            Some("erb-native-host-only-embedded-ruby-and-rendering-unavailable")
+        }
+        (SyntaxFactKind::Signature, "erb.statement_unavailable.expression") => {
+            Some("erb-statement-ruby-analysis-unavailable")
+        }
+        (SyntaxFactKind::Signature, "erb.output_unavailable.expression") => {
+            Some("erb-output-ruby-analysis-and-rendered-values-unavailable")
+        }
+        _ => None,
+    };
+    [
+        FactDomain::Entities,
+        FactDomain::Occurrences,
+        FactDomain::Relations,
+    ]
+    .into_iter()
+    .filter_map(move |domain| detail.map(|detail| (domain, detail)))
+}
+
 fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
     // An unanalysed attribute omits both the authored decorator occurrence and
     // its binding relation. Lexical header evidence proves neither domain.
@@ -10913,7 +10935,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(
             liquid::gaps(fact)
                 .chain(handlebars::gaps(fact))
-                .chain(nushell::gaps(fact)),
+                .chain(nushell::gaps(fact).chain(erb_host_gaps(fact))),
         )
         .chain(sed::gaps(fact))
         .chain(idris::gaps(fact))
@@ -13315,6 +13337,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "erb" || fact.syntax_kind().as_str().starts_with("erb.") {
+        return language == "erb"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "erb.file.module";
+    }
     if language == "nu" || fact.syntax_kind().as_str().starts_with("nu.") {
         return language == "nu"
             && fact.kind() == SyntaxFactKind::Module
@@ -14238,6 +14265,11 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("erb.") {
+        return (fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "erb.file.module")
+            .then_some(EntityKind::Module);
+    }
     if fact.syntax_kind().as_str().starts_with("nu.") {
         return match (fact.kind(), fact.syntax_kind().as_str()) {
             (SyntaxFactKind::Module, "nu.file.module") => Some(EntityKind::Module),
@@ -14268,6 +14300,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("erb.") {
+        return structural_entity_kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("nu.") {
         return structural_entity_kind(fact);
     }
@@ -16260,6 +16295,17 @@ mod tests {
         ));
         assert!(is_explicit_file_module(&module("ruby.file.module"), "ruby"));
         assert!(is_explicit_file_module(&module("nu.file.module"), "nu"));
+        assert!(is_explicit_file_module(&module("erb.file.module"), "erb"));
+        assert_eq!(
+            structural_entity_kind(&module("erb.file.module")),
+            Some(EntityKind::Module)
+        );
+        assert!(!is_explicit_file_module(&module("erb.file.module"), "ruby"));
+        assert!(!is_explicit_file_module(&module("ruby.file.module"), "erb"));
+        assert!(!is_explicit_file_module(
+            &module("erb.file.module.extra"),
+            "erb"
+        ));
         assert_eq!(
             structural_entity_kind(&module("nu.file.module")),
             Some(EntityKind::Module)

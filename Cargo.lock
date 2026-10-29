@@ -1746,6 +1746,7 @@ dependencies = [
  "tree-sitter-dart",
  "tree-sitter-dockerfile",
  "tree-sitter-eiffel",
+ "tree-sitter-embedded-template",
  "tree-sitter-elixir",
  "tree-sitter-fish",
  "tree-sitter-fortran",
@@ -3300,6 +3301,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-eiffel"
 version = "1.0.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-embedded-template"
+version = "0.25.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
