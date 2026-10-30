@@ -28,7 +28,73 @@ use crate::{
     CatalogError, CatalogErrorKind, OracleReadAdmissionError, OracleReadMemoryPlan, codec, write,
 };
 
-type EvidenceMap = BTreeMap<(String, Vec<u8>), Vec<FactRef>>;
+#[derive(Debug)]
+struct EvidenceGroup {
+    owner: FactRef,
+    items: Vec<FactRef>,
+}
+
+#[derive(Debug)]
+struct EvidenceGroups {
+    groups: Vec<EvidenceGroup>,
+    remaining: usize,
+}
+
+fn evidence_key(reference: &FactRef) -> (u8, &[u8]) {
+    // SQLite's closed text tags sort entity, fact, file; enum ordering differs.
+    match reference {
+        FactRef::Entity(id) => (0, id.as_bytes()),
+        FactRef::Fact(id) => (1, id.as_bytes()),
+        FactRef::File(id) => (2, id.as_bytes()),
+    }
+}
+
+impl EvidenceGroups {
+    fn is_empty(&self) -> bool {
+        self.remaining == 0
+    }
+
+    fn take(&mut self, owner: FactRef) -> Result<Vec<FactRef>, CatalogError> {
+        let Ok(index) = self.groups.binary_search_by(|group| {
+            evidence_key(&group.owner)
+                .cmp(&evidence_key(&owner))
+                .reverse()
+        }) else {
+            return Ok(Vec::new());
+        };
+        let group = &mut self.groups[index];
+        if !group.items.is_empty() {
+            self.remaining = self
+                .remaining
+                .checked_sub(1)
+                .ok_or_else(memory_plan_overflow)?;
+        }
+        Ok(std::mem::take(&mut group.items))
+    }
+}
+
+fn evidence_reference(kind: &str, id: &[u8]) -> Result<FactRef, CatalogError> {
+    let id = id
+        .try_into()
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    match kind {
+        "file" => Ok(FactRef::File(FileId::from_bytes(id))),
+        "entity" => Ok(FactRef::Entity(SymbolId::from_bytes(id))),
+        "fact" => Ok(FactRef::Fact(FactId::from_bytes(id))),
+        _ => Err(CatalogError::new(CatalogErrorKind::Corrupt)),
+    }
+}
+
+fn read_evidence_reference(row: &Row<'_>, kind: usize, id: usize) -> Result<FactRef, CatalogError> {
+    let kind = row.get_ref(kind).map_err(CatalogError::sqlite)?;
+    let id = row.get_ref(id).map_err(CatalogError::sqlite)?;
+    evidence_reference(
+        kind.as_str()
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
+        id.as_blob()
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
+    )
+}
 
 struct HeaderRow {
     contract_major: i64,
@@ -332,8 +398,13 @@ pub(crate) fn read_generation_with_admission<E>(
     if metadata != expected_metadata || stats != expected_stats {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
-    let entity_flag_rows =
-        validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
+    let cardinality = validate_payload_cardinality_counts(
+        &transaction,
+        metadata.contract_version(),
+        stats,
+        context,
+    )?;
+    let entity_flag_rows = cardinality.entity_flag_rows;
     let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
     let symbol_envelopes =
         count_symbol_envelopes(&transaction, metadata, stats.extensions(), context)?;
@@ -351,7 +422,19 @@ pub(crate) fn read_generation_with_admission<E>(
     admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
     context.check().map_err(CatalogError::control)?;
     let sources = read_sources(&transaction, stats.source_refs(), context)?;
-    let mut evidence = read_evidence(&transaction, context)?;
+    let evidence_owners = stats
+        .files()
+        .checked_add(stats.entities())
+        .and_then(|rows| rows.checked_add(stats.occurrences()))
+        .and_then(|rows| rows.checked_add(stats.relations()))
+        .and_then(|rows| rows.checked_add(stats.coverage()))
+        .ok_or_else(memory_plan_overflow)?;
+    let mut evidence = read_evidence(
+        &transaction,
+        cardinality.evidence_rows,
+        evidence_owners,
+        context,
+    )?;
     let mut flags = read_flags(&transaction, entity_flag_rows, stats.entities(), context)?;
     let mut candidates = read_candidates(&transaction, context)?;
     let mut provenance_sources = read_provenance_sources(&transaction, &sources, context)?;
@@ -1082,12 +1165,33 @@ fn validate_document_hash(
     Ok(())
 }
 
+#[derive(Debug)]
+struct PayloadCardinality {
+    entity_flag_rows: u64,
+    evidence_rows: u64,
+}
+
 pub(crate) fn validate_payload_cardinality(
     connection: &Connection,
     contract_version: GenerationContractVersion,
     stats: GenerationStats,
     context: &GenerationContext<'_>,
 ) -> Result<u64, CatalogError> {
+    Ok(
+        validate_payload_cardinality_counts(connection, contract_version, stats, context)?
+            .entity_flag_rows,
+    )
+}
+
+fn validate_payload_cardinality_counts(
+    connection: &Connection,
+    contract_version: GenerationContractVersion,
+    stats: GenerationStats,
+    context: &GenerationContext<'_>,
+) -> Result<PayloadCardinality, CatalogError> {
+    const EVIDENCE_COUNT_SQL: &str = "SELECT count(*) FROM (
+                SELECT 1 FROM evidence_derivations LIMIT ?1
+             )";
     const FLAG_COUNT_SQL: &str = "SELECT count(*) FROM (
                 SELECT 1 FROM entity_flags LIMIT ?1
              )";
@@ -1193,12 +1297,7 @@ pub(crate) fn validate_payload_cardinality(
              )",
             Some(stats.extensions()),
         ),
-        (
-            "SELECT count(*) FROM (
-                SELECT 1 FROM evidence_derivations LIMIT ?1
-             )",
-            None,
-        ),
+        (EVIDENCE_COUNT_SQL, None),
         (
             "SELECT count(*) FROM (
                 SELECT 1 FROM provenance_sources LIMIT ?1
@@ -1228,6 +1327,7 @@ pub(crate) fn validate_payload_cardinality(
     .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     let mut observed_total = 0_u64;
     let mut entity_flag_rows = 0_u64;
+    let mut evidence_rows = 0_u64;
     for (sql, expected) in tables {
         let remaining = physical_row_limit
             .checked_sub(observed_total)
@@ -1243,6 +1343,9 @@ pub(crate) fn validate_payload_cardinality(
         if sql == FLAG_COUNT_SQL {
             entity_flag_rows = count;
         }
+        if sql == EVIDENCE_COUNT_SQL {
+            evidence_rows = count;
+        }
         if expected.is_some_and(|expected| expected != count) {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
@@ -1254,7 +1357,10 @@ pub(crate) fn validate_payload_cardinality(
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     flag_workspace_bytes(entity_flag_rows, stats.entities())?;
-    Ok(entity_flag_rows)
+    Ok(PayloadCardinality {
+        entity_flag_rows,
+        evidence_rows,
+    })
 }
 
 fn bounded_table_count(
@@ -1381,32 +1487,96 @@ fn read_sources(
 
 fn read_evidence(
     connection: &Connection,
+    expected_rows: u64,
+    expected_owners: u64,
     context: &GenerationContext<'_>,
-) -> Result<EvidenceMap, CatalogError> {
+) -> Result<EvidenceGroups, CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let nested_limit = usize_to_u64(IrLimits::default().max_nested_items_per_record)?;
+    if expected_rows
+        > expected_owners
+            .checked_mul(nested_limit)
+            .ok_or_else(memory_plan_overflow)?
+    {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let maximum_groups = expected_rows.min(expected_owners);
+    let mut groups: Vec<EvidenceGroup> = exact_record_buffer(maximum_groups)?;
     let mut statement = connection
         .prepare(
             "SELECT owner_kind, owner_id, position, reference_kind, reference_id
              FROM evidence_derivations
-             ORDER BY owner_kind, owner_id, position",
+             ORDER BY owner_kind DESC, owner_id DESC, position DESC",
         )
         .map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut values = BTreeMap::new();
+    let mut observed_rows = 0_u64;
+    let mut group_remaining = 0_u64;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
-        let owner_kind: String = get(row, 0)?;
-        let owner_id: Vec<u8> = get(row, 1)?;
-        let position: i64 = get(row, 2)?;
-        let reference_kind: String = get(row, 3)?;
-        let reference_id: Vec<u8> = get(row, 4)?;
-        push_positioned(
-            &mut values,
-            (owner_kind, owner_id),
-            position,
-            codec::decode_fact_ref(&reference_kind, reference_id)?,
-        )?;
+        let remaining_rows = expected_rows
+            .checked_sub(observed_rows)
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        let owner = read_evidence_reference(row, 0, 1)?;
+        let reference = read_evidence_reference(row, 3, 4)?;
+        let position = row.get_ref(2).map_err(CatalogError::sqlite)?;
+        let position = position
+            .as_i64()
+            .ok()
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        match groups
+            .last()
+            .map(|group| evidence_key(&group.owner).cmp(&evidence_key(&owner)))
+        {
+            Some(std::cmp::Ordering::Less) => {
+                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            }
+            Some(std::cmp::Ordering::Equal) => {}
+            Some(std::cmp::Ordering::Greater) | None => {
+                // Finish the prior group before accepting a new claimed allocation.
+                if group_remaining != 0 {
+                    return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+                }
+                let claimed = position.checked_add(1).ok_or_else(memory_plan_overflow)?;
+                if claimed > nested_limit || claimed > remaining_rows {
+                    return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+                }
+                check_record_push(groups.len(), maximum_groups)?;
+                groups.push(EvidenceGroup {
+                    owner,
+                    items: exact_record_buffer(claimed)?,
+                });
+                group_remaining = claimed;
+            }
+        }
+        let expected_position = group_remaining
+            .checked_sub(1)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        if position != expected_position {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        groups
+            .last_mut()
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?
+            .items
+            .push(reference);
+        group_remaining = expected_position;
+        observed_rows = observed_rows
+            .checked_add(1)
+            .ok_or_else(memory_plan_overflow)?;
     }
-    Ok(values)
+    if observed_rows != expected_rows || group_remaining != 0 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    for group in &mut groups {
+        context.check().map_err(CatalogError::control)?;
+        group.items.reverse();
+    }
+    context.check().map_err(CatalogError::control)?;
+    let remaining = groups.len();
+    Ok(EvidenceGroups { groups, remaining })
 }
 
 #[derive(Debug)]
@@ -1654,7 +1824,7 @@ fn read_files(
     connection: &Connection,
     expected_count: u64,
     sources: &[SourceRef],
-    evidence: &mut EvidenceMap,
+    evidence: &mut EvidenceGroups,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<FileRecord>, CatalogError> {
     let mut statement = connection
@@ -1713,7 +1883,7 @@ fn read_entities(
     connection: &Connection,
     expected_count: u64,
     sources: &[SourceRef],
-    evidence: &mut EvidenceMap,
+    evidence: &mut EvidenceGroups,
     flags: &mut FlagGroups,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<EntityRecord>, CatalogError> {
@@ -1758,7 +1928,7 @@ fn read_occurrences(
     connection: &Connection,
     expected_count: u64,
     sources: &[SourceRef],
-    evidence: &mut EvidenceMap,
+    evidence: &mut EvidenceGroups,
     candidates: &mut BTreeMap<FactId, Vec<SymbolId>>,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<OccurrenceRecord>, CatalogError> {
@@ -1843,7 +2013,7 @@ fn read_relations(
     connection: &Connection,
     expected_count: u64,
     sources: &[SourceRef],
-    evidence: &mut EvidenceMap,
+    evidence: &mut EvidenceGroups,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<RelationRecord>, CatalogError> {
     let mut statement = connection
@@ -1882,7 +2052,7 @@ fn read_coverage(
     connection: &Connection,
     expected_count: u64,
     sources: &[SourceRef],
-    evidence: &mut EvidenceMap,
+    evidence: &mut EvidenceGroups,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<CoverageRecord>, CatalogError> {
     let mut statement = connection
@@ -2118,13 +2288,11 @@ fn take_evidence(
     owner_id: Vec<u8>,
     source_ordinal: Option<i64>,
     sources: &[SourceRef],
-    evidence: &mut EvidenceMap,
+    evidence: &mut EvidenceGroups,
 ) -> Result<FactEvidence, CatalogError> {
     Ok(FactEvidence {
         source: codec::optional_source_by_ordinal(sources, source_ordinal)?,
-        derivation: evidence
-            .remove(&(owner_kind.to_owned(), owner_id))
-            .unwrap_or_default(),
+        derivation: evidence.take(evidence_reference(owner_kind, &owner_id)?)?,
     })
 }
 
@@ -2653,6 +2821,333 @@ mod tests {
             );
             assert!(called.get());
         }
+    }
+
+    #[test]
+    fn bounded_evidence_rejects_group_above_nested_limit() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE evidence_derivations(owner_kind, owner_id, position, reference_kind, reference_id)")
+            .unwrap();
+        let maximum = IrLimits::default().max_nested_items_per_record;
+        for position in 0..=maximum {
+            let mut reference = [0_u8; 20];
+            reference[..8].copy_from_slice(&u64::try_from(position).unwrap().to_be_bytes());
+            connection
+                .execute(
+                    "INSERT INTO evidence_derivations VALUES ('file', ?1, ?2, 'fact', ?3)",
+                    rusqlite::params![
+                        [1_u8; 20].as_slice(),
+                        i64::try_from(position).unwrap(),
+                        reference.as_slice(),
+                    ],
+                )
+                .unwrap();
+        }
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        match read_evidence(
+            &connection,
+            u64::try_from(maximum + 1).unwrap(),
+            2,
+            &context,
+        ) {
+            Err(error) => assert_eq!(error.kind(), CatalogErrorKind::Corrupt),
+            Ok(_) => panic!("oversized evidence group must be refused before allocation"),
+        }
+    }
+
+    fn evidence_table() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE evidence_derivations(owner_kind, owner_id, position, reference_kind, reference_id)").unwrap();
+        connection
+    }
+
+    fn insert_derivation(
+        connection: &Connection,
+        owner: FactRef,
+        position: i64,
+        reference: FactRef,
+    ) {
+        let (kind, id) = codec::encode_fact_ref(&owner);
+        let (reference_kind, reference_id) = codec::encode_fact_ref(&reference);
+        connection
+            .execute(
+                "INSERT INTO evidence_derivations VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![kind, id, position, reference_kind, reference_id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn bounded_evidence_preserves_positions_and_moves_vectors_in_mixed_owner_order() {
+        let connection = evidence_table();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let empty = read_evidence(&connection, 0, 0, &context).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.groups.capacity(), 0);
+        let file = FactRef::File(FileId::from_bytes([1; 20]));
+        let entity = FactRef::Entity(SymbolId::from_bytes([1; 20]));
+        let fact = FactRef::Fact(FactId::from_bytes([1; 20]));
+        let earlier_fact = FactRef::Fact(FactId::from_bytes([3; 20]));
+        let later_fact = FactRef::Fact(FactId::from_bytes([5; 20]));
+        let references = [
+            FactRef::File(FileId::from_bytes([9; 20])),
+            FactRef::Entity(SymbolId::from_bytes([9; 20])),
+            FactRef::Fact(FactId::from_bytes([9; 20])),
+        ];
+        for (owner, values) in [
+            (fact, &references[1..]),
+            (file, references.as_slice()),
+            (entity, &references[2..]),
+            (earlier_fact, &references[..1]),
+            (later_fact, &references[2..]),
+        ] {
+            for (position, reference) in values.iter().enumerate().rev() {
+                insert_derivation(
+                    &connection,
+                    owner,
+                    i64::try_from(position).unwrap(),
+                    *reference,
+                );
+            }
+        }
+        let mut evidence = read_evidence(&connection, 8, 8, &context).unwrap();
+        assert_eq!(evidence.groups.capacity(), 8);
+        assert_eq!(evidence.groups.len(), 5);
+        assert!(
+            evidence
+                .groups
+                .iter()
+                .all(|group| group.items.len() == group.items.capacity())
+        );
+        let file_pointer = evidence
+            .groups
+            .iter()
+            .find(|group| group.owner == file)
+            .unwrap()
+            .items
+            .as_ptr();
+        let taken = take_evidence("file", vec![1; 20], None, &[], &mut evidence).unwrap();
+        assert_eq!(taken.derivation, references);
+        assert_eq!(taken.derivation.as_ptr(), file_pointer);
+        assert!(
+            take_evidence("file", vec![1; 20], None, &[], &mut evidence)
+                .unwrap()
+                .derivation
+                .is_empty()
+        );
+        assert!(!evidence.is_empty());
+        assert_eq!(evidence.remaining, 4);
+        assert!(
+            evidence
+                .take(FactRef::Fact(FactId::from_bytes([2; 20])))
+                .unwrap()
+                .is_empty()
+        );
+        for (owner, expected) in [
+            (entity, &references[2..]),
+            (later_fact, &references[2..]),
+            (fact, &references[1..]),
+            (earlier_fact, &references[..1]),
+        ] {
+            let pointer = evidence
+                .groups
+                .iter()
+                .find(|group| group.owner == owner)
+                .unwrap()
+                .items
+                .as_ptr();
+            let moved = evidence.take(owner).unwrap();
+            assert_eq!(moved, expected);
+            assert_eq!(moved.as_ptr(), pointer);
+        }
+        assert!(evidence.is_empty());
+        assert!(
+            evidence
+                .groups
+                .iter()
+                .all(|group| group.items.capacity() == 0)
+        );
+    }
+
+    #[test]
+    fn bounded_evidence_accepts_exact_nested_limit_without_vector_growth() {
+        let connection = evidence_table();
+        let owner = FactRef::File(FileId::from_bytes([1; 20]));
+        let maximum = IrLimits::default().max_nested_items_per_record;
+        for position in 0..maximum {
+            let mut id = [0; 20];
+            id[..8].copy_from_slice(&u64::try_from(position).unwrap().to_be_bytes());
+            insert_derivation(
+                &connection,
+                owner,
+                i64::try_from(position).unwrap(),
+                FactRef::Fact(FactId::from_bytes(id)),
+            );
+        }
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let mut evidence =
+            read_evidence(&connection, u64::try_from(maximum).unwrap(), 1, &context).unwrap();
+        assert_eq!(evidence.groups[0].items.capacity(), maximum);
+        let pointer = evidence.groups[0].items.as_ptr();
+        let moved = evidence.take(owner).unwrap();
+        assert_eq!(moved.len(), maximum);
+        assert_eq!(moved.as_ptr(), pointer);
+        assert!(evidence.is_empty());
+    }
+
+    #[test]
+    fn bounded_evidence_rejects_hostile_cells_before_owned_scalar_decode() {
+        let connection = evidence_table();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        for (columns, values) in [
+            (
+                &[0, 3][..],
+                &[
+                    "'unknown'",
+                    "'FILE'",
+                    "7",
+                    "NULL",
+                    "zeroblob(1048576)",
+                    "CAST(zeroblob(1048576) AS TEXT)",
+                    "CAST(x'ff' AS TEXT)",
+                ][..],
+            ),
+            (
+                &[1, 4][..],
+                &[
+                    "zeroblob(19)",
+                    "zeroblob(21)",
+                    "zeroblob(1048576)",
+                    "'wrong scalar type'",
+                    "7",
+                    "NULL",
+                ][..],
+            ),
+            (
+                &[2][..],
+                &[
+                    "-1",
+                    "1",
+                    "2.0",
+                    "'0'",
+                    "NULL",
+                    "9223372036854775807",
+                    "zeroblob(1048576)",
+                ][..],
+            ),
+        ] {
+            for column in columns {
+                for value in values {
+                    connection
+                        .execute("DELETE FROM evidence_derivations", [])
+                        .unwrap();
+                    let mut cells = ["'file'", "zeroblob(20)", "0", "'fact'", "zeroblob(20)"];
+                    cells[*column] = value;
+                    connection
+                        .execute_batch(&format!(
+                            "INSERT INTO evidence_derivations VALUES ({})",
+                            cells.join(",")
+                        ))
+                        .unwrap();
+                    assert_eq!(
+                        read_evidence(&connection, 1, 1, &context)
+                            .unwrap_err()
+                            .kind(),
+                        CatalogErrorKind::Corrupt,
+                        "column{column} {value}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_evidence_rejects_counts_dense_position_gaps_orphans_and_cancellation() {
+        let connection = evidence_table();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let owner = FactRef::File(FileId::from_bytes([1; 20]));
+        let other = FactRef::File(FileId::from_bytes([3; 20]));
+        let reference = FactRef::Fact(FactId::from_bytes([7; 20]));
+        insert_derivation(&connection, owner, 0, reference);
+        for (rows, owners) in [(0, 1), (2, 1), (1, 0)] {
+            assert_eq!(
+                read_evidence(&connection, rows, owners, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        let mut orphan = read_evidence(&connection, 1, 2, &context).unwrap();
+        assert!(orphan.take(other).unwrap().is_empty());
+        assert!(!orphan.is_empty());
+        assert_eq!(
+            take_evidence("unknown", vec![1; 20], None, &[], &mut orphan)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert_eq!(
+            take_evidence("file", vec![1; 19], None, &[], &mut orphan)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert!(!orphan.is_empty());
+        for (entries, owners) in [
+            (vec![(owner, 0), (owner, 0)], 1),
+            (vec![(owner, 0), (owner, 2)], 1),
+            (vec![(owner, 0), (other, 0)], 1),
+            (vec![(other, 2), (other, 1), (owner, 0)], 2),
+        ] {
+            connection
+                .execute("DELETE FROM evidence_derivations", [])
+                .unwrap();
+            for (owner, position) in &entries {
+                insert_derivation(&connection, *owner, *position, reference);
+            }
+            assert_eq!(
+                read_evidence(
+                    &connection,
+                    u64::try_from(entries.len()).unwrap(),
+                    owners,
+                    &context
+                )
+                .unwrap_err()
+                .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert_eq!(
+            read_evidence(&connection, 3, 2, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+        let during_query = Cancellation::new();
+        let progress = during_query.clone();
+        connection
+            .progress_handler(
+                1,
+                Some(move || {
+                    progress.cancel(CancellationReason::ClientRequest);
+                    false
+                }),
+            )
+            .unwrap();
+        let context = GenerationContext::new(&during_query, GenerationBudget::default());
+        assert_eq!(
+            read_evidence(&connection, 3, 2, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
     }
 
     #[test]
