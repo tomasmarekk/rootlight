@@ -427,9 +427,19 @@ pub(crate) fn read_generation_with_admission<E>(
         context,
     )?;
     let mut flags = read_flags(&transaction, entity_flag_rows, stats.entities(), context)?;
-    let mut candidates = read_candidates(&transaction, context)?;
+    let mut candidates = read_candidates(
+        &transaction,
+        cardinality.occurrence_candidate_rows,
+        stats.occurrences(),
+        context,
+    )?;
     let mut provenance_sources = read_provenance_sources(&transaction, &sources, context)?;
-    let mut provenance_derivations = read_provenance_derivations(&transaction, context)?;
+    let mut provenance_derivations = read_provenance_derivations(
+        &transaction,
+        cardinality.provenance_derivation_rows,
+        stats.provenance(),
+        context,
+    )?;
 
     let provenance = read_provenance(
         &transaction,
@@ -1193,6 +1203,8 @@ fn validate_document_hash(
 
 #[derive(Debug)]
 pub(crate) struct PayloadCardinality {
+    pub(crate) occurrence_candidate_rows: u64,
+    pub(crate) provenance_derivation_rows: u64,
     pub(crate) entity_flag_rows: u64,
     pub(crate) evidence_rows: u64,
 }
@@ -1203,6 +1215,12 @@ pub(crate) fn validate_payload_cardinality(
     stats: GenerationStats,
     context: &GenerationContext<'_>,
 ) -> Result<PayloadCardinality, CatalogError> {
+    const CANDIDATE_COUNT_SQL: &str = "SELECT count(*) FROM (
+                SELECT 1 FROM occurrence_candidates LIMIT ?1
+             )";
+    const DERIVATION_COUNT_SQL: &str = "SELECT count(*) FROM (
+                SELECT 1 FROM provenance_derivations LIMIT ?1
+             )";
     const EVIDENCE_COUNT_SQL: &str = "SELECT count(*) FROM (
                 SELECT 1 FROM evidence_derivations LIMIT ?1
              )";
@@ -1269,12 +1287,7 @@ pub(crate) fn validate_payload_cardinality(
              )",
             Some(stats.occurrences()),
         ),
-        (
-            "SELECT count(*) FROM (
-                SELECT 1 FROM occurrence_candidates LIMIT ?1
-             )",
-            None,
-        ),
+        (CANDIDATE_COUNT_SQL, None),
         (
             "SELECT count(*) FROM (
                 SELECT 1 FROM relations LIMIT ?1
@@ -1318,12 +1331,7 @@ pub(crate) fn validate_payload_cardinality(
              )",
             None,
         ),
-        (
-            "SELECT count(*) FROM (
-                SELECT 1 FROM provenance_derivations LIMIT ?1
-             )",
-            None,
-        ),
+        (DERIVATION_COUNT_SQL, None),
         (
             "SELECT count(*) FROM (
                 SELECT 1 FROM application_meta
@@ -1342,6 +1350,8 @@ pub(crate) fn validate_payload_cardinality(
     let mut observed_total = 0_u64;
     let mut entity_flag_rows = 0_u64;
     let mut evidence_rows = 0_u64;
+    let mut occurrence_candidate_rows = 0_u64;
+    let mut provenance_derivation_rows = 0_u64;
     for (sql, expected) in tables {
         let remaining = physical_row_limit
             .checked_sub(observed_total)
@@ -1360,6 +1370,12 @@ pub(crate) fn validate_payload_cardinality(
         if sql == EVIDENCE_COUNT_SQL {
             evidence_rows = count;
         }
+        if sql == CANDIDATE_COUNT_SQL {
+            occurrence_candidate_rows = count;
+        }
+        if sql == DERIVATION_COUNT_SQL {
+            provenance_derivation_rows = count;
+        }
         if expected.is_some_and(|expected| expected != count) {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
@@ -1372,6 +1388,8 @@ pub(crate) fn validate_payload_cardinality(
     }
     flag_workspace_bytes(entity_flag_rows, stats.entities())?;
     Ok(PayloadCardinality {
+        occurrence_candidate_rows,
+        provenance_derivation_rows,
         entity_flag_rows,
         evidence_rows,
     })
@@ -1703,29 +1721,148 @@ fn read_flags(
     })
 }
 
-fn read_candidates(
+#[derive(Debug)]
+struct FactGroup<T> {
+    owner: FactId,
+    items: Vec<T>,
+}
+
+#[derive(Debug)]
+struct FactGroups<T> {
+    groups: Vec<FactGroup<T>>,
+    next: usize,
+}
+
+impl<T> FactGroups<T> {
+    fn is_empty(&self) -> bool {
+        self.next == self.groups.len()
+    }
+
+    fn take(&mut self, owner: FactId) -> Result<Vec<T>, CatalogError> {
+        let Some(group) = self.groups.get_mut(self.next) else {
+            return Ok(Vec::new());
+        };
+        match group.owner.cmp(&owner) {
+            std::cmp::Ordering::Less => Err(CatalogError::new(CatalogErrorKind::Corrupt)),
+            std::cmp::Ordering::Greater => Ok(Vec::new()),
+            std::cmp::Ordering::Equal => {
+                self.next = self.next.checked_add(1).ok_or_else(memory_plan_overflow)?;
+                Ok(std::mem::take(&mut group.items))
+            }
+        }
+    }
+}
+
+fn borrowed_id(row: &Row<'_>, column: usize) -> Result<[u8; 20], CatalogError> {
+    row.get_ref(column)
+        .map_err(CatalogError::sqlite)?
+        .as_blob()
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+fn read_fact_groups<T>(
     connection: &Connection,
+    sql: &str,
+    expected_rows: u64,
+    expected_owners: u64,
     context: &GenerationContext<'_>,
-) -> Result<BTreeMap<FactId, Vec<SymbolId>>, CatalogError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT occurrence_id, position, entity_id
-             FROM occurrence_candidates
-             ORDER BY occurrence_id, position",
-        )
-        .map_err(CatalogError::sqlite)?;
+    read_item: impl Fn(&Row<'_>) -> Result<T, CatalogError>,
+) -> Result<FactGroups<T>, CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let nested_limit = usize_to_u64(IrLimits::default().max_nested_items_per_record)?;
+    if expected_rows
+        > expected_owners
+            .checked_mul(nested_limit)
+            .ok_or_else(memory_plan_overflow)?
+    {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let maximum_groups = expected_rows.min(expected_owners);
+    let mut groups: Vec<FactGroup<T>> = exact_record_buffer(maximum_groups)?;
+    let mut statement = connection.prepare(sql).map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut values = BTreeMap::new();
+    let mut observed_rows = 0_u64;
+    let mut group_remaining = 0_u64;
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
-        push_positioned(
-            &mut values,
-            codec::fact_id(get(row, 0)?)?,
-            get(row, 1)?,
-            codec::symbol_id(get(row, 2)?)?,
-        )?;
+        let remaining_rows = expected_rows
+            .checked_sub(observed_rows)
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        let owner = FactId::from_bytes(borrowed_id(row, 0)?);
+        let item = read_item(row)?;
+        let position = row.get_ref(1).map_err(CatalogError::sqlite)?;
+        let position = position
+            .as_i64()
+            .ok()
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        match groups.last().map(|group| group.owner.cmp(&owner)) {
+            Some(std::cmp::Ordering::Greater) => {
+                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            }
+            Some(std::cmp::Ordering::Equal) => {}
+            Some(std::cmp::Ordering::Less) | None => {
+                if group_remaining != 0 {
+                    return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+                }
+                // Descending positions bound this group before its buffer is allocated.
+                let claimed = position.checked_add(1).ok_or_else(memory_plan_overflow)?;
+                if claimed > nested_limit || claimed > remaining_rows {
+                    return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+                }
+                check_record_push(groups.len(), maximum_groups)?;
+                groups.push(FactGroup {
+                    owner,
+                    items: exact_record_buffer(claimed)?,
+                });
+                group_remaining = claimed;
+            }
+        }
+        let expected_position = group_remaining
+            .checked_sub(1)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        if position != expected_position {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        groups
+            .last_mut()
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?
+            .items
+            .push(item);
+        group_remaining = expected_position;
+        observed_rows = observed_rows
+            .checked_add(1)
+            .ok_or_else(memory_plan_overflow)?;
     }
-    Ok(values)
+    if observed_rows != expected_rows || group_remaining != 0 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    for group in &mut groups {
+        context.check().map_err(CatalogError::control)?;
+        group.items.reverse();
+    }
+    context.check().map_err(CatalogError::control)?;
+    Ok(FactGroups { groups, next: 0 })
+}
+
+fn read_candidates(
+    connection: &Connection,
+    expected_rows: u64,
+    expected_owners: u64,
+    context: &GenerationContext<'_>,
+) -> Result<FactGroups<SymbolId>, CatalogError> {
+    read_fact_groups(
+        connection,
+        "SELECT occurrence_id, position, entity_id FROM occurrence_candidates
+         ORDER BY occurrence_id ASC, position DESC",
+        expected_rows,
+        expected_owners,
+        context,
+        |row| Ok(SymbolId::from_bytes(borrowed_id(row, 2)?)),
+    )
 }
 
 fn read_provenance_sources(
@@ -1756,35 +1893,26 @@ fn read_provenance_sources(
 
 fn read_provenance_derivations(
     connection: &Connection,
+    expected_rows: u64,
+    expected_owners: u64,
     context: &GenerationContext<'_>,
-) -> Result<BTreeMap<FactId, Vec<FactRef>>, CatalogError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT provenance_id, position, reference_kind, reference_id
-             FROM provenance_derivations
-             ORDER BY provenance_id, position",
-        )
-        .map_err(CatalogError::sqlite)?;
-    let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut values = BTreeMap::new();
-    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
-        context.check().map_err(CatalogError::control)?;
-        let kind: String = get(row, 2)?;
-        push_positioned(
-            &mut values,
-            codec::fact_id(get(row, 0)?)?,
-            get(row, 1)?,
-            codec::decode_fact_ref(&kind, get(row, 3)?)?,
-        )?;
-    }
-    Ok(values)
+) -> Result<FactGroups<FactRef>, CatalogError> {
+    read_fact_groups(
+        connection,
+        "SELECT provenance_id, position, reference_kind, reference_id
+         FROM provenance_derivations ORDER BY provenance_id ASC, position DESC",
+        expected_rows,
+        expected_owners,
+        context,
+        |row| read_evidence_reference(row, 2, 3),
+    )
 }
 
 fn read_provenance(
     connection: &Connection,
     expected_count: u64,
     sources: &mut BTreeMap<(FactId, String), Vec<SourceRef>>,
-    derivations: &mut BTreeMap<FactId, Vec<FactRef>>,
+    derivations: &mut FactGroups<FactRef>,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<ProvenanceRecord>, CatalogError> {
     let mut statement = connection
@@ -1827,7 +1955,7 @@ fn read_provenance(
             evidence_sources: sources
                 .remove(&(id, "evidence".to_owned()))
                 .unwrap_or_default(),
-            derivation_parents: derivations.remove(&id).unwrap_or_default(),
+            derivation_parents: derivations.take(id)?,
             rule: get(row, 12)?,
         });
     }
@@ -1943,7 +2071,7 @@ fn read_occurrences(
     expected_count: u64,
     sources: &[SourceRef],
     evidence: &mut EvidenceGroups,
-    candidates: &mut BTreeMap<FactId, Vec<SymbolId>>,
+    candidates: &mut FactGroups<SymbolId>,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<OccurrenceRecord>, CatalogError> {
     let mut statement = connection
@@ -1972,7 +2100,7 @@ fn read_occurrences(
             get(row, 9)?,
             get(row, 10)?,
             get(row, 11)?,
-            candidates.remove(&id).unwrap_or_default(),
+            candidates.take(id)?,
         )?;
         records.push(OccurrenceRecord {
             id,
@@ -2844,6 +2972,362 @@ mod tests {
             );
             assert!(called.get());
         }
+    }
+
+    fn fixed_child_tables() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE occurrence_candidates(occurrence_id, position, entity_id);
+             CREATE TABLE provenance_derivations(provenance_id, position, reference_kind, reference_id);",
+        ).unwrap();
+        connection
+    }
+
+    fn insert_fixed_children(
+        connection: &Connection,
+        owner: FactId,
+        position: i64,
+        candidate: SymbolId,
+        reference: FactRef,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO occurrence_candidates VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    owner.as_bytes().as_slice(),
+                    position,
+                    candidate.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        let (kind, id) = codec::encode_fact_ref(&reference);
+        connection
+            .execute(
+                "INSERT INTO provenance_derivations VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![owner.as_bytes().as_slice(), position, kind, id],
+            )
+            .unwrap();
+    }
+
+    fn fixed_children_errors(
+        connection: &Connection,
+        rows: u64,
+        owners: u64,
+        context: &GenerationContext<'_>,
+    ) -> (Option<CatalogErrorKind>, Option<CatalogErrorKind>) {
+        (
+            read_candidates(connection, rows, owners, context)
+                .err()
+                .map(|error| error.kind()),
+            read_provenance_derivations(connection, rows, owners, context)
+                .err()
+                .map(|error| error.kind()),
+        )
+    }
+
+    #[test]
+    fn bounded_fixed_children_preserve_positions_and_move_reserved_vectors() {
+        let connection = fixed_child_tables();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        assert!(
+            read_candidates(&connection, 0, 3, &context)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            read_provenance_derivations(&connection, 0, 3, &context)
+                .unwrap()
+                .groups
+                .capacity(),
+            0
+        );
+        let first = FactId::from_bytes([1; 20]);
+        let last = FactId::from_bytes([3; 20]);
+        let symbols = [7, 8, 9].map(|byte| SymbolId::from_bytes([byte; 20]));
+        let references = [
+            FactRef::File(FileId::from_bytes([7; 20])),
+            FactRef::Entity(symbols[1]),
+            FactRef::Fact(FactId::from_bytes([9; 20])),
+        ];
+        for (owner, position, index) in [(last, 0, 2), (first, 1, 1), (first, 0, 0)] {
+            insert_fixed_children(
+                &connection,
+                owner,
+                position,
+                symbols[index],
+                references[index],
+            );
+        }
+        let mut candidates = read_candidates(&connection, 3, 3, &context).unwrap();
+        let mut derivations = read_provenance_derivations(&connection, 3, 3, &context).unwrap();
+        assert_eq!(candidates.groups.len(), 2);
+        assert_eq!(derivations.groups.len(), 2);
+        assert_eq!(
+            candidates
+                .take(FactId::from_bytes([4; 20]))
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert_eq!(
+            derivations
+                .take(FactId::from_bytes([4; 20]))
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+        let candidate_pointer = candidates.groups[0].items.as_ptr();
+        let reference_pointer = derivations.groups[0].items.as_ptr();
+        let moved = candidates.take(first).unwrap();
+        let moved_references = derivations.take(first).unwrap();
+        assert_eq!(moved, symbols[..2]);
+        assert_eq!(moved_references, references[..2]);
+        assert_eq!(moved.as_ptr(), candidate_pointer);
+        assert_eq!(moved_references.as_ptr(), reference_pointer);
+        assert_eq!(candidates.groups[0].items.capacity(), 0);
+        assert_eq!(derivations.groups[0].items.capacity(), 0);
+        let absent = FactId::from_bytes([2; 20]);
+        assert!(candidates.take(absent).unwrap().is_empty());
+        assert!(derivations.take(absent).unwrap().is_empty());
+        assert!(!candidates.is_empty());
+        assert!(!derivations.is_empty());
+        assert_eq!(candidates.take(last).unwrap(), symbols[2..]);
+        assert_eq!(derivations.take(last).unwrap(), references[2..]);
+        assert!(candidates.is_empty());
+        assert!(derivations.is_empty());
+    }
+
+    #[test]
+    fn bounded_fixed_children_accept_exact_nested_limit_without_growth() {
+        let connection = fixed_child_tables();
+        let owner = FactId::from_bytes([1; 20]);
+        let maximum = IrLimits::default().max_nested_items_per_record;
+        for position in (0..maximum).rev() {
+            let mut id = [0; 20];
+            id[..8].copy_from_slice(&u64::try_from(position).unwrap().to_be_bytes());
+            insert_fixed_children(
+                &connection,
+                owner,
+                i64::try_from(position).unwrap(),
+                SymbolId::from_bytes(id),
+                FactRef::Fact(FactId::from_bytes(id)),
+            );
+        }
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let mut candidates =
+            read_candidates(&connection, u64::try_from(maximum).unwrap(), 1, &context).unwrap();
+        let mut derivations =
+            read_provenance_derivations(&connection, u64::try_from(maximum).unwrap(), 1, &context)
+                .unwrap();
+        assert_eq!(candidates.groups[0].items.capacity(), maximum);
+        assert_eq!(derivations.groups[0].items.capacity(), maximum);
+        let symbols = candidates.take(owner).unwrap();
+        let references = derivations.take(owner).unwrap();
+        assert_eq!(symbols.len(), maximum);
+        assert_eq!(references.len(), maximum);
+        for (position, (symbol, reference)) in symbols.iter().zip(&references).enumerate() {
+            let mut id = [0; 20];
+            id[..8].copy_from_slice(&u64::try_from(position).unwrap().to_be_bytes());
+            assert_eq!(*symbol, SymbolId::from_bytes(id));
+            assert_eq!(*reference, FactRef::Fact(FactId::from_bytes(id)));
+        }
+    }
+
+    #[test]
+    fn bounded_fixed_children_reject_hostile_cells_counts_gaps_and_cancellation() {
+        let connection = fixed_child_tables();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let owner = FactId::from_bytes([1; 20]);
+        let symbol = SymbolId::from_bytes([7; 20]);
+        let reference = FactRef::Fact(FactId::from_bytes([7; 20]));
+        let corrupt = (
+            Some(CatalogErrorKind::Corrupt),
+            Some(CatalogErrorKind::Corrupt),
+        );
+        insert_fixed_children(&connection, owner, 0, symbol, reference);
+        for (rows, owners) in [(0, 1), (2, 1), (1, 0)] {
+            assert_eq!(
+                fixed_children_errors(&connection, rows, owners, &context),
+                corrupt
+            );
+        }
+        for (column, value) in [
+            ("owner", "zeroblob(19)"),
+            ("owner", "zeroblob(65536)"),
+            ("owner", "'not a blob'"),
+            ("position", "-1"),
+            ("position", "'0'"),
+            ("position", "0.5"),
+            ("position", "NULL"),
+            ("position", "9223372036854775807"),
+            ("item", "zeroblob(19)"),
+            ("item", "zeroblob(65536)"),
+            ("item", "'not a blob'"),
+        ] {
+            connection
+                .execute_batch(
+                    "DELETE FROM occurrence_candidates; DELETE FROM provenance_derivations;",
+                )
+                .unwrap();
+            insert_fixed_children(&connection, owner, 0, symbol, reference);
+            let (candidate_column, derivation_column) = match column {
+                "owner" => ("occurrence_id", "provenance_id"),
+                "position" => ("position", "position"),
+                _ => ("entity_id", "reference_id"),
+            };
+            connection.execute_batch(&format!("UPDATE occurrence_candidates SET {candidate_column} = {value}; UPDATE provenance_derivations SET {derivation_column} = {value};")).unwrap();
+            assert_eq!(
+                fixed_children_errors(&connection, 1, 1, &context),
+                corrupt,
+                "{column}={value}"
+            );
+        }
+        for kind in [
+            "'unknown'",
+            "NULL",
+            "zeroblob(65536)",
+            "CAST(zeroblob(65536) AS TEXT)",
+        ] {
+            connection
+                .execute_batch("DELETE FROM provenance_derivations;")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO provenance_derivations VALUES (?1, 0, 'fact', ?2)",
+                    rusqlite::params![owner.as_bytes().as_slice(), owner.as_bytes().as_slice()],
+                )
+                .unwrap();
+            connection
+                .execute_batch(&format!(
+                    "UPDATE provenance_derivations SET reference_kind = {kind}"
+                ))
+                .unwrap();
+            assert_eq!(
+                read_provenance_derivations(&connection, 1, 1, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        let other = FactId::from_bytes([3; 20]);
+        for (items, owners) in [
+            (vec![(owner, 0), (owner, 0)], 1),
+            (vec![(owner, 0), (owner, 2)], 1),
+            (vec![(owner, 1), (other, 0)], 2),
+            (vec![(owner, 0), (other, 0)], 1),
+        ] {
+            connection
+                .execute_batch(
+                    "DELETE FROM occurrence_candidates; DELETE FROM provenance_derivations;",
+                )
+                .unwrap();
+            for (owner, position) in &items {
+                insert_fixed_children(&connection, *owner, *position, symbol, reference);
+            }
+            assert_eq!(
+                fixed_children_errors(
+                    &connection,
+                    u64::try_from(items.len()).unwrap(),
+                    owners,
+                    &context
+                ),
+                corrupt
+            );
+        }
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert_eq!(
+            fixed_children_errors(&connection, 2, 1, &context),
+            (
+                Some(CatalogErrorKind::Cancelled),
+                Some(CatalogErrorKind::Cancelled)
+            )
+        );
+        for candidates in [true, false] {
+            let during = Cancellation::new();
+            let progress = during.clone();
+            connection
+                .progress_handler(
+                    1,
+                    Some(move || {
+                        progress.cancel(CancellationReason::ClientRequest);
+                        false
+                    }),
+                )
+                .unwrap();
+            let context = GenerationContext::new(&during, GenerationBudget::default());
+            let error = if candidates {
+                read_candidates(&connection, 2, 1, &context)
+                    .unwrap_err()
+                    .kind()
+            } else {
+                read_provenance_derivations(&connection, 2, 1, &context)
+                    .unwrap_err()
+                    .kind()
+            };
+            assert_eq!(error, CatalogErrorKind::Cancelled);
+        }
+    }
+
+    #[test]
+    fn bounded_fixed_children_reject_group_above_nested_limit() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE occurrence_candidates(occurrence_id, position, entity_id);
+             CREATE TABLE provenance_derivations(provenance_id, position, reference_kind, reference_id);",
+        ).unwrap();
+        let maximum = IrLimits::default().max_nested_items_per_record;
+        for position in 0..=maximum {
+            connection
+                .execute(
+                    "INSERT INTO occurrence_candidates VALUES (?1, ?2, ?3)",
+                    rusqlite::params![
+                        [1_u8; 20].as_slice(),
+                        i64::try_from(position).unwrap(),
+                        [7_u8; 20].as_slice()
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO provenance_derivations VALUES (?1, ?2, 'fact', ?3)",
+                    rusqlite::params![
+                        [1_u8; 20].as_slice(),
+                        i64::try_from(position).unwrap(),
+                        [7_u8; 20].as_slice()
+                    ],
+                )
+                .unwrap();
+        }
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        assert_eq!(
+            (
+                read_candidates(
+                    &connection,
+                    u64::try_from(maximum + 1).unwrap(),
+                    2,
+                    &context
+                )
+                .err()
+                .map(|error| error.kind()),
+                read_provenance_derivations(
+                    &connection,
+                    u64::try_from(maximum + 1).unwrap(),
+                    2,
+                    &context
+                )
+                .err()
+                .map(|error| error.kind()),
+            ),
+            (
+                Some(CatalogErrorKind::Corrupt),
+                Some(CatalogErrorKind::Corrupt)
+            ),
+            "both fixed-ID families must reject an oversized group before allocation",
+        );
     }
 
     #[test]
