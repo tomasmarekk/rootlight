@@ -409,9 +409,8 @@ pub(crate) fn read_generation_with_admission<E>(
         metadata.contract_version(),
         stats,
         maximum_payload_bytes,
-        entity_flag_rows,
+        cardinality,
         symbol_envelopes,
-        cardinality.evidence_rows,
     )?
     .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
     validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
@@ -587,10 +586,15 @@ pub(crate) fn oracle_read_memory_plan(
     contract_version: GenerationContractVersion,
     stats: GenerationStats,
     maximum_payload_bytes: u64,
-    entity_flag_rows: u64,
+    cardinality: PayloadCardinality,
     symbol_envelopes: u64,
-    evidence_rows: u64,
 ) -> Result<OracleReadMemoryPlan, CatalogError> {
+    let PayloadCardinality {
+        entity_flag_rows,
+        evidence_rows,
+        occurrence_candidate_rows,
+        provenance_derivation_rows,
+    } = cardinality;
     if symbol_envelopes > stats.extensions() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
@@ -640,9 +644,15 @@ pub(crate) fn oracle_read_memory_plan(
         .checked_sub(entity_flag_rows)
         .and_then(|rows| rows.checked_sub(symbol_envelopes))
         .and_then(|rows| rows.checked_sub(evidence_rows))
+        .and_then(|rows| rows.checked_sub(occurrence_candidate_rows))
+        .and_then(|rows| rows.checked_sub(provenance_derivation_rows))
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     let evidence_workspace = evidence_workspace_bytes(evidence_rows, evidence_owner_count(stats)?)?;
     let flag_workspace = flag_workspace_bytes(entity_flag_rows, stats.entities())?;
+    let candidate_workspace =
+        fact_group_workspace_bytes::<SymbolId>(occurrence_candidate_rows, stats.occurrences())?;
+    let derivation_workspace =
+        fact_group_workspace_bytes::<FactRef>(provenance_derivation_rows, stats.provenance())?;
 
     // Exact buffers are allocated only after the same-transaction census and
     // admission. Canonicalization sorts one collection at a time; its validation
@@ -656,6 +666,10 @@ pub(crate) fn oracle_read_memory_plan(
     // resident while each owned vector moves into its final EntityRecord.
     // Evidence groups retain fixed typed headers and exact reference vectors;
     // each vector moves into its record while the empty group header remains.
+    // Fixed-ID groups retain their reserved headers while exact item buffers move
+    // into occurrences and provenance. Borrowed decoding and in-place reversal
+    // need one item slot; the spare typed header covers the current owner and
+    // the in-place header reversal after a primary-key reverse scan.
     // Symbol claims have closed outer records and sequential bounded decoders;
     // their opaque text retains the unchanged text and largest-payload charges.
     let id_set = tree_node_bytes::<FactId, ()>()?;
@@ -747,6 +761,8 @@ pub(crate) fn oracle_read_memory_plan(
         .checked_mul(4 * 1024)
         .and_then(|bytes| bytes.checked_add(flag_workspace))
         .and_then(|bytes| bytes.checked_add(evidence_workspace))
+        .and_then(|bytes| bytes.checked_add(candidate_workspace))
+        .and_then(|bytes| bytes.checked_add(derivation_workspace))
         .and_then(|bytes| bytes.checked_add(retained_record_bytes))
         .and_then(|bytes| bytes.checked_add(temporary_workspace))
         .and_then(|bytes| bytes.checked_add(source_buffers))
@@ -823,6 +839,25 @@ fn evidence_workspace_bytes(rows: u64, owners: u64) -> Result<u64, CatalogError>
         .and_then(|bytes| {
             bytes.checked_add(u64::try_from(std::mem::size_of::<EvidenceGroups>()).ok()?)
         })
+        .ok_or_else(memory_plan_overflow)
+}
+
+fn fact_group_workspace_bytes<T>(rows: u64, owners: u64) -> Result<u64, CatalogError> {
+    let limit = usize_to_u64(IrLimits::default().max_nested_items_per_record)?;
+    if rows > owners.checked_mul(limit).ok_or_else(memory_plan_overflow)? {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    typed_record_buffer_bytes::<FactGroup<T>>(rows.min(owners))?
+        .checked_add(
+            rows.checked_mul(
+                u64::try_from(std::mem::size_of::<T>()).map_err(|_| memory_plan_overflow())?,
+            )
+            .ok_or_else(memory_plan_overflow)?,
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(u64::try_from(std::mem::size_of::<FactGroups<T>>()).ok()?)
+        })
+        .and_then(|bytes| bytes.checked_add(u64::try_from(std::mem::size_of::<T>()).ok()?))
         .ok_or_else(memory_plan_overflow)
 }
 
@@ -1201,7 +1236,7 @@ fn validate_document_hash(
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PayloadCardinality {
     pub(crate) occurrence_candidate_rows: u64,
     pub(crate) provenance_derivation_rows: u64,
@@ -1721,6 +1756,12 @@ fn read_flags(
     })
 }
 
+const CANDIDATE_GROUPS_SQL: &str =
+    "SELECT occurrence_id, position, entity_id FROM occurrence_candidates
+    ORDER BY occurrence_id DESC, position DESC";
+const PROVENANCE_GROUPS_SQL: &str = "SELECT provenance_id, position, reference_kind, reference_id
+    FROM provenance_derivations ORDER BY provenance_id DESC, position DESC";
+
 #[derive(Debug)]
 struct FactGroup<T> {
     owner: FactId,
@@ -1800,11 +1841,11 @@ fn read_fact_groups<T>(
             .and_then(|value| u64::try_from(value).ok())
             .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
         match groups.last().map(|group| group.owner.cmp(&owner)) {
-            Some(std::cmp::Ordering::Greater) => {
+            Some(std::cmp::Ordering::Less) => {
                 return Err(CatalogError::new(CatalogErrorKind::Corrupt));
             }
             Some(std::cmp::Ordering::Equal) => {}
-            Some(std::cmp::Ordering::Less) | None => {
+            Some(std::cmp::Ordering::Greater) | None => {
                 if group_remaining != 0 {
                     return Err(CatalogError::new(CatalogErrorKind::Corrupt));
                 }
@@ -1844,6 +1885,8 @@ fn read_fact_groups<T>(
         context.check().map_err(CatalogError::control)?;
         group.items.reverse();
     }
+    // The primary-key reverse scan avoids a SQLite sorter; consumers stay ascending.
+    groups.reverse();
     context.check().map_err(CatalogError::control)?;
     Ok(FactGroups { groups, next: 0 })
 }
@@ -1856,8 +1899,7 @@ fn read_candidates(
 ) -> Result<FactGroups<SymbolId>, CatalogError> {
     read_fact_groups(
         connection,
-        "SELECT occurrence_id, position, entity_id FROM occurrence_candidates
-         ORDER BY occurrence_id ASC, position DESC",
+        CANDIDATE_GROUPS_SQL,
         expected_rows,
         expected_owners,
         context,
@@ -1899,8 +1941,7 @@ fn read_provenance_derivations(
 ) -> Result<FactGroups<FactRef>, CatalogError> {
     read_fact_groups(
         connection,
-        "SELECT provenance_id, position, reference_kind, reference_id
-         FROM provenance_derivations ORDER BY provenance_id ASC, position DESC",
+        PROVENANCE_GROUPS_SQL,
         expected_rows,
         expected_owners,
         context,
@@ -2583,8 +2624,11 @@ mod tests {
             GENERATION_CONTRACT_VERSION,
             stats(17, maximum + 1024),
             maximum,
-            0,
-            0,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
             0,
         )
         .unwrap();
@@ -2743,12 +2787,39 @@ mod tests {
             metadata.contract_version(),
             written.stats,
             written.maximum_payload_bytes,
-            snapshot
-                .document()
-                .entities
-                .iter()
-                .map(|entity| u64::try_from(entity.flags.len()).unwrap())
-                .sum(),
+            PayloadCardinality {
+                entity_flag_rows: snapshot
+                    .document()
+                    .entities
+                    .iter()
+                    .map(|entity| u64::try_from(entity.flags.len()).unwrap())
+                    .sum(),
+                evidence_rows: u64::try_from(
+                    connection
+                        .query_row("SELECT count(*) FROM evidence_derivations", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap(),
+                )
+                .unwrap(),
+                occurrence_candidate_rows: snapshot
+                    .document()
+                    .occurrences
+                    .iter()
+                    .map(|record| match &record.target {
+                        OccurrenceTarget::Candidates { symbols, .. } => {
+                            u64::try_from(symbols.len()).unwrap()
+                        }
+                        _ => 0,
+                    })
+                    .sum(),
+                provenance_derivation_rows: snapshot
+                    .document()
+                    .provenance
+                    .iter()
+                    .map(|record| u64::try_from(record.derivation_parents.len()).unwrap())
+                    .sum(),
+            },
             u64::try_from(
                 snapshot
                     .document()
@@ -2758,14 +2829,6 @@ mod tests {
                         envelope.namespace == rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE
                     })
                     .count(),
-            )
-            .unwrap(),
-            u64::try_from(
-                connection
-                    .query_row("SELECT count(*) FROM evidence_derivations", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .unwrap(),
             )
             .unwrap(),
         )
@@ -3236,6 +3299,21 @@ mod tests {
                 ),
                 corrupt
             );
+        }
+        connection
+            .execute_batch("DELETE FROM occurrence_candidates; DELETE FROM provenance_derivations;")
+            .unwrap();
+        for (owner, position) in [(owner, 0), (owner, 1), (other, 0)] {
+            insert_fixed_children(&connection, owner, position, symbol, reference);
+        }
+        for ordering in [
+            "occurrence_id ASC, position DESC",
+            "occurrence_id DESC, position ASC",
+        ] {
+            assert_eq!(read_fact_groups(&connection,
+                &format!("SELECT occurrence_id, position, entity_id FROM occurrence_candidates ORDER BY {ordering}"),
+                3, 2, &context, |row| Ok(SymbolId::from_bytes(borrowed_id(row, 2)?)))
+                .unwrap_err().kind(), CatalogErrorKind::Corrupt);
         }
         assert!(cancellation.cancel(CancellationReason::ClientRequest));
         assert_eq!(
@@ -3844,16 +3922,180 @@ mod tests {
     }
 
     #[test]
+    fn fixed_child_queries_use_native_indexes_without_temporary_sort() {
+        let connection = crate::schema::create_ephemeral_oracle().unwrap();
+        let plans = [CANDIDATE_GROUPS_SQL, PROVENANCE_GROUPS_SQL].map(|sql| {
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        });
+        assert!(
+            plans
+                .iter()
+                .flatten()
+                .all(|detail| !detail.contains("TEMP B-TREE")),
+            "fixed-ID reads must not add an unmodeled SQLite sort: {plans:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_child_workspace_replaces_only_authenticated_family_envelopes() {
+        let stats = GenerationStats::new(1, 1, 2, 0, 2, 0, 0, 0, 0, 0, 0, 115, 17).unwrap();
+        let empty = PayloadCardinality::default();
+        let baseline =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, empty, 0).unwrap();
+        let empty_candidate =
+            fact_group_workspace_bytes::<SymbolId>(0, stats.occurrences()).unwrap();
+        let empty_derivation =
+            fact_group_workspace_bytes::<FactRef>(0, stats.provenance()).unwrap();
+        for (candidates, derivations) in [(1, 0), (0, 1), (2, 2), (20, 30)] {
+            let cardinality = PayloadCardinality {
+                occurrence_candidate_rows: candidates,
+                provenance_derivation_rows: derivations,
+                ..empty
+            };
+            let plan =
+                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, cardinality, 0)
+                    .unwrap();
+            let candidate_bytes = (candidates.min(stats.occurrences()) + 1)
+                * u64::try_from(std::mem::size_of::<FactGroup<SymbolId>>()).unwrap()
+                + candidates * u64::try_from(std::mem::size_of::<SymbolId>()).unwrap()
+                + u64::try_from(
+                    std::mem::size_of::<FactGroups<SymbolId>>() + std::mem::size_of::<SymbolId>(),
+                )
+                .unwrap();
+            let derivation_bytes = (derivations.min(stats.provenance()) + 1)
+                * u64::try_from(std::mem::size_of::<FactGroup<FactRef>>()).unwrap()
+                + derivations * u64::try_from(std::mem::size_of::<FactRef>()).unwrap()
+                + u64::try_from(
+                    std::mem::size_of::<FactGroups<FactRef>>() + std::mem::size_of::<FactRef>(),
+                )
+                .unwrap();
+            assert_eq!(
+                fact_group_workspace_bytes::<SymbolId>(candidates, stats.occurrences()).unwrap(),
+                candidate_bytes
+            );
+            assert_eq!(
+                fact_group_workspace_bytes::<FactRef>(derivations, stats.provenance()).unwrap(),
+                derivation_bytes
+            );
+            let original_charge = (candidates + derivations) * 4096;
+            assert_eq!(
+                plan.record_workspace_bytes() + original_charge
+                    - candidate_bytes
+                    - derivation_bytes,
+                baseline.record_workspace_bytes() - empty_candidate - empty_derivation
+            );
+            assert_eq!(
+                plan.materialization_bytes() + original_charge - candidate_bytes - derivation_bytes,
+                baseline.materialization_bytes() - empty_candidate - empty_derivation
+            );
+            assert_eq!(plan.stats(), baseline.stats());
+            assert_eq!(plan.physical_rows(), baseline.physical_rows());
+            assert_eq!(plan.retained_text_bytes(), baseline.retained_text_bytes());
+            assert_eq!(
+                plan.identity_registry_rows(),
+                baseline.identity_registry_rows()
+            );
+            assert_eq!(
+                plan.maximum_payload_bytes(),
+                baseline.maximum_payload_bytes()
+            );
+            assert_eq!(
+                plan.transient_decode_bytes(),
+                baseline.transient_decode_bytes()
+            );
+        }
+        for cardinality in [
+            PayloadCardinality {
+                occurrence_candidate_rows: 103,
+                ..empty
+            },
+            PayloadCardinality {
+                provenance_derivation_rows: 103,
+                ..empty
+            },
+            PayloadCardinality {
+                occurrence_candidate_rows: 60,
+                provenance_derivation_rows: 43,
+                ..empty
+            },
+            PayloadCardinality {
+                occurrence_candidate_rows: u64::MAX,
+                ..empty
+            },
+        ] {
+            assert_eq!(
+                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 0, cardinality, 0)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        for (rows, owners) in [(4097, 1), (1, 0)] {
+            assert_eq!(
+                fact_group_workspace_bytes::<SymbolId>(rows, owners)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+            assert_eq!(
+                fact_group_workspace_bytes::<FactRef>(rows, owners)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        assert_eq!(
+            fact_group_workspace_bytes::<SymbolId>(u64::MAX, u64::MAX)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Storage
+        );
+        assert_eq!(
+            fact_group_workspace_bytes::<FactRef>(u64::MAX, u64::MAX)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Storage
+        );
+    }
+
+    #[test]
     fn evidence_workspace_replaces_only_its_complete_typed_family_charge() {
         let stats = GenerationStats::new(1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 40, 17).unwrap();
         let owners = evidence_owner_count(stats).unwrap();
         assert_eq!(owners, 5);
-        let baseline =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, 0).unwrap();
+        let baseline = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            97,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
+            0,
+        )
+        .unwrap();
         let empty = evidence_workspace_bytes(0, owners).unwrap();
         for rows in [1, 5, 20] {
-            let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, rows)
-                .unwrap();
+            let plan = oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                stats,
+                97,
+                PayloadCardinality {
+                    entity_flag_rows: 0,
+                    evidence_rows: rows,
+                    ..PayloadCardinality::default()
+                },
+                0,
+            )
+            .unwrap();
             let complete = typed_record_buffer_bytes::<EvidenceGroup>(rows.min(owners)).unwrap()
                 + rows * u64::try_from(std::mem::size_of::<FactRef>()).unwrap()
                 + u64::try_from(std::mem::size_of::<EvidenceGroups>()).unwrap();
@@ -3899,9 +4141,19 @@ mod tests {
         let only_one_auxiliary =
             GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0).unwrap();
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, only_one_auxiliary, 0, 1, 0, 1)
-                .unwrap_err()
-                .kind(),
+            oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                only_one_auxiliary,
+                0,
+                PayloadCardinality {
+                    entity_flag_rows: 1,
+                    evidence_rows: 1,
+                    ..PayloadCardinality::default()
+                },
+                0,
+            )
+            .unwrap_err()
+            .kind(),
             CatalogErrorKind::Corrupt
         );
     }
@@ -3909,8 +4161,18 @@ mod tests {
     #[test]
     fn flag_workspace_changes_only_the_flag_envelope_and_complete_bounded_buffer() {
         let stats = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 17).unwrap();
-        let baseline =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, 0).unwrap();
+        let baseline = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            97,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
+            0,
+        )
+        .unwrap();
         let empty_workspace = flag_workspace_bytes(0, 3).unwrap();
         assert_eq!(
             empty_workspace,
@@ -3924,9 +4186,18 @@ mod tests {
                 flag_workspace_bytes(flag_rows, 3).unwrap(),
                 expected_workspace
             );
-            let plan =
-                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, flag_rows, 0, 0)
-                    .unwrap();
+            let plan = oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                stats,
+                97,
+                PayloadCardinality {
+                    entity_flag_rows: flag_rows,
+                    evidence_rows: 0,
+                    ..PayloadCardinality::default()
+                },
+                0,
+            )
+            .unwrap();
             assert_eq!(
                 plan.record_workspace_bytes() + flag_rows * 4096 - expected_workspace,
                 baseline.record_workspace_bytes() - empty_workspace,
@@ -3962,9 +4233,19 @@ mod tests {
         );
         let no_auxiliary = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0).unwrap();
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 1, 0, 0)
-                .unwrap_err()
-                .kind(),
+            oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                no_auxiliary,
+                0,
+                PayloadCardinality {
+                    entity_flag_rows: 1,
+                    evidence_rows: 0,
+                    ..PayloadCardinality::default()
+                },
+                0,
+            )
+            .unwrap_err()
+            .kind(),
             CatalogErrorKind::Corrupt,
         );
     }
@@ -4120,8 +4401,18 @@ mod tests {
     fn symbol_envelope_discount_keeps_other_charges_and_adds_full_typed_workspaces() {
         let stats =
             GenerationStats::new(0, 0, 0, 0, 100_000, 0, 0, 0, 0, 32, 0, 200_067, 17).unwrap();
-        let baseline =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 0, 0).unwrap();
+        let baseline = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            185,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
+            0,
+        )
+        .unwrap();
         // This provenance-dense frame keeps validation larger than registry and
         // sorting, so every added symbol validation node must remain charged.
         let id_set = tree_node_bytes::<FactId, ()>().unwrap();
@@ -4131,9 +4422,18 @@ mod tests {
         assert!(validation > typed_record_buffer_bytes::<ProvenanceRecord>(100_000).unwrap());
         assert!(validation > typed_record_buffer_bytes::<ExtensionEnvelope>(32).unwrap());
         for count in [1, 4, 32] {
-            let plan =
-                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, count, 0)
-                    .unwrap();
+            let plan = oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                stats,
+                185,
+                PayloadCardinality {
+                    entity_flag_rows: 0,
+                    evidence_rows: 0,
+                    ..PayloadCardinality::default()
+                },
+                count,
+            )
+            .unwrap();
             assert_eq!(
                 plan.record_workspace_bytes() + count * 4096,
                 baseline.record_workspace_bytes()
@@ -4149,16 +4449,36 @@ mod tests {
             );
         }
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 33, 0)
-                .unwrap_err()
-                .kind(),
+            oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                stats,
+                185,
+                PayloadCardinality {
+                    entity_flag_rows: 0,
+                    evidence_rows: 0,
+                    ..PayloadCardinality::default()
+                },
+                33,
+            )
+            .unwrap_err()
+            .kind(),
             CatalogErrorKind::Corrupt
         );
         let no_auxiliary = GenerationStats::new(1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0).unwrap();
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 0, 1, 0)
-                .unwrap_err()
-                .kind(),
+            oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                no_auxiliary,
+                0,
+                PayloadCardinality {
+                    entity_flag_rows: 0,
+                    evidence_rows: 0,
+                    ..PayloadCardinality::default()
+                },
+                1,
+            )
+            .unwrap_err()
+            .kind(),
             CatalogErrorKind::Corrupt
         );
         assert_eq!(
@@ -4172,8 +4492,18 @@ mod tests {
     #[test]
     fn memory_plan_separates_closed_records_and_retains_opaque_envelopes() {
         let stats = stats(17, 1024);
-        let plan =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, 0).unwrap();
+        let plan = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            97,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
+            0,
+        )
+        .unwrap();
         assert_eq!(plan.physical_rows(), 17);
         assert_eq!(plan.identity_registry_rows(), 8);
         assert!(plan.record_workspace_bytes() >= 5 * 4096);
@@ -4192,8 +4522,11 @@ mod tests {
             GenerationContractVersion::new(1, 1),
             self::stats(16, 1024),
             97,
-            0,
-            0,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
             0,
         )
         .unwrap();
@@ -4204,8 +4537,11 @@ mod tests {
                 GENERATION_CONTRACT_VERSION,
                 self::stats(rows, 1024),
                 payload,
-                0,
-                0,
+                PayloadCardinality {
+                    entity_flag_rows: 0,
+                    evidence_rows: 0,
+                    ..PayloadCardinality::default()
+                },
                 0,
             )
             .unwrap_err();
@@ -4215,8 +4551,11 @@ mod tests {
             GenerationContractVersion::new(1, 1),
             self::stats(u64::MAX, 1024),
             0,
-            0,
-            0,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
             0,
         )
         .unwrap_err();
@@ -4241,8 +4580,18 @@ mod tests {
             769_035_567,
         )
         .unwrap();
-        let plan =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0, 0).unwrap();
+        let plan = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            100_636,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
+            0,
+        )
+        .unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -4263,8 +4612,11 @@ mod tests {
             GENERATION_CONTRACT_VERSION,
             stats,
             512 * 1024 * 1024,
-            0,
-            0,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
             0,
         )
         .unwrap();
@@ -4290,8 +4642,18 @@ mod tests {
             1_442_569_165,
         )
         .unwrap();
-        let plan =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0, 0).unwrap();
+        let plan = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            100_636,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
+            0,
+        )
+        .unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -4310,8 +4672,11 @@ mod tests {
             GENERATION_CONTRACT_VERSION,
             stats,
             512 * 1024 * 1024,
-            0,
-            0,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
             0,
         )
         .unwrap();
@@ -4447,8 +4812,18 @@ mod tests {
         let stats = stats(17, 32_768);
         let maximum = maximum_payload_bytes(&connection, stats, &context).unwrap();
         assert_eq!(maximum, expected_max);
-        let plan =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum, 0, 0, 0).unwrap();
+        let plan = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            maximum,
+            PayloadCardinality {
+                entity_flag_rows: 0,
+                evidence_rows: 0,
+                ..PayloadCardinality::default()
+            },
+            0,
+        )
+        .unwrap();
         let factor =
             u64::try_from(4 * (std::mem::size_of::<String>() + std::mem::size_of::<usize>()))
                 .unwrap();

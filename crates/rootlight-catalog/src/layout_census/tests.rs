@@ -1016,9 +1016,26 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
         GENERATION_CONTRACT_VERSION,
         actual.stats,
         actual.maximum_payload_bytes,
-        flag_rows(document),
+        read::PayloadCardinality {
+            entity_flag_rows: flag_rows(document),
+            evidence_rows: evidence_rows(document),
+            occurrence_candidate_rows: document
+                .occurrences
+                .iter()
+                .map(|record| match &record.target {
+                    OccurrenceTarget::Candidates { symbols, .. } => {
+                        u64::try_from(symbols.len()).unwrap()
+                    }
+                    _ => 0,
+                })
+                .sum(),
+            provenance_derivation_rows: document
+                .provenance
+                .iter()
+                .map(|record| u64::try_from(record.derivation_parents.len()).unwrap())
+                .sum(),
+        },
         symbol_envelopes(document),
-        evidence_rows(document),
     )
     .unwrap();
     assert_eq!(combined.read_memory_plan(&context).unwrap(), expected);

@@ -1342,7 +1342,7 @@ fn c_local_address_proofs_invalidate_immediate_parser_and_resolver_identity() {
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         ANALYZER_BINARY_SEED,
         b"rootlight.first-slice.treesitter-structural/357"
@@ -1384,7 +1384,7 @@ fn python_module_main_references_invalidate_immediate_parser_and_resolver_identi
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         ANALYZER_BINARY_SEED,
         b"rootlight.first-slice.treesitter-structural/357"
@@ -1426,7 +1426,7 @@ fn php_ordinary_source_proofs_invalidate_immediate_parser_and_resolver_identity(
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1472,7 +1472,7 @@ fn javascript_written_bindings_invalidate_immediate_parser_and_resolver_identity
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1518,7 +1518,7 @@ fn javascript_default_class_export_proofs_invalidate_immediate_parser_and_resolv
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1564,7 +1564,7 @@ fn rust_struct_member_ownership_invalidates_immediate_native_and_deep_contexts()
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1644,7 +1644,7 @@ fn ruby_written_bindings_invalidate_immediate_parser_and_resolver_identity() {
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1690,7 +1690,7 @@ fn bash_module_references_invalidate_immediate_parser_and_resolver_identity() {
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1736,7 +1736,7 @@ fn html_closing_tag_references_invalidate_immediate_parser_and_resolver_identity
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1782,7 +1782,7 @@ fn assembly_written_owners_invalidate_immediate_parser_and_resolver_identity() {
     ])
     .unwrap();
     let parser = first_slice_parser_provider_hash().unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         PROJECT_PROVIDER_SET_SEED,
         b"rootlight.first-slice.project-provider/32"
@@ -1835,7 +1835,7 @@ fn native_refusal_recognition_invalidates_immediate_host_admission_identity() {
         ])
         .unwrap()
     };
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         ANALYZER_BINARY_SEED,
         b"rootlight.first-slice.treesitter-structural/357"
@@ -1848,6 +1848,10 @@ fn native_refusal_recognition_invalidates_immediate_host_admission_identity() {
     assert_ne!(
         first_slice_provider_set_hash().unwrap(),
         provider(b"rootlight.first-slice.providers/6")
+    );
+    assert_ne!(
+        first_slice_provider_set_hash().unwrap(),
+        provider(b"rootlight.first-slice.providers/10")
     );
 }
 
@@ -1862,7 +1866,7 @@ fn python_formal_rebinding_invalidates_preceding_parser_identity() {
         grammar.as_bytes(),
     ])
     .unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         ANALYZER_BINARY_SEED,
         b"rootlight.first-slice.treesitter-structural/357"
@@ -1900,7 +1904,7 @@ fn python_module_iterables_invalidate_preceding_parser_identity() {
         grammar.as_bytes(),
     ])
     .unwrap();
-    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/10");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/11");
     assert_eq!(
         ANALYZER_BINARY_SEED,
         b"rootlight.first-slice.treesitter-structural/357"

@@ -285,9 +285,13 @@ impl OracleLayoutFragment {
             GENERATION_CONTRACT_VERSION,
             stats,
             self.payloads.last().map_or(0, |(bytes, _)| *bytes),
-            self.totals.entity_flag_rows,
+            read::PayloadCardinality {
+                entity_flag_rows: self.totals.entity_flag_rows,
+                evidence_rows: self.totals.evidence_rows,
+                occurrence_candidate_rows: self.totals.occurrence_candidate_rows,
+                provenance_derivation_rows: self.totals.provenance_derivation_rows,
+            },
             self.totals.symbol_envelopes,
-            self.totals.evidence_rows,
         )?
         .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
     }
@@ -1031,9 +1035,13 @@ impl OracleLayoutCensus {
             GENERATION_CONTRACT_VERSION,
             stats,
             self.payloads.last().copied().unwrap_or(0),
-            self.totals.entity_flag_rows,
+            read::PayloadCardinality {
+                entity_flag_rows: self.totals.entity_flag_rows,
+                evidence_rows: self.totals.evidence_rows,
+                occurrence_candidate_rows: self.totals.occurrence_candidate_rows,
+                provenance_derivation_rows: self.totals.provenance_derivation_rows,
+            },
             self.totals.symbol_envelopes,
-            self.totals.evidence_rows,
         )?
         .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
     }

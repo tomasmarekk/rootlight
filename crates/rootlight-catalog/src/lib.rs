@@ -315,9 +315,8 @@ impl OracleWriter {
             generation.metadata().contract_version(),
             written.stats,
             written.maximum_payload_bytes,
-            cardinality.entity_flag_rows,
+            cardinality,
             symbol_envelopes,
-            cardinality.evidence_rows,
         )?
         .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
         transaction.commit().map_err(CatalogError::sqlite)?;
