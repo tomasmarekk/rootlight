@@ -142,6 +142,38 @@ fn native_regression_decorator_arguments_accept_type_expressions() {
 }
 
 #[test]
+fn native_augment_directives_preserve_statement_ownership() {
+    for source in [
+        b"model M {}\n#suppress \"deprecated\" \"compat\"\n@@doc(M, \"text\");".as_slice(),
+        b"model M {}\n#suppress \"deprecated\" \"compat\"\n#suppress \"other\" \"reason\"\n@@doc(M, \"text\");".as_slice(),
+    ] {
+        let tree = parse(source);
+        clean(source, &tree);
+        let root = tree.root_node();
+        let augment = nodes(root, "augment_decorator_statement");
+        assert_eq!(augment.len(), 1);
+        assert_eq!(name(augment[0], source), "doc");
+        assert_eq!(
+            nodes(augment[0], "directive").len(),
+            source.iter().filter(|byte| **byte == b'#').count()
+        );
+        assert!(nodes(nodes(root, "model_statement")[0], "directive").is_empty());
+    }
+    for source in [
+        b"model M {}\n@doc(\"invalid\")\n@@doc(M, \"text\");".as_slice(),
+        b"model M {}\n#suppress \"deprecated\"\n@doc(\"invalid\")\n@@doc(M, \"text\");".as_slice(),
+        b"model M {}\n#suppress\n@@doc(M, \"text\");".as_slice(),
+    ] {
+        let tree = parse(source);
+        assert!(
+            tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
 fn native_regression_metaproperty_selector_preserves_its_operator() {
     let source = b"alias Body = AttributeNamespaces.create::parameters.body;";
     let tree = parse(source);

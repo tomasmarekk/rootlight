@@ -233,11 +233,15 @@
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": false,
       "types": [
         {
           "type": "decorator_arguments",
+          "named": true
+        },
+        {
+          "type": "directive",
           "named": true
         }
       ]

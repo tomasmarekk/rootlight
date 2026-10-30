@@ -233,6 +233,39 @@ fn unsupported_owner_and_ambiguous_file_namespaces_cannot_donate_members() {
 }
 
 #[test]
+fn augment_directives_keep_file_namespace_and_written_owners() {
+    let source = b"namespace Sample;\nmodel M { field: string; }\n#suppress \"deprecated\" \"compat\"\n@@doc(M, \"text\");\nmodel Next {}\n";
+    let result = output(source);
+    let doc = result.document();
+    assert_eq!(doc.entities.len(), 5);
+    let namespace = entity(&result, EntityKind::Namespace, "Sample");
+    let model = entity(&result, EntityKind::Struct, "M");
+    owned(&result, namespace, model);
+    owned(
+        &result,
+        namespace,
+        entity(&result, EntityKind::Struct, "Next"),
+    );
+    owned(
+        &result,
+        model,
+        entity(&result, EntityKind::Property, "field"),
+    );
+    assert!(
+        doc.relations
+            .iter()
+            .all(|relation| relation.predicate == RelationPredicate::Contains)
+    );
+    assert_eq!(
+        doc.occurrences
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Definition)
+            .count(),
+        4
+    );
+}
+
+#[test]
 fn malformed_native_owner_withholds_authored_declarations() {
     let result = output(b"namespace Broken { model Incomplete { value: ; } }\n");
     assert!(result.document().entities.iter().all(|entity| !matches!(

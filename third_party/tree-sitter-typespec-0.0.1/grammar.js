@@ -1,8 +1,10 @@
 // Local TypeSpec corrections over the pinned upstream grammar.
-// Decorator type expressions and metaproperty selectors retain their distinct syntax.
+// Type expressions, metaproperty selectors and augment directives retain their syntax.
 // The unchanged upstream preferred source is retained under upstream/files/grammar.js.
 module.exports = grammar({
   name: "typespec",
+
+  conflicts: $ => [[$.annotation, $.augment_decorator_statement]],
 
   extras: $ => [
     $.single_line_comment,
@@ -308,6 +310,7 @@ module.exports = grammar({
     ),
 
     augment_decorator_statement: $ => seq(
+      repeat($.directive),
       "@@",
       field("name", $.identifier_or_member_expression),
       optional($.decorator_arguments),

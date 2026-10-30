@@ -1672,6 +1672,13 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "directive"
+          }
+        },
+        {
           "type": "STRING",
           "value": "@@"
         },
@@ -2862,7 +2869,12 @@
       "value": "[\\s]"
     }
   ],
-  "conflicts": [],
+  "conflicts": [
+    [
+      "annotation",
+      "augment_decorator_statement"
+    ]
+  ],
   "precedences": [],
   "externals": [],
   "inline": [],

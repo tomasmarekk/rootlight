@@ -42,24 +42,24 @@
       "sha256": "ec9f9f3aca84863e4df8c1ebc6218c5fddc9bb59ac39b6a02f7799faa7d143bd"
     },
     "grammar.js": {
-      "bytes": 12957,
-      "sha256": "4d271397402db3f3eaa008493ee97b191109eb6e7eb9f3eb8290c89ea8c5be5f"
+      "bytes": 13053,
+      "sha256": "83270a19b4341c5b503cfd304c9cb7cead71337ea7e9ed76a1813647e2030b3f"
     },
     "tree-sitter.json": {
       "bytes": 553,
       "sha256": "1305d39534ee5b83a8bedd196acf5916fdea541336f7ef41b0cf34fd2828ec9d"
     },
     "src/parser.c": {
-      "bytes": 1060531,
-      "sha256": "87cf00055e8c975c70736422822a0a478f16f6f0e7be70ab63202e34bd2d3dbf"
+      "bytes": 1068364,
+      "sha256": "3cd651682b278e8eb1688d9163e3b612f612cab649178d9d0391822addf1848c"
     },
     "src/grammar.json": {
-      "bytes": 59124,
-      "sha256": "52ed829c2022a3c5acc41fc82e84d0b81d7818bfe8f328fd675cfca19f134620"
+      "bytes": 59341,
+      "sha256": "15153690614e6220cb297bd4869dec6633774efddd65422cab5c08c17afbf8c5"
     },
     "src/node-types.json": {
-      "bytes": 59554,
-      "sha256": "dfeb977507fd11587a1036120a899068a1d390347d0a091a60d84b9195646a22"
+      "bytes": 59629,
+      "sha256": "69d95aa5475cbb0ad1b67780f30ea3a30376c5c5a6362157ca0a35d44cc9d6d1"
     },
     "src/tree_sitter/parser.h": {
       "bytes": 7624,
@@ -97,7 +97,8 @@
     "base_grammar_sha256": "57485af9ac1da932c6f4a4c2299963f5aea9f448a8bb990cb375fcf8e5b681c4",
     "corrections": [
       "Decorator and augment-decorator argument lists admit existing type expressions alongside existing object and array values.",
-      "Reference expressions retain distinct metaproperty selectors; namespace, using and decorator name productions remain unchanged."
+      "Reference expressions retain distinct metaproperty selectors; namespace, using and decorator name productions remain unchanged.",
+      "Augment decorator statements admit preceding directives while ordinary decorators remain invalid; shared directive prefixes remain explicit parser conflicts."
     ],
     "generator": {
       "name": "tree-sitter",

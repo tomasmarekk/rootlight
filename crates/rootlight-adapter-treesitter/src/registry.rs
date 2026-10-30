@@ -743,7 +743,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             language_id: "typespec",
             grammar_version: "0.0.1",
             source_package_sha256: "814bffffd13167f41020520c138f159c35ec7e744540508bec1c321ec97bd2f7",
-            parser_sha256: "87cf00055e8c975c70736422822a0a478f16f6f0e7be70ab63202e34bd2d3dbf",
+            parser_sha256: "3cd651682b278e8eb1688d9163e3b612f612cab649178d9d0391822addf1848c",
             scanner_sha256: None,
         },
         GrammarFamily::Ron => GrammarIdentity {
