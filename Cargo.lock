@@ -1795,6 +1795,7 @@ dependencies = [
  "tree-sitter-racket",
  "tree-sitter-ring",
  "tree-sitter-rocq",
+ "tree-sitter-ron",
  "tree-sitter-ruby",
  "tree-sitter-rust",
  "tree-sitter-sas",
@@ -3709,6 +3710,14 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-rocq"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-ron"
 version = "0.2.0"
 dependencies = [
  "cc",

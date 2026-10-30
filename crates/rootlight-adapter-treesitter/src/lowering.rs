@@ -924,6 +924,7 @@ fn required_syntax_fact_count_from_output(
                     || matches!(fact.syntax_kind().as_str(), "c.block.scope" | "c.for.scope")
                     || fact.syntax_kind().as_str().starts_with("json.")
                     || fact.syntax_kind().as_str().starts_with("jsonc.")
+                    || fact.syntax_kind().as_str().starts_with("ron.")
                     || fact.syntax_kind().as_str().starts_with("toml.")
                     || fact.syntax_kind().as_str().starts_with("yaml.")
                     || ((required_scope_profile == RequiredScopeProfile::FSharpImplementation
@@ -8424,6 +8425,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "json.document_value.scope"
                         | "jsonc.array_element.scope"
                         | "jsonc.document_value.scope"
+                        | "ron.array_element.scope"
+                        | "ron.tuple_element.scope"
+                        | "ron.document_value.scope"
                 ) {
                     let next = json_positions.entry(fact.parent()).or_default();
                     let position = *next;
@@ -8647,13 +8651,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     .or(written_scope_identity)
                     .or(json_position
                         .map(|position| {
-                            json_data_identity(
-                                parent_scope
-                                    .as_ref()
-                                    .and_then(|scope| scope.stable_identity),
-                                fact.syntax_kind().as_str(),
-                                position,
-                            )
+                            let parent = parent_scope
+                                .as_ref()
+                                .and_then(|scope| scope.stable_identity);
+                            if self.language_for_fact(fact) == "ron" {
+                                source_occurrence_identity(
+                                    "rootlight.ron-data-position/1",
+                                    parent,
+                                    fact.syntax_kind().as_str(),
+                                    position,
+                                )
+                            } else {
+                                json_data_identity(parent, fact.syntax_kind().as_str(), position)
+                            }
                         })
                         .or(scope_digest
                             .map(|digest| {
@@ -8673,13 +8683,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             })));
                 // CSS groups repeated declarations by raw name and enclosing
                 // headers; each declaration retains its source-bound occurrence.
-                // JSON data positions already distinguish repeated members.
+                // JSON and RON data positions distinguish repeated members.
                 // Lexical bindings in other languages need a span-local ambiguity
                 // guard without making position part of their durable SymbolId.
                 let collision_guard = if fact.syntax_kind().as_str().starts_with("css.")
                     || matches!(
                         self.language_for_fact(fact),
-                        "json" | "jsonc" | "json-schema"
+                        "json" | "jsonc" | "json-schema" | "ron"
                     ) {
                     None
                 } else {
@@ -9007,20 +9017,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 json_schema.identity(fact)
             } else if matches!(
                 fact.syntax_kind().as_str(),
-                "json.property.declaration" | "jsonc.property.declaration"
+                "json.property.declaration"
+                    | "jsonc.property.declaration"
+                    | "ron.property.declaration"
             ) {
                 let next = json_members
                     .entry((fact.parent(), name.to_string()))
                     .or_default();
                 let position = *next;
                 *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
-                Some(json_data_identity(
-                    parent_scope
-                        .as_ref()
-                        .and_then(|scope| scope.stable_identity),
-                    "json.property",
-                    position,
-                ))
+                let parent = parent_scope
+                    .as_ref()
+                    .and_then(|scope| scope.stable_identity);
+                Some(if self.language_for_fact(fact) == "ron" {
+                    source_occurrence_identity(
+                        "rootlight.ron-data-position/1",
+                        parent,
+                        "ron.property",
+                        position,
+                    )
+                } else {
+                    json_data_identity(parent, "json.property", position)
+                })
             } else if fact.syntax_kind().as_str() == "vba.compilation_constant.declaration" {
                 // Keep compiler constants distinct from same-named runtime constants.
                 let label = fact.syntax_kind().as_str();
@@ -11074,12 +11092,32 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(scss::gaps(fact))
         .chain(less::gaps(fact))
         .chain(modelica::gaps(fact))
-        .chain(ring::gaps(fact).chain(wesl::gaps(fact)))
+        .chain(
+            ring::gaps(fact)
+                .chain(wesl::gaps(fact))
+                .chain(ron_source_gaps(fact)),
+        )
         .chain(hare::gaps(fact))
         .chain(json_schema::gaps(fact))
         .chain(cue::gaps(fact).chain(pony::gaps(fact).chain(
             crystal::gaps(fact).chain(zig::gaps(fact).chain(hcl::gaps(fact).chain(d::gaps(fact)))),
         )))
+}
+
+fn ron_source_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
+    (fact.kind() == SyntaxFactKind::Module && fact.syntax_kind().as_str() == "ron.file.module")
+        .then_some([
+            (
+                FactDomain::Entities,
+                "ron-schema-escape-and-non-string-map-key-interpretation-unavailable",
+            ),
+            (
+                FactDomain::Relations,
+                "ron-constructor-and-enum-binding-unavailable",
+            ),
+        ])
+        .into_iter()
+        .flatten()
 }
 
 fn fortran_source_identity_gap(fact: &SyntaxFact) -> Option<&'static str> {
@@ -13507,6 +13545,11 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
         return language == "sed"
             && fact.kind() == SyntaxFactKind::Module
             && fact.syntax_kind().as_str() == "sed.file.module";
+    }
+    if language == "ron" || fact.syntax_kind().as_str().starts_with("ron.") {
+        return fact.kind() == SyntaxFactKind::Module
+            && language == "ron"
+            && fact.syntax_kind().as_str() == "ron.file.module";
     }
     if fact.syntax_kind().as_str() == "json_schema.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "json-schema";

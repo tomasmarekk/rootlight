@@ -412,3 +412,4 @@ third_party/tree-sitter-idris-0.0.1/** -text
 /crates/rootlight-service/tests/fixtures/ruby_dsl/mailer.text.erb.tt -text whitespace=cr-at-eol
 /crates/rootlight-service/tests/fixtures/ruby_dsl/docker-entrypoint.tt -text whitespace=cr-at-eol
 /third_party/tree-sitter-ron-0.2.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/crates/rootlight-adapter-treesitter/tests/fixtures/ron/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol

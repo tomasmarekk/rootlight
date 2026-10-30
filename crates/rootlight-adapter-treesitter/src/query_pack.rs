@@ -614,7 +614,7 @@ impl QueryPack {
                 .retain(|name| !matches!(*name, "call" | "import" | "comment" | "documentation"));
             expected.push("expression");
         }
-        if family.is_json() || family == GrammarFamily::Toml {
+        if family.is_json() || matches!(family, GrammarFamily::Toml | GrammarFamily::Ron) {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
         }
         if matches!(family, GrammarFamily::Liquid | GrammarFamily::Handlebars) {
@@ -1281,6 +1281,7 @@ impl QueryPack {
                             GrammarFamily::Json
                                 | GrammarFamily::Jsonc
                                 | GrammarFamily::Toml
+                                | GrammarFamily::Ron
                                 | GrammarFamily::Yaml
                                 | GrammarFamily::FSharp
                         );
@@ -4380,6 +4381,17 @@ fn candidate_for_capture(
                 .syntax
         }
         StructuralRole::Signature if family == GrammarFamily::R => "r.function_header",
+        StructuralRole::Definition if family == GrammarFamily::Ron => "ron.key",
+        StructuralRole::Scope if family == GrammarFamily::Ron => {
+            match capture.node.parent().map(|node| node.kind()) {
+                Some("array") => "ron.array_element",
+                Some("tuple") => "ron.tuple_element",
+                Some("source_file") => "ron.document_value",
+                _ => canonical_syntax(family, capture.node.kind())
+                    .ok_or_else(|| query_failure("query-ron-scope-kind"))?,
+            }
+        }
+
         StructuralRole::Scope if family == GrammarFamily::Toml => {
             if capture
                 .node
@@ -4611,6 +4623,7 @@ fn candidate_for_capture(
             GrammarFamily::Json | GrammarFamily::Jsonc => {
                 return Err(query_failure("query-json-call-kind"));
             }
+            GrammarFamily::Ron => return Err(query_failure("query-ron-data-call-unavailable")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
             GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
             GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
@@ -5179,6 +5192,14 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Html, "erroneous_end_tag") => Some("html.unmatched_end_tag"),
         (GrammarFamily::Html, "attribute_value" | "text" | "entity") => Some("html.text"),
         (GrammarFamily::Html, "comment") => Some("html.comment"),
+        (GrammarFamily::Ron, "source_file") => Some("ron.file"),
+        (GrammarFamily::Ron, "struct_entry" | "map_entry") => Some("ron.property"),
+        (GrammarFamily::Ron, "map") => Some("ron.map"),
+        (GrammarFamily::Ron, "struct") => Some("ron.struct"),
+        (GrammarFamily::Ron, "tuple") => Some("ron.tuple"),
+        (GrammarFamily::Ron, "array") => Some("ron.array"),
+        (GrammarFamily::Ron, "string") => Some("ron.string"),
+        (GrammarFamily::Ron, "line_comment" | "block_comment") => Some("ron.comment"),
         (GrammarFamily::Toml, "document") => Some("toml.file"),
         (GrammarFamily::Toml, "table") => Some("toml.table"),
         (GrammarFamily::Toml, "table_array_element") => Some("toml.table_array_element"),
@@ -5660,7 +5681,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(108);
+        let mut packs = Vec::with_capacity(109);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5745,6 +5766,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Hlsl, include_str!("../queries/hlsl.scm")),
             (GrammarFamily::Wgsl, include_str!("../queries/wgsl.scm")),
             (GrammarFamily::Wesl, include_str!("../queries/wesl.scm")),
+            (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
             (GrammarFamily::Dtd, include_str!("../queries/dtd.scm")),
             (GrammarFamily::CMake, include_str!("../queries/cmake.scm")),
@@ -5988,12 +6010,13 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 108);
+        assert_eq!(registry.len(), 109);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
             GrammarFamily::Erb,
             GrammarFamily::Wesl,
+            GrammarFamily::Ron,
             GrammarFamily::Nushell,
             GrammarFamily::Clojure,
             GrammarFamily::Racket,
@@ -6369,7 +6392,7 @@ mod tests {
                 });
                 expected.push("expression");
             }
-            if family.is_json() || family == GrammarFamily::Toml {
+            if family.is_json() || matches!(family, GrammarFamily::Toml | GrammarFamily::Ron) {
                 expected
                     .retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
             }

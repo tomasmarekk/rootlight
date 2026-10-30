@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "efcb18bb3926a0c83d608916f98cc66da75729ff1dd79ae3dfe588756f067930";
+    "ba44af24bb0f38b9f63c488897cc165aa6e8d0ea32d328c6bb0c41aba43ccab0";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 63] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 64] = [
+    (
+        "tree-sitter-ron",
+        "0.2.0",
+        "third_party/tree-sitter-ron-0.2.0",
+        "ae70c4d5ba6744a31342eeab2e7f9656be75f00638d92bbc3f5d14047a3cfb14",
+    ),
     (
         "tree-sitter-wesl",
         "0.1.0",
@@ -624,6 +630,14 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
 
     for (path, checksum) in [
         (
+            "third_party/tree-sitter-ron-0.2.0/LICENSE-MIT",
+            "c6137844f3f63aa4522dfc1cde8dff4f3314ed594ea954a73e3073dcc9d33b11",
+        ),
+        (
+            "third_party/tree-sitter-ron-0.2.0/LICENSE-APACHE",
+            "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+        ),
+        (
             "third_party/tree-sitter-wesl-0.1.0/COPYRIGHT",
             "ccef2f8fb35b3f36bc94b4084a188f7a20243c6eb6f94f48be9767115cbb763d",
         ),
@@ -885,7 +899,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 103 {
+    if manifest.grammars.len() != 104 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -910,6 +924,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "ron",
         "wesl",
         "erb",
         "cuda",

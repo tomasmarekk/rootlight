@@ -61,7 +61,9 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 76] = [
+const DISTRIBUTION_LICENSES: [&str; 78] = [
+    "tree-sitter-ron-0.2.0-LICENSE-MIT",
+    "tree-sitter-ron-0.2.0-LICENSE-APACHE",
     "tree-sitter-wesl-0.1.0-COPYRIGHT",
     "tree-sitter-wesl-0.1.0-LICENSE-MIT",
     "tree-sitter-wesl-0.1.0-LICENSE-APACHE",
@@ -633,6 +635,12 @@ struct ArchiveBuild<'a> {
 fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
     // Read retained vendor notices directly instead of maintaining a second copy.
     match filename {
+        "tree-sitter-ron-0.2.0-LICENSE-MIT" => {
+            workspace.join("third_party/tree-sitter-ron-0.2.0/LICENSE-MIT")
+        }
+        "tree-sitter-ron-0.2.0-LICENSE-APACHE" => {
+            workspace.join("third_party/tree-sitter-ron-0.2.0/LICENSE-APACHE")
+        }
         "tree-sitter-wesl-0.1.0-COPYRIGHT" => {
             workspace.join("third_party/tree-sitter-wesl-0.1.0/COPYRIGHT")
         }
@@ -2495,6 +2503,18 @@ mod tests {
     fn local_grammar_distribution_notices_match_retained_sources() {
         let workspace = workspace_root().expect("workspace root");
         for (filename, source, expected_bytes, expected_sha256) in [
+            (
+                "tree-sitter-ron-0.2.0-LICENSE-MIT",
+                "third_party/tree-sitter-ron-0.2.0/LICENSE-MIT",
+                1140,
+                "c6137844f3f63aa4522dfc1cde8dff4f3314ed594ea954a73e3073dcc9d33b11",
+            ),
+            (
+                "tree-sitter-ron-0.2.0-LICENSE-APACHE",
+                "third_party/tree-sitter-ron-0.2.0/LICENSE-APACHE",
+                9723,
+                "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+            ),
             (
                 "tree-sitter-wesl-0.1.0-COPYRIGHT",
                 "third_party/tree-sitter-wesl-0.1.0/COPYRIGHT",

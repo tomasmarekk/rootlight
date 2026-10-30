@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tree-sitter-ron.workspace = true
 tree-sitter-wesl.workspace = true
 tree-sitter-embedded-template.workspace = true
 tree-sitter-nu.workspace = true

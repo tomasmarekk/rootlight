@@ -806,6 +806,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             if matches!(
                 label,
                 "json.property.declaration"
+                    | "ron.property.declaration"
                     | "jsonc.property.declaration"
                     | "csharp.property.declaration"
                     | "groovy.property.declaration"
@@ -1449,6 +1450,16 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "ron" && label == "ron.key.definition" {
+        // Preserve authored key spelling; decoding RON escapes or constructor
+        // interpretation requires a separate source-bound data model.
+        return (fact.kind() == SyntaxFactKind::Occurrence
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && !text.chars().any(char::is_control)
+            && !text.contains('\\'))
+        .then_some(Cow::Borrowed(text));
+    }
     if label.starts_with("bash.direct_wrapper") {
         // A complete command span is evidence, never an identifier projection.
         return None;
@@ -2306,6 +2317,8 @@ pub fn vba_module_name(text: &str) -> Option<&str> {
 /// escapes. Empty, boundary-whitespace, control-bearing and unpaired-UTF-16 keys
 /// retain the canonical quoted identity. TOML uses the same display rule for a
 /// single segment; multi-segment paths stay quoted to preserve boundaries.
+/// RON removes quotes only from nonempty plain readable keys; escapes and
+/// embedded quotes retain exact authored spelling without interpretation.
 /// YAML string identities use the same readable-string rule; other scalar types
 /// keep their type prefix so a boolean or number cannot masquerade as a string.
 /// PowerShell literal keys decode quoting and escapes for readable display only;
@@ -2328,6 +2341,18 @@ pub fn structural_display_name_for_language<'a>(
         crate::powershell_names::display_key(canonical).unwrap_or(Cow::Borrowed(canonical))
     } else if language == "nix" {
         crate::nix_names::display_path(canonical).unwrap_or(Cow::Borrowed(canonical))
+    } else if language == "ron" {
+        canonical
+            .strip_prefix('"')
+            .and_then(|inner| inner.strip_suffix('"'))
+            .filter(|inner| {
+                !inner.is_empty()
+                    && inner.trim() == *inner
+                    && !inner
+                        .chars()
+                        .any(|ch| ch.is_control() || matches!(ch, '"' | '\\'))
+            })
+            .map_or(Cow::Borrowed(canonical), Cow::Borrowed)
     } else if matches!(language, "json" | "jsonc" | "toml")
         || (language == "groovy" && canonical.starts_with('"'))
     {
@@ -3352,6 +3377,47 @@ mod tests {
             assert!(
                 structural_captured_name_for_language("scala", invalid, 64).is_none(),
                 "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ron_display_names_expose_only_plain_readable_quoted_keys() {
+        for (canonical, display) in [
+            (r#""MyDataAsset""#, "MyDataAsset"),
+            (r#""two words""#, "two words"),
+            ("\"λ😀\"", "λ😀"),
+        ] {
+            assert_eq!(
+                structural_display_name_for_language("ron", canonical),
+                display
+            );
+            assert_eq!(
+                structural_display_name_for_language("rust", canonical),
+                canonical
+            );
+            assert_eq!(canonical.as_bytes().first(), Some(&b'"'));
+        }
+        for canonical in [
+            "plain",
+            "'single'",
+            r#""""#,
+            r#"" leading""#,
+            r#""trailing ""#,
+            r#""escaped\nkey""#,
+            r#""escaped\"quote""#,
+            r#""embedded"quote""#,
+            "\"line\nkey\"",
+            "\"control\u{0001}key\"",
+            "\"\u{2003}key\"",
+            "\"key\u{2003}\"",
+            "\"open",
+            "closed\"",
+        ] {
+            assert_eq!(
+                structural_display_name_for_language("ron", canonical),
+                canonical,
+                "{canonical:?}"
             );
         }
     }

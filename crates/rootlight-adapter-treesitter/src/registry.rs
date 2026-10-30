@@ -13,6 +13,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// RON written data structure without Rust binding or deserialization evaluation.
+    Ron,
     /// WESL written shader functions and native-proven local parameters.
     Wesl,
     /// ERB host syntax; embedded Ruby and rendering are separately qualified.
@@ -321,8 +323,9 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(106);
+        let mut descriptors = Vec::with_capacity(107);
         for family in [
+            GrammarFamily::Ron,
             GrammarFamily::Wesl,
             GrammarFamily::Erb,
             GrammarFamily::Nushell,
@@ -530,6 +533,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::Ron => tree_sitter_ron::LANGUAGE.into(),
         GrammarFamily::Wesl => tree_sitter_wesl::LANGUAGE.into(),
         GrammarFamily::Erb => tree_sitter_embedded_template::LANGUAGE.into(),
         GrammarFamily::Nushell => tree_sitter_nu::LANGUAGE.into(),
@@ -729,6 +733,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268",
             scanner_sha256: Some(
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
+            ),
+        },
+        GrammarFamily::Ron => GrammarIdentity {
+            language_id: "ron",
+            grammar_version: "0.2.0",
+            source_package_sha256: "ae70c4d5ba6744a31342eeab2e7f9656be75f00638d92bbc3f5d14047a3cfb14",
+            parser_sha256: "7da2fa169ebeb4e5a0be62feda374536e7bbc8ce031db901613e980d409307f7",
+            scanner_sha256: Some(
+                "5863e811087bcc0c3fa9d975642c4871528fa3655a87b361de56b239769a2985",
             ),
         },
         GrammarFamily::Wesl => GrammarIdentity {
@@ -1578,8 +1591,9 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 106);
+        assert_eq!(registry.descriptors().len(), 107);
         for family in [
+            GrammarFamily::Ron,
             GrammarFamily::Wesl,
             GrammarFamily::Erb,
             GrammarFamily::Nushell,
@@ -1942,6 +1956,7 @@ mod tests {
 
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
         for (family, language, package) in [
+            (GrammarFamily::Ron, "ron", "tree-sitter-ron"),
             (GrammarFamily::Wesl, "wesl", "tree-sitter-wesl"),
             (GrammarFamily::Erb, "erb", "tree-sitter-embedded-template"),
             (GrammarFamily::Hcl, "hcl", "tree-sitter-hcl"),
@@ -2121,7 +2136,8 @@ mod tests {
                     ) || family.is_cobol()
                         || matches!(
                             family,
-                            GrammarFamily::Wesl
+                            GrammarFamily::Ron
+                                | GrammarFamily::Wesl
                                 | GrammarFamily::Erb
                                 | GrammarFamily::Cuda
                                 | GrammarFamily::Haxe

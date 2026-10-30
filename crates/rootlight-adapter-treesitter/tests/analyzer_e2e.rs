@@ -136,6 +136,8 @@ mod pug_native;
 mod python_module_updates;
 #[path = "analyzer_e2e/r_native.rs"]
 mod r_native;
+#[path = "analyzer_e2e/ron_native.rs"]
+mod ron_native;
 #[path = "analyzer_e2e/rust_bindings.rs"]
 mod rust_bindings;
 #[path = "analyzer_e2e/rust_inherent_owners.rs"]
