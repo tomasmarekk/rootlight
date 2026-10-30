@@ -1566,7 +1566,10 @@ impl QueryPack {
         );
         let mut hlsl_captures = hlsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut wgsl_captures = wgsl::CaptureCache::new(limits.captures.min(limits.body_nodes));
-        let mut xml_captures = xml::CaptureCache::new(limits.captures.min(limits.body_nodes));
+        let mut xml_captures = xml::CaptureCache::new(
+            input.tree.root_node(),
+            limits.captures.min(limits.body_nodes),
+        );
         let mut cmake_captures = cmake::CaptureCache::new(limits.captures.min(limits.body_nodes));
         let mut coq_captures = coq::CaptureCache::new(
             input.tree.root_node(),

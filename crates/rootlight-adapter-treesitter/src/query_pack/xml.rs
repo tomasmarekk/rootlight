@@ -7,7 +7,7 @@ use rootlight_adapter_sdk::{AdapterError, SinkError, structural_captured_name_fo
 use rootlight_cancel::Cancellation;
 use tree_sitter::Node;
 
-use super::{QueryCandidate, StructuralRole, native_depth, query_failure};
+use super::{QueryCandidate, StructuralRole, query_failure};
 use crate::GrammarFamily;
 
 #[derive(Clone)]
@@ -21,20 +21,23 @@ struct OwnerProof {
 struct Entry {
     proof: Option<Option<OwnerProof>>,
     chain: Option<bool>,
+    depth: Option<usize>,
 }
 
-/// Memoizes physical owner proofs within the existing capture/body work ceiling.
-pub(super) struct CaptureCache {
+/// Memoizes physical owner proofs and depths within the capture/body work ceiling.
+pub(super) struct CaptureCache<'tree> {
+    root: Node<'tree>,
     entries: HashMap<usize, Entry>,
     remaining_work: usize,
     maximum_entries: usize,
     exhausted: bool,
 }
 
-impl CaptureCache {
+impl<'tree> CaptureCache<'tree> {
     /// Creates a bounded request-local cache without source-sized preallocation.
-    pub(super) fn new(maximum_entries: usize) -> Self {
+    pub(super) fn new(root: Node<'tree>, maximum_entries: usize) -> Self {
         Self {
+            root,
             entries: HashMap::new(),
             remaining_work: maximum_entries,
             maximum_entries,
@@ -70,6 +73,51 @@ impl CaptureCache {
             .map_err(|_| SinkError::AllocationFailed)?;
         self.entries.insert(node.id(), Entry::default());
         Ok(true)
+    }
+
+    fn depth(
+        &mut self,
+        node: Node<'tree>,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<Option<usize>, AdapterError> {
+        cancellation.check()?;
+        if source.get(node.byte_range()).is_none() || source.get(self.root.byte_range()).is_none() {
+            return Err(query_failure("query-xml-source-range"));
+        }
+        if self.exhausted {
+            return Ok(None);
+        }
+        if let Some(depth) = self.entries.get(&node.id()).and_then(|entry| entry.depth) {
+            return Ok(Some(depth));
+        }
+        let mut current = self.root;
+        let mut depth = 0usize;
+        // Native parent() restarts at the root. Descend once and retain depths
+        // for the repeated declaration, definition and header captures.
+        loop {
+            if !self.visit(cancellation)? || !self.entry(current)? {
+                return Ok(None);
+            }
+            if source.get(current.byte_range()).is_none() {
+                return Err(query_failure("query-xml-source-range"));
+            }
+            let entry = self
+                .entries
+                .get_mut(&current.id())
+                .ok_or_else(|| query_failure("query-xml-depth-entry"))?;
+            entry.depth = Some(depth);
+            if current == node {
+                return Ok(Some(depth));
+            }
+            current = current
+                .child_with_descendant(node)
+                .filter(|child| *child != current)
+                .ok_or_else(|| query_failure("query-xml-depth-node"))?;
+            depth = depth
+                .checked_add(1)
+                .ok_or_else(|| query_failure("query-xml-depth"))?;
+        }
     }
 
     fn proof(
@@ -157,7 +205,7 @@ fn direct<'tree>(
     node: Node<'tree>,
     kind: &str,
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'_>,
 ) -> Result<Option<Node<'tree>>, AdapterError> {
     let mut result = None;
     let mut cursor = node.walk();
@@ -176,7 +224,7 @@ fn owner_proof(
     node: Node<'_>,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'_>,
 ) -> Result<Option<OwnerProof>, AdapterError> {
     if node.is_missing() || source.get(node.byte_range()).is_none() {
         return Ok(None);
@@ -278,7 +326,7 @@ fn reference_syntax(
     family: GrammarFamily,
     node: Node<'_>,
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'_>,
 ) -> Result<Option<&'static str>, AdapterError> {
     let xml = family == GrammarFamily::Xml;
     let Some(parent) = node.parent() else {
@@ -333,13 +381,13 @@ fn reference_syntax(
 ///
 /// Returns no candidate for unproved owners or unsupported roles. Cancellation,
 /// invalid source ranges and allocation failures propagate as adapter errors.
-pub(super) fn candidate(
+pub(super) fn candidate<'tree>(
     family: GrammarFamily,
-    node: Node<'_>,
+    node: Node<'tree>,
     role: StructuralRole,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'tree>,
 ) -> Result<Option<QueryCandidate>, AdapterError> {
     cancellation.check()?;
     if !matches!(family, GrammarFamily::Xml | GrammarFamily::Dtd) {
@@ -425,13 +473,16 @@ pub(super) fn candidate(
     } else {
         return Ok(None);
     };
+    let Some(native_depth) = cache.depth(node, source, cancellation)? else {
+        return Ok(None);
+    };
     Ok(Some(QueryCandidate {
         start: range.start,
         end: range.end,
         role,
         syntax,
         required: role.belongs_to_identity_closure(),
-        native_depth: native_depth(node, cancellation)?,
+        native_depth,
     }))
 }
 
@@ -575,6 +626,154 @@ mod tests {
     }
 
     #[test]
+    fn cached_depth_matches_native_parents_and_cursor_for_xml_and_dtd() {
+        let nested = format!("{}text{}", "<item>".repeat(16), "</item>".repeat(16));
+        let mut parser = Parser::new();
+        let cancellation = Cancellation::new();
+        let (mut saw_recovery, mut saw_anonymous, mut maximum_depth) = (false, false, 0);
+        for (family, source) in [
+            (GrammarFamily::Xml, ""),
+            (
+                GrammarFamily::Xml,
+                "<?xml version='1.0'?><root><item value='plain'/>text</root>",
+            ),
+            (GrammarFamily::Xml, "<root><item value="),
+            (GrammarFamily::Xml, nested.as_str()),
+            (
+                GrammarFamily::Dtd,
+                "<!ELEMENT root (item*)>\n<!ATTLIST root id ID #IMPLIED>\n<!ENTITY name 'text'>",
+            ),
+            (GrammarFamily::Dtd, "<!ELEMENT root (item|)>"),
+        ] {
+            parser
+                .set_language(&crate::registry::language_for(family))
+                .unwrap();
+            let tree = parser.parse(source, None).unwrap();
+            let mut cache = CaptureCache::new(tree.root_node(), 65_536);
+            let mut cursor = tree.walk();
+            let mut expected_depth = 0usize;
+            loop {
+                let node = cursor.node();
+                saw_recovery |= node.is_error() || node.is_missing();
+                saw_anonymous |= !node.is_named();
+                let depth = cache
+                    .depth(node, source.as_bytes(), &cancellation)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    depth,
+                    expected_depth,
+                    "{} {:?}",
+                    node.kind(),
+                    node.byte_range()
+                );
+                assert_eq!(
+                    depth,
+                    super::super::native_depth(node, &cancellation).unwrap()
+                );
+                maximum_depth = maximum_depth.max(depth);
+                let remaining = cache.remaining_work;
+                let entries = cache.entries.len();
+                assert_eq!(
+                    cache.depth(node, source.as_bytes(), &cancellation).unwrap(),
+                    Some(depth)
+                );
+                assert_eq!(cache.remaining_work, remaining);
+                assert_eq!(cache.entries.len(), entries);
+                if cursor.goto_first_child() {
+                    expected_depth += 1;
+                    continue;
+                }
+                while !cursor.goto_next_sibling() {
+                    if !cursor.goto_parent() {
+                        break;
+                    }
+                    expected_depth -= 1;
+                }
+                if cursor.node() == tree.root_node() {
+                    break;
+                }
+            }
+            assert!(!cache.exhausted());
+        }
+        assert!(saw_recovery);
+        assert!(saw_anonymous);
+        assert!(maximum_depth >= 16);
+    }
+
+    #[test]
+    fn depth_cache_rejects_foreign_ranges_and_observes_cached_cancellation() {
+        let source = b"<root><item/></root>";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&crate::registry::language_for(GrammarFamily::Xml))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let other = parser.parse(source, None).unwrap();
+        let node = tree.root_node().child_by_field_name("root").unwrap();
+        let mut cache = CaptureCache::new(tree.root_node(), 4096);
+        let cancellation = Cancellation::new();
+        assert_eq!(cache.depth(node, source, &cancellation).unwrap(), Some(1));
+        assert!(matches!(
+            cache.depth(node, &source[..source.len() - 1], &cancellation),
+            Err(AdapterError::ProviderFailed { code })
+                if code.as_str() == "query-xml-source-range"
+        ));
+        assert!(matches!(
+            cache.depth(other.root_node(), source, &cancellation),
+            Err(AdapterError::ProviderFailed { code })
+                if code.as_str() == "query-xml-depth-node"
+        ));
+        cancellation.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            cache.depth(node, source, &cancellation),
+            Err(AdapterError::Cancelled {
+                reason: CancellationReason::ClientRequest
+            })
+        ));
+    }
+
+    #[test]
+    fn depth_work_exhaustion_cannot_publish_a_cached_partial_identity() {
+        let source = b"<root><item/></root>";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&crate::registry::language_for(GrammarFamily::Xml))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let node = root.child_by_field_name("root").unwrap();
+        let cancellation = Cancellation::new();
+        for maximum in [0, 1] {
+            let mut cache = CaptureCache::new(root, maximum);
+            assert_eq!(cache.depth(node, source, &cancellation).unwrap(), None);
+            assert!(cache.exhausted());
+            assert!(cache.entries.len() <= maximum);
+            assert_eq!(cache.depth(root, source, &cancellation).unwrap(), None);
+            assert!(
+                candidate(
+                    GrammarFamily::Xml,
+                    root,
+                    StructuralRole::Module,
+                    source,
+                    &cancellation,
+                    &mut cache,
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        let registry = QueryPackRegistry::audited().unwrap();
+        let error = registry
+            .get(GrammarFamily::Xml)
+            .unwrap()
+            .extract_identity(GrammarFamily::Xml, &tree, source, 1, &cancellation)
+            .unwrap_err();
+        assert!(matches!(error, AdapterError::ProviderFailed { code }
+            if code.as_str() == "query-identity-xml-captures-limit"));
+    }
+
+    #[test]
     fn xml_owner_proof_propagates_cancellation_and_existing_work_bound() {
         let source = "<root><item value=\"plain\"/><item value='other'>text</item></root>";
         let mut parser = Parser::new();
@@ -583,7 +782,7 @@ mod tests {
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
         let node = tree.root_node().child_by_field_name("root").unwrap();
-        let mut bounded = CaptureCache::new(1);
+        let mut bounded = CaptureCache::new(tree.root_node(), 1);
         assert!(
             bounded
                 .proof(node, source.as_bytes(), &Cancellation::new())
@@ -600,7 +799,7 @@ mod tests {
                 StructuralRole::Declaration,
                 source.as_bytes(),
                 &cancelled,
-                &mut CaptureCache::new(4096)
+                &mut CaptureCache::new(tree.root_node(), 4096)
             ),
             Err(AdapterError::Cancelled {
                 reason: CancellationReason::ClientRequest
