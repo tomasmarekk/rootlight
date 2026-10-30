@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.85";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.86";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3288,6 +3288,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "wesl",
+        suffixes: &[".wesl"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "wgsl",
         suffixes: &[".wgsl"],
         aliases: &[],
@@ -4247,6 +4255,7 @@ mod tests {
             "misleading.rake",
             "misleading.ru",
             "misleading.builder",
+            "misleading.wesl",
         ] {
             write_fixture(&temporary, path, pdf);
         }
@@ -4269,6 +4278,7 @@ mod tests {
             "misleading.rake",
             "misleading.ru",
             "misleading.builder",
+            "misleading.wesl",
             "marked.tt",
             "archive.txt",
         ] {
@@ -9388,6 +9398,101 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn wesl_admission_keeps_its_exact_suffix_and_distinct_identity() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "wesl")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".wesl"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.detectors, ["extension"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        for path in ["shader.wesl", "SHADER.WESL", "shader.wgsl.wesl"] {
+            assert_eq!(extension_language(path), Some("wesl"));
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"import package::math::value;\nfn entry(value: f32)->f32 { return value; }\n",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "wesl".to_owned(),
+                    evidence: LanguageEvidence::Extension
+                }]
+            );
+        }
+        assert_eq!(canonical_language("wesl"), Some("wesl"));
+        assert_eq!(canonical_language("wgsl"), Some("wgsl"));
+        for path in [
+            "shader.wesl.bak",
+            "shader.weslx",
+            "shader.wesl/source",
+            "shader.wesl.tt",
+        ] {
+            assert_eq!(extension_language(path), None);
+        }
+        assert_eq!(extension_language("shader.wesl.wgsl"), Some("wgsl"));
+        assert_eq!(extension_language("shader.wesl.json"), Some("json"));
+    }
+
+    #[test]
+    fn configured_wesl_routes_keep_binary_exclusion_and_override_priority() {
+        let temporary = local_tempdir();
+        let raw = b"fn entry(value: f32)->f32 { return value; }\n";
+        write_fixture(&temporary, "configured.wesl", raw);
+        write_fixture(&temporary, "explicit.shader", raw);
+        write_fixture(&temporary, "binary.wesl", b"%PDF-1.7\nopaque\n");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer { source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nshader='wesl'\n[extensions.source-languages.data.paths]\n'configured.wesl'='wgsl'\n'binary.wesl'='wesl'\n" }]).unwrap();
+        let root = fixture_root(&temporary, b"configured-wesl");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 2);
+        let configured = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "configured.wesl")
+            .unwrap();
+        assert!(
+            configured
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "wesl"
+                    && signal.evidence == LanguageEvidence::Extension)
+        );
+        assert!(
+            configured
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "wgsl"
+                    && signal.evidence == LanguageEvidence::Configuration)
+        );
+        let explicit = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "explicit.shader")
+            .unwrap();
+        assert!(
+            explicit
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "wesl"
+                    && signal.evidence == LanguageEvidence::Configuration)
+        );
+        assert_eq!(explicit.content_hash, content_hash(raw));
+        assert!(manifest.exclusions.iter().any(|entry| entry.path == "binary.wesl" && entry.reason == ExclusionReason::Binary));
+    }
+
+    #[test]
     fn wgsl_admission_uses_only_its_exact_installed_suffix_and_canonical_name() {
         let capability = language_capabilities()
             .iter()
@@ -9442,6 +9547,7 @@ max_source_file_bytes = 2097152
                 &[".hlsl", ".hlsli", ".fxh"][..],
                 &["treesitter"][..],
             ),
+            ("wesl", &[".wesl"][..], &["treesitter"][..]),
         ] {
             let capability = language_capabilities()
                 .iter()

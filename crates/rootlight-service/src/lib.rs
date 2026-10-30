@@ -26979,6 +26979,7 @@ mod tests {
     mod thinkscript_written_inputs;
     mod tsx_source;
     mod typescript_calls;
+    mod wesl_discovery;
     mod wolfram_native_source_preservation;
     mod wolfram_source_preservation;
     mod yaml_source_names;
@@ -40178,7 +40179,7 @@ mod tests {
     fn discovery_classification_revision_invalidates_provider_identity() {
         let parser = first_slice_parser_provider_hash().unwrap();
         for previous_discovery in [
-            b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79", b"1.83", b"1.84",
+            b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79", b"1.83", b"1.84", b"1.85",
         ] {
             let previous = hash_static_components(&[
                 PROVIDER_SET_SEED,
