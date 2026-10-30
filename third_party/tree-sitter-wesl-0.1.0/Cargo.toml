@@ -1,0 +1,21 @@
+# Local unpublished static binding for retained WESL native sources.
+# Upstream manifests and lifecycle hooks remain inert under upstream/.
+[package]
+name = "tree-sitter-wesl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license-file = "COPYRIGHT"
+repository = "https://github.com/webgpu-tools/tree-sitter-wesl"
+description = "Pinned WESL grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"

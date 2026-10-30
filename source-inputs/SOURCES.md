@@ -351,3 +351,17 @@ Upstream ignore/filter metadata and the prebuilt Node module remain inert
 provenance data; production builds compile declared reviewed C sources only.
 The active corrected grammar, generated tables and bounded stateless scanner
 are separate derivatives whose complete file inventory is in `adapters/grammars.lock`.
+
+`third_party/tree-sitter-wesl-0.1.0/` retains the separately authenticated WESL
+Git archive and all 59 original files, with byte hashes, original Git modes and
+reversible inert metadata paths in `SOURCE-INVENTORY.json`. The local static
+binding compiles the unchanged ABI15 parser and external scanner with retained
+`tree-sitter-language` and `cc` inputs; upstream package lifecycle hooks and
+development dependencies do not participate in this build.
+
+The complete `COPYRIGHT`, MIT, Apache and W3C notices are retained. The explicit
+W3C 2023 notices in `grammar.js` and `src/scanner.c` remain unchanged; the
+upstream manifest's MIT shorthand does not replace these per-file statements.
+This intake is exercised only by the isolated native grammar test workspace.
+Production grammar registration, language indexing and distribution notice
+integration remain separate work and are not qualified by a native load test.

@@ -1,0 +1,536 @@
+{
+  "schema": "rootlight.wesl-source-inventory/1",
+  "upstream_files": [
+    {
+      "path": ".editorconfig",
+      "retained_path": "upstream/files/.editorconfig",
+      "bytes": 453,
+      "sha256": "1be48c047c7681d02d72da83c800bf343f05a2dbec6206a2d97317d676ade233",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "f363cc55691c1ac09a10268c27e2a5a0ed3b4496"
+    },
+    {
+      "path": ".gitattributes",
+      "retained_path": "upstream/files/.gitattributes.upstream",
+      "bytes": 349,
+      "sha256": "4ff1e6a30552bcf1bce345aebcda3e7e26e47c5296fc1a77af27c936f7bed352",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "604293719dab72b6f89c5e2088aea2282e715eb1"
+    },
+    {
+      "path": ".gitignore",
+      "retained_path": "upstream/files/.gitignore.upstream",
+      "bytes": 431,
+      "sha256": "81abeda97a588d3a9a8f87a6cdf01e91fa5fd746d5327763ea37ff19b439a4ab",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "87a0c80c26f0380eac59b52b9414f1adb61f4909"
+    },
+    {
+      "path": "CMakeLists.txt",
+      "retained_path": "upstream/files/CMakeLists.txt",
+      "bytes": 3495,
+      "sha256": "f2ded2d81b14360b7c04f0890c73d9e73af0914b2626baeed26d490815c9b09b",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "040737c6e2c5d2a7e03486d111e9cf6e3bc4aa32"
+    },
+    {
+      "path": "COPYRIGHT",
+      "retained_path": "upstream/files/COPYRIGHT",
+      "bytes": 599,
+      "sha256": "ccef2f8fb35b3f36bc94b4084a188f7a20243c6eb6f94f48be9767115cbb763d",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "806620bce9847e5fd822a178f86c127851ba6e50"
+    },
+    {
+      "path": "Cargo.toml",
+      "retained_path": "upstream/files/Cargo.toml",
+      "bytes": 612,
+      "sha256": "03aa9d3fdc635f55e18e21102644691bbfd5b551deb7b24140a6f36c6d0b7cf4",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "44ed1093c0bec03c2f5ece1e4120653b17eeb536"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "retained_path": "upstream/files/LICENSE-APACHE",
+      "bytes": 10173,
+      "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "d9a10c0d8e868ebf8da0b3dc95bb0be634c34bfe"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "retained_path": "upstream/files/LICENSE-MIT",
+      "bytes": 1036,
+      "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "9cf106272ac3b56b0c4c80218e8fc10a664ca5f4"
+    },
+    {
+      "path": "LICENSE-W3C.md",
+      "retained_path": "upstream/files/LICENSE-W3C.md",
+      "bytes": 2175,
+      "sha256": "d2d7a9947e1ffe79ed0c71ad7ad1198ffb754b259f5792ad90c04ce2625fb995",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "53a204d1714775d1ed9a1280e787a951f490db80"
+    },
+    {
+      "path": "Makefile",
+      "retained_path": "upstream/files/Makefile",
+      "bytes": 4201,
+      "sha256": "67845512551c339eb7edda6a69cb0dfd97d344e6548a151a33c5e35369fba0af",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "cd62001bc3442a03a77734e14a813a8a9fd999c0"
+    },
+    {
+      "path": "Package.swift",
+      "retained_path": "upstream/files/Package.swift",
+      "bytes": 1200,
+      "sha256": "7c04c2aa4eb7e1094ff5e719a69c281f34f311fe8125bb5e041272655281901d",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "47ea15ad2b3065ccd3aaa4a28a5e8045b0db3388"
+    },
+    {
+      "path": "README.md",
+      "retained_path": "upstream/files/README.md",
+      "bytes": 2062,
+      "sha256": "6027e99316f885945c9da3dabd7529831d2a74ee9b579792178763f65be331d8",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "9c1bddd159844709c0439a6fc2ce17aa4f24c8c6"
+    },
+    {
+      "path": "binding.gyp",
+      "retained_path": "upstream/files/binding.gyp",
+      "bytes": 763,
+      "sha256": "6522760a0d718cfbb6bc7e652ffa698e0c46bce861eebd005cec5568f79d9533",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "082a8834647db519c93cd5c2bc9697871fc22e17"
+    },
+    {
+      "path": "bindings/c/tree-sitter-wesl.pc.in",
+      "retained_path": "upstream/files/bindings/c/tree-sitter-wesl.pc.in",
+      "bytes": 293,
+      "sha256": "94d9869afa83d0175b2faa34cfd93e126c12c29f92e9ba8de9fffde4ade51046",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "9b4ae308c7fefdee66d79dffd0355f182fe57757"
+    },
+    {
+      "path": "bindings/c/tree_sitter/tree-sitter-wesl.h",
+      "retained_path": "upstream/files/bindings/c/tree_sitter/tree-sitter-wesl.h",
+      "bytes": 238,
+      "sha256": "c60afce84a270a51cbac9fc4b26b41793f5794c256b36a48d9e04c4f56d53c5d",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "845dbe18c559b310df5dcbfb143c353502f2dffe"
+    },
+    {
+      "path": "bindings/go/binding.go",
+      "retained_path": "upstream/files/bindings/go/binding.go",
+      "bytes": 337,
+      "sha256": "3a53690d6534d99cebd282a01ced757b975776fbea36a321c2c1fc1c81332ae8",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "c522494ca277e61734aa3f3577500bc1e5d5edb9"
+    },
+    {
+      "path": "bindings/go/binding_test.go",
+      "retained_path": "upstream/files/bindings/go/binding_test.go",
+      "bytes": 344,
+      "sha256": "3e0711a98cc7b581861214fd2079fad91a37696ac24f6f5311fab10021efd088",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "20a000db9bd7a10b26f27eade66e225dd8c7083c"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "retained_path": "upstream/files/bindings/node/binding.cc",
+      "bytes": 523,
+      "sha256": "731031adb97578f4fce1903806e77e1e732bb3376b574ac8e466e7bb5d7bd82b",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "dc082863bc5a2314619a369785155a37351290dc"
+    },
+    {
+      "path": "bindings/node/binding_test.js",
+      "retained_path": "upstream/files/bindings/node/binding_test.js",
+      "bytes": 310,
+      "sha256": "d21db69cd974fafa44724a73dd9788d3b393a4d6af68f65a58486548e5b00f58",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "7a91a84d2b8a742bb07036ae50400ed4161b1118"
+    },
+    {
+      "path": "bindings/node/index.d.ts",
+      "retained_path": "upstream/files/bindings/node/index.d.ts",
+      "bytes": 1327,
+      "sha256": "55a3b940af86e7ff2f545534cac34169888bc55f4d7497c7f803026b55ade0ed",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "bd02ec71fb2e37fa58a29d8c2722dc95c7245262"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "retained_path": "upstream/files/bindings/node/index.js",
+      "bytes": 1167,
+      "sha256": "b030626a2a0a6f02cad0af977c581f553e7ba612356ea4f27d81b5925aaf324a",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "ef6c2efc2d263bfdd7f2d8a92383f923a19318e2"
+    },
+    {
+      "path": "bindings/python/tests/test_binding.py",
+      "retained_path": "upstream/files/bindings/python/tests/test_binding.py",
+      "bytes": 314,
+      "sha256": "d94d560fe7583b4474892dae464c191d7d49f8a59474a0cb5fb8765201c7dea1",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "993484a4dd71ea1afe85dd4bb0b02e2674f33ba7"
+    },
+    {
+      "path": "bindings/python/tree_sitter_wesl/__init__.py",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_wesl/__init__.py",
+      "bytes": 1257,
+      "sha256": "fe89b70d51b599bfeae3d561e56a577e2dd74bcc444129d390a5e8c42aac03db",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "149b68feb7706e66b892b740eb3b7483621ced11"
+    },
+    {
+      "path": "bindings/python/tree_sitter_wesl/__init__.pyi",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_wesl/__init__.pyi",
+      "bytes": 504,
+      "sha256": "fceb2c08289d035296c8ce9df63df8df2e40cd2bcf72d7d9f601394ce7ff577c",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "5c88ff6c1a99b10dfb3fc3220d8b7126f15dba1c"
+    },
+    {
+      "path": "bindings/python/tree_sitter_wesl/binding.c",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_wesl/binding.c",
+      "bytes": 832,
+      "sha256": "b680e2e6a3e7563cae67cf20fbf43f0f77374fc7c9864fc6870846bb72653dc2",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "24afcf518a6d21a6874f7bffabfe5701232e1f67"
+    },
+    {
+      "path": "bindings/python/tree_sitter_wesl/py.typed",
+      "retained_path": "upstream/files/bindings/python/tree_sitter_wesl/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "retained_path": "upstream/files/bindings/rust/build.rs",
+      "bytes": 1855,
+      "sha256": "9d2e2b6df3a7d4381e0f8183d27c5fb511251d36126c50f937935e8ca1f9a107",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "bf21dd1b1bf22434bf2d9cd073a40203cb1a5dcc"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "retained_path": "upstream/files/bindings/rust/lib.rs",
+      "bytes": 2058,
+      "sha256": "0b3bb88f5b4394b76251670c3c1221e050717e219326a815ec8a111a14b38925",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "a230db9269e64b31c122bcdd5705b7b501bbded9"
+    },
+    {
+      "path": "bindings/swift/TreeSitterWesl/wesl.h",
+      "retained_path": "upstream/files/bindings/swift/TreeSitterWesl/wesl.h",
+      "bytes": 238,
+      "sha256": "c60afce84a270a51cbac9fc4b26b41793f5794c256b36a48d9e04c4f56d53c5d",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "845dbe18c559b310df5dcbfb143c353502f2dffe"
+    },
+    {
+      "path": "bindings/swift/TreeSitterWeslTests/TreeSitterWeslTests.swift",
+      "retained_path": "upstream/files/bindings/swift/TreeSitterWeslTests/TreeSitterWeslTests.swift",
+      "bytes": 359,
+      "sha256": "84431272110e17491f8444ca22d6cdf53202b79e071acf58444f4cfa8d7da782",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "679ae63b5b7977a197986edb589dd5b5515370e3"
+    },
+    {
+      "path": "compile_flags.txt",
+      "retained_path": "upstream/files/compile_flags.txt",
+      "bytes": 94,
+      "sha256": "233501c36ed37915255745861f75e2ac61d106ceb9fb2f7938b62ec35ef2060e",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "74cc9329e5f0a59aab02405fe0d74bbb3602d576"
+    },
+    {
+      "path": "go.mod",
+      "retained_path": "upstream/files/go.mod",
+      "bytes": 101,
+      "sha256": "dc5429138bcc18e861146d94b0577dc4dd2b4dcb20bc0dc2909dadf457cf5a90",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "7e015c9a0666d60e6908538cb8d5218ce84e6034"
+    },
+    {
+      "path": "grammar.js",
+      "retained_path": "upstream/files/grammar.js",
+      "bytes": 16167,
+      "sha256": "5ff64a4b5ef5542e61a0624fb2e764bc7cd80e89fc7df3c5848b2f1c37e68623",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "25880187a0109f03a91794ab125ed20bf292bb06"
+    },
+    {
+      "path": "package-lock.json",
+      "retained_path": "upstream/files/package-lock.json",
+      "bytes": 11629,
+      "sha256": "d6a5164f72032a76b57316caea481c9dbdcc3112adde729031f709cf312b7fb4",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "4f1c595efb8da99e3bb44af58367fc61e443f343"
+    },
+    {
+      "path": "package.json",
+      "retained_path": "upstream/files/package.json",
+      "bytes": 1076,
+      "sha256": "4e56e06bbed898a5bcefa887d6f1d6506c2e13f4c87879ecacb7e7b612af0215",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "857c19319bcc04d0a76e150f4fdeb21992482d16"
+    },
+    {
+      "path": "pyproject.toml",
+      "retained_path": "upstream/files/pyproject.toml",
+      "bytes": 791,
+      "sha256": "ffc427acaa9e8d42ccb6ceef1858ba2918e8858d1d5ce98970e0b270738a6bc8",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "e27f5121644b59843bdb1a2dd4fea8b437f390a8"
+    },
+    {
+      "path": "queries/brackets.scm",
+      "retained_path": "upstream/files/queries/brackets.scm",
+      "bytes": 94,
+      "sha256": "7a5d41f54e587031d0718cb758200a580e18d84d0652284fd224d98eef3f926f",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "b4895c512b9b87a89805e158aebcb94cde3c8224"
+    },
+    {
+      "path": "queries/highlights.scm",
+      "retained_path": "upstream/files/queries/highlights.scm",
+      "bytes": 4297,
+      "sha256": "73b6eef0ba0987f5c61b9e4f51a893e5c39151dc409c4e3adb4821478d75f6b1",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "c5570903bf5b8704eca9bcf0d4384c990ef0c846"
+    },
+    {
+      "path": "queries/indents.scm",
+      "retained_path": "upstream/files/queries/indents.scm",
+      "bytes": 211,
+      "sha256": "ee75c0480c07b785b6775bf38a934e6fcac563b734ff9baa7b639b400fd5c21a",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "c0a51222fe45f1bfb6cb97ed7291e99dab8c11d7"
+    },
+    {
+      "path": "queries/injections.scm",
+      "retained_path": "upstream/files/queries/injections.scm",
+      "bytes": 92,
+      "sha256": "7a2a5f9b28dbde596ea955639ab0905705940cf9c2dcc370b54e4f491172b97a",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "e4509a5fd317b4ef2f2c7d24935473a31fc5f1d3"
+    },
+    {
+      "path": "queries/locals.scm",
+      "retained_path": "upstream/files/queries/locals.scm",
+      "bytes": 200,
+      "sha256": "945f234cc377c3ae71d1b343a9e93f4888020c3bba7c00541df7bba7565f0d1c",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "9135505795ec58742221564af02e1a0cfc815832"
+    },
+    {
+      "path": "queries/nvim/brackets.scm",
+      "retained_path": "upstream/files/queries/nvim/brackets.scm",
+      "bytes": 94,
+      "sha256": "7a5d41f54e587031d0718cb758200a580e18d84d0652284fd224d98eef3f926f",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "b4895c512b9b87a89805e158aebcb94cde3c8224"
+    },
+    {
+      "path": "queries/nvim/highlights.scm",
+      "retained_path": "upstream/files/queries/nvim/highlights.scm",
+      "bytes": 4050,
+      "sha256": "4a2d618ff44a209433f905fdb80abd7548f5326a5ab322f4836399db29f542c6",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "de3207331b9e9258dddb964c73f883818b4f703f"
+    },
+    {
+      "path": "queries/nvim/indents.scm",
+      "retained_path": "upstream/files/queries/nvim/indents.scm",
+      "bytes": 211,
+      "sha256": "ee75c0480c07b785b6775bf38a934e6fcac563b734ff9baa7b639b400fd5c21a",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "c0a51222fe45f1bfb6cb97ed7291e99dab8c11d7"
+    },
+    {
+      "path": "queries/nvim/injections.scm",
+      "retained_path": "upstream/files/queries/nvim/injections.scm",
+      "bytes": 92,
+      "sha256": "7a2a5f9b28dbde596ea955639ab0905705940cf9c2dcc370b54e4f491172b97a",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "e4509a5fd317b4ef2f2c7d24935473a31fc5f1d3"
+    },
+    {
+      "path": "queries/nvim/locals.scm",
+      "retained_path": "upstream/files/queries/nvim/locals.scm",
+      "bytes": 200,
+      "sha256": "945f234cc377c3ae71d1b343a9e93f4888020c3bba7c00541df7bba7565f0d1c",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "9135505795ec58742221564af02e1a0cfc815832"
+    },
+    {
+      "path": "queries/nvim/outline.scm",
+      "retained_path": "upstream/files/queries/nvim/outline.scm",
+      "bytes": 147,
+      "sha256": "2077ccec076ebcea6386eb803c21637681ecd6214809aad9d1e52bf5ddb112fd",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "20f44de805a19cd831bd664e0293c1b357b77803"
+    },
+    {
+      "path": "queries/nvim/textobjects.scm",
+      "retained_path": "upstream/files/queries/nvim/textobjects.scm",
+      "bytes": 496,
+      "sha256": "8539f1fe4e970976e5d1cbbadad0dc60544f10cdbd4a14f79ac2f5a662f16267",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "c5b3f93e61e454875b369cee5f5597a726abd076"
+    },
+    {
+      "path": "queries/outline.scm",
+      "retained_path": "upstream/files/queries/outline.scm",
+      "bytes": 147,
+      "sha256": "2077ccec076ebcea6386eb803c21637681ecd6214809aad9d1e52bf5ddb112fd",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "20f44de805a19cd831bd664e0293c1b357b77803"
+    },
+    {
+      "path": "queries/textobjects.scm",
+      "retained_path": "upstream/files/queries/textobjects.scm",
+      "bytes": 496,
+      "sha256": "8539f1fe4e970976e5d1cbbadad0dc60544f10cdbd4a14f79ac2f5a662f16267",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "c5b3f93e61e454875b369cee5f5597a726abd076"
+    },
+    {
+      "path": "setup.py",
+      "retained_path": "upstream/files/setup.py",
+      "bytes": 2391,
+      "sha256": "11cf1557b495bde08b481b60f35c75ff7463be74c873dbb072058bfc0013a366",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "5b2d64cebdbb6a7bc3218b2d0b04e8119903c226"
+    },
+    {
+      "path": "src/grammar.json",
+      "retained_path": "upstream/files/src/grammar.json",
+      "bytes": 66041,
+      "sha256": "e78a931ae991203264e6c72578f11558772d327483a8c678f08a389c1f7ebf9f",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "d535660835da09b27879fd8dc24e5bbaf6b3380f"
+    },
+    {
+      "path": "src/node-types.json",
+      "retained_path": "upstream/files/src/node-types.json",
+      "bytes": 61192,
+      "sha256": "3deb70438ac36a190020b44f3a8264fe952a6cfa189b4c778498eb040228d65b",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "a04b6f389c8b002d9c5085e8150087d28ae02c2f"
+    },
+    {
+      "path": "src/parser.c",
+      "retained_path": "upstream/files/src/parser.c",
+      "bytes": 1048288,
+      "sha256": "2f1d0f81397039930bb33670e3e03318363ff3b7edcf961418cf4fd70b2fb2d0",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "11a24d7981167907fe6b43b81752e49f131fd94d"
+    },
+    {
+      "path": "src/scanner.c",
+      "retained_path": "upstream/files/src/scanner.c",
+      "bytes": 48298,
+      "sha256": "55d4755fb3deff4cc3eaef5ca3330fb6aa42e7c670de1920ba350c0f5166a221",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "14e4bb3eeb796f23a1bd374923ad0196f5a4221d"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "retained_path": "upstream/files/src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "1abdd1201578605b8d05a3001f01ebc0d58826d9"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "retained_path": "upstream/files/src/tree_sitter/array.h",
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "a17a574f04e0c20c38463149640badc5126063f8"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "retained_path": "upstream/files/src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "858107deb9e4a1ffcd2ed5e6ffe98a5fcab3e1f6"
+    },
+    {
+      "path": "tree-sitter.json",
+      "retained_path": "upstream/files/tree-sitter.json",
+      "bytes": 869,
+      "sha256": "0bc41061160c664a49ba469d4e390ddf3f4b3792fe60ce45d055dd036c37f8d4",
+      "archive_mode": 436,
+      "git_mode": "100644",
+      "git_blob": "f9e4d01839302ee4a85558b0fb95dfc4575867d2"
+    }
+  ]
+}

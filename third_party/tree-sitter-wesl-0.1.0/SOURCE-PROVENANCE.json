@@ -1,0 +1,103 @@
+{
+  "schema": "rootlight.wesl-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/webgpu-tools/tree-sitter-wesl",
+    "revision": "b600a65818e4dd7f4d32407d1427643c27f3c389",
+    "git_tree": "3eb430f18e50cf59ae805c2e4f0dbb3f03219fc6",
+    "archive_sha256": "d7ce21f3d2ea70ff6441bbd3a3a800bc957f7dba587d7d850bcb3d9401b7f523",
+    "archive_bytes": 116988,
+    "files": 59,
+    "file_bytes": 1326309,
+    "all_git_blob_ids_and_executable_modes_verified": true,
+    "lifecycle_executed_during_acquisition": false,
+    "local_signature_verification": false
+  },
+  "license_scope": {
+    "default": "COPYRIGHT states MIT OR Apache-2.0 except as otherwise noted",
+    "notices": [
+      "COPYRIGHT",
+      "LICENSE-MIT",
+      "LICENSE-APACHE",
+      "LICENSE-W3C.md"
+    ],
+    "explicit_w3c_2023_headers": [
+      "grammar.js",
+      "src/scanner.c"
+    ],
+    "legal_acceptance_verified": false
+  },
+  "binding": {
+    "local_unpublished": true,
+    "network_or_generator_in_build": false,
+    "build_inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ]
+  },
+  "preferred_source": {
+    "upstream_native_sources_unchanged": true,
+    "archival_upstream_sources_unchanged": true,
+    "generated_by": "tree-sitter v0.25.9",
+    "abi": 15,
+    "external_scanner": true,
+    "local_regeneration_performed": false
+  },
+  "active_inputs": {
+    "COPYRIGHT": {
+      "bytes": 599,
+      "sha256": "ccef2f8fb35b3f36bc94b4084a188f7a20243c6eb6f94f48be9767115cbb763d"
+    },
+    "LICENSE-MIT": {
+      "bytes": 1036,
+      "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+    },
+    "LICENSE-APACHE": {
+      "bytes": 10173,
+      "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+    },
+    "LICENSE-W3C.md": {
+      "bytes": 2175,
+      "sha256": "d2d7a9947e1ffe79ed0c71ad7ad1198ffb754b259f5792ad90c04ce2625fb995"
+    },
+    "grammar.js": {
+      "bytes": 16167,
+      "sha256": "5ff64a4b5ef5542e61a0624fb2e764bc7cd80e89fc7df3c5848b2f1c37e68623"
+    },
+    "tree-sitter.json": {
+      "bytes": 869,
+      "sha256": "0bc41061160c664a49ba469d4e390ddf3f4b3792fe60ce45d055dd036c37f8d4"
+    },
+    "src/parser.c": {
+      "bytes": 1048288,
+      "sha256": "2f1d0f81397039930bb33670e3e03318363ff3b7edcf961418cf4fd70b2fb2d0"
+    },
+    "src/scanner.c": {
+      "bytes": 48298,
+      "sha256": "55d4755fb3deff4cc3eaef5ca3330fb6aa42e7c670de1920ba350c0f5166a221"
+    },
+    "src/grammar.json": {
+      "bytes": 66041,
+      "sha256": "e78a931ae991203264e6c72578f11558772d327483a8c678f08a389c1f7ebf9f"
+    },
+    "src/node-types.json": {
+      "bytes": 61192,
+      "sha256": "3deb70438ac36a190020b44f3a8264fe952a6cfa189b4c778498eb040228d65b"
+    },
+    "src/tree_sitter/parser.h": {
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    "src/tree_sitter/alloc.h": {
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    "src/tree_sitter/array.h": {
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    }
+  },
+  "scope": "Native compile/load experiment only; no production registration or WESL product qualification."
+}

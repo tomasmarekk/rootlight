@@ -402,6 +402,8 @@ third_party/tree-sitter-idris-0.0.1/** -text
 /adapters/licenses/tree-sitter-nu-0.0.1-* -text
 /third_party/tree-sitter-embedded-template-0.25.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /third_party/tree-sitter-embedded-template-0.25.0/upstream/*.tar.gz binary
+/third_party/tree-sitter-wesl-0.1.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/third_party/tree-sitter-wesl-0.1.0/upstream/*.tar.gz binary
 /tests/native-grammars/fixtures/erb/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /crates/rootlight-service/tests/fixtures/ruby_dsl/config.ru -text whitespace=cr-at-eol
 /crates/rootlight-service/tests/fixtures/ruby_dsl/formatted_fragment_cached.xml.builder -text whitespace=cr-at-eol
