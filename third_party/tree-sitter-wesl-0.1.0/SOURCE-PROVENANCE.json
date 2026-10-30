@@ -29,6 +29,7 @@
   "binding": {
     "local_unpublished": true,
     "network_or_generator_in_build": false,
+    "symbol_isolation": "Compiler defines prefix kNumXIDStartRanges and kNumXIDContinueRanges with rootlight_wesl_ so the unchanged WESL scanner can link alongside WGSL.",
     "build_inputs": [
       "src/parser.c",
       "src/scanner.c",
@@ -99,5 +100,5 @@
       "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
     }
   },
-  "scope": "Native compile/load experiment only; no production registration or WESL product qualification."
+  "scope": "Retained static inputs for the distinct WESL adapter; native observations and source-bound adapter behavior are separately qualified. Discovery/service routing, imported targets, corpus coverage and whole-language support remain separate."
 }

@@ -358,10 +358,15 @@ reversible inert metadata paths in `SOURCE-INVENTORY.json`. The local static
 binding compiles the unchanged ABI15 parser and external scanner with retained
 `tree-sitter-language` and `cc` inputs; upstream package lifecycle hooks and
 development dependencies do not participate in this build.
+The wrapper prefixes two external Unicode range-count symbols through compiler
+defines so WESL and WGSL can link together without changing upstream C bytes.
 
 The complete `COPYRIGHT`, MIT, Apache and W3C notices are retained. The explicit
 W3C 2023 notices in `grammar.js` and `src/scanner.c` remain unchanged; the
 upstream manifest's MIT shorthand does not replace these per-file statements.
-This intake is exercised only by the isolated native grammar test workspace.
-Production grammar registration, language indexing and distribution notice
-integration remain separate work and are not qualified by a native load test.
+The isolated native grammar workspace and distinct WESL adapter use these same
+pinned inputs. Adapter declarations and local parameter reads require their own
+source-bound behavioral evidence; a native load test alone does not qualify them.
+Discovery/service routing, import resolution, corpus coverage and whole-language
+support remain separate. The distribution notice bundle preserves all four
+retained notices without replacing their individual scope statements.

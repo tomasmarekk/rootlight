@@ -101,3 +101,23 @@ fn native_wesl_loads_imports_functions_scanner_and_incremental_edits() {
         .expect("recovery parse completes");
     assert!(invalid.root_node().has_error());
 }
+
+#[test]
+#[ignore = "requires the caller-supplied immutable external WESL original"]
+fn original_wesl_witnesses_expose_exact_native_cst() {
+    let path = std::env::var_os("ROOTLIGHT_WESL_EXTERNAL_SOURCE")
+        .expect("explicit external source path is required");
+    let external = std::fs::read(path).expect("external original is readable");
+    for (name, source) in [
+        ("external", external.as_slice()),
+        ("manual_material", include_bytes!("../../../crates/rootlight-adapter-treesitter/tests/fixtures/wesl/manual_material.wesl").as_slice()),
+        ("wireframe2d", include_bytes!("../../../crates/rootlight-adapter-treesitter/tests/fixtures/wesl/wireframe2d.wesl").as_slice()),
+    ] {
+        assert!(source.len() <= 1024 * 1024);
+        let tree = parser().parse(source, None).expect("native parse completes");
+        println!("{name} {}: {}", source.len(), tree.root_node().to_sexp());
+        assert!(!tree.root_node().has_error());
+        assert_eq!(tree.root_node().start_byte(), 0);
+        assert_eq!(tree.root_node().end_byte(), source.len());
+    }
+}

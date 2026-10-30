@@ -135,6 +135,7 @@ mod v;
 pub(super) mod vba;
 mod vba_calls;
 mod vhdl;
+mod wesl;
 mod wgsl;
 mod wolfram;
 mod xml;
@@ -565,6 +566,11 @@ impl QueryPack {
             expected.retain(|name| !matches!(*name, "call" | "documentation"));
         }
 
+        if family == GrammarFamily::Wesl {
+            expected
+                .retain(|name| !matches!(*name, "call" | "documentation" | "import" | "string"));
+            expected.push("expression");
+        }
         if family == GrammarFamily::Wgsl {
             expected.retain(|name| {
                 !matches!(
@@ -3150,6 +3156,12 @@ impl QueryPack {
                     thrift::candidate(capture.node, role, input.source, input.cancellation)
                 } else if input.family == GrammarFamily::Elixir {
                     elixir::candidate(capture.node, role, input.source, input.cancellation)
+                } else if input.family == GrammarFamily::Wesl {
+                    let Some(candidate) = wesl::candidate(capture.node, role, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
                 } else if input.family == GrammarFamily::Wgsl {
                     wgsl::candidate(
                         capture.node,
@@ -4528,6 +4540,7 @@ fn candidate_for_capture(
             GrammarFamily::Glsl => return Err(query_failure("query-glsl-unproven-call")),
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
             GrammarFamily::Wgsl => return Err(query_failure("query-wgsl-unproven-call")),
+            GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
             GrammarFamily::Xml | GrammarFamily::Dtd => {
                 return Err(query_failure("query-xml-unproven-call"));
             }
@@ -5647,7 +5660,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(107);
+        let mut packs = Vec::with_capacity(108);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5731,6 +5744,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Glsl, include_str!("../queries/glsl.scm")),
             (GrammarFamily::Hlsl, include_str!("../queries/hlsl.scm")),
             (GrammarFamily::Wgsl, include_str!("../queries/wgsl.scm")),
+            (GrammarFamily::Wesl, include_str!("../queries/wesl.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
             (GrammarFamily::Dtd, include_str!("../queries/dtd.scm")),
             (GrammarFamily::CMake, include_str!("../queries/cmake.scm")),
@@ -5974,11 +5988,12 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 107);
+        assert_eq!(registry.len(), 108);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
             GrammarFamily::Erb,
+            GrammarFamily::Wesl,
             GrammarFamily::Nushell,
             GrammarFamily::Clojure,
             GrammarFamily::Racket,
@@ -6158,6 +6173,12 @@ mod tests {
                 expected.retain(|name| !matches!(*name, "call" | "documentation"));
             }
 
+            if family == GrammarFamily::Wesl {
+                expected.retain(|name| {
+                    !matches!(*name, "call" | "documentation" | "import" | "string")
+                });
+                expected.push("expression");
+            }
             if family == GrammarFamily::Wgsl {
                 expected.retain(|name| {
                     !matches!(

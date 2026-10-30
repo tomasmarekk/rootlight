@@ -51,6 +51,9 @@ impl TreeSitterProvider {
                 .registry
                 .family_for_language(&language)
                 .ok_or_else(|| provider_failure("markdown-code-language"))?;
+            if family == GrammarFamily::Wesl {
+                continue;
+            }
             let classic = language.as_str() == "visual-basic-classic";
             let mut cursor = block.walk();
             let body = block

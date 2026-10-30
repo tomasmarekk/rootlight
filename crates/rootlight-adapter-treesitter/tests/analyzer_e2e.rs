@@ -164,6 +164,8 @@ mod v_native;
 mod vba_native;
 #[path = "analyzer_e2e/vhdl_native.rs"]
 mod vhdl_native;
+#[path = "analyzer_e2e/wesl_native.rs"]
+mod wesl_native;
 #[path = "analyzer_e2e/wgsl_native.rs"]
 mod wgsl_native;
 #[path = "analyzer_e2e/xml_native.rs"]

@@ -61,7 +61,11 @@ const EXPECTED_TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ];
-const DISTRIBUTION_LICENSES: [&str; 72] = [
+const DISTRIBUTION_LICENSES: [&str; 76] = [
+    "tree-sitter-wesl-0.1.0-COPYRIGHT",
+    "tree-sitter-wesl-0.1.0-LICENSE-MIT",
+    "tree-sitter-wesl-0.1.0-LICENSE-APACHE",
+    "tree-sitter-wesl-0.1.0-LICENSE-W3C.md",
     "tree-sitter-cuda-0.21.2-LICENSE",
     "tree-sitter-cuda-0.21.2-Cpp-generation-LICENSE",
     "tree-sitter-cuda-0.21.2-Cpp-gitlink-LICENSE",
@@ -629,6 +633,18 @@ struct ArchiveBuild<'a> {
 fn distribution_license_path(workspace: &Path, filename: &str) -> PathBuf {
     // Read retained vendor notices directly instead of maintaining a second copy.
     match filename {
+        "tree-sitter-wesl-0.1.0-COPYRIGHT" => {
+            workspace.join("third_party/tree-sitter-wesl-0.1.0/COPYRIGHT")
+        }
+        "tree-sitter-wesl-0.1.0-LICENSE-MIT" => {
+            workspace.join("third_party/tree-sitter-wesl-0.1.0/LICENSE-MIT")
+        }
+        "tree-sitter-wesl-0.1.0-LICENSE-APACHE" => {
+            workspace.join("third_party/tree-sitter-wesl-0.1.0/LICENSE-APACHE")
+        }
+        "tree-sitter-wesl-0.1.0-LICENSE-W3C.md" => {
+            workspace.join("third_party/tree-sitter-wesl-0.1.0/LICENSE-W3C.md")
+        }
         "tree-sitter-dockerfile-0.2.0-LICENSE" => {
             workspace.join("third_party/tree-sitter-dockerfile-0.2.0/LICENSE")
         }
@@ -2479,6 +2495,30 @@ mod tests {
     fn local_grammar_distribution_notices_match_retained_sources() {
         let workspace = workspace_root().expect("workspace root");
         for (filename, source, expected_bytes, expected_sha256) in [
+            (
+                "tree-sitter-wesl-0.1.0-COPYRIGHT",
+                "third_party/tree-sitter-wesl-0.1.0/COPYRIGHT",
+                599,
+                "ccef2f8fb35b3f36bc94b4084a188f7a20243c6eb6f94f48be9767115cbb763d",
+            ),
+            (
+                "tree-sitter-wesl-0.1.0-LICENSE-MIT",
+                "third_party/tree-sitter-wesl-0.1.0/LICENSE-MIT",
+                1036,
+                "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+            ),
+            (
+                "tree-sitter-wesl-0.1.0-LICENSE-APACHE",
+                "third_party/tree-sitter-wesl-0.1.0/LICENSE-APACHE",
+                10173,
+                "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+            ),
+            (
+                "tree-sitter-wesl-0.1.0-LICENSE-W3C.md",
+                "third_party/tree-sitter-wesl-0.1.0/LICENSE-W3C.md",
+                2175,
+                "d2d7a9947e1ffe79ed0c71ad7ad1198ffb754b259f5792ad90c04ce2625fb995",
+            ),
             (
                 "tree-sitter-coffeescript-1.0.0-LICENSE",
                 "third_party/tree-sitter-coffeescript-1.0.0/LICENSE",

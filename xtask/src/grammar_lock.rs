@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "6d6b621c7c0f313622976eee407b08b2aa1d7b9be836cc10574bd36ddbd9a74c";
+    "efcb18bb3926a0c83d608916f98cc66da75729ff1dd79ae3dfe588756f067930";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 62] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 63] = [
+    (
+        "tree-sitter-wesl",
+        "0.1.0",
+        "third_party/tree-sitter-wesl-0.1.0",
+        "ed850951a4aa096c75d2aeae88d1ee8592d17e3fdcf883a9eb10e0c89c517ed7",
+    ),
     (
         "tree-sitter-embedded-template",
         "0.25.0",
@@ -616,6 +622,27 @@ pub(crate) fn check(metadata: &Metadata, root: &Path) -> Result<(), GrammarLockE
     validate_cargo_lock(root, &manifest)?;
     validate_vendored_sources(metadata, root, &manifest)?;
 
+    for (path, checksum) in [
+        (
+            "third_party/tree-sitter-wesl-0.1.0/COPYRIGHT",
+            "ccef2f8fb35b3f36bc94b4084a188f7a20243c6eb6f94f48be9767115cbb763d",
+        ),
+        (
+            "third_party/tree-sitter-wesl-0.1.0/LICENSE-MIT",
+            "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+        ),
+        (
+            "third_party/tree-sitter-wesl-0.1.0/LICENSE-APACHE",
+            "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+        ),
+        (
+            "third_party/tree-sitter-wesl-0.1.0/LICENSE-W3C.md",
+            "d2d7a9947e1ffe79ed0c71ad7ad1198ffb754b259f5792ad90c04ce2625fb995",
+        ),
+    ] {
+        validate_local_license(root, path, checksum)?;
+    }
+
     validate_local_license(
         root,
         COQ_LICENSE_DECLARATIONS_PATH,
@@ -858,7 +885,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 102 {
+    if manifest.grammars.len() != 103 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -883,6 +910,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "wesl",
         "erb",
         "cuda",
         "idris",

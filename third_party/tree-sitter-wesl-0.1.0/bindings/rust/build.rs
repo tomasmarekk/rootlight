@@ -6,6 +6,11 @@ fn main() {
     builder
         .std("c11")
         .include("src")
+        .define("kNumXIDStartRanges", "rootlight_wesl_kNumXIDStartRanges")
+        .define(
+            "kNumXIDContinueRanges",
+            "rootlight_wesl_kNumXIDContinueRanges",
+        )
         .file("src/parser.c")
         .file("src/scanner.c");
     #[cfg(target_env = "msvc")]

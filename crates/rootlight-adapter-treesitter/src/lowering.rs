@@ -116,6 +116,7 @@ mod typescript_calls;
 mod typescript_const;
 mod v;
 mod vhdl;
+mod wesl;
 mod wolfram;
 mod wolfram_formals;
 mod yaml;
@@ -3524,6 +3525,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let wesl_reads = if self.request.language().as_str() == "wesl" {
+            Some(wesl::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                wesl::CurrentSource {
+                    reference: self.full_source,
+                    original: self.request.source().bytes(),
+                    view: self.source_view,
+                    path: self.request.source().path().as_str(),
+                    complete: self.request.included_ranges().is_empty()
+                        && self.parse_output.report().coverage().status()
+                            == CoverageStatus::Complete
+                        && self.parse_output.diagnostics().is_empty(),
+                    maximum: self
+                        .request
+                        .limits()
+                        .max_syntax_nodes()
+                        .saturating_mul(128)
+                        .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                },
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let erb_reads = if self.request.language().as_str() == "erb" {
             Some(erb::Targets::new(
                 self.coordinates.facts(),
@@ -5208,6 +5234,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && !liquid::reference(fact)
                     && !handlebars::reference(fact)
                     && !nushell::reference(fact)
+                    && !(self.request.language().as_str() == "wesl"
+                        && matches!(
+                            fact.syntax_kind().as_str(),
+                            "wesl.identifier.reference" | "wesl.import.reference"
+                        ))
                     && !(self.request.language().as_str() == "erb"
                         && fact.syntax_kind().as_str().starts_with("ruby."))
                 {
@@ -5405,6 +5436,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.target = OccurrenceTarget::Resolved { symbol };
                     occurrence.id = derive_occurrence_record_id(&occurrence)
                         .map_err(|_| provider_failure("liquid-loop-read-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &wesl_reads
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.role = OccurrenceRole::Read;
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("wesl-formal-read-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -8441,6 +8487,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         | "glsl"
                         | "hlsl"
                         | "wgsl"
+                        | "wesl"
                 ) || is_ocaml_written_scope(
                     self.language_for_fact(fact),
                     fact,
@@ -11027,7 +11074,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(scss::gaps(fact))
         .chain(less::gaps(fact))
         .chain(modelica::gaps(fact))
-        .chain(ring::gaps(fact))
+        .chain(ring::gaps(fact).chain(wesl::gaps(fact)))
         .chain(hare::gaps(fact))
         .chain(json_schema::gaps(fact))
         .chain(cue::gaps(fact).chain(pony::gaps(fact).chain(
@@ -11513,6 +11560,14 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
         return Some((FactDomain::Entities, reason));
     }
     match fact.syntax_kind().as_str() {
+        "wesl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
+            FactDomain::Relations,
+            "wesl-import-type-resource-attribute-call-and-shader-binding-unavailable",
+        )),
+        "wesl.context_unavailable.expression" => Some((
+            FactDomain::Entities,
+            "wesl-declarations-beyond-named-functions-and-parameters-unavailable",
+        )),
         "wgsl.file.module" if fact.kind() == SyntaxFactKind::Module => Some((
             FactDomain::Relations,
             "wgsl-type-resource-and-pipeline-binding-unavailable",
@@ -12170,6 +12225,13 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
                 )
         );
     }
+    if language == "wesl" {
+        return matches!(
+            (kind, label),
+            (EntityKind::Function, "wesl.function.declaration")
+                | (EntityKind::Parameter, "wesl.parameter.declaration")
+        );
+    }
     if language == "wgsl" {
         return matches!(
             (kind, label),
@@ -12351,6 +12413,8 @@ fn written_source_identity(
         "rootlight.assembly-source-occurrence/1"
     } else if language == "glsl" {
         "rootlight.glsl-source-occurrence/1"
+    } else if language == "wesl" {
+        "rootlight.wesl-source-occurrence/1"
     } else if language == "wgsl" {
         "rootlight.wgsl-source-occurrence/1"
     } else if language == "hlsl" {
@@ -12520,6 +12584,9 @@ fn structural_resolution_text<'a>(
     terminal_call_name: Option<&'a str>,
     maximum_name_bytes: usize,
 ) -> Option<std::borrow::Cow<'a, str>> {
+    if language == "wesl" {
+        return None;
+    }
     if liquid::reference(fact) || handlebars::reference(fact) || nushell::reference(fact) {
         return None;
     }
@@ -13547,6 +13614,9 @@ fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
     if fact.syntax_kind().as_str() == "elixir.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "elixir";
     }
+    if fact.syntax_kind().as_str() == "wesl.file.module" {
+        return fact.kind() == SyntaxFactKind::Module && language == "wesl";
+    }
     if fact.syntax_kind().as_str() == "wgsl.file.module" {
         return fact.kind() == SyntaxFactKind::Module && language == "wgsl";
     }
@@ -14340,6 +14410,18 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("wesl.") {
+        return match (fact.kind(), fact.syntax_kind().as_str()) {
+            (SyntaxFactKind::Module, "wesl.file.module") => Some(EntityKind::Module),
+            (SyntaxFactKind::Declaration, "wesl.function.declaration") => {
+                Some(EntityKind::Function)
+            }
+            (SyntaxFactKind::Declaration, "wesl.parameter.declaration") => {
+                Some(EntityKind::Parameter)
+            }
+            _ => None,
+        };
+    }
     if fact.syntax_kind().as_str().starts_with("erb.") {
         return (fact.kind() == SyntaxFactKind::Module
             && fact.syntax_kind().as_str() == "erb.file.module")
@@ -14375,6 +14457,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("wesl.") {
+        return structural_entity_kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("erb.") {
         return structural_entity_kind(fact);
     }
@@ -14392,6 +14477,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if fact.syntax_kind().as_str().starts_with("wesl.") {
+        return Some("wesl-unproved-local-import-type-member-and-call-binding-unavailable");
+    }
     if nushell::reference(fact) {
         return Some("nu-current-source-formal-or-completer-binding-unavailable");
     }
@@ -14967,6 +15055,11 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && fact.syntax_kind().as_str() == "wesl.import.reference"
+    {
+        return Some(OccurrenceRole::ImportUse);
+    }
     if liquid::reference(fact) || handlebars::reference(fact) {
         return Some(OccurrenceRole::Read);
     }
@@ -16385,6 +16478,15 @@ mod tests {
         assert!(is_explicit_file_module(&module("ruby.file.module"), "ruby"));
         assert!(is_explicit_file_module(&module("nu.file.module"), "nu"));
         assert!(is_explicit_file_module(&module("erb.file.module"), "erb"));
+        assert!(is_explicit_file_module(&module("wesl.file.module"), "wesl"));
+        assert!(!is_explicit_file_module(
+            &module("wesl.file.module"),
+            "wgsl"
+        ));
+        assert!(!is_explicit_file_module(
+            &module("wgsl.file.module"),
+            "wesl"
+        ));
         assert_eq!(
             structural_entity_kind(&module("erb.file.module")),
             Some(EntityKind::Module)
