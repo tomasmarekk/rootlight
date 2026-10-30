@@ -1,3 +1,6 @@
+// Local TypeSpec corrections over the pinned upstream grammar.
+// Decorator type expressions and metaproperty selectors retain their distinct syntax.
+// The unchanged upstream preferred source is retained under upstream/files/grammar.js.
 module.exports = grammar({
   name: "typespec",
 
@@ -80,10 +83,12 @@ module.exports = grammar({
     ),
 
     value_list: $ => seq(
-      $._value,
-      repeat(seq(",", $._value)),
+      $._decorator_argument,
+      repeat(seq(",", $._decorator_argument)),
       optional(","),
     ),
+
+    _decorator_argument: $ => choice($._expression, $.object_value, $.array_value),
 
     decorator: $ => prec.right(seq(
       "@",
@@ -380,6 +385,13 @@ module.exports = grammar({
     reference_expression: $ => seq(
       $.identifier_or_member_expression,
       optional($.template_arguments),
+      repeat($.metaproperty_selector),
+    ),
+
+    metaproperty_selector: $ => seq(
+      "::",
+      field("name", $.identifier),
+      repeat(seq(".", field("member", $.identifier))),
     ),
 
     parenthesized_expression: $ => seq("(", $._expression, ")"),

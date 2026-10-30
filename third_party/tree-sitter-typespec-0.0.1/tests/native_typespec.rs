@@ -131,6 +131,63 @@ fn malformed_written_declarations_retain_native_error_state() {
 }
 
 #[test]
+fn native_regression_decorator_arguments_accept_type_expressions() {
+    for source in [
+        b"@@d(M.p, string | int32);".as_slice(),
+        b"@d({p: string}) namespace N;".as_slice(),
+    ] {
+        let tree = parse(source);
+        clean(source, &tree);
+    }
+}
+
+#[test]
+fn native_regression_metaproperty_selector_preserves_its_operator() {
+    let source = b"alias Body = AttributeNamespaces.create::parameters.body;";
+    let tree = parse(source);
+    clean(source, &tree);
+    let selectors = nodes(tree.root_node(), "metaproperty_selector");
+    assert_eq!(selectors.len(), 1);
+    let selector = selectors[0];
+    assert_eq!(selector.utf8_text(source).unwrap(), "::parameters.body");
+    assert_eq!(name(selector, source), "parameters");
+    assert_eq!(
+        selector
+            .child_by_field_name("member")
+            .unwrap()
+            .utf8_text(source)
+            .unwrap(),
+        "body"
+    );
+}
+
+#[test]
+fn native_selectors_keep_ordinary_values_and_illegal_name_errors_distinct() {
+    let source = b"using N.Sub; const value = #{p: #[1, 2]}; @N.d(value, #{p: 1}, #[1, 2]) namespace N.Sub {} alias Dot = M.p;";
+    let tree = parse(source);
+    clean(source, &tree);
+    let root = tree.root_node();
+    assert_eq!(nodes(root, "object_value").len(), 2);
+    assert_eq!(nodes(root, "array_value").len(), 2);
+    assert!(!nodes(root, "member_expression").is_empty());
+    assert!(nodes(root, "metaproperty_selector").is_empty());
+    for source in [
+        b"namespace N::Bad;".as_slice(),
+        b"using N::Bad;".as_slice(),
+        b"@N::bad() namespace Valid;".as_slice(),
+        b"@@N::bad(Valid);".as_slice(),
+        b"alias Missing = M::;".as_slice(),
+    ] {
+        let tree = parse(source);
+        assert!(
+            tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires a pinned source list; reports native syntax, not semantic qualification"]
 fn census_pinned_original_sources() {
     let list = std::env::var_os("ROOTLIGHT_TYPESPEC_SOURCE_LIST")

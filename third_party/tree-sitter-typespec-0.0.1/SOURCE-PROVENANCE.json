@@ -23,9 +23,9 @@
   "binding": {
     "local_unpublished": true,
     "generated_abi": 15,
-    "generated_with": "tree-sitter 0.25.10",
+    "generated_with": "tree-sitter 0.26.8",
     "external_scanner_required": false,
-    "native_sources_unchanged": true,
+    "native_sources_unchanged": false,
     "network_or_generator_in_build": false,
     "build_inputs": [
       "src/parser.c",
@@ -42,24 +42,24 @@
       "sha256": "ec9f9f3aca84863e4df8c1ebc6218c5fddc9bb59ac39b6a02f7799faa7d143bd"
     },
     "grammar.js": {
-      "bytes": 12421,
-      "sha256": "57485af9ac1da932c6f4a4c2299963f5aea9f448a8bb990cb375fcf8e5b681c4"
+      "bytes": 12957,
+      "sha256": "4d271397402db3f3eaa008493ee97b191109eb6e7eb9f3eb8290c89ea8c5be5f"
     },
     "tree-sitter.json": {
       "bytes": 553,
       "sha256": "1305d39534ee5b83a8bedd196acf5916fdea541336f7ef41b0cf34fd2828ec9d"
     },
     "src/parser.c": {
-      "bytes": 1010528,
-      "sha256": "de71c1ecb184561c52cddef077a55bd73ee9ff561b917b6c890c7cf803906f25"
+      "bytes": 1060531,
+      "sha256": "87cf00055e8c975c70736422822a0a478f16f6f0e7be70ab63202e34bd2d3dbf"
     },
     "src/grammar.json": {
-      "bytes": 57813,
-      "sha256": "7fb20e74a6f911fc8837e94140a0463206315ba225386a0c53687224b9ce774b"
+      "bytes": 59124,
+      "sha256": "52ed829c2022a3c5acc41fc82e84d0b81d7818bfe8f328fd675cfca19f134620"
     },
     "src/node-types.json": {
-      "bytes": 58278,
-      "sha256": "eaf6af91a4fe4ed1a01afb68a8f7f6a8fc1c93dae27a0f70c4a77c9fcf6b7b32"
+      "bytes": 59554,
+      "sha256": "dfeb977507fd11587a1036120a899068a1d390347d0a091a60d84b9195646a22"
     },
     "src/tree_sitter/parser.h": {
       "bytes": 7624,
@@ -91,5 +91,28 @@
       }
     }
   ],
-  "scope": "Static native grammar loading and written syntax tests only; production routing, IR, resolution and corpus qualification remain separate."
+  "scope": "Static native grammar loading and written syntax tests only; production routing, IR, resolution and corpus qualification remain separate.",
+  "local_derivation": {
+    "base_grammar": "upstream/files/grammar.js",
+    "base_grammar_sha256": "57485af9ac1da932c6f4a4c2299963f5aea9f448a8bb990cb375fcf8e5b681c4",
+    "corrections": [
+      "Decorator and augment-decorator argument lists admit existing type expressions alongside existing object and array values.",
+      "Reference expressions retain distinct metaproperty selectors; namespace, using and decorator name productions remain unchanged."
+    ],
+    "generator": {
+      "name": "tree-sitter",
+      "version": "0.26.8",
+      "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+      "abi": 15,
+      "javascript_runtime": "Node.js v26.2.0",
+      "javascript_runtime_sha256": "96f768b95e8e9d443f5eead1cb2d199744923320bb8240d2c3129362e7ae2a5d"
+    },
+    "generated_outputs_adopted": [
+      "src/parser.c",
+      "src/grammar.json",
+      "src/node-types.json"
+    ],
+    "support_headers": "parser.h is byte-identical to generator output; original alloc.h and unused array.h remain unchanged.",
+    "generation_at_product_build_time": false
+  }
 }

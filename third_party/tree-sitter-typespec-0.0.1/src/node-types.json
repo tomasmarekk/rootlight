@@ -991,6 +991,32 @@
     }
   },
   {
+    "type": "metaproperty_selector",
+    "named": true,
+    "fields": {
+      "member": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "model_body",
     "named": true,
     "fields": {},
@@ -1813,6 +1839,10 @@
           "named": true
         },
         {
+          "type": "metaproperty_selector",
+          "named": true
+        },
+        {
           "type": "template_arguments",
           "named": true
         }
@@ -2621,6 +2651,10 @@
       "required": true,
       "types": [
         {
+          "type": "array_expression",
+          "named": true
+        },
+        {
           "type": "array_value",
           "named": true
         },
@@ -2641,7 +2675,11 @@
           "named": true
         },
         {
-          "type": "identifier_or_member_expression",
+          "type": "intersection_expression",
+          "named": true
+        },
+        {
+          "type": "model_expression",
           "named": true
         },
         {
@@ -2649,11 +2687,35 @@
           "named": true
         },
         {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
           "type": "quoted_string_literal",
           "named": true
         },
         {
+          "type": "reference_expression",
+          "named": true
+        },
+        {
           "type": "triple_quoted_string_literal",
+          "named": true
+        },
+        {
+          "type": "tuple_expression",
+          "named": true
+        },
+        {
+          "type": "typeof_expression",
+          "named": true
+        },
+        {
+          "type": "union_expression",
+          "named": true
+        },
+        {
+          "type": "value_of_expression",
           "named": true
         }
       ]
@@ -2776,6 +2838,10 @@
   },
   {
     "type": ":",
+    "named": false
+  },
+  {
+    "type": "::",
     "named": false
   },
   {
