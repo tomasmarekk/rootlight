@@ -63,6 +63,24 @@ fn flag_rows(document: &NormalizedIrDocument) -> u64 {
     })
 }
 
+fn evidence_rows(document: &NormalizedIrDocument) -> u64 {
+    document
+        .files
+        .iter()
+        .map(|record| &record.evidence)
+        .chain(document.entities.iter().map(|record| &record.evidence))
+        .chain(document.occurrences.iter().map(|record| &record.evidence))
+        .chain(document.relations.iter().map(|record| &record.evidence))
+        .chain(
+            document
+                .coverage_records
+                .iter()
+                .map(|record| &record.evidence),
+        )
+        .map(|evidence| u64::try_from(evidence.derivation.len()).unwrap())
+        .sum()
+}
+
 fn symbol_envelopes(document: &NormalizedIrDocument) -> u64 {
     u64::try_from(
         document
@@ -108,6 +126,11 @@ fn all_layout_features() -> NormalizedIrDocument {
         total_count: 3,
         completeness: CoverageStatus::Complete,
     };
+    let second_file = document.files[1].id;
+    document.files[0]
+        .evidence
+        .derivation
+        .push(FactRef::File(second_file));
     document.entities[0]
         .evidence
         .derivation
@@ -184,6 +207,7 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
     }
     let prospective = census.read_memory_plan(&context).unwrap();
     assert_eq!(census.totals.entity_flag_rows, 7);
+    assert_eq!(census.totals.evidence_rows, 5);
     assert_eq!(census.totals.symbol_envelopes, 1);
     let actual = write::measure(&generation, &context).unwrap();
     assert_eq!(prospective.stats(), actual.stats);
@@ -197,6 +221,18 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
         .unwrap()
         .seal_unverified_for_test(generation, &context)
         .unwrap();
+    let connection = rusqlite::Connection::open_with_flags(
+        &reader.path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let actual_evidence: i64 = connection
+        .query_row("SELECT count(*) FROM evidence_derivations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(actual_evidence, 5);
+    drop(connection);
     assert_eq!(prospective, observed_plan(&reader, &context));
     drop(reader);
     let reopened = OracleReader::open_in(root.path(), &context).unwrap();
@@ -418,6 +454,88 @@ fn symbol_envelope_replacements_conserve_preview_commit_and_rollback_counts() {
     assert!(
         matches!(error, OracleReadAdmissionError::Catalog(ref error) if error.kind() == CatalogErrorKind::InvalidGeneration)
     );
+    assert_eq!(census.read_memory_plan(&context).unwrap(), before);
+}
+
+#[test]
+fn evidence_replacements_removals_and_rollback_conserve_exact_counts() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let (template, _) = fixture_documents();
+    let first = FactRef::File(template.files[0].id);
+    let second = FactRef::File(template.files[1].id);
+    let mut document = NormalizedIrDocument::empty(template.repository, template.generation);
+    document.entities = template.entities.clone();
+    document.entities[0].evidence.derivation.clear();
+    let mut census = OracleLayoutCensus::new(document.repository, document.generation);
+    insert(&mut census, &document, &context);
+    for references in [
+        Some(vec![first]),
+        Some(vec![first, second]),
+        Some(Vec::new()),
+        None,
+        Some(vec![first, second]),
+    ] {
+        let before = census.read_memory_plan(&context).unwrap();
+        let before_rows = evidence_rows(&document);
+        let mut replacement = NormalizedIrDocument::empty(template.repository, template.generation);
+        if let Some(references) = references {
+            let mut entity = template.entities[0].clone();
+            entity.evidence.derivation = references;
+            replacement.entities.push(entity);
+        }
+        let expected_rows = evidence_rows(&replacement);
+        let expected = measure(&replacement, &context)
+            .read_memory_plan(&context)
+            .unwrap();
+        {
+            let preview = census
+                .preview(
+                    measure(&document, &context),
+                    measure(&replacement, &context),
+                    0,
+                    &context,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(preview.census.totals.evidence_rows, expected_rows);
+            assert_eq!(preview.read_memory_plan(&context).unwrap(), expected);
+        }
+        assert_eq!(census.totals.evidence_rows, before_rows);
+        assert_eq!(census.read_memory_plan(&context).unwrap(), before);
+        census
+            .preview(
+                measure(&document, &context),
+                measure(&replacement, &context),
+                0,
+                &context,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .commit();
+        document = replacement;
+        assert_eq!(census.totals.evidence_rows, expected_rows);
+        assert_eq!(census.read_memory_plan(&context).unwrap(), expected);
+    }
+    let before = census.read_memory_plan(&context).unwrap();
+    let mut invalid_removal = document.clone();
+    invalid_removal.entities[0]
+        .evidence
+        .derivation
+        .push(FactRef::Entity(template.entities[0].id));
+    let error = census
+        .preview(
+            measure(&invalid_removal, &context),
+            empty(&document),
+            0,
+            &context,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, OracleReadAdmissionError::Catalog(ref error) if error.kind() == CatalogErrorKind::InvalidGeneration)
+    );
+    assert_eq!(census.totals.evidence_rows, 2);
     assert_eq!(census.read_memory_plan(&context).unwrap(), before);
 }
 
@@ -827,10 +945,12 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
         actual.maximum_payload_bytes,
         flag_rows(document),
         symbol_envelopes(document),
+        evidence_rows(document),
     )
     .unwrap();
     assert_eq!(combined.read_memory_plan(&context).unwrap(), expected);
     assert_eq!(combined.totals.entity_flag_rows, 7);
+    assert_eq!(combined.totals.evidence_rows, 5);
     assert_eq!(combined.totals.symbol_envelopes, 1);
     let mut peak = 0;
     let duplicate = combined
@@ -842,6 +962,7 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
     assert!(peak >= combined.retained_bytes().unwrap() + duplicate.retained_bytes().unwrap() + 17);
     assert_eq!(duplicate.read_memory_plan(&context).unwrap(), expected);
     assert_eq!(duplicate.totals.entity_flag_rows, 7);
+    assert_eq!(duplicate.totals.evidence_rows, 5);
     assert_eq!(duplicate.totals.symbol_envelopes, 1);
     let refused = combined.duplicate(0, &context, &mut |_| Err("duplicate workspace refused"));
     assert!(matches!(
@@ -862,7 +983,14 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
 fn borrowed_target_records_match_owned_writer_fragments_without_payload_clones() {
     let cancellation = Cancellation::new();
     let context = GenerationContext::new(&cancellation, GenerationBudget::default());
-    let (document, _) = fixture_documents();
+    let (mut document, _) = fixture_documents();
+    let reference = FactRef::File(document.files[0].id);
+    document.diagnostics[0].evidence.derivation.push(reference);
+    document.extensions[0].evidence.derivation.push(reference);
+    document.coverage_records[0]
+        .evidence
+        .derivation
+        .push(reference);
     let mut owned = NormalizedIrDocument::empty(document.repository, document.generation);
     owned.diagnostics.push(document.diagnostics[0].clone());
     let borrowed = OracleLayoutFragment::measure_diagnostic(
@@ -872,6 +1000,7 @@ fn borrowed_target_records_match_owned_writer_fragments_without_payload_clones()
         &mut |_| Ok::<_, ()>(()),
     )
     .unwrap();
+    assert_eq!(borrowed.totals.evidence_rows, 0);
     assert_eq!(
         borrowed.read_memory_plan(&context).unwrap(),
         measure(&owned, &context)
@@ -885,6 +1014,7 @@ fn borrowed_target_records_match_owned_writer_fragments_without_payload_clones()
             Ok::<_, ()>(())
         })
         .unwrap();
+    assert_eq!(borrowed.totals.evidence_rows, 0);
     assert_eq!(
         borrowed.read_memory_plan(&context).unwrap(),
         measure(&owned, &context)
@@ -902,6 +1032,7 @@ fn borrowed_target_records_match_owned_writer_fragments_without_payload_clones()
         &mut |_| Ok::<_, ()>(()),
     )
     .unwrap();
+    assert_eq!(borrowed.totals.evidence_rows, 1);
     assert_eq!(
         borrowed.read_memory_plan(&context).unwrap(),
         measure(&owned, &context)

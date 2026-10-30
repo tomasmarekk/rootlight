@@ -35,6 +35,7 @@ struct Totals {
     records: [u64; 10],
     children: u64,
     entity_flag_rows: u64,
+    evidence_rows: u64,
     symbol_envelopes: u64,
     text: u64,
     skipped_metadata_bytes: u64,
@@ -45,6 +46,7 @@ impl Totals {
         stats: GenerationStats,
         entity_flag_rows: u64,
         symbol_envelopes: u64,
+        evidence_rows: u64,
     ) -> Result<Self, CatalogError> {
         let records = [
             stats.files(),
@@ -72,6 +74,7 @@ impl Totals {
             records,
             children,
             entity_flag_rows,
+            evidence_rows,
             symbol_envelopes,
             text: stats.text_bytes(),
             skipped_metadata_bytes: 0,
@@ -81,7 +84,26 @@ impl Totals {
     }
 
     fn validate_counts(self) -> Result<(), CatalogError> {
-        if self.entity_flag_rows > self.children
+        let owners = self.records[0]
+            .checked_add(self.records[1])
+            .and_then(|rows| rows.checked_add(self.records[2]))
+            .and_then(|rows| rows.checked_add(self.records[3]))
+            .and_then(|rows| rows.checked_add(self.records[6]))
+            .ok_or_else(invalid)?;
+        if self
+            .entity_flag_rows
+            .checked_add(self.evidence_rows)
+            .ok_or_else(invalid)?
+            > self.children
+            || self.evidence_rows
+                > owners
+                    .checked_mul(
+                        u64::try_from(
+                            rootlight_ir::IrLimits::default().max_nested_items_per_record,
+                        )
+                        .map_err(|_| invalid())?,
+                    )
+                    .ok_or_else(invalid)?
             || self.entity_flag_rows > self.records[1].checked_mul(6).ok_or_else(invalid)?
             || self.symbol_envelopes > self.records[9]
             || self.skipped_metadata_bytes > self.text
@@ -108,6 +130,11 @@ impl Totals {
             .entity_flag_rows
             .checked_sub(removed.entity_flag_rows)
             .and_then(|n| n.checked_add(added.entity_flag_rows))
+            .ok_or_else(invalid)?;
+        next.evidence_rows = self
+            .evidence_rows
+            .checked_sub(removed.evidence_rows)
+            .and_then(|rows| rows.checked_add(added.evidence_rows))
             .ok_or_else(invalid)?;
         next.symbol_envelopes = self
             .symbol_envelopes
@@ -203,6 +230,7 @@ impl OracleLayoutFragment {
             self.payloads.last().map_or(0, |(bytes, _)| *bytes),
             self.totals.entity_flag_rows,
             self.totals.symbol_envelopes,
+            self.totals.evidence_rows,
         )?
         .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
     }
@@ -500,11 +528,39 @@ impl OracleLayoutFragment {
                 ))
                 .ok_or_else(invalid)
             })?;
+        let evidence_rows = document
+            .files
+            .iter()
+            .map(|record| &record.evidence)
+            .chain(document.entities.iter().map(|record| &record.evidence))
+            .chain(document.occurrences.iter().map(|record| &record.evidence))
+            .chain(document.relations.iter().map(|record| &record.evidence))
+            .chain(
+                document
+                    .coverage_records
+                    .iter()
+                    .map(|record| &record.evidence),
+            )
+            .try_fold(0_u64, |rows, evidence| {
+                context.check().map_err(CatalogError::control)?;
+                if evidence.derivation.len()
+                    > rootlight_ir::IrLimits::default().max_nested_items_per_record
+                {
+                    return Err(invalid());
+                }
+                rows.checked_add(u64::try_from(evidence.derivation.len()).map_err(|_| invalid())?)
+                    .ok_or_else(invalid)
+            })?;
         let source_capacity = plan.source_ordinals.capacity();
         let source_counts_capacity = auxiliary.source_counts.capacity();
         let payload_capacity = auxiliary.payloads.capacity();
         let mut fragment = Self::empty(document.repository, document.generation);
-        fragment.totals = Totals::from_stats(plan.stats, entity_flag_rows, symbol_envelopes)?;
+        fragment.totals = Totals::from_stats(
+            plan.stats,
+            entity_flag_rows,
+            symbol_envelopes,
+            evidence_rows,
+        )?;
         fragment.totals.skipped_metadata_bytes = auxiliary.skipped_metadata_bytes;
         fragment.totals.validate_counts()?;
         fragment
@@ -912,6 +968,7 @@ impl OracleLayoutCensus {
             self.payloads.last().copied().unwrap_or(0),
             self.totals.entity_flag_rows,
             self.totals.symbol_envelopes,
+            self.totals.evidence_rows,
         )?
         .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
     }

@@ -297,7 +297,7 @@ impl OracleWriter {
         let transaction = connection
             .unchecked_transaction()
             .map_err(CatalogError::sqlite)?;
-        let entity_flag_rows = read::validate_payload_cardinality(
+        let cardinality = read::validate_payload_cardinality(
             &transaction,
             generation.metadata().contract_version(),
             written.stats,
@@ -315,8 +315,9 @@ impl OracleWriter {
             generation.metadata().contract_version(),
             written.stats,
             written.maximum_payload_bytes,
-            entity_flag_rows,
+            cardinality.entity_flag_rows,
             symbol_envelopes,
+            cardinality.evidence_rows,
         )?
         .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
         transaction.commit().map_err(CatalogError::sqlite)?;
@@ -360,7 +361,7 @@ pub struct OracleReader {
 ///
 /// The plan is derived and admitted within the same read transaction. It keeps
 /// typed vector and validation workspaces for closed records, full envelopes for
-/// opaque and auxiliary rows, and transient decoding of one opaque or locator payload.
+/// remaining opaque and auxiliary rows, and transient decoding of one opaque or locator payload.
 /// It is a logical reservation, not an allocator, heap, or RSS measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OracleReadMemoryPlan {

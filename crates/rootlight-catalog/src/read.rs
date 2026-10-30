@@ -398,12 +398,8 @@ pub(crate) fn read_generation_with_admission<E>(
     if metadata != expected_metadata || stats != expected_stats {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
-    let cardinality = validate_payload_cardinality_counts(
-        &transaction,
-        metadata.contract_version(),
-        stats,
-        context,
-    )?;
+    let cardinality =
+        validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
     let entity_flag_rows = cardinality.entity_flag_rows;
     let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
     let symbol_envelopes =
@@ -415,6 +411,7 @@ pub(crate) fn read_generation_with_admission<E>(
         maximum_payload_bytes,
         entity_flag_rows,
         symbol_envelopes,
+        cardinality.evidence_rows,
     )?
     .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
     validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
@@ -422,13 +419,7 @@ pub(crate) fn read_generation_with_admission<E>(
     admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
     context.check().map_err(CatalogError::control)?;
     let sources = read_sources(&transaction, stats.source_refs(), context)?;
-    let evidence_owners = stats
-        .files()
-        .checked_add(stats.entities())
-        .and_then(|rows| rows.checked_add(stats.occurrences()))
-        .and_then(|rows| rows.checked_add(stats.relations()))
-        .and_then(|rows| rows.checked_add(stats.coverage()))
-        .ok_or_else(memory_plan_overflow)?;
+    let evidence_owners = evidence_owner_count(stats)?;
     let mut evidence = read_evidence(
         &transaction,
         cardinality.evidence_rows,
@@ -588,6 +579,7 @@ pub(crate) fn oracle_read_memory_plan(
     maximum_payload_bytes: u64,
     entity_flag_rows: u64,
     symbol_envelopes: u64,
+    evidence_rows: u64,
 ) -> Result<OracleReadMemoryPlan, CatalogError> {
     if symbol_envelopes > stats.extensions() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
@@ -637,7 +629,9 @@ pub(crate) fn oracle_read_memory_plan(
     let opaque_and_other_auxiliary_rows = opaque_and_auxiliary_rows
         .checked_sub(entity_flag_rows)
         .and_then(|rows| rows.checked_sub(symbol_envelopes))
+        .and_then(|rows| rows.checked_sub(evidence_rows))
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    let evidence_workspace = evidence_workspace_bytes(evidence_rows, evidence_owner_count(stats)?)?;
     let flag_workspace = flag_workspace_bytes(entity_flag_rows, stats.entities())?;
 
     // Exact buffers are allocated only after the same-transaction census and
@@ -650,6 +644,8 @@ pub(crate) fn oracle_read_memory_plan(
     // opaque payloads and other child-row maps retain the four-KiB envelope.
     // Flag groups reserve six closed enum slots per owner. Their headers remain
     // resident while each owned vector moves into its final EntityRecord.
+    // Evidence groups retain fixed typed headers and exact reference vectors;
+    // each vector moves into its record while the empty group header remains.
     // Symbol claims have closed outer records and sequential bounded decoders;
     // their opaque text retains the unchanged text and largest-payload charges.
     let id_set = tree_node_bytes::<FactId, ()>()?;
@@ -740,6 +736,7 @@ pub(crate) fn oracle_read_memory_plan(
     let record_workspace_bytes = opaque_and_other_auxiliary_rows
         .checked_mul(4 * 1024)
         .and_then(|bytes| bytes.checked_add(flag_workspace))
+        .and_then(|bytes| bytes.checked_add(evidence_workspace))
         .and_then(|bytes| bytes.checked_add(retained_record_bytes))
         .and_then(|bytes| bytes.checked_add(temporary_workspace))
         .and_then(|bytes| bytes.checked_add(source_buffers))
@@ -787,6 +784,35 @@ fn typed_record_buffer_bytes<R>(rows: u64) -> Result<u64, CatalogError> {
         u64::try_from(std::mem::size_of::<R>()).map_err(|_| memory_plan_overflow())?;
     rows.checked_add(1)
         .and_then(|rows| rows.checked_mul(record_bytes))
+        .ok_or_else(memory_plan_overflow)
+}
+
+fn evidence_owner_count(stats: GenerationStats) -> Result<u64, CatalogError> {
+    stats
+        .files()
+        .checked_add(stats.entities())
+        .and_then(|rows| rows.checked_add(stats.occurrences()))
+        .and_then(|rows| rows.checked_add(stats.relations()))
+        .and_then(|rows| rows.checked_add(stats.coverage()))
+        .ok_or_else(memory_plan_overflow)
+}
+
+fn evidence_workspace_bytes(rows: u64, owners: u64) -> Result<u64, CatalogError> {
+    let limit = usize_to_u64(IrLimits::default().max_nested_items_per_record)?;
+    if rows > owners.checked_mul(limit).ok_or_else(memory_plan_overflow)? {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    typed_record_buffer_bytes::<EvidenceGroup>(rows.min(owners))?
+        .checked_add(
+            rows.checked_mul(
+                u64::try_from(std::mem::size_of::<FactRef>())
+                    .map_err(|_| memory_plan_overflow())?,
+            )
+            .ok_or_else(memory_plan_overflow)?,
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(u64::try_from(std::mem::size_of::<EvidenceGroups>()).ok()?)
+        })
         .ok_or_else(memory_plan_overflow)
 }
 
@@ -1166,24 +1192,12 @@ fn validate_document_hash(
 }
 
 #[derive(Debug)]
-struct PayloadCardinality {
-    entity_flag_rows: u64,
-    evidence_rows: u64,
+pub(crate) struct PayloadCardinality {
+    pub(crate) entity_flag_rows: u64,
+    pub(crate) evidence_rows: u64,
 }
 
 pub(crate) fn validate_payload_cardinality(
-    connection: &Connection,
-    contract_version: GenerationContractVersion,
-    stats: GenerationStats,
-    context: &GenerationContext<'_>,
-) -> Result<u64, CatalogError> {
-    Ok(
-        validate_payload_cardinality_counts(connection, contract_version, stats, context)?
-            .entity_flag_rows,
-    )
-}
-
-fn validate_payload_cardinality_counts(
     connection: &Connection,
     contract_version: GenerationContractVersion,
     stats: GenerationStats,
@@ -2443,6 +2457,7 @@ mod tests {
             maximum,
             0,
             0,
+            0,
         )
         .unwrap();
         let credit = canonical_skipped_metadata_bytes(&malformed, &context).unwrap();
@@ -2615,6 +2630,14 @@ mod tests {
                         envelope.namespace == rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE
                     })
                     .count(),
+            )
+            .unwrap(),
+            u64::try_from(
+                connection
+                    .query_row("SELECT count(*) FROM evidence_derivations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
             )
             .unwrap(),
         )
@@ -3337,10 +3360,73 @@ mod tests {
     }
 
     #[test]
+    fn evidence_workspace_replaces_only_its_complete_typed_family_charge() {
+        let stats = GenerationStats::new(1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 40, 17).unwrap();
+        let owners = evidence_owner_count(stats).unwrap();
+        assert_eq!(owners, 5);
+        let baseline =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, 0).unwrap();
+        let empty = evidence_workspace_bytes(0, owners).unwrap();
+        for rows in [1, 5, 20] {
+            let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, rows)
+                .unwrap();
+            let complete = typed_record_buffer_bytes::<EvidenceGroup>(rows.min(owners)).unwrap()
+                + rows * u64::try_from(std::mem::size_of::<FactRef>()).unwrap()
+                + u64::try_from(std::mem::size_of::<EvidenceGroups>()).unwrap();
+            assert_eq!(evidence_workspace_bytes(rows, owners).unwrap(), complete);
+            assert_eq!(
+                plan.record_workspace_bytes() + rows * 4096 - complete,
+                baseline.record_workspace_bytes() - empty
+            );
+            assert_eq!(
+                plan.materialization_bytes() + rows * 4096 - complete,
+                baseline.materialization_bytes() - empty
+            );
+            assert_eq!(plan.stats(), baseline.stats());
+            assert_eq!(plan.retained_text_bytes(), baseline.retained_text_bytes());
+            assert_eq!(plan.physical_rows(), baseline.physical_rows());
+            assert_eq!(
+                plan.identity_registry_rows(),
+                baseline.identity_registry_rows()
+            );
+            assert_eq!(
+                plan.maximum_payload_bytes(),
+                baseline.maximum_payload_bytes()
+            );
+            assert_eq!(
+                plan.transient_decode_bytes(),
+                baseline.transient_decode_bytes()
+            );
+        }
+        assert_eq!(
+            evidence_workspace_bytes(4097, 1).unwrap_err().kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert_eq!(
+            evidence_workspace_bytes(1, 0).unwrap_err().kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert_eq!(
+            evidence_workspace_bytes(u64::MAX, u64::MAX)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Storage
+        );
+        let only_one_auxiliary =
+            GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0).unwrap();
+        assert_eq!(
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, only_one_auxiliary, 0, 1, 0, 1)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+    }
+
+    #[test]
     fn flag_workspace_changes_only_the_flag_envelope_and_complete_bounded_buffer() {
         let stats = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 17).unwrap();
         let baseline =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0).unwrap();
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, 0).unwrap();
         let empty_workspace = flag_workspace_bytes(0, 3).unwrap();
         assert_eq!(
             empty_workspace,
@@ -3355,7 +3441,7 @@ mod tests {
                 expected_workspace
             );
             let plan =
-                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, flag_rows, 0)
+                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, flag_rows, 0, 0)
                     .unwrap();
             assert_eq!(
                 plan.record_workspace_bytes() + flag_rows * 4096 - expected_workspace,
@@ -3392,7 +3478,7 @@ mod tests {
         );
         let no_auxiliary = GenerationStats::new(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0).unwrap();
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 1, 0)
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 1, 0, 0)
                 .unwrap_err()
                 .kind(),
             CatalogErrorKind::Corrupt,
@@ -3551,7 +3637,7 @@ mod tests {
         let stats =
             GenerationStats::new(0, 0, 0, 0, 100_000, 0, 0, 0, 0, 32, 0, 200_067, 17).unwrap();
         let baseline =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 0).unwrap();
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 0, 0).unwrap();
         // This provenance-dense frame keeps validation larger than registry and
         // sorting, so every added symbol validation node must remain charged.
         let id_set = tree_node_bytes::<FactId, ()>().unwrap();
@@ -3562,7 +3648,8 @@ mod tests {
         assert!(validation > typed_record_buffer_bytes::<ExtensionEnvelope>(32).unwrap());
         for count in [1, 4, 32] {
             let plan =
-                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, count).unwrap();
+                oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, count, 0)
+                    .unwrap();
             assert_eq!(
                 plan.record_workspace_bytes() + count * 4096,
                 baseline.record_workspace_bytes()
@@ -3578,14 +3665,14 @@ mod tests {
             );
         }
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 33)
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 185, 0, 33, 0)
                 .unwrap_err()
                 .kind(),
             CatalogErrorKind::Corrupt
         );
         let no_auxiliary = GenerationStats::new(1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 0).unwrap();
         assert_eq!(
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 0, 1)
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, no_auxiliary, 0, 0, 1, 0)
                 .unwrap_err()
                 .kind(),
             CatalogErrorKind::Corrupt
@@ -3601,7 +3688,8 @@ mod tests {
     #[test]
     fn memory_plan_separates_closed_records_and_retains_opaque_envelopes() {
         let stats = stats(17, 1024);
-        let plan = oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0).unwrap();
+        let plan =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, 0, 0, 0).unwrap();
         assert_eq!(plan.physical_rows(), 17);
         assert_eq!(plan.identity_registry_rows(), 8);
         assert!(plan.record_workspace_bytes() >= 5 * 4096);
@@ -3622,6 +3710,7 @@ mod tests {
             97,
             0,
             0,
+            0,
         )
         .unwrap();
         assert_eq!(legacy.physical_rows(), plan.physical_rows());
@@ -3633,6 +3722,7 @@ mod tests {
                 payload,
                 0,
                 0,
+                0,
             )
             .unwrap_err();
             assert_eq!(error.kind(), CatalogErrorKind::Storage);
@@ -3640,6 +3730,7 @@ mod tests {
         let error = oracle_read_memory_plan(
             GenerationContractVersion::new(1, 1),
             self::stats(u64::MAX, 1024),
+            0,
             0,
             0,
             0,
@@ -3667,7 +3758,7 @@ mod tests {
         )
         .unwrap();
         let plan =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0).unwrap();
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0, 0).unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -3684,9 +3775,15 @@ mod tests {
             admitted.checked_add(3_867_000_000).unwrap() < 16 * 1024 * 1024 * 1024,
             "closed record and borrowed source workspaces coexist with the resident generation under the unchanged ceiling: {admitted}"
         );
-        let oversized =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0, 0)
-                .unwrap();
+        let oversized = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            512 * 1024 * 1024,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
         assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
         assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
     }
@@ -3710,7 +3807,7 @@ mod tests {
         )
         .unwrap();
         let plan =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0).unwrap();
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 100_636, 0, 0, 0).unwrap();
         let index_per_row = u64::try_from(
             4 * std::mem::size_of::<(SymbolId, usize)>() + 2 * std::mem::size_of::<usize>(),
         )
@@ -3725,9 +3822,15 @@ mod tests {
         );
         assert_eq!(plan.transient_decode_bytes(), 100_636 * 128);
         assert_eq!(plan.stats(), stats);
-        let oversized =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 512 * 1024 * 1024, 0, 0)
-                .unwrap();
+        let oversized = oracle_read_memory_plan(
+            GENERATION_CONTRACT_VERSION,
+            stats,
+            512 * 1024 * 1024,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
         assert!(oversized.materialization_bytes() > 16 * 1024 * 1024 * 1024);
     }
 
@@ -3861,7 +3964,7 @@ mod tests {
         let maximum = maximum_payload_bytes(&connection, stats, &context).unwrap();
         assert_eq!(maximum, expected_max);
         let plan =
-            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum, 0, 0).unwrap();
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, maximum, 0, 0, 0).unwrap();
         let factor =
             u64::try_from(4 * (std::mem::size_of::<String>() + std::mem::size_of::<usize>()))
                 .unwrap();
