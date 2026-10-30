@@ -233,6 +233,14 @@ fn analyzers(
 }
 
 fn saved_language(input: &ManifestInput) -> Option<&str> {
+    if rootlight_discovery::is_terminal_tt_source(&input.path)
+        && !input
+            .language_signals
+            .iter()
+            .any(|signal| signal.evidence == LanguageEvidence::Configuration)
+    {
+        return rootlight_discovery::terminal_tt_content_language(input);
+    }
     // Manifest/toolchain names do not classify the source syntax of that file.
     for evidence in [
         LanguageEvidence::Configuration,
@@ -601,6 +609,50 @@ mod tests {
         let mut count = usize::MAX;
         assert!(increment(&mut count).is_err());
         assert_eq!(count, usize::MAX);
+    }
+
+    #[test]
+    fn terminal_tt_saved_language_requires_content_or_configuration() {
+        let raw = include_bytes!("../tests/fixtures/ruby_dsl/docker-entrypoint.tt");
+        let mut input = ManifestInput {
+            file: rootlight_ids::FileId::from_bytes([3; 20]),
+            path: "docker-entrypoint.tt".to_owned(),
+            content_hash: rootlight_ids::content_hash(raw),
+            bytes: u64::try_from(raw.len()).unwrap(),
+            encoding: "utf-8".to_owned(),
+            class: rootlight_discovery::InputClass::Source,
+            language_signals: vec![
+                rootlight_discovery::LanguageSignal {
+                    language: "erb".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                },
+                rootlight_discovery::LanguageSignal {
+                    language: "bash".to_owned(),
+                    evidence: LanguageEvidence::Shebang,
+                },
+            ],
+            project_language_witnesses: Vec::new(),
+            decisive_rule: None,
+        };
+        assert_eq!(saved_language(&input), Some("erb"));
+        input
+            .language_signals
+            .retain(|signal| signal.evidence != LanguageEvidence::Content);
+        assert_eq!(saved_language(&input), None);
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "ruby".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(saved_language(&input), Some("ruby"));
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "python".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(saved_language(&input), None);
     }
 
     #[test]

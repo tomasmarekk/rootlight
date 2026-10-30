@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.84";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.85";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2071,6 +2071,15 @@ fn classify_validated_prefix(
             evidence: LanguageEvidence::Shebang,
         });
     }
+    if validated_text
+        && is_terminal_tt_source(&normalized)
+        && tt_erb_content_hint(content, prefix_truncated)
+    {
+        signals.insert(LanguageSignal {
+            language: "erb".to_owned(),
+            evidence: LanguageEvidence::Content,
+        });
+    }
     if validated_text && racket_reader::has_header(content, prefix_truncated) {
         signals.insert(LanguageSignal {
             language: "racket".to_owned(),
@@ -3032,7 +3041,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "erb",
         suffixes: &[".erb"],
         aliases: &[],
-        detectors: &["extension", "configuration"],
+        detectors: &["extension", "content", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -3319,6 +3328,46 @@ pub fn extension_language(path: &str) -> Option<&'static str> {
         }
     }
     best.map(|(_, language)| language)
+}
+
+/// Reports the case-insensitive terminal `.tt` suffix without selecting a processor.
+///
+/// Inner suffixes, directory names and backup suffixes do not establish a language.
+#[must_use]
+pub fn is_terminal_tt_source(path: &str) -> bool {
+    path.rsplit(['/', '\\'])
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("tt"))
+}
+
+/// Selects outer ERB only from discovery's positive terminal-template content claim.
+///
+/// Callers apply explicit configuration first. A terminal `.tt` without this
+/// claim remains unproven; its payload shebang or inner suffix is not a fallback.
+#[must_use]
+pub fn terminal_tt_content_language(input: &ManifestInput) -> Option<&str> {
+    if !is_terminal_tt_source(&input.path) {
+        return None;
+    }
+    input.language_signals.iter().find_map(|signal| {
+        (signal.evidence == LanguageEvidence::Content && signal.language == "erb")
+            .then_some(signal.language.as_str())
+    })
+}
+
+fn tt_erb_content_hint(content: &[u8], prefix_truncated: bool) -> bool {
+    if prefix_truncated
+        || content.len() > MAX_CLASSIFICATION_BYTES
+        || content.contains(&0)
+        || content.windows(2).any(|pair| pair == b"<#")
+    {
+        return false;
+    }
+    let Some(start) = content.windows(2).position(|pair| pair == b"<%") else {
+        return false;
+    };
+    content[start + 2..].windows(2).any(|pair| pair == b"%>")
 }
 
 /// Returns the source language of an exact conventional basename.
@@ -4201,6 +4250,7 @@ mod tests {
         ] {
             write_fixture(&temporary, path, pdf);
         }
+        write_fixture(&temporary, "marked.tt", b"%PDF-1.7\n<%= item %>\n");
         write_fixture(&temporary, "archive.txt", b"PK\x03\x04opaque archive");
         write_fixture(&temporary, "source.pdf", b"let signature = \"%PDF-1.7\";\n");
         let root = fixture_root(&temporary, b"binary-format-signatures");
@@ -4219,6 +4269,7 @@ mod tests {
             "misleading.rake",
             "misleading.ru",
             "misleading.builder",
+            "marked.tt",
             "archive.txt",
         ] {
             assert!(
@@ -7941,7 +7992,10 @@ max_source_file_bytes = 2097152
             .unwrap();
         assert_eq!(capability.analyzers, &["treesitter"]);
         assert_eq!(capability.maximum_tier, "tier_d");
-        assert_eq!(capability.detectors, &["extension", "configuration"]);
+        assert_eq!(
+            capability.detectors,
+            &["extension", "content", "configuration"]
+        );
     }
 
     #[test]
@@ -9092,6 +9146,117 @@ max_source_file_bytes = 2097152
         ] {
             assert_eq!(extension_language(path), None, "{path}");
         }
+    }
+
+    #[test]
+    fn terminal_tt_erb_content_is_explicit_and_conditional() {
+        let path = RelativePath::parse(Path::new("view.html.erb.tt")).unwrap();
+        assert_eq!(extension_language(path.as_str()), None);
+        for source in [b"<%= item %>\n".as_slice(), b"<%%= item %>\n".as_slice()] {
+            let (class, signals) = classify(&path, source);
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "erb".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }]
+            );
+        }
+        for source in [
+            "plain template text\n",
+            "<% unfinished",
+            "<#@ template language=\"C#\" #>\n<%= item %>\n",
+            "<%%= item %>\n<#= value #>\n",
+        ] {
+            let (_, signals) = classify(&path, source.as_bytes());
+            assert!(!signals.iter().any(|signal| signal.language == "erb"));
+        }
+        for other in [
+            "view.tt.bak",
+            "view.html.erb.tt.backup",
+            "templates.tt/view",
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(other)).unwrap(),
+                b"<%= item %>",
+            );
+            assert!(!signals.iter().any(|signal| signal.language == "erb"));
+        }
+        let (_, signals) = classify_prefix(&path, b"<%= item %>", true, false);
+        assert!(!signals.iter().any(|signal| signal.language == "erb"));
+        let large = format!("{}<%= item %>", "x".repeat(MAX_CLASSIFICATION_BYTES));
+        let (_, signals) = classify(&path, large.as_bytes());
+        assert!(!signals.iter().any(|signal| signal.language == "erb"));
+    }
+
+    #[test]
+    fn terminal_tt_evidence_requires_complete_supported_text_encodings() {
+        let temporary = local_tempdir();
+        let text = "λ😀\r\n<%%= item %>\r\n";
+        for (path, encoding) in [
+            ("utf8.tt", "utf-8"),
+            ("UTF16LE.TT", "utf-16le"),
+            ("utf16be.tt", "utf-16be"),
+        ] {
+            let raw = if encoding == "utf-8" {
+                text.as_bytes().to_vec()
+            } else {
+                let mut raw = if encoding == "utf-16le" {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                };
+                for unit in text.encode_utf16() {
+                    raw.extend_from_slice(&if encoding == "utf-16le" {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+                raw
+            };
+            write_fixture(&temporary, path, &raw);
+        }
+        write_fixture(&temporary, "invalid.tt", b"\xff<%= item %>\n");
+        write_fixture(&temporary, "binary.tt", b"%PDF-1.7\n<%= item %>\n");
+        write_fixture(&temporary, "with-nul.tt", b"<%= item %>\0\n");
+        let root = fixture_root(&temporary, b"terminal-tt-encoding");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(&root, &config(), &policy, limits(), &Cancellation::new()).unwrap();
+        for (path, encoding) in [
+            ("utf8.tt", "utf-8"),
+            ("UTF16LE.TT", "utf-16le"),
+            ("utf16be.tt", "utf-16be"),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert_eq!(input.encoding, encoding);
+            assert_eq!(terminal_tt_content_language(input), Some("erb"));
+        }
+        let invalid = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "invalid.tt")
+            .unwrap();
+        assert_eq!(invalid.encoding, "bytes");
+        assert_eq!(terminal_tt_content_language(invalid), None);
+        for path in ["binary.tt", "with-nul.tt"] {
+            assert!(
+                manifest
+                    .exclusions
+                    .iter()
+                    .any(|entry| entry.path == path && entry.reason == ExclusionReason::Binary)
+            );
+        }
+        assert_eq!(
+            manifest,
+            discover_manifest_streaming(&root, &config(), &policy, limits(), &Cancellation::new())
+                .unwrap()
+        );
     }
 
     #[test]

@@ -405,3 +405,6 @@ third_party/tree-sitter-idris-0.0.1/** -text
 /tests/native-grammars/fixtures/erb/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /crates/rootlight-service/tests/fixtures/ruby_dsl/config.ru -text whitespace=cr-at-eol
 /crates/rootlight-service/tests/fixtures/ruby_dsl/formatted_fragment_cached.xml.builder -text whitespace=cr-at-eol
+/crates/rootlight-service/tests/fixtures/ruby_dsl/view.html.erb.tt -text whitespace=cr-at-eol
+/crates/rootlight-service/tests/fixtures/ruby_dsl/mailer.text.erb.tt -text whitespace=cr-at-eol
+/crates/rootlight-service/tests/fixtures/ruby_dsl/docker-entrypoint.tt -text whitespace=cr-at-eol

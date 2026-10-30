@@ -19495,6 +19495,10 @@ fn source_language_route<'a>(
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    if rootlight_discovery::is_terminal_tt_source(&input.path) {
+        let language = rootlight_discovery::terminal_tt_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     if is_xml_companion_source(&input.path) {
         let language = xml_companion_content_language(input)?;
         return analyzers.contains_key(language).then_some(language);
@@ -19745,6 +19749,9 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
     if let Some(language) = configured.next() {
         return (!configured.any(|other| other.language != language.language))
             .then_some(language.language.as_str());
+    }
+    if rootlight_discovery::is_terminal_tt_source(&input.path) {
+        return rootlight_discovery::terminal_tt_content_language(input);
     }
     if is_xml_companion_source(&input.path) {
         return xml_companion_content_language(input);
@@ -40171,7 +40178,7 @@ mod tests {
     fn discovery_classification_revision_invalidates_provider_identity() {
         let parser = first_slice_parser_provider_hash().unwrap();
         for previous_discovery in [
-            b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79", b"1.83",
+            b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79", b"1.83", b"1.84",
         ] {
             let previous = hash_static_components(&[
                 PROVIDER_SET_SEED,
@@ -46520,6 +46527,306 @@ mod tests {
             actual.sort();
             assert_eq!(actual, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn terminal_tt_original_templates_keep_outer_erb_and_exact_sources() {
+        use rootlight_ir::{ContainerRef, OccurrenceRole};
+
+        let sources = [
+            (
+                "view.html.erb.tt",
+                include_bytes!("../tests/fixtures/ruby_dsl/view.html.erb.tt").as_slice(),
+            ),
+            (
+                "mailer.text.erb.tt",
+                include_bytes!("../tests/fixtures/ruby_dsl/mailer.text.erb.tt").as_slice(),
+            ),
+            (
+                "docker-entrypoint.tt",
+                include_bytes!("../tests/fixtures/ruby_dsl/docker-entrypoint.tt").as_slice(),
+            ),
+        ];
+        let fixture = TempDir::new().unwrap();
+        for (path, raw) in sources {
+            fs::write(fixture.path().join(path), raw).unwrap();
+        }
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let mut service =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        assert_eq!(document.files.len(), 3);
+        assert!(
+            !document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "unsupported-language")
+        );
+        for (path, raw) in sources {
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            assert_eq!(file.language, "erb");
+            assert_eq!(file.content_hash, content_hash(raw));
+            let source = file.evidence.source.as_ref().unwrap();
+            let modules: Vec<_> = document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Module
+                        && entity.language == "erb"
+                        && entity.container == Some(ContainerRef::File(file.id))
+                })
+                .collect();
+            assert_eq!(modules.len(), 1, "{path}");
+            assert_eq!(modules[0].evidence.source.as_ref(), Some(source));
+            let read = service
+                .source_read(receipt.generation, vec![source.clone()], &deadline())
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, raw);
+            assert_eq!(read.data.chunks[0].language, "erb");
+            assert!(!document.occurrences.iter().any(|site| {
+                site.source.span().file() == file.id && site.role == OccurrenceRole::Definition
+            }));
+            let ruby: Vec<_> = document
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.source.span().file() == file.id && site.syntax_kind.starts_with("ruby.")
+                })
+                .collect();
+            if path == "mailer.text.erb.tt" {
+                assert!(ruby.is_empty(), "escaped output never becomes Ruby input");
+            } else {
+                assert!(
+                    !ruby.is_empty(),
+                    "authored ERB code is natively parsed: {path}"
+                );
+            }
+            if path == "view.html.erb.tt" {
+                let greeting = raw
+                    .windows(b"@greeting".len())
+                    .position(|part| part == b"@greeting")
+                    .unwrap();
+                assert!(!ruby.iter().any(|site| {
+                    site.source.span().start_byte() <= u64::try_from(greeting).unwrap()
+                        && site.source.span().end_byte() > u64::try_from(greeting).unwrap()
+                }));
+            }
+        }
+        let inventory = service.support_inventory_snapshot().unwrap();
+        let erb = inventory
+            .languages
+            .iter()
+            .find(|entry| entry.language == "erb")
+            .unwrap();
+        assert_eq!(erb.suffixes, [".erb"]);
+        assert!(erb.detectors.iter().any(|detector| detector == "content"));
+        let original = document
+            .files
+            .iter()
+            .find(|file| file.path == "docker-entrypoint.tt")
+            .unwrap()
+            .evidence
+            .source
+            .clone()
+            .unwrap();
+        assert_eq!(
+            service
+                .index_repository(fixture.path(), &deadline())
+                .unwrap()
+                .generation,
+            receipt.generation
+        );
+        let changed_source = b"#!/bin/bash\n<#@ template language=\"C#\" #>\n<%= value %>\n";
+        fs::write(fixture.path().join("docker-entrypoint.tt"), changed_source).unwrap();
+        let changed = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_ne!(changed.generation, receipt.generation);
+        drop(service);
+        let mut restored =
+            FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+        let snapshot = restored
+            .loaded_generation_snapshot(changed.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == "docker-entrypoint.tt")
+            .unwrap();
+        assert_eq!(file.language, "unknown");
+        assert!(!document.entities.iter().any(|entity| {
+            entity.kind == EntityKind::Module
+                && entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == file.id)
+        }));
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.language == "erb" && entity.kind == EntityKind::Module)
+                .count(),
+            2
+        );
+        let read = restored
+            .source_read(
+                changed.generation,
+                vec![file.evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, changed_source);
+        assert_eq!(read.data.chunks[0].language, "unknown");
+        let original_read = restored
+            .source_read(receipt.generation, vec![original], &deadline())
+            .unwrap();
+        assert_eq!(original_read.data.chunks[0].bytes, sources[2].1);
+        assert_eq!(original_read.data.chunks[0].language, "erb");
+        assert_eq!(
+            restored
+                .index_repository(fixture.path(), &deadline())
+                .unwrap()
+                .generation,
+            changed.generation
+        );
+    }
+
+    #[test]
+    fn terminal_tt_unproven_sources_refuse_payload_routes() {
+        use rootlight_ir::OccurrenceRole;
+
+        let clipped = format!(
+            "<%= item %>\n{}",
+            "x".repeat(rootlight_discovery::MAX_CLASSIFICATION_BYTES)
+        );
+        let sources = [
+            ("shell.tt", b"#!/bin/bash\nprintf 'payload'\n".as_slice()),
+            (
+                "inner.erb.tt",
+                b"#!/usr/bin/env python3\ndef fabricated():\n    return 1\n".as_slice(),
+            ),
+            (
+                "mixed.tt",
+                b"#!/bin/bash\n<#@ template language=\"C#\" #>\n<%= item %>\n".as_slice(),
+            ),
+            ("backup.tt.bak", b"<%= item %>\n".as_slice()),
+            ("unfinished.tt", b"<% unfinished\n".as_slice()),
+            ("clipped.tt", clipped.as_bytes()),
+        ];
+        let fixture = TempDir::new().unwrap();
+        for (path, raw) in sources {
+            fs::write(fixture.path().join(path), raw).unwrap();
+        }
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        assert_eq!(document.files.len(), sources.len());
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Module)
+        );
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Definition)
+        );
+        for (path, raw) in sources {
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            assert_eq!(file.language, "unknown", "{path}");
+            let read = service
+                .source_read(
+                    receipt.generation,
+                    vec![file.evidence.source.clone().unwrap()],
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, raw);
+            assert_eq!(read.data.chunks[0].language, "unknown");
+            assert!(
+                document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "unsupported-language"
+                        && gap.source.span().file() == file.id)
+            );
+        }
+        let raw = include_bytes!("../tests/fixtures/ruby_dsl/docker-entrypoint.tt");
+        let mut input = ManifestInput {
+            file: FileId::from_bytes([3; 20]),
+            path: "docker-entrypoint.tt".to_owned(),
+            content_hash: content_hash(raw),
+            bytes: u64::try_from(raw.len()).unwrap(),
+            encoding: "utf-8".to_owned(),
+            class: InputClass::Source,
+            language_signals: vec![
+                rootlight_discovery::LanguageSignal {
+                    language: "erb".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                },
+                rootlight_discovery::LanguageSignal {
+                    language: "bash".to_owned(),
+                    evidence: LanguageEvidence::Shebang,
+                },
+            ],
+            project_language_witnesses: Vec::new(),
+            decisive_rule: None,
+        };
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("erb").is_some());
+        assert_eq!(detected_source_language(&input), Some("erb"));
+        assert_eq!(source_language_route(&input, &absent), None);
+        input
+            .language_signals
+            .retain(|signal| signal.evidence != LanguageEvidence::Content);
+        assert_eq!(detected_source_language(&input), None);
+        assert_eq!(source_language_route(&input, &service.analyzers), None);
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "ruby".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(detected_source_language(&input), Some("ruby"));
+        assert_eq!(
+            source_language_route(&input, &service.analyzers),
+            Some("ruby")
+        );
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "python".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(detected_source_language(&input), None);
+        assert_eq!(source_language_route(&input, &service.analyzers), None);
     }
 
     #[test]

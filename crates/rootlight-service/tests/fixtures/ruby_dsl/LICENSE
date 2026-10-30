@@ -5,6 +5,12 @@ at commit f39c8aad8ba71f92dd018f339fa4d1696ccb0cd8.
 config.ru: actionmailbox/test/dummy/config.ru
 formatted_fragment_cached.xml.builder:
   actionpack/test/fixtures/functional_caching/formatted_fragment_cached.xml.builder
+view.html.erb.tt:
+  railties/lib/rails/generators/erb/mailer/templates/view.html.erb.tt
+mailer.text.erb.tt:
+  railties/lib/rails/generators/rails/app/templates/app/views/layouts/mailer.text.erb.tt
+docker-entrypoint.tt:
+  railties/lib/rails/generators/rails/app/templates/docker-entrypoint.tt
 The source fixtures preserve the corpus checkout CRLF line endings.
 
 Upstream MIT-LICENSE follows unchanged.
