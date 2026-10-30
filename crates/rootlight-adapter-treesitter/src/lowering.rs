@@ -88,6 +88,7 @@ mod powershell_formals;
 mod prolog_calls;
 mod protobuf;
 mod pug;
+mod pwct;
 mod python_module_functions;
 mod python_module_reads;
 mod python_parameters;
@@ -7973,6 +7974,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
         cancellation: &Cancellation,
         total_string_bytes: &mut usize,
     ) -> Result<EntityPlan, AdapterError> {
+        let pwct_plan = if self.request.language().as_str() == "pwct" {
+            if !self.request.included_ranges().is_empty() {
+                return Err(provider_failure("pwct-complete-source-required"));
+            }
+            Some(pwct::admit(
+                self.coordinates.facts(),
+                self.full_source,
+                self.request.source().bytes(),
+                self.request.limits(),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let nushell = if self.request.language().as_str() == "nu" {
             nushell::Plan::new(
                 self.full_source,
@@ -9408,6 +9423,15 @@ impl<'context, 'source> Lowering<'context, 'source> {
             );
             nearest_entity_ancestor.insert(fact.local_id(), Some(fact.local_id()));
             nearest_scope_ancestor.insert(fact.local_id(), None);
+        }
+        if let Some(plan) = &pwct_plan {
+            pwct::resolve(
+                plan,
+                &mut drafts,
+                total_string_bytes,
+                self.request.limits().ir(),
+                cancellation,
+            )?;
         }
         if self.request.language().as_str() == "toml" {
             toml::resolve(

@@ -16,6 +16,7 @@ mod make;
 mod project_context;
 mod project_semantics;
 mod prolog;
+mod pwct;
 mod runtime_trace;
 mod sass;
 mod scip_export;
@@ -61,6 +62,7 @@ pub use project_semantics::{
     SemanticProjectLanguage,
 };
 pub use prolog::PrologParseProvider;
+pub use pwct::PwctParseProvider;
 pub use runtime_trace::{
     RUNTIME_TRACE_SCHEMA_VERSION, RuntimeTraceImportError, RuntimeTraceImportRequest,
     RuntimeTraceLimits, RuntimeTraceOverlay, RuntimeTraceProvenance, RuntimeTraceRelation,

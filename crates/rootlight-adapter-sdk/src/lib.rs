@@ -20,6 +20,7 @@ mod nix_names;
 mod objective_c_names;
 mod powershell_names;
 mod prolog_names;
+pub mod pwct;
 mod r_names;
 mod report;
 mod request;

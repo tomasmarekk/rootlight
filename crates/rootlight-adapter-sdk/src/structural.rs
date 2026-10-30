@@ -807,6 +807,7 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
                 label,
                 "json.property.declaration"
                     | "ron.property.declaration"
+                    | "pwct.step.declaration"
                     | "jsonc.property.declaration"
                     | "csharp.property.declaration"
                     | "groovy.property.declaration"
@@ -1088,6 +1089,9 @@ pub fn structural_captured_name_for_language<'a>(
     text: &'a str,
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
+    if language == "pwct" {
+        return None;
+    }
     if language == "hcl" {
         return hcl::captured_name(text, maximum_bytes).map(Cow::Borrowed);
     }
@@ -1450,6 +1454,15 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "pwct" {
+        return (fact.kind() == SyntaxFactKind::Occurrence
+            && label == "pwct.step.definition"
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text.bytes().all(|byte| byte.is_ascii_digit())
+            && text.parse::<u64>().is_ok_and(|id| id > 0))
+        .then_some(Cow::Borrowed(text));
+    }
     if language == "ron" && label == "ron.key.definition" {
         // Preserve authored key spelling; decoding RON escapes or constructor
         // interpretation requires a separate source-bound data model.
