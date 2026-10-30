@@ -1,0 +1,341 @@
+{
+  "schema": "rootlight.ron-source-inventory/1",
+  "upstream_files": [
+    {
+      "path": ".eslintrc.js",
+      "mode": "100644",
+      "git_blob": "b2e707a9e7eeb7a6e632d2c6e0a4f67c53924062",
+      "bytes": 400,
+      "sha256": "e2cb5680b08e2e57e9b2864a4ef582567c6a29f65fa3ec42e3a8b0336429f331",
+      "retained_path": "upstream/files/.eslintrc.js"
+    },
+    {
+      "path": ".gitattributes",
+      "mode": "100644",
+      "git_blob": "49e20c96e923aa06d7d02ef4a12f3a55ba78ae87",
+      "bytes": 161,
+      "sha256": "02bc9d68a60ed4f09abdc632ad996deaf97efb52822174120913fe8b03bbb91e",
+      "retained_path": "upstream/files/.gitattributes.upstream"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "git_blob": "cb17c448891f3205c1a0d2d9fd76ee9c21e58c44",
+      "bytes": 631,
+      "sha256": "b50e8021f25940b635ea930bdd4cc985507343c047d5d5d1df140bc150ea6dbf",
+      "retained_path": "upstream/files/.github/workflows/ci.yml"
+    },
+    {
+      "path": ".github/workflows/fuzz.yml",
+      "mode": "100644",
+      "git_blob": "9c9c594b1f254c9a3aa01a9a69f7e961bfb8d9e9",
+      "bytes": 393,
+      "sha256": "4209591167f09b83a5802f933984a3ccab070f2fa14a66fb2d82600be1782f05",
+      "retained_path": "upstream/files/.github/workflows/fuzz.yml"
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "mode": "100644",
+      "git_blob": "27632c9349a928855ba497bff24d9fd3f29e9bf2",
+      "bytes": 1106,
+      "sha256": "e5422e163e9a5f8f583f9b47a5fb30799790592706fdc1e19db03debb401771e",
+      "retained_path": "upstream/files/.github/workflows/publish.yml"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "git_blob": "ec14a9bcfbaf2e5f4f56eb6fcd638203a98d4a8b",
+      "bytes": 81,
+      "sha256": "43fc754139359fd5ad571338b89bd7f207918e8ae40ec2a84c0d6ed305505803",
+      "retained_path": "upstream/files/.gitignore.upstream"
+    },
+    {
+      "path": ".npmignore",
+      "mode": "100644",
+      "git_blob": "822430e96c3b4391016b62d2468e43ffa68ea1a6",
+      "bytes": 34,
+      "sha256": "4577548598b140d422e2b9f4c52423d53912476e52791cd18a95309b0df1c818",
+      "retained_path": "upstream/files/.npmignore.upstream"
+    },
+    {
+      "path": "Cargo.toml",
+      "mode": "100644",
+      "git_blob": "6f09d47a2d46cbac5676ac9a47d0721dd1554db4",
+      "bytes": 658,
+      "sha256": "cc11b478ba8655de3a03e6dee187a08a5b4a965a7956e459f8bfc2aa21c43c68",
+      "retained_path": "upstream/files/Cargo.toml"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "mode": "100644",
+      "git_blob": "1b5ec8b78e237b5c3b3d812a7c0a6589d0f7161d",
+      "bytes": 9723,
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "retained_path": "upstream/files/LICENSE-APACHE"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "mode": "100644",
+      "git_blob": "6b0457324e59a491197b69da1a1fa858bbd0ab86",
+      "bytes": 1140,
+      "sha256": "c6137844f3f63aa4522dfc1cde8dff4f3314ed594ea954a73e3073dcc9d33b11",
+      "retained_path": "upstream/files/LICENSE-MIT"
+    },
+    {
+      "path": "Package.swift",
+      "mode": "100644",
+      "git_blob": "e2344d060748df3f0b21107a33329f432c7f3cc4",
+      "bytes": 1119,
+      "sha256": "cd401ec36326cd91f20791c768c7ad0cbbce5e85f7290a82153aa5e16d39e94f",
+      "retained_path": "upstream/files/Package.swift"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "git_blob": "27f8230899e4a3bf29cc0482a9f7c945136aa5a5",
+      "bytes": 1265,
+      "sha256": "fba598526785230399eab9379d59aefe12a0b0b9ae58184e89c7f90c0cec9dae",
+      "retained_path": "upstream/files/README.md"
+    },
+    {
+      "path": "binding.gyp",
+      "mode": "100644",
+      "git_blob": "94b40f53034a69d0c57a6645d10c03d6d007782d",
+      "bytes": 332,
+      "sha256": "e6b3a1de9f5004e86f7a077b72910d6e5d3cee1f3a6d711b0dbf18c3f27bd2d0",
+      "retained_path": "upstream/files/binding.gyp"
+    },
+    {
+      "path": "bindings/node/binding.cc",
+      "mode": "100644",
+      "git_blob": "1d1b72da18ab0950658b9ee6e0868fc1b0f2ea13",
+      "bytes": 872,
+      "sha256": "4ee6fb1a6d61c82892eda268378a53b0b5ecb92acb95fd51a76fbbacbb866489",
+      "retained_path": "upstream/files/bindings/node/binding.cc"
+    },
+    {
+      "path": "bindings/node/index.js",
+      "mode": "100644",
+      "git_blob": "570d355de87bab01a2889465ae72e68474db51ba",
+      "bytes": 458,
+      "sha256": "bd06e79a1defdc8039a2b6b7fd2a8fec7a4cca6ce9d0ace80f1df24b5f40c77d",
+      "retained_path": "upstream/files/bindings/node/index.js"
+    },
+    {
+      "path": "bindings/rust/README.md",
+      "mode": "100644",
+      "git_blob": "483704086231964ed9815779055e116a51f258de",
+      "bytes": 1252,
+      "sha256": "872400a4f11c859be7239216ec25583162f58dac619cffadf0e0ae874e180383",
+      "retained_path": "upstream/files/bindings/rust/README.md"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "mode": "100644",
+      "git_blob": "8851fed13a68dbdc9664a793811f70fd0a78608e",
+      "bytes": 652,
+      "sha256": "fd420b75712f7437d7fadb6c488a417a3bc268bcf8c7c43185d7db1fab94c614",
+      "retained_path": "upstream/files/bindings/rust/build.rs"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "mode": "100644",
+      "git_blob": "32ce5d96efdba76501ee3a76a5b4be16d0c16f4d",
+      "bytes": 2589,
+      "sha256": "8dea4c938042208b1e0ac494b3bbaa0b8aa0fdf9e13f1759dc63c5e0895e6e79",
+      "retained_path": "upstream/files/bindings/rust/lib.rs"
+    },
+    {
+      "path": "bindings/swift/ron.h",
+      "mode": "100644",
+      "git_blob": "b373a856efabe95715657913a2a6fe7074c30010",
+      "bytes": 231,
+      "sha256": "b87b50c0be3c3001edb685b5c30dbf8199adb560097c3092c870ae063bd6dd1a",
+      "retained_path": "upstream/files/bindings/swift/ron.h"
+    },
+    {
+      "path": "examples/game-config.ron",
+      "mode": "100644",
+      "git_blob": "533980c3433d716b8108019dfbf50d9432082fbc",
+      "bytes": 495,
+      "sha256": "aa1c5e9f213f95934e144d57fd330fae677242d30d48324e9def79d34053b08c",
+      "retained_path": "upstream/files/examples/game-config.ron"
+    },
+    {
+      "path": "examples/struct-0.ron",
+      "mode": "100644",
+      "git_blob": "b81a3606359a29176841f583fd5290e2b4a73de2",
+      "bytes": 300,
+      "sha256": "823bbd7022e0d7669e8ae9bdcda92360c1aa761e84e0b2c436c115ef9c3d6aca",
+      "retained_path": "upstream/files/examples/struct-0.ron"
+    },
+    {
+      "path": "examples/tuple.ron",
+      "mode": "100644",
+      "git_blob": "6ba69f1eb7aad2a419af8b63524bed63318c6fa5",
+      "bytes": 134,
+      "sha256": "5d5ecc7a1eed9901d3411f1580ea1529ae7a621946bc28d83671e1690b964d5c",
+      "retained_path": "upstream/files/examples/tuple.ron"
+    },
+    {
+      "path": "examples/zee-config.ron",
+      "mode": "100644",
+      "git_blob": "7e7f8332791f3619a4a4625f8de951ff277d21ee",
+      "bytes": 737,
+      "sha256": "15afdacab28e566197fe4c12422b6c3b37b585bd127fad2df191f4044682a34f",
+      "retained_path": "upstream/files/examples/zee-config.ron"
+    },
+    {
+      "path": "grammar.js",
+      "mode": "100644",
+      "git_blob": "274053a966aff0912760643611bd39b35a7c7ad7",
+      "bytes": 3674,
+      "sha256": "3b290b7caf6b4fdced4009548d316ec8c566b204ed0bd976e0f8b30d9d4721f8",
+      "retained_path": "upstream/files/grammar.js"
+    },
+    {
+      "path": "package.json",
+      "mode": "100644",
+      "git_blob": "30f49c78c20c19e0267705b40840df54159fcc75",
+      "bytes": 1137,
+      "sha256": "1707ceb9a077f6150f6b7ec5d34de9a52d638a7a44125c7527279235734e9143",
+      "retained_path": "upstream/files/package.json"
+    },
+    {
+      "path": "queries/folds.scm",
+      "mode": "100644",
+      "git_blob": "ae79583ea85377be07ce12fc6c67eb2132f902c8",
+      "bytes": 67,
+      "sha256": "01ca8da54d33a9254d24e9de58dcd63f72ff56ba19e5add0422942d21d76e78b",
+      "retained_path": "upstream/files/queries/folds.scm"
+    },
+    {
+      "path": "queries/highlights.scm",
+      "mode": "100644",
+      "git_blob": "869264305642cd9fe94516635c9bc05542516fa7",
+      "bytes": 662,
+      "sha256": "fc9fc7dcf003158aff23ae4ae1aceab6a7f9a974476b04835a839583273a95f4",
+      "retained_path": "upstream/files/queries/highlights.scm"
+    },
+    {
+      "path": "queries/indents.scm",
+      "mode": "100644",
+      "git_blob": "84701a7e9318f1776c9d46fd13599367580aa0c5",
+      "bytes": 114,
+      "sha256": "6622dbcae773e23820cae20449fcf26dea42d5a2a78938ee18ba7617036e8bc8",
+      "retained_path": "upstream/files/queries/indents.scm"
+    },
+    {
+      "path": "queries/injections.scm",
+      "mode": "100644",
+      "git_blob": "e48ce9af339bbc66e456dd61774c98ee08e42d75",
+      "bytes": 48,
+      "sha256": "6c8d85c2f1f79ead0a09c98f7a7b7219c9e5fa0f1a92d5f401e4e3583690403c",
+      "retained_path": "upstream/files/queries/injections.scm"
+    },
+    {
+      "path": "queries/locals.scm",
+      "mode": "100644",
+      "git_blob": "de90d35fd8ca565060dc07b15ec270821cb601fe",
+      "bytes": 309,
+      "sha256": "2381e004f959ca64548c10611eee35b38979ed8c90759788fbebf193e0cd0653",
+      "retained_path": "upstream/files/queries/locals.scm"
+    },
+    {
+      "path": "script/known_failures.txt",
+      "mode": "100644",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "retained_path": "upstream/files/script/known_failures.txt"
+    },
+    {
+      "path": "script/parse-examples",
+      "mode": "100755",
+      "git_blob": "f3f013d31d9f41b14f991363582eef9469da1853",
+      "bytes": 1022,
+      "sha256": "db98777241364f5d6afa5572c12e0206eb492cd775ebaa883a79bec6e0d0088f",
+      "retained_path": "upstream/files/script/parse-examples"
+    },
+    {
+      "path": "src/grammar.json",
+      "mode": "100644",
+      "git_blob": "77cb811c070b7f37ce3e61a8e952a6c7e7e77ff6",
+      "bytes": 13852,
+      "sha256": "59bda7aad8629c2583d211fcdfa14b5a21a7eea838c6c57454547d89e04f277b",
+      "retained_path": "upstream/files/src/grammar.json"
+    },
+    {
+      "path": "src/node-types.json",
+      "mode": "100644",
+      "git_blob": "07fa2b0ec0c16c9b56bab0e05e0b5222a19b6db6",
+      "bytes": 8442,
+      "sha256": "558797ee8be8fe43e093de54ccfeb0732c098e00d195bd0484ebfdc2a9b6ad5c",
+      "retained_path": "upstream/files/src/node-types.json"
+    },
+    {
+      "path": "src/parser.c",
+      "mode": "100644",
+      "git_blob": "e0a9e5c4cf5cead43a3f3906f5d33d8fe3a1e337",
+      "bytes": 96470,
+      "sha256": "7da2fa169ebeb4e5a0be62feda374536e7bbc8ce031db901613e980d409307f7",
+      "retained_path": "upstream/files/src/parser.c"
+    },
+    {
+      "path": "src/scanner.c",
+      "mode": "100644",
+      "git_blob": "4e2af6d6abd7ecf22364ea847dbca7c17168f71b",
+      "bytes": 5550,
+      "sha256": "5863e811087bcc0c3fa9d975642c4871528fa3655a87b361de56b239769a2985",
+      "retained_path": "upstream/files/src/scanner.c"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "mode": "100644",
+      "git_blob": "1f4466d75c40b6e62728b2de94c82c6398e42151",
+      "bytes": 958,
+      "sha256": "253b44a7b4313a7afd0c505c2fc6e7ce4b8e78955ebf4be3ea000532ec060673",
+      "retained_path": "upstream/files/src/tree_sitter/alloc.h"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "mode": "100644",
+      "git_blob": "15a3b233bbb8760a5d87089b259fe0122da75c8a",
+      "bytes": 10420,
+      "sha256": "4ff743903dc46f5db6aa54f31c6b4d160a8a9779e5b2ab1ee59ae7ebcd850ea1",
+      "retained_path": "upstream/files/src/tree_sitter/array.h"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "mode": "100644",
+      "git_blob": "17f0e94bfcf4d8a54615c24fe61820a18e4d1411",
+      "bytes": 6988,
+      "sha256": "a3eb18ef034b3f4255b965a26caa276f9cfe13a79573b402f1a12dc5018052aa",
+      "retained_path": "upstream/files/src/tree_sitter/parser.h"
+    },
+    {
+      "path": "test/corpus/arrays.txt",
+      "mode": "100644",
+      "git_blob": "c3a33af9a0efdfc74952cbe8ec9c1322fc5f2fa6",
+      "bytes": 1592,
+      "sha256": "c7f0d9c6112ebf7cc350956a8c49ff208cd29a9c4a47d44bea52f80ce32fa875",
+      "retained_path": "upstream/files/test/corpus/arrays.txt"
+    },
+    {
+      "path": "test/corpus/structs.txt",
+      "mode": "100644",
+      "git_blob": "84b4706ce385718093ff19f611e9d119b3acd19d",
+      "bytes": 6271,
+      "sha256": "3bcb5b8cde0e8b7ca3f533bd8db446dd04b09a0605eb765286e86275774a96b1",
+      "retained_path": "upstream/files/test/corpus/structs.txt"
+    },
+    {
+      "path": "test/corpus/tuples.txt",
+      "mode": "100644",
+      "git_blob": "0e1e14e4f84b2e39c4be67e04b762a9fda2815c7",
+      "bytes": 1090,
+      "sha256": "1125ea88799bbf67efb44608202426ea7f128f08d8c8f3fc3e3c0757431c1b20",
+      "retained_path": "upstream/files/test/corpus/tuples.txt"
+    }
+  ]
+}

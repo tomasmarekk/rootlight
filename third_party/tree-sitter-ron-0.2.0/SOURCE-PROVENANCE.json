@@ -1,0 +1,43 @@
+{
+  "schema": "rootlight.ron-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/tree-sitter-grammars/tree-sitter-ron",
+    "revision": "78938553b93075e638035f624973083451b29055",
+    "git_tree": "6e4e80c7619dcbcbbd397ad0f7ea21c80f2fcfb2",
+    "files": 42,
+    "file_bytes": 183429,
+    "all_git_blob_ids_and_executable_modes_verified": true,
+    "lifecycle_executed_during_acquisition": false,
+    "local_signature_verification": false
+  },
+  "license_scope": {
+    "manifest": "MIT",
+    "retained_notices": [
+      "LICENSE-MIT",
+      "LICENSE-APACHE"
+    ],
+    "legal_acceptance_verified": false
+  },
+  "binding": {
+    "local_unpublished": true,
+    "generated_abi": 14,
+    "parser_and_scanner_unchanged": true,
+    "network_or_generator_in_build": false,
+    "build_inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ]
+  },
+  "reversible_metadata_paths": {
+    ".gitattributes": "upstream/files/.gitattributes.upstream",
+    ".gitignore": "upstream/files/.gitignore.upstream",
+    ".npmignore": "upstream/files/.npmignore.upstream"
+  },
+  "native_syntax_limits": [
+    "The generated grammar does not admit RON extension preludes.",
+    "The scanner declares raw_string, but the grammar does not include it among literal values."
+  ]
+}

@@ -370,3 +370,12 @@ source-bound behavioral evidence; a native load test alone does not qualify them
 Discovery/service routing, import resolution, corpus coverage and whole-language
 support remain separate. The distribution notice bundle preserves all four
 retained notices without replacing their individual scope statements.
+
+`third_party/tree-sitter-ron-0.2.0/` retains all 42 original files from the
+separately authenticated RON Git revision, including MIT and Apache notices.
+`SOURCE-INVENTORY.json` records the original blob IDs, Git modes and reversible
+inert metadata paths. The local static binding compiles the unchanged ABI14
+parser and external scanner; upstream generation and lifecycle hooks stay inert.
+Its standalone `Cargo.lock` uses only the existing retained Rust inputs for the
+small native load and edit tests. Production routing, IR, schema interpretation
+and corpus qualification require separate behavioral integration.
