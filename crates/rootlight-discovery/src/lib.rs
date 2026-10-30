@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.90";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.91";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3546,6 +3546,7 @@ fn xml_companion_roots(path: &str) -> Option<&'static [&'static str]> {
         "lvclass" => Some(&["LVClass"]),
         "eant" => Some(&["project"]),
         "ecf" => Some(&["system", "redirection"]),
+        "xlf" => Some(&["xliff"]),
         _ => None,
     }
 }
@@ -9087,6 +9088,7 @@ max_source_file_bytes = 2097152
             ("eant", "project"),
             ("ecf", "system"),
             ("ecf", "redirection"),
+            ("xlf", "xliff"),
         ] {
             for path in [
                 format!("written.{suffix}"),

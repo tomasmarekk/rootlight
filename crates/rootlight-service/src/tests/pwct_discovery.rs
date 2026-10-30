@@ -266,7 +266,7 @@ fn normal_pwct_configuration_and_outer_suffix_respect_binary_exclusion() {
 
 #[test]
 fn pwct_discovery_revision_invalidates_the_previous_unknown_generation_identity() {
-    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.90");
+    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.91");
     let parser = first_slice_parser_provider_hash().unwrap();
     let previous = hash_static_components(&[
         PROVIDER_SET_SEED,

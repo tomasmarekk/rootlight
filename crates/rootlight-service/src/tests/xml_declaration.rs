@@ -4,6 +4,186 @@
 
 use super::*;
 
+#[path = "../../examples/reopen_query/paged_source.rs"]
+mod paged_source;
+
+#[test]
+fn xliff_routing_requires_content_and_preserves_configuration() {
+    let service = FirstSliceService::new(1).unwrap();
+    for path in ["messages.xlf", "MESSAGES.XLF", "messages.xml.xlf"] {
+        let mut input = ManifestInput {
+            file: FileId::from_bytes([9; 20]),
+            path: path.to_owned(),
+            content_hash: content_hash(b"<xliff/>"),
+            bytes: 8,
+            encoding: "utf-8".to_owned(),
+            class: InputClass::Source,
+            language_signals: vec![rootlight_discovery::LanguageSignal {
+                language: "xml".to_owned(),
+                evidence: LanguageEvidence::Extension,
+            }],
+            project_language_witnesses: Vec::new(),
+            decisive_rule: None,
+        };
+        assert_eq!(source_language_route(&input, &service.analyzers), None);
+        input.language_signals[0].evidence = LanguageEvidence::Content;
+        assert_eq!(
+            supported_source_language(&input, &service.analyzers),
+            Some("xml")
+        );
+        let mut absent = service.analyzers.clone();
+        assert!(absent.remove("xml").is_some());
+        assert_eq!(source_language_route(&input, &absent), None);
+        for evidence in [
+            LanguageEvidence::Content,
+            LanguageEvidence::Shebang,
+            LanguageEvidence::Extension,
+        ] {
+            input
+                .language_signals
+                .push(rootlight_discovery::LanguageSignal {
+                    language: "python".to_owned(),
+                    evidence,
+                });
+            assert_eq!(source_language_route(&input, &service.analyzers), None);
+            input.language_signals.pop();
+        }
+        input
+            .language_signals
+            .push(rootlight_discovery::LanguageSignal {
+                language: "json".to_owned(),
+                evidence: LanguageEvidence::Configuration,
+            });
+        assert_eq!(
+            source_language_route(&input, &service.analyzers),
+            Some("json")
+        );
+        input.language_signals.last_mut().unwrap().language = "unavailable-xml-parser".to_owned();
+        assert_eq!(source_language_route(&input, &service.analyzers), None);
+    }
+}
+
+#[test]
+#[ignore = "requires the independently pinned original FSharp XLIFF source list"]
+fn original_xliff_sources_publish_markup_and_exact_bytes_after_reopen() {
+    let list =
+        std::env::var_os("ROOTLIGHT_XLF_SOURCE_LIST").expect("pinned XLIFF source list required");
+    let list = fs::read_to_string(list).unwrap();
+    let repository = durable_test_tempdir();
+    let storage = durable_test_tempdir();
+    let paths =
+        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let mut cases = Vec::new();
+    for (index, original) in list.lines().enumerate() {
+        let bytes = fs::read(original).unwrap();
+        let path = format!("original{index}.xlf");
+        fs::write(repository.path().join(&path), &bytes).unwrap();
+        let start = bytes
+            .windows(b"<xliff ".len())
+            .position(|part| part == b"<xliff ")
+            .unwrap()
+            + 1;
+        cases.push((path, bytes, start));
+    }
+    let expected_files = std::env::var("ROOTLIGHT_XLF_EXPECTED_FILES")
+        .map_or(482, |value| value.parse::<usize>().unwrap());
+    assert!(expected_files > 0);
+    assert_eq!(cases.len(), expected_files);
+    let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+    let receipt = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_eq!(
+        receipt.indexed_files,
+        u64::try_from(expected_files).unwrap()
+    );
+    let assert_originals = |service: &FirstSliceService| {
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let doc = snapshot.document();
+        for (path, bytes, start) in &cases {
+            let file = doc.files.iter().find(|file| file.path == *path).unwrap();
+            assert_eq!(file.language, "xml", "{path}");
+            assert_eq!(file.content_hash, content_hash(bytes), "{path}");
+            let budget = FirstSliceBudget::default();
+            let maximum_page_bytes = budget
+                .query()
+                .max_source_bytes()
+                .min(u64::try_from(budget.source().max_source_bytes).unwrap());
+            let plan = paged_source::SourcePagePlan::new(
+                file.evidence.source.clone().unwrap(),
+                maximum_page_bytes,
+            )
+            .unwrap();
+            let pages = paged_source::read_source_pages(&plan, |reference| {
+                let read = service.source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(rootlight_source::SourceEncoding::Bytes),
+                    budget,
+                    &deadline(),
+                )?;
+                let range = usize::try_from(reference.span().start_byte()).unwrap()
+                    ..usize::try_from(reference.span().end_byte()).unwrap();
+                assert_eq!(read.data.chunks[0].bytes, bytes[range], "{path}");
+                Ok(read)
+            })
+            .unwrap();
+            assert_eq!(pages.page_count(), plan.page_count());
+            let root = doc
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::MarkupElement
+                        && entity.canonical_name == "xliff"
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().file() == file.id)
+                })
+                .unwrap();
+            assert!(
+                doc.occurrences.iter().any(|site| site.role
+                    == rootlight_ir::OccurrenceRole::Definition
+                    && site.source.span().file() == file.id
+                    && site.source.span().start_byte() == u64::try_from(*start).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(*start + 5).unwrap()
+                    && site.target == rootlight_ir::OccurrenceTarget::Resolved { symbol: root.id }),
+                "{path}"
+            );
+        }
+    };
+    assert_originals(&service);
+    assert_eq!(
+        service
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        receipt.generation
+    );
+    drop(service);
+    let mut reopened = FirstSliceService::new_durable(2, paths.state_dir(), &deadline()).unwrap();
+    assert_originals(&reopened);
+    assert_eq!(
+        reopened
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        receipt.generation
+    );
+    println!(
+        "original-xliff\t{}\t{}",
+        cases.len(),
+        cases.iter().map(|(_, bytes, _)| bytes.len()).sum::<usize>()
+    );
+}
+
 fn utf16le(text: &str) -> Vec<u8> {
     std::iter::once(0xfeff_u16)
         .chain(text.encode_utf16())
