@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.87";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.88";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3156,6 +3156,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "pwct",
+        suffixes: &[".pwct"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
     },
     LanguageCapability {
         language: "ron",
@@ -9431,6 +9439,81 @@ max_source_file_bytes = 2097152
         }
         assert_eq!(extension_language("data.ron.json"), Some("json"));
         assert_eq!(extension_language("data.ron.rs"), Some("rust"));
+    }
+
+    #[test]
+    fn pwct_suffix_has_a_distinct_native_capability_without_aliases() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "pwct")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".pwct"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.analyzers, ["native"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(canonical_language("pwct"), Some("pwct"));
+        for path in ["visual.pwct", "VISUAL.PWCT", "visual.ring.pwct"] {
+            assert_eq!(extension_language(path), Some("pwct"));
+        }
+        for path in ["visual.pwctx", "visual.pwct.bak", "visual.pwct/source"] {
+            assert_eq!(extension_language(path), None);
+        }
+        assert_eq!(extension_language("visual.pwct.ring"), Some("ring"));
+        assert_eq!(extension_language("visual.pwct.json"), Some("json"));
+    }
+
+    #[test]
+    fn pwct_configuration_priority_does_not_override_binary_exclusion() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "configured.pwct", b"{\"written\":1}\n");
+        write_fixture(&temporary, "explicit.data", b"visual data\n");
+        write_fixture(&temporary, "binary.pwct", b"%PDF-1.7\nopaque\n");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\ndata='pwct'\n[extensions.source-languages.data.paths]\n'configured.pwct'='json'\n'binary.pwct'='pwct'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"configured-pwct");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let configured = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "configured.pwct")
+            .unwrap();
+        assert!(
+            configured
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "pwct"
+                    && signal.evidence == LanguageEvidence::Extension)
+        );
+        assert!(
+            configured
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "json"
+                    && signal.evidence == LanguageEvidence::Configuration)
+        );
+        let explicit = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "explicit.data")
+            .unwrap();
+        assert!(
+            explicit
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "pwct"
+                    && signal.evidence == LanguageEvidence::Configuration)
+        );
+        assert!(manifest.exclusions.iter().any(|entry| entry.path == "binary.pwct" && entry.reason == ExclusionReason::Binary));
     }
 
     #[test]

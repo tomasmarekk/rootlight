@@ -148,8 +148,8 @@ use rootlight_adapter_treesitter::{
 use rootlight_adapters::{
     AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, FluxParseProvider,
     IniParseProvider, LessParseProvider, MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider,
-    PrologParseProvider, RuntimeTraceImportRequest, SassParseProvider, ScssParseProvider,
-    TclParseProvider, ThinkScriptParseProvider, import_runtime_trace,
+    PrologParseProvider, PwctParseProvider, RuntimeTraceImportRequest, SassParseProvider,
+    ScssParseProvider, TclParseProvider, ThinkScriptParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
@@ -6539,6 +6539,20 @@ impl StructuralPreflight for IniParseProvider {
     }
 }
 
+impl StructuralPreflight for PwctParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        PwctParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for PrologParseProvider {
     fn supports_fresh_source_preservation(&self) -> bool {
         true
@@ -7645,6 +7659,10 @@ impl FirstSliceService {
             IniParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let pwct_parser = Arc::new(
+            PwctParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let prolog_parser = Arc::new(
             PrologParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -7913,6 +7931,25 @@ impl FirstSliceService {
         if structural_parsers
             .insert("ini".to_owned(), ini_parser as Arc<dyn StructuralPreflight>)
             .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let pwct_analyzer = TreeSitterAnalyzer::new(
+            Arc::clone(&pwct_parser) as Arc<dyn ParseProvider>,
+            ProducerIdentity::new("rootlight-first-slice-pwct-native", "1.0", config.hash())
+                .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("pwct").map_err(|_| FirstSliceError::Adapter)?,
+            "pwct-visual-source-1",
+            PwctParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers.insert("pwct".to_owned(), pwct_analyzer).is_some()
+            || structural_parsers
+                .insert(
+                    "pwct".to_owned(),
+                    pwct_parser as Arc<dyn StructuralPreflight>,
+                )
+                .is_some()
         {
             return Err(FirstSliceError::Adapter);
         }
@@ -26968,6 +27005,7 @@ mod tests {
     mod php_written_calls;
     mod prepared_artifacts;
     mod pug_source_preservation;
+    mod pwct_discovery;
     mod python_parameter_bindings;
     mod python_parameters;
     mod qml_routing_tests;
