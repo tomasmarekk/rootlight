@@ -51,6 +51,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "third_party/tree-sitter-typespec-0.0.1",
     "third_party/tree-sitter-ron-0.2.0",
     "third_party/tree-sitter-embedded-template-0.25.0",
     "third_party/tree-sitter-wesl-0.1.0",
@@ -150,6 +151,7 @@ repository = "https://github.com/tomasmarekk/rootlight"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+tree-sitter-typespec = { path = "third_party/tree-sitter-typespec-0.0.1", version = "=0.0.1", default-features = false }
 tree-sitter-ron = { path = "third_party/tree-sitter-ron-0.2.0", version = "=0.2.0", default-features = false }
 tree-sitter-wesl = { path = "third_party/tree-sitter-wesl-0.1.0", version = "=0.1.0", default-features = false }
 tree-sitter-embedded-template = { path = "third_party/tree-sitter-embedded-template-0.25.0", version = "=0.25.0", default-features = false }

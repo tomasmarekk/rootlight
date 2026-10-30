@@ -1,0 +1,87 @@
+{
+  "schema": "rootlight.typespec-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/happenslol/tree-sitter-typespec",
+    "revision": "395bef1e1eb4dd18365401642beb534e8a244056",
+    "git_tree": "7c939da85df9636415cafb195fe041624da8da1a",
+    "archive_url": "https://codeload.github.com/happenslol/tree-sitter-typespec/tar.gz/395bef1e1eb4dd18365401642beb534e8a244056",
+    "archive_sha256": "814bffffd13167f41020520c138f159c35ec7e744540508bec1c321ec97bd2f7",
+    "archive_bytes": 84739,
+    "files": 42,
+    "file_bytes": 1234639,
+    "all_git_blob_ids_and_executable_modes_verified": true,
+    "lifecycle_executed_during_acquisition": false,
+    "local_signature_verification": false
+  },
+  "license_scope": {
+    "manifest": "MIT",
+    "retained_notices": [
+      "LICENSE"
+    ],
+    "legal_acceptance_verified": false
+  },
+  "binding": {
+    "local_unpublished": true,
+    "generated_abi": 15,
+    "generated_with": "tree-sitter 0.25.10",
+    "external_scanner_required": false,
+    "native_sources_unchanged": true,
+    "network_or_generator_in_build": false,
+    "build_inputs": [
+      "src/parser.c",
+      "src/tree_sitter/parser.h"
+    ]
+  },
+  "reversible_metadata_paths": {
+    ".gitattributes": "upstream/files/.gitattributes.upstream",
+    ".gitignore": "upstream/files/.gitignore.upstream"
+  },
+  "active_inputs": {
+    "LICENSE": {
+      "bytes": 1071,
+      "sha256": "ec9f9f3aca84863e4df8c1ebc6218c5fddc9bb59ac39b6a02f7799faa7d143bd"
+    },
+    "grammar.js": {
+      "bytes": 12421,
+      "sha256": "57485af9ac1da932c6f4a4c2299963f5aea9f448a8bb990cb375fcf8e5b681c4"
+    },
+    "tree-sitter.json": {
+      "bytes": 553,
+      "sha256": "1305d39534ee5b83a8bedd196acf5916fdea541336f7ef41b0cf34fd2828ec9d"
+    },
+    "src/parser.c": {
+      "bytes": 1010528,
+      "sha256": "de71c1ecb184561c52cddef077a55bd73ee9ff561b917b6c890c7cf803906f25"
+    },
+    "src/grammar.json": {
+      "bytes": 57813,
+      "sha256": "7fb20e74a6f911fc8837e94140a0463206315ba225386a0c53687224b9ce774b"
+    },
+    "src/node-types.json": {
+      "bytes": 58278,
+      "sha256": "eaf6af91a4fe4ed1a01afb68a8f7f6a8fc1c93dae27a0f70c4a77c9fcf6b7b32"
+    },
+    "src/tree_sitter/parser.h": {
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    },
+    "src/tree_sitter/alloc.h": {
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    "src/tree_sitter/array.h": {
+      "bytes": 10431,
+      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+    }
+  },
+  "corpus_witnesses": [
+    {
+      "repository": "181_TypeSpec_typespec",
+      "path": "packages/http-client-java/generator/http-client-generator-test/tsp/namespace.tsp",
+      "retained_path": "tests/fixtures/namespace.tsp",
+      "bytes": 417,
+      "sha256": "6482663c6a3ffe561e28aaa2dd08455b9354bea829201f7239303c0045a41d5b"
+    }
+  ],
+  "scope": "Static native grammar loading and written syntax tests only; production routing, IR, resolution and corpus qualification remain separate."
+}

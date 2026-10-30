@@ -379,3 +379,13 @@ parser and external scanner; upstream generation and lifecycle hooks stay inert.
 Its standalone `Cargo.lock` uses only the existing retained Rust inputs for the
 small native load and edit tests. Production routing, IR, schema interpretation
 and corpus qualification require separate behavioral integration.
+
+`third_party/tree-sitter-typespec-0.0.1/` retains all 42 original files from
+`happenslol/tree-sitter-typespec` revision
+`395bef1e1eb4dd18365401642beb534e8a244056`, including its MIT notice.
+`SOURCE-INVENTORY.json` preserves the authenticated blob identities, modes and
+inert metadata paths. The local static binding compiles the unchanged ABI15
+parser using the existing retained Rust inputs; upstream generators and lifecycle
+hooks never run during compilation. Its standalone lock and native tests cover
+grammar loading, written declarations and error retention. Production routing,
+normalized ownership, type resolution and corpus qualification remain separate.

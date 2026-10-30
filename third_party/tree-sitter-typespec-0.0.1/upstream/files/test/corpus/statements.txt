@@ -1,0 +1,1356 @@
+============================================
+Comments
+============================================
+
+/*
+Block comment with
+multiple lines
+*/
+
+// Single line comment
+
+// Multiple Single
+// line comments
+
+/* Single line block comment */
+
+---
+
+(source_file
+  (multi_line_comment)
+  (single_line_comment)
+  (single_line_comment)
+  (single_line_comment)
+  (multi_line_comment))
+
+============================================
+Namespaces and identifiers
+============================================
+
+namespace Foo;
+
+namespace Foo.Bar.Baz;
+
+namespace `Foo \` Bar \n Baz`;
+
+namespace Foo {}
+
+namespace Foo {
+  namespace Bar {
+    namespace Baz {}
+  }
+}
+
+---
+
+(source_file
+  (namespace_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier))))
+  (namespace_statement
+    (identifier_or_member_expression
+      (member_expression
+        (identifier
+          (plain_identifier))
+        (identifier
+          (plain_identifier))
+        (identifier
+          (plain_identifier)))))
+  (namespace_statement
+    (identifier_or_member_expression
+      (identifier
+        (backticked_identifier
+          (backticked_identifier_fragment)
+          (escape_sequence)
+          (backticked_identifier_fragment)
+          (escape_sequence)
+          (backticked_identifier_fragment)))))
+  (namespace_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier)))
+    (namespace_body))
+  (namespace_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier)))
+    (namespace_body
+      (namespace_statement
+        (identifier_or_member_expression
+          (identifier
+            (plain_identifier)))
+        (namespace_body
+          (namespace_statement
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))
+            (namespace_body)))))))
+
+============================================
+Imports and using statements
+============================================
+
+import "foo";
+import "bar";
+
+using Foo;
+using Foo.Bar;
+
+---
+
+(source_file
+  (import_statement
+    (quoted_string_literal
+      (quoted_string_fragment)))
+  (import_statement
+    (quoted_string_literal
+      (quoted_string_fragment)))
+  (using_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier))))
+  (using_statement
+    (identifier_or_member_expression
+      (member_expression
+        (identifier
+          (plain_identifier))
+        (identifier
+          (plain_identifier))))))
+
+============================================
+Model heritage
+============================================
+
+model Foo {}
+
+model Foo is A;
+
+model Foo is A.B.C;
+
+model Foo extends A.B.C {}
+
+---
+
+(source_file
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_expression))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (reference_expression
+        (identifier_or_member_expression
+          (identifier
+            (plain_identifier))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (reference_expression
+        (identifier_or_member_expression
+          (member_expression
+            (identifier
+              (plain_identifier))
+            (identifier
+              (plain_identifier))
+            (identifier
+              (plain_identifier)))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_extends_heritage
+      (reference_expression
+        (identifier_or_member_expression
+          (member_expression
+            (identifier
+              (plain_identifier))
+            (identifier
+              (plain_identifier))
+            (identifier
+              (plain_identifier))))))
+    (model_expression)))
+
+============================================
+Expressions
+============================================
+
+model Foo is A | B | C;
+
+model Foo is A & B & C;
+
+model Foo is A[] & valueof B | (C & D.E.F);
+
+model Foo is A<B> & C<D> & E<F>;
+
+model Foo is [A, B, C];
+
+---
+
+(source_file
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (union_expression
+        (union_expression
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (intersection_expression
+        (intersection_expression
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (union_expression
+        (intersection_expression
+          (array_expression
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))))
+          (value_of_expression
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))
+        (parenthesized_expression
+          (intersection_expression
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))
+            (reference_expression
+              (identifier_or_member_expression
+                (member_expression
+                  (identifier
+                    (plain_identifier))
+                  (identifier
+                    (plain_identifier))
+                  (identifier
+                    (plain_identifier))))))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (intersection_expression
+        (intersection_expression
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))
+            (template_arguments
+              (expression_list
+                (reference_expression
+                  (identifier_or_member_expression
+                    (identifier
+                      (plain_identifier)))))))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))
+            (template_arguments
+              (expression_list
+                (reference_expression
+                  (identifier_or_member_expression
+                    (identifier
+                      (plain_identifier))))))))
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))
+          (template_arguments
+            (expression_list
+              (reference_expression
+                (identifier_or_member_expression
+                  (identifier
+                    (plain_identifier))))))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (tuple_expression
+        (expression_list
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))))))
+
+============================================
+Template parameters
+============================================
+
+model Foo<T> {}
+
+model Foo<T, U> {}
+
+model Foo<T = string, U = int32> {}
+
+model Foo<T extends A, U extends B> {}
+
+model Foo<T extends string = string> {}
+
+model Foo is A<T>;
+
+---
+
+(source_file
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (template_parameters
+      (template_parameter_list
+        (template_parameter
+          (identifier
+            (plain_identifier)))))
+    (model_expression))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (template_parameters
+      (template_parameter_list
+        (template_parameter
+          (identifier
+            (plain_identifier)))
+        (template_parameter
+          (identifier
+            (plain_identifier)))))
+    (model_expression))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (template_parameters
+      (template_parameter_list
+        (template_parameter
+          (identifier
+            (plain_identifier))
+          (template_default
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (builtin_type))))))
+        (template_parameter
+          (identifier
+            (plain_identifier))
+          (template_default
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (builtin_type))))))))
+    (model_expression))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (template_parameters
+      (template_parameter_list
+        (template_parameter
+          (identifier
+            (plain_identifier))
+          (template_constraint
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))
+        (template_parameter
+          (identifier
+            (plain_identifier))
+          (template_constraint
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))))
+    (model_expression))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (template_parameters
+      (template_parameter_list
+        (template_parameter
+          (identifier
+            (plain_identifier))
+          (template_constraint
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (builtin_type)))))
+          (template_default
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (builtin_type))))))))
+    (model_expression))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (reference_expression
+        (identifier_or_member_expression
+          (identifier
+            (plain_identifier)))
+        (template_arguments
+          (expression_list
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))))))
+
+============================================
+Models
+============================================
+
+model Foo {
+  a: string
+  b: int32;
+  c: bool,
+}
+
+model Foo {
+  ...Bar;
+  ...Bar.Baz;
+
+  @foo a: string;
+  b?: int32,
+  "c": bool
+  d: A | B
+  e: "literal"
+  f: 123
+}
+
+---
+
+(source_file
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_expression
+      (model_body
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_expression
+      (model_body
+        (model_property
+          (model_spread_property
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))
+        (model_property
+          (model_spread_property
+            (reference_expression
+              (identifier_or_member_expression
+                (member_expression
+                  (identifier
+                    (plain_identifier))
+                  (identifier
+                    (plain_identifier)))))))
+        (model_property
+          (annotation_list
+            (annotation
+              (decorator
+                (identifier_or_member_expression
+                  (identifier
+                    (plain_identifier))))))
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (quoted_string_literal
+            (quoted_string_fragment))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (union_expression
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (quoted_string_literal
+            (quoted_string_fragment)))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (decimal_literal))))))
+
+============================================
+Default values
+============================================
+
+model Dog {
+  address?: string = "wild";
+}
+
+---
+
+(source_file
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_expression
+      (model_body
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type))))
+          (quoted_string_literal
+            (quoted_string_fragment)))))))
+
+============================================
+Scalars
+============================================
+
+scalar Foo;
+
+@foo @bar scalar Foo;
+
+scalar Foo extends string;
+
+---
+
+(source_file
+  (scalar_statement
+    (identifier
+      (plain_identifier)))
+  (scalar_statement
+    (annotation_list
+      (annotation
+        (decorator
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))))
+      (annotation
+        (decorator
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier))))))
+    (identifier
+      (plain_identifier)))
+  (scalar_statement
+    (identifier
+      (plain_identifier))
+    (scalar_extends
+      (reference_expression
+        (identifier_or_member_expression
+          (identifier
+            (builtin_type)))))))
+
+============================================
+Enums
+============================================
+
+enum Foo {
+  ...Bar;
+  ...Bar.Baz;
+
+  A;
+  @foo B: "test",
+  C: 123
+  D,
+}
+
+---
+
+(source_file
+  (enum_statement
+    (identifier
+      (plain_identifier))
+    (enum_body
+      (enum_spread_member
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))))
+      (enum_spread_member
+        (reference_expression
+          (identifier_or_member_expression
+            (member_expression
+              (identifier
+                (plain_identifier))
+              (identifier
+                (plain_identifier))))))
+      (enum_member
+        (identifier
+          (plain_identifier)))
+      (enum_member
+        (annotation_list
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))
+        (identifier
+          (plain_identifier))
+        (enum_member_value
+          (quoted_string_literal
+            (quoted_string_fragment))))
+      (enum_member
+        (identifier
+          (plain_identifier))
+        (enum_member_value
+          (decimal_literal)))
+      (enum_member
+        (identifier
+          (plain_identifier))))))
+
+============================================
+Aliases
+============================================
+
+alias A = B;
+
+alias A<Foo> = B<C>;
+
+---
+
+(source_file
+  (alias_statement
+    (identifier
+      (plain_identifier))
+    (reference_expression
+      (identifier_or_member_expression
+        (identifier
+          (plain_identifier)))))
+  (alias_statement
+    (identifier
+      (plain_identifier))
+    (template_parameters
+      (template_parameter_list
+        (template_parameter
+          (identifier
+            (plain_identifier)))))
+    (reference_expression
+      (identifier_or_member_expression
+        (identifier
+          (plain_identifier)))
+      (template_arguments
+        (expression_list
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))))))
+
+============================================
+Decorator augments
+============================================
+
+@@foo
+
+@@foo("a", "b")
+
+---
+
+(source_file
+  (augment_decorator_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier))))
+  (augment_decorator_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier)))
+    (decorator_arguments
+      (value_list
+        (quoted_string_literal
+          (quoted_string_fragment))
+        (quoted_string_literal
+          (quoted_string_fragment))))))
+
+============================================
+Interfaces and operations
+============================================
+
+op foo(): Foo;
+
+op foo(a: string, b: int32): Foo;
+
+interface Foo {
+  op bar(): Foo;
+  op baz(a: string, b: int32): Foo;
+}
+
+---
+
+(source_file
+  (operation_statement
+    (identifier
+      (plain_identifier))
+    (operation_signature_declaration
+      (operation_arguments)
+      (reference_expression
+        (identifier_or_member_expression
+          (identifier
+            (plain_identifier))))))
+  (operation_statement
+    (identifier
+      (plain_identifier))
+    (operation_signature_declaration
+      (operation_arguments
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type))))))
+      (reference_expression
+        (identifier_or_member_expression
+          (identifier
+            (plain_identifier))))))
+  (interface_statement
+    (identifier
+      (plain_identifier))
+    (interface_body
+      (interface_member
+        (identifier
+          (plain_identifier))
+        (operation_signature_declaration
+          (operation_arguments)
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))))
+      (interface_member
+        (identifier
+          (plain_identifier))
+        (operation_signature_declaration
+          (operation_arguments
+            (model_property
+              (identifier
+                (plain_identifier))
+              (reference_expression
+                (identifier_or_member_expression
+                  (identifier
+                    (builtin_type)))))
+            (model_property
+              (identifier
+                (plain_identifier))
+              (reference_expression
+                (identifier_or_member_expression
+                  (identifier
+                    (builtin_type))))))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))))))
+
+============================================
+Functions
+============================================
+
+extern fn foo(): void;
+
+extern fn foo(a: string, b: int32): void | Error;
+
+---
+
+(source_file
+  (function_declaration_statement
+    (function_modifiers)
+    (identifier
+      (plain_identifier))
+    (function_parameter_list)
+    (type_annotation
+      (reference_expression
+        (identifier_or_member_expression
+          (identifier
+            (builtin_type))))))
+  (function_declaration_statement
+    (function_modifiers)
+    (identifier
+      (plain_identifier))
+    (function_parameter_list
+      (function_parameter
+        (identifier
+          (plain_identifier))
+        (type_annotation
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type))))))
+      (function_parameter
+        (identifier
+          (plain_identifier))
+        (type_annotation
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))))
+    (type_annotation
+      (union_expression
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (builtin_type))))
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier))))))))
+
+============================================
+Playground Example: API versioning
+============================================
+
+import "@typespec/http";
+import "@typespec/rest";
+import "@typespec/versioning";
+
+using Versioning;
+
+@versioned(Versions)
+@service(#{ title: "Widget Service" })
+namespace DemoService;
+
+enum Versions {
+  v1,
+  v2,
+}
+
+using Http;
+using Rest;
+
+model Widget {
+  @key id: string;
+  weight: int32;
+  color: "red" | "blue";
+  @added(Versions.v2) name: string;
+}
+
+@error
+model Error {
+  code: int32;
+  message: string;
+}
+
+interface WidgetService extends Resource.ResourceOperations<Widget, Error> {
+  @added(Versions.v2)
+  @get
+  @route("customGet")
+  customGet(): Widget;
+}
+
+---
+
+(source_file
+  (import_statement
+    (quoted_string_literal
+      (quoted_string_fragment)))
+  (import_statement
+    (quoted_string_literal
+      (quoted_string_fragment)))
+  (import_statement
+    (quoted_string_literal
+      (quoted_string_fragment)))
+  (using_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier))))
+  (namespace_statement
+    (annotation_list
+      (annotation
+        (decorator
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))
+          (decorator_arguments
+            (value_list
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))))))
+      (annotation
+        (decorator
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))
+          (decorator_arguments
+            (value_list
+              (object_value
+                (object_member
+                  (identifier
+                    (plain_identifier))
+                  (quoted_string_literal
+                    (quoted_string_fragment)))))))))
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier))))
+  (enum_statement
+    (identifier
+      (plain_identifier))
+    (enum_body
+      (enum_member
+        (identifier
+          (plain_identifier)))
+      (enum_member
+        (identifier
+          (plain_identifier)))))
+  (using_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier))))
+  (using_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_expression
+      (model_body
+        (model_property
+          (annotation_list
+            (annotation
+              (decorator
+                (identifier_or_member_expression
+                  (identifier
+                    (plain_identifier))))))
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (union_expression
+            (quoted_string_literal
+              (quoted_string_fragment))
+            (quoted_string_literal
+              (quoted_string_fragment))))
+        (model_property
+          (annotation_list
+            (annotation
+              (decorator
+                (identifier_or_member_expression
+                  (identifier
+                    (plain_identifier)))
+                (decorator_arguments
+                  (value_list
+                    (identifier_or_member_expression
+                      (member_expression
+                        (identifier
+                          (plain_identifier))
+                        (identifier
+                          (plain_identifier)))))))))
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type))))))))
+  (model_statement
+    (annotation_list
+      (annotation
+        (decorator
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier))))))
+    (identifier
+      (plain_identifier))
+    (model_expression
+      (model_body
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type)))))
+        (model_property
+          (identifier
+            (plain_identifier))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (builtin_type))))))))
+  (interface_statement
+    (identifier
+      (plain_identifier))
+    (interface_heritage
+      (reference_expression_list
+        (reference_expression
+          (identifier_or_member_expression
+            (member_expression
+              (identifier
+                (plain_identifier))
+              (identifier
+                (plain_identifier))))
+          (template_arguments
+            (expression_list
+              (reference_expression
+                (identifier_or_member_expression
+                  (identifier
+                    (plain_identifier))))
+              (reference_expression
+                (identifier_or_member_expression
+                  (identifier
+                    (plain_identifier)))))))))
+    (interface_body
+      (interface_member
+        (annotation_list
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))
+              (decorator_arguments
+                (value_list
+                  (identifier_or_member_expression
+                    (member_expression
+                      (identifier
+                        (plain_identifier))
+                      (identifier
+                        (plain_identifier))))))))
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))))
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))
+              (decorator_arguments
+                (value_list
+                  (quoted_string_literal
+                    (quoted_string_fragment)))))))
+        (identifier
+          (plain_identifier))
+        (operation_signature_declaration
+          (operation_arguments)
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))))))
+
+============================================
+Union statements
+============================================
+
+union Foo {
+  a;
+  b: c;
+  d: e | f;
+}
+
+union Foo {
+  @foo("bar") (a | b);
+};
+
+---
+
+(source_file
+  (union_statement
+    (identifier
+      (plain_identifier))
+    (union_body
+      (union_variant
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))))
+      (union_variant
+        (identifier
+          (plain_identifier))
+        (reference_expression
+          (identifier_or_member_expression
+            (identifier
+              (plain_identifier)))))
+      (union_variant
+        (identifier
+          (plain_identifier))
+        (union_expression
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier))))))))
+  (union_statement
+    (identifier
+      (plain_identifier))
+    (union_body
+      (union_variant
+        (annotation_list
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))
+              (decorator_arguments
+                (value_list
+                  (quoted_string_literal
+                    (quoted_string_fragment)))))))
+        (parenthesized_expression
+          (union_expression
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))
+            (reference_expression
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))))))
+
+============================================
+Values
+============================================
+
+const someNumber: int32 = 0;
+const value: string | null = null;
+const object = #{ x: 0, y: 0 };
+
+const nestedObject = #{
+  prop1: #{ nested: true },
+};
+
+const objectArray = #[#{ x: 0, y: 0 }, #{ x: 1, y: 1 }];
+
+model Type is typeof object;
+model StringLiteralType is typeof "foo";
+
+---
+
+(source_file
+  (const_statement
+    (identifier
+      (plain_identifier))
+    (type_annotation
+      (reference_expression
+      (identifier_or_member_expression
+        (identifier
+        (builtin_type)))))
+      (decimal_literal))
+  (const_statement
+    (identifier
+      (plain_identifier))
+    (type_annotation
+        (union_expression
+        (reference_expression
+            (identifier_or_member_expression
+            (identifier
+                (builtin_type))))
+        (reference_expression
+            (identifier_or_member_expression
+            (identifier
+                (builtin_type))))))
+    (identifier_or_member_expression
+        (identifier
+        (builtin_type))))
+    (const_statement
+    (identifier
+        (plain_identifier))
+    (object_value
+      (object_member
+        (identifier
+          (plain_identifier))
+        (decimal_literal))
+      (object_member
+        (identifier
+          (plain_identifier))
+        (decimal_literal))))
+  (const_statement
+    (identifier
+      (plain_identifier))
+    (object_value
+      (object_member
+        (identifier
+          (plain_identifier))
+        (object_value
+          (object_member
+            (identifier
+              (plain_identifier))
+            (boolean_literal))))))
+  (const_statement
+    (identifier
+      (plain_identifier))
+    (array_value
+      (object_value
+        (object_member
+          (identifier
+            (plain_identifier))
+          (decimal_literal))
+        (object_member
+          (identifier
+            (plain_identifier))
+          (decimal_literal)))
+      (object_value
+        (object_member
+          (identifier
+            (plain_identifier))
+          (decimal_literal))
+        (object_member
+          (identifier
+            (plain_identifier))
+          (decimal_literal)))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (typeof_expression
+        (identifier_or_member_expression
+          (identifier
+            (plain_identifier))))))
+  (model_statement
+    (identifier
+      (plain_identifier))
+    (model_is_heritage
+      (typeof_expression
+        (quoted_string_literal
+          (quoted_string_fragment))))))
+
+============================================
+Triple quoted strings with quotes inside
+============================================
+
+namespace App {
+  @doc("""
+    some ["doc"]
+    """)
+  @route("/route")
+  @post
+  op route(): Foo;
+}
+
+---
+
+(source_file
+  (namespace_statement
+    (identifier_or_member_expression
+      (identifier
+        (plain_identifier)))
+    (namespace_body
+      (operation_statement
+        (annotation_list
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))
+              (decorator_arguments
+                (value_list
+                  (triple_quoted_string_literal
+                    (triple_quoted_string_fragment)
+                    (triple_quoted_string_fragment)
+                    (triple_quoted_string_fragment)
+                    (triple_quoted_string_fragment)
+                    (triple_quoted_string_fragment))))))
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier)))
+              (decorator_arguments
+                (value_list
+                  (quoted_string_literal
+                    (quoted_string_fragment))))))
+          (annotation
+            (decorator
+              (identifier_or_member_expression
+                (identifier
+                  (plain_identifier))))))
+        (identifier
+          (plain_identifier))
+        (operation_signature_declaration
+          (operation_arguments)
+          (reference_expression
+            (identifier_or_member_expression
+              (identifier
+                (plain_identifier)))))))))
