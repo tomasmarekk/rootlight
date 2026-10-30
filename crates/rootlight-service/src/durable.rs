@@ -6897,56 +6897,83 @@ fn restore_file_only_search(
         let file = verified
             .find_file(file_id)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let metadata_only = if let Some(cause) = aggregate {
-            file.byte_length > cause.text_snapshot_bytes
-        } else {
-            source_projection.is_some_and(|projection| match projection {
-                DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(limit) => {
-                    file.byte_length > limit.snapshot_bytes
-                }
-                _ => false,
-            })
+        let snapshot_limit = aggregate
+            .map(|cause| cause.text_snapshot_bytes)
+            .or_else(|| {
+                source_projection.and_then(|projection| match projection {
+                    DurableLexicalSourceProjection::FullSourceTermsWithSnapshotLimitV2(limit) => {
+                        Some(limit.snapshot_bytes)
+                    }
+                    _ => None,
+                })
+            });
+        let source_only = super::fallback_native::source_only(verified, file);
+        if let Some(limit) = snapshot_limit
+            && file.byte_length > limit
+            && !source_only
+        {
+            return Err(FirstSliceError::ResourceLimit {
+                resource: super::FirstSliceResource::SourceBytes,
+                observed: file.byte_length,
+                limit,
+            });
         };
+        let metadata_only = snapshot_limit.is_some_and(|limit| file.byte_length > limit);
         let snapshot = if metadata_only {
             None
         } else {
             Some(source_reader.read(file, cancellation)?)
         };
-        let document = if metadata_only {
-            rootlight_query::project_source_metadata_document(
-                verified,
-                file.id,
-                budget,
-                cancellation,
-            )
-        } else if let Some(text_limit) = legacy_text_limit {
-            project_source_fallback_document_with_text_limit(
+        let documents = if !source_only {
+            rootlight_query::project_scoped_lexical_documents_with_source(
                 verified,
                 snapshot.as_ref().ok_or(FirstSliceError::CatalogCorrupt)?,
-                text_limit,
                 budget,
                 cancellation,
             )
+            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?
         } else {
-            rootlight_query::project_source_document_with_full_terms(
-                verified,
-                snapshot.as_ref().ok_or(FirstSliceError::CatalogCorrupt)?,
-                budget,
-                cancellation,
-            )
-        }
-        .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
-        partition.push(document);
-        lexical_documents = lexical_documents
-            .checked_add(1)
-            .ok_or(FirstSliceError::Limits)?;
-        if partition.len() == partition_files {
-            builder
-                .push_partition(std::mem::take(&mut partition), cancellation)
-                .map_err(|error| generation_data_error(map_search_error(error, cancellation)))?;
-            partition
-                .try_reserve_exact(partition_files)
-                .map_err(|_| FirstSliceError::Retention)?;
+            let document = if metadata_only {
+                rootlight_query::project_source_metadata_document(
+                    verified,
+                    file.id,
+                    budget,
+                    cancellation,
+                )
+            } else if let Some(text_limit) = legacy_text_limit {
+                project_source_fallback_document_with_text_limit(
+                    verified,
+                    snapshot.as_ref().ok_or(FirstSliceError::CatalogCorrupt)?,
+                    text_limit,
+                    budget,
+                    cancellation,
+                )
+            } else {
+                rootlight_query::project_source_document_with_full_terms(
+                    verified,
+                    snapshot.as_ref().ok_or(FirstSliceError::CatalogCorrupt)?,
+                    budget,
+                    cancellation,
+                )
+            }
+            .map_err(|error| generation_data_error(map_query_error(error, cancellation)))?;
+            vec![document]
+        };
+        for document in documents {
+            partition.push(document);
+            lexical_documents = lexical_documents
+                .checked_add(1)
+                .ok_or(FirstSliceError::Limits)?;
+            if partition.len() == partition_files {
+                builder
+                    .push_partition(std::mem::take(&mut partition), cancellation)
+                    .map_err(|error| {
+                        generation_data_error(map_search_error(error, cancellation))
+                    })?;
+                partition
+                    .try_reserve_exact(partition_files)
+                    .map_err(|_| FirstSliceError::Retention)?;
+            }
         }
     }
     if !partition.is_empty() {

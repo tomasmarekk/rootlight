@@ -5,6 +5,30 @@
 use super::*;
 
 #[test]
+fn bounded_native_batches_invalidate_previous_file_only_generations() {
+    let parser = first_slice_parser_provider_hash().unwrap();
+    let previous = hash_static_components(&[
+        PROVIDER_SET_SEED,
+        parser.as_bytes(),
+        DISCOVERY_MANIFEST_VERSION.as_bytes(),
+        RESOLVER_PROVIDER_VERSION.as_bytes(),
+        RESOLVER_BINARY_SEED,
+        SEARCH_REVISION_SEED,
+        INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+        DERIVED_PLAN_REVISION_SEED,
+        LANGUAGE_DISPOSITION_PROVIDER_SEED,
+        b"rootlight.source-file-fallback/4",
+        container_sources::REVISION,
+    ])
+    .unwrap();
+    assert_eq!(
+        SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+        b"rootlight.source-file-fallback/5"
+    );
+    assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
+}
+
+#[test]
 fn bounded_xml_depth_proofs_invalidate_the_previous_parser_identity() {
     let grammar = first_slice_grammar_revision_hash().unwrap();
     let previous = hash_static_components(&[

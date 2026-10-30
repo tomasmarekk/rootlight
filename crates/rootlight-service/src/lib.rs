@@ -39,6 +39,7 @@ mod eiffel_resolution_contract;
 mod embedded_resolution_tests;
 #[cfg(test)]
 mod extension_admission_observation;
+mod fallback_native;
 #[cfg(test)]
 mod fsharp_native_tests;
 mod fsharp_projects;
@@ -903,7 +904,6 @@ const RECOVERY_SMOKE_QUERY: &str = "__rootlight_startup_recovery_smoke__";
 const SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE: &str = "source-file-fallback-resource-bounded";
 const SOURCE_FILE_FALLBACK_PARTITION_FILES: usize = 4_096;
 const SOURCE_FILE_FALLBACK_ENTRY_MEMORY_BYTES: u64 = 1_024;
-const SOURCE_FILE_FALLBACK_NORMALIZED_FACTS: u64 = 12;
 // Project fallback documents share this allowance while held for refinement.
 // Other files drain sequentially under the same bounded per-file ceiling;
 // their retained generation still obeys aggregate IR and memory admission.
@@ -974,7 +974,7 @@ const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structura
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/155";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/15";
-const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
+const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/5";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
 const PARSER_ARTIFACT_SEED: &str = "rootlight.first-slice.parser-artifact";
@@ -2948,10 +2948,6 @@ fn language_coverage(
     snapshot: &rootlight_storage::GenerationSnapshot,
 ) -> Vec<LanguageCoverageSummary> {
     let document = snapshot.document();
-    let file_only_fallback = document
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE);
     let provenance_tiers: BTreeMap<_, _> = document
         .provenance
         .iter()
@@ -2991,7 +2987,8 @@ fn language_coverage(
             .get(&file.provenance)
             .copied()
             .unwrap_or(AnalysisTier::TierD);
-        let status = if file_only_fallback {
+        let source_only = fallback_native::source_only(snapshot, file);
+        let status = if source_only {
             CoverageStatus::Unknown
         } else {
             coverage_by_file
@@ -3012,7 +3009,7 @@ fn language_coverage(
         entry.tier = lower_analysis_tier(entry.tier, tier);
         entry.status = lower_coverage_status(entry.status, status);
         entry.discovered_files = entry.discovered_files.saturating_add(1);
-        if !file_only_fallback && !unsupported_files.contains(&file.id) {
+        if !source_only && !unsupported_files.contains(&file.id) {
             entry.indexed_files = entry.indexed_files.saturating_add(1);
         }
     };
@@ -3269,6 +3266,7 @@ struct UnsupportedSourceInput {
 }
 
 struct FileOnlyFallbackPreparation<'root> {
+    mode: FirstSliceIndexMode,
     root: &'root RepositoryRoot,
     manifest: DiscoveryManifest,
     source_frame: Option<aggregate_source_recovery::PreparedSourceFrame>,
@@ -9633,6 +9631,7 @@ impl FirstSliceService {
         if file_only_fallback_required && self.durable.is_some() {
             return self.prepare_file_only_fallback(
                 FileOnlyFallbackPreparation {
+                    mode,
                     root: &root,
                     manifest,
                     source_frame: None,
@@ -11493,6 +11492,7 @@ impl FirstSliceService {
                 let streamed_sources = source_frame.captured.clone();
                 self.prepare_file_only_fallback(
                     FileOnlyFallbackPreparation {
+                        mode,
                         root: &root,
                         manifest,
                         source_frame: Some(source_frame),
@@ -11604,6 +11604,7 @@ impl FirstSliceService {
         observe_planning: &mut dyn FnMut(&FirstSliceIndexPlanning) -> Result<(), ObserverError>,
     ) -> Result<FirstSliceIndexPreparation, FirstSlicePreparationError<ObserverError>> {
         let FileOnlyFallbackPreparation {
+            mode,
             root,
             manifest,
             source_frame,
@@ -11682,6 +11683,47 @@ impl FirstSliceService {
                 return Err(FirstSliceError::Identity.into());
             }
         }
+        observe_progress(FirstSliceIndexProgress::observed(
+            FirstSliceIndexStage::Analysis,
+            2,
+            files_examined,
+            bytes_examined,
+            0,
+        ));
+
+        let (mut document, mut source_file_catalog) = source_file_fallback_document_and_entries(
+            repository,
+            generation,
+            &manifest.inputs,
+            file_claims,
+            cancellation,
+        )?;
+        let native_batch = mode == FirstSliceIndexMode::Structural
+            && source_frame.is_none()
+            && aggregate_cause.is_none()
+            && durable_restore_capacity.is_none()
+            && fresh_projection_capacity.is_none();
+        let native_file_bound = if native_batch {
+            source_file_catalog.len().min(MAX_SNAPSHOT_BATCH_FILES).min(
+                self.analysis_limits
+                    .ir()
+                    .max_files
+                    .saturating_sub(document.files.len()),
+            )
+        } else {
+            0
+        };
+        let native_file_bound =
+            u64::try_from(native_file_bound).map_err(|_| FirstSliceError::Limits)?;
+        let initial_facts = u64::try_from(normalized_record_count(&document)?)
+            .map_err(|_| FirstSliceError::Limits)?;
+        let estimated_facts = native_file_bound
+            .checked_mul(
+                u64::try_from(self.analysis_limits.ir_stream().max_records())
+                    .map_err(|_| FirstSliceError::Limits)?,
+            )
+            .and_then(|count| count.checked_add(initial_facts))
+            .ok_or(FirstSliceError::Limits)?;
         let mut incremental_plan = prepare_file_only_incremental_state(
             parent.is_some(),
             reuse_policy,
@@ -11693,27 +11735,29 @@ impl FirstSliceService {
                     .as_ref()
                     .map_or(&[], |frame| frame.derived_fingerprints.as_slice()),
             },
-            SOURCE_FILE_FALLBACK_NORMALIZED_FACTS,
+            estimated_facts,
             estimated_disk_bytes,
             cancellation,
         )?;
+        incremental_plan.planning.estimated_analysis_units = native_file_bound;
         observe_planning(&incremental_plan.planning)
             .map_err(FirstSlicePreparationError::PlanningObserver)?;
-        observe_progress(FirstSliceIndexProgress::observed(
-            FirstSliceIndexStage::Analysis,
-            2,
-            files_examined,
-            bytes_examined,
-            0,
-        ));
-
-        let (mut document, source_file_catalog) = source_file_fallback_document_and_catalog(
-            repository,
-            generation,
-            &manifest.inputs,
-            file_claims,
-            cancellation,
-        )?;
+        let mut parsed_files = 0;
+        if native_batch {
+            let batch = self.append_fallback_native_batch(
+                root,
+                &manifest.inputs,
+                &mut document,
+                source_file_catalog,
+                &mut memory_reservation,
+                &mut reserved_memory_bytes,
+                cancellation,
+            )?;
+            source_file_catalog = batch.catalog;
+            parsed_files = batch.parsed_files;
+        }
+        let source_file_catalog =
+            SourceFileCatalog::new(source_file_catalog).map_err(|_| FirstSliceError::Identity)?;
         if let Some(cause) = durable_restore_capacity {
             if aggregate_cause.is_some()
                 || source_frame
@@ -11744,17 +11788,12 @@ impl FirstSliceService {
                 cancellation,
             )?;
         }
-        let expected_facts = SOURCE_FILE_FALLBACK_NORMALIZED_FACTS
-            .checked_add(if aggregate_cause.is_some() { 2 } else { 0 })
-            .and_then(|count| {
-                count.checked_add(aggregate_cause.map_or(0, |cause| cause.derived_members))
-            })
-            .ok_or(FirstSliceError::Limits)?;
         let normalized_facts = normalized_record_count(&document)?;
-        if u64::try_from(normalized_facts).ok() != Some(expected_facts) {
-            return Err(FirstSliceError::Identity.into());
-        }
-        incremental_plan.state.evidence.rebuilt_normalized_facts = expected_facts;
+        let normalized_facts =
+            u64::try_from(normalized_facts).map_err(|_| FirstSliceError::Limits)?;
+        incremental_plan.state.evidence.parsed_files = parsed_files;
+        incremental_plan.state.evidence.lowered_files = parsed_files;
+        incremental_plan.state.evidence.rebuilt_normalized_facts = normalized_facts;
         incremental_plan.state.evidence.normalized_fact_work =
             normalized_fact_work(&document, &ReusedNormalizedRecords::default(), cancellation)?;
         let mut incremental = incremental_plan.state;
@@ -11993,35 +12032,50 @@ impl FirstSliceService {
                     return Err(FirstSliceError::DiscoveryDrift.into());
                 }
                 source_writer.push(&snapshot)?;
-                let lexical = if aggregate_cause
-                    .is_some_and(|cause| snapshot_bytes > cause.text_snapshot_bytes)
-                {
-                    rootlight_query::project_source_metadata_document(
-                        verified.snapshot(),
-                        file_id,
-                        budget,
-                        cancellation,
-                    )
-                } else {
-                    project_source_document_with_full_terms(
+                let lexical = if !fallback_native::source_only(verified.snapshot(), file) {
+                    project_scoped_lexical_documents_with_source(
                         verified.snapshot(),
                         &snapshot,
                         budget,
                         cancellation,
                     )
-                }
-                .map_err(|error| map_query_error(error, cancellation))?;
-                logical_builder
-                    .push(&LogicalLexicalDocument::from(&lexical))
-                    .map_err(|error| map_incremental_error(error, cancellation))?;
-                partition.push(lexical);
-                if partition.len() == partition_files {
-                    search_builder
-                        .push_partition(std::mem::take(&mut partition), cancellation)
-                        .map_err(|error| map_search_error(error, cancellation))?;
-                    partition
-                        .try_reserve_exact(partition_files)
-                        .map_err(|_| FirstSliceError::Retention)?;
+                    .map_err(|error| map_query_error(error, cancellation))?
+                } else if aggregate_cause
+                    .is_some_and(|cause| snapshot_bytes > cause.text_snapshot_bytes)
+                {
+                    vec![
+                        rootlight_query::project_source_metadata_document(
+                            verified.snapshot(),
+                            file_id,
+                            budget,
+                            cancellation,
+                        )
+                        .map_err(|error| map_query_error(error, cancellation))?,
+                    ]
+                } else {
+                    vec![
+                        project_source_document_with_full_terms(
+                            verified.snapshot(),
+                            &snapshot,
+                            budget,
+                            cancellation,
+                        )
+                        .map_err(|error| map_query_error(error, cancellation))?,
+                    ]
+                };
+                for lexical in lexical {
+                    logical_builder
+                        .push(&LogicalLexicalDocument::from(&lexical))
+                        .map_err(|error| map_incremental_error(error, cancellation))?;
+                    partition.push(lexical);
+                    if partition.len() == partition_files {
+                        search_builder
+                            .push_partition(std::mem::take(&mut partition), cancellation)
+                            .map_err(|error| map_search_error(error, cancellation))?;
+                        partition
+                            .try_reserve_exact(partition_files)
+                            .map_err(|_| FirstSliceError::Retention)?;
+                    }
                 }
                 streamed_files = streamed_files
                     .checked_add(1)
@@ -12066,6 +12120,7 @@ impl FirstSliceService {
         let search = search_builder
             .finish(cancellation)
             .map_err(|error| map_search_error(error, cancellation))?;
+        let lexical_documents = search.document_count();
         let query_component = logical_builder
             .finish()
             .map_err(|error| map_incremental_error(error, cancellation))?;
@@ -12177,8 +12232,9 @@ impl FirstSliceService {
                 })?,
             indexed_files: streamed_files,
             extracted_files: source_frame.as_ref().map_or(0, |frame| frame.derived_files),
-            entities: 0,
-            lexical_documents: streamed_files,
+            entities: u64::try_from(verified.document().entities.len())
+                .map_err(|_| FirstSliceError::Limits)?,
+            lexical_documents,
             oracle_allocated_bytes,
             estimated_disk_bytes,
             retained_durable_bytes: 0,
@@ -16579,11 +16635,7 @@ impl FirstSliceService {
             .iter()
             .find_map(|provenance| (provenance.id == file.provenance).then_some(provenance.tier))
             .ok_or(FirstSliceError::CatalogCorrupt)?;
-        let file_only_fallback = document
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE);
-        let (status, reason) = if file_only_fallback {
+        let (status, reason) = if fallback_native::source_only(snapshot, file) {
             (
                 CoverageStatus::Unknown,
                 Some(FirstSliceSourceCoverageReason::ResourceBounded),
@@ -16764,13 +16816,9 @@ impl FirstSliceService {
                             .is_some_and(|suffix| suffix.starts_with('/'))
                 })
         };
-        let file_only_fallback = document
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == SOURCE_FILE_FALLBACK_DIAGNOSTIC_CODE);
         let mut fallback_counts =
             BTreeMap::<(FirstSliceCoverageGapReason, Option<String>), u64>::new();
-        if file_only_fallback {
+        {
             for file in document.files.iter().chain(
                 snapshot
                     .source_files()
@@ -16779,7 +16827,7 @@ impl FirstSliceService {
                     .map(|entry| entry.file()),
             ) {
                 check_cancellation(cancellation)?;
-                if !in_path_scope(file) {
+                if !in_path_scope(file) || !fallback_native::source_only(snapshot, file) {
                     continue;
                 }
                 increment_evidence_count(
@@ -16804,11 +16852,8 @@ impl FirstSliceService {
             BTreeMap::<(FirstSliceCoverageGapReason, Option<String>), BTreeSet<FileId>>::new();
         // Lexical and generated-source warnings do not explain bounded entity coverage.
         let mut explained_entity_files = BTreeSet::<FileId>::new();
-        let embedded_languages = if file_only_fallback {
-            coverage_languages::SourceLanguageScopes::default()
-        } else {
-            coverage_languages::SourceLanguageScopes::from_snapshot(snapshot, cancellation)?
-        };
+        let embedded_languages =
+            coverage_languages::SourceLanguageScopes::from_snapshot(snapshot, cancellation)?;
         {
             let mut observe = |reason,
                                file: Option<FileId>,
@@ -16844,7 +16889,7 @@ impl FirstSliceService {
                 }
                 Ok(())
             };
-            if !file_only_fallback {
+            {
                 for diagnostic in &document.diagnostics {
                     let file = diagnostic
                         .source
@@ -16921,6 +16966,9 @@ impl FirstSliceService {
                     )?;
                 }
                 for file in &document.files {
+                    if fallback_native::source_only(snapshot, file) {
+                        continue;
+                    }
                     if file.generated
                         && document.coverage_records.iter().any(|coverage| {
                             coverage.scope == CoverageScope::File(file.id)
@@ -16961,7 +17009,7 @@ impl FirstSliceService {
                 }
             }
         }
-        if !file_only_fallback {
+        {
             for coverage in &document.coverage_records {
                 check_cancellation(cancellation)?;
                 let CoverageScope::File(file) = coverage.scope else {
@@ -20447,13 +20495,13 @@ fn unsupported_source_document(
     Ok(document)
 }
 
-fn source_file_fallback_document_and_catalog(
+fn source_file_fallback_document_and_entries(
     repository: RepositoryId,
     generation: GenerationId,
     inputs: &[ManifestInput],
     mut claims: Vec<FileIdentityClaim>,
     cancellation: &Cancellation,
-) -> Result<(NormalizedIrDocument, SourceFileCatalog), FirstSliceError> {
+) -> Result<(NormalizedIrDocument, Vec<SourceFileCatalogEntry>), FirstSliceError> {
     check_cancellation(cancellation)?;
     if inputs.is_empty() || inputs.len() != claims.len() {
         return Err(FirstSliceError::Identity);
@@ -20624,8 +20672,7 @@ fn source_file_fallback_document_and_catalog(
         catalog_entries
             .push(SourceFileCatalogEntry::new(file, claim).map_err(|_| FirstSliceError::Identity)?);
     }
-    let catalog = SourceFileCatalog::new(catalog_entries).map_err(|_| FirstSliceError::Identity)?;
-    Ok((document, catalog))
+    Ok((document, catalog_entries))
 }
 
 fn source_file_fallback_record(

@@ -2190,3 +2190,382 @@ fn generated_physical_occurrence_capacity_preserves_ordinary_neighbors_and_exact
 fn generated_physical_string_capacity_preserves_ordinary_neighbors_and_exact_source() {
     preserve_physical_capacity_case("string_bytes", true);
 }
+
+fn assert_native_batch(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    sources: &BTreeMap<String, Vec<u8>>,
+) -> BTreeSet<SymbolId> {
+    let lease = service
+        .generation_lease(receipt.generation, &deadline())
+        .unwrap();
+    let snapshot = lease.generation();
+    let document = snapshot.document();
+    assert_eq!(snapshot.file_count(), sources.len());
+    assert!(
+        !document.entities.is_empty(),
+        "capacity fallback must retain genuine native facts"
+    );
+    assert_eq!(
+        receipt.entities,
+        u64::try_from(document.entities.len()).unwrap()
+    );
+    assert_eq!(document.files.len(), 6);
+    assert_eq!(snapshot.source_files().len(), sources.len() - 6);
+    assert!(
+        document
+            .files
+            .iter()
+            .all(|file| snapshot.source_files().find(file.id).is_none())
+    );
+    let evidence = service.incremental_evidence(receipt.generation).unwrap();
+    assert_eq!(evidence.lowered_files, 5);
+    assert_eq!(evidence.parsed_files, 5);
+    assert_eq!(
+        evidence.rebuilt_normalized_facts,
+        u64::try_from(normalized_record_count(document).unwrap()).unwrap()
+    );
+    assert_eq!(evidence.reused_normalized_facts, 0);
+    for language in ["rust", "css", "lua"] {
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.language == language && entity.kind != EntityKind::Module),
+            "{language} has native declarations"
+        );
+        let files: BTreeSet<_> = document
+            .files
+            .iter()
+            .filter(|file| {
+                file.language == language && !crate::fallback_native::source_only(snapshot, file)
+            })
+            .map(|file| file.id)
+            .collect();
+        assert!(
+            document.occurrences.iter().any(|occurrence| {
+                occurrence.role == rootlight_ir::OccurrenceRole::Definition
+                    && files.contains(&occurrence.source.span().file())
+            }),
+            "{language} has genuine definition occurrences"
+        );
+        if language != "css" {
+            assert!(
+                document.occurrences.iter().any(|occurrence| {
+                    !matches!(
+                        occurrence.role,
+                        rootlight_ir::OccurrenceRole::Definition
+                            | rootlight_ir::OccurrenceRole::Declaration
+                    ) && files.contains(&occurrence.source.span().file())
+                }),
+                "{language} retains written references"
+            );
+        }
+    }
+    let mut source_only = 0_u64;
+    for (path, bytes) in sources {
+        let reference = assert_exact(service, receipt, path, bytes);
+        let file = snapshot.find_file(reference.span().file()).unwrap();
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, file.id, &deadline())
+            .unwrap();
+        if crate::fallback_native::source_only(snapshot, file) {
+            source_only += 1;
+            assert_eq!(coverage.status, CoverageStatus::Unknown);
+            assert_eq!(
+                coverage.reason,
+                Some(FirstSliceSourceCoverageReason::ResourceBounded)
+            );
+        } else {
+            assert_ne!(coverage.status, CoverageStatus::Unknown, "{path}");
+            assert_eq!(coverage.reason, None, "{path}");
+        }
+    }
+    assert_eq!(source_only, 3);
+    let projection = service
+        .generation_language_coverage_until(receipt.repository, receipt.generation, &deadline())
+        .unwrap()
+        .unwrap();
+    assert!(
+        projection
+            .iter()
+            .any(|row| row.status != CoverageStatus::Unknown)
+    );
+    assert_eq!(
+        language_coverage(snapshot)
+            .iter()
+            .map(|row| row.indexed_files)
+            .sum::<u64>(),
+        5
+    );
+    let gaps = service
+        .coverage_gap_summary_until(receipt.repository, receipt.generation, &[], &deadline())
+        .unwrap();
+    assert!(gaps.skipped_inputs >= source_only);
+    for entity in document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Function)
+    {
+        let located = service
+            .code_locate(
+                receipt.generation,
+                entity.canonical_name.clone(),
+                LocateMode::Exact,
+                20,
+                0,
+                &deadline(),
+            )
+            .unwrap();
+        assert!(
+            located
+                .data
+                .hits
+                .iter()
+                .any(|hit| hit.symbol == Some(entity.id)),
+            "native symbols must be in the persistent lexical projection"
+        );
+    }
+    document.entities.iter().map(|entity| entity.id).collect()
+}
+
+#[test]
+fn inventory_capacity_retains_one_native_batch_and_unknown_remainder_through_reopen() {
+    let (_storage, paths) = paths();
+    let root = durable_test_tempdir();
+    let mut sources = BTreeMap::new();
+    for suffix in ["a", "b"] {
+        sources.insert(format!("rust_{suffix}.rs"), format!("pub fn capacity_rust_{suffix}() -> u8 {{ 1 }}\npub fn caller_{suffix}() -> u8 {{ capacity_rust_{suffix}() }}\n").into_bytes());
+        sources.insert(format!("style_{suffix}.css"), format!(".capacity_css_{suffix} {{ --accent-{suffix}: red; color: var(--accent-{suffix}); }}\n").into_bytes());
+        sources.insert(format!("script_{suffix}.lua"), format!("local function capacity_lua_{suffix}(value)\n return value()\nend\nreturn capacity_lua_{suffix}(function() return 1 end)\n").into_bytes());
+        sources.insert(
+            format!("unknown_{suffix}.unrecognized"),
+            format!("exactUnknown{suffix}\n").into_bytes(),
+        );
+    }
+    for (path, bytes) in &sources {
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let mut limits = service.analysis_limits.ir().clone();
+    limits.max_files = 6;
+    replace_service_ir_limits(&mut service, limits.clone());
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let symbols = assert_native_batch(&service, &receipt, &sources);
+    assert_eq!(
+        service.index_repository(root.path(), &deadline()).unwrap(),
+        receipt
+    );
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let changed_path = snapshot
+        .document()
+        .files
+        .iter()
+        .find(|file| {
+            file.language == "rust" && !crate::fallback_native::source_only(&snapshot, file)
+        })
+        .unwrap()
+        .path
+        .clone();
+    sources
+        .get_mut(&changed_path)
+        .unwrap()
+        .extend_from_slice(b"\n");
+    fs::write(root.path().join(&changed_path), &sources[&changed_path]).unwrap();
+    let successor = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_ne!(successor.generation, receipt.generation);
+    assert_eq!(successor.parent, Some(receipt.generation));
+    assert_eq!(assert_native_batch(&service, &successor, &sources), symbols);
+    let mut old_sources = sources.clone();
+    old_sources.get_mut(&changed_path).unwrap().pop();
+    assert_native_batch(&service, &receipt, &old_sources);
+    drop(service);
+    for path in sources.keys() {
+        fs::remove_file(root.path().join(path)).unwrap();
+    }
+    let mut restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    replace_service_ir_limits(&mut restored, limits);
+    assert_eq!(
+        assert_native_batch(&restored, &receipt, &old_sources),
+        symbols
+    );
+    assert_eq!(
+        assert_native_batch(&restored, &successor, &sources),
+        symbols
+    );
+}
+
+#[test]
+fn inventory_capacity_legacy_snapshot_limit_keeps_captured_source_unknown_after_reopen() {
+    let (_storage, paths) = paths();
+    let root = durable_test_tempdir();
+    let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+        source: rootlight_config::ConfigSource::User,
+        contents: "version = \"1.0\"\n[resources]\nmax_source_bytes = 64\n",
+    }])
+    .unwrap();
+    let policy = FirstSliceStoragePolicy::from_config(config, 4);
+    let mut sources = BTreeMap::from([
+        ("small.rs", b"fn native_small() {}\n".to_vec()),
+        ("small.css", b".native_small {color:red}\n".to_vec()),
+        ("small.lua", b"local native_small = 1\n".to_vec()),
+        ("unknown.unrecognized", b"unknownExact\n".to_vec()),
+    ]);
+    let mut large = vec![b' '; 128];
+    large.extend_from_slice(b"fn captured_stays_unknown() {}\n");
+    sources.insert("large.rs", large);
+    for (path, bytes) in &sources {
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let mut service =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    assert_eq!(
+        DiscoveryLimits::from_config(&service.config).max_file_bytes,
+        64
+    );
+    assert!(service.analysis_limits.max_source_bytes() > 64);
+    let mut limits = service.analysis_limits.ir().clone();
+    limits.max_files = 3;
+    replace_service_ir_limits(&mut service, limits);
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    assert!(receipt.entities > 0);
+    assert_eq!(
+        service.index_repository(root.path(), &deadline()).unwrap(),
+        receipt
+    );
+    drop(service);
+    for path in sources.keys() {
+        fs::remove_file(root.path().join(path)).unwrap();
+    }
+    let restored =
+        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+    let lease = restored
+        .generation_lease(receipt.generation, &deadline())
+        .unwrap();
+    let snapshot = lease.generation();
+    assert_eq!(snapshot.file_count(), sources.len());
+    assert_eq!(
+        u64::try_from(snapshot.document().entities.len()).unwrap(),
+        receipt.entities
+    );
+    for (path, bytes) in &sources {
+        let file = snapshot
+            .document()
+            .files
+            .iter()
+            .chain(
+                snapshot
+                    .source_files()
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.file()),
+            )
+            .find(|file| file.path == *path)
+            .unwrap();
+        let mut actual = Vec::new();
+        for offset in (0..bytes.len()).step_by(32) {
+            let reference = SourceRef::new(
+                receipt.repository,
+                receipt.generation,
+                SourceSpan::new(
+                    file.id,
+                    u64::try_from(offset).unwrap(),
+                    u64::try_from(bytes.len().min(offset + 32)).unwrap(),
+                )
+                .unwrap(),
+                file.content_hash,
+                None,
+            );
+            let read = restored
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    FirstSliceBudget::default(),
+                    &deadline(),
+                )
+                .unwrap();
+            actual.extend_from_slice(&read.data.chunks[0].bytes);
+        }
+        assert_eq!(&actual, bytes);
+        if *path == "large.rs" {
+            assert!(crate::fallback_native::source_only(snapshot, file));
+            let coverage = restored
+                .source_file_coverage_until(receipt.generation, file.id, &deadline())
+                .unwrap();
+            assert_eq!(coverage.status, CoverageStatus::Unknown);
+            assert_eq!(
+                coverage.reason,
+                Some(FirstSliceSourceCoverageReason::ResourceBounded)
+            );
+            assert!(!snapshot.document().entities.iter().any(|entity| {
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == file.id)
+            }));
+        }
+    }
+}
+
+#[test]
+fn inventory_capacity_refused_native_append_retains_catalog_and_actual_work() {
+    let (_storage, paths) = paths();
+    let root = durable_test_tempdir();
+    let sources = BTreeMap::from([
+        ("first.rs", b"pub fn first() {}\n".to_vec()),
+        ("second.rs", b"pub fn second() {}\n".to_vec()),
+        ("third.rs", b"pub fn third() {}\n".to_vec()),
+        ("unknown.unrecognized", b"exactUnknown\n".to_vec()),
+    ]);
+    for (path, bytes) in &sources {
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let single = individual(&service, "first.rs", sources["first.rs"].clone(), "utf-8");
+    let mut limits = service.analysis_limits.ir().clone();
+    limits.max_files = 3;
+    limits.max_entities = single.entities.len();
+    replace_service_ir_limits(&mut service, limits);
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let lease = service
+        .generation_lease(receipt.generation, &deadline())
+        .unwrap();
+    let snapshot = lease.generation();
+    assert_eq!(snapshot.file_count(), 4);
+    assert_eq!(snapshot.document().entities.len(), single.entities.len());
+    assert_eq!(snapshot.document().files.len(), 2);
+    assert_eq!(snapshot.source_files().len(), 2);
+    let evidence = service.incremental_evidence(receipt.generation).unwrap();
+    assert_eq!(
+        evidence.parsed_files, 2,
+        "both captured artifacts were actually produced"
+    );
+    assert_eq!(
+        evidence.lowered_files, 2,
+        "both native fragments were lowered before combined admission"
+    );
+    assert_eq!(
+        evidence.rebuilt_normalized_facts,
+        u64::try_from(normalized_record_count(snapshot.document()).unwrap()).unwrap()
+    );
+    let mut unknown = 0;
+    for (path, bytes) in &sources {
+        let reference = assert_exact(&service, &receipt, path, bytes);
+        let coverage = service
+            .source_file_coverage_until(receipt.generation, reference.span().file(), &deadline())
+            .unwrap();
+        if coverage.reason == Some(FirstSliceSourceCoverageReason::ResourceBounded) {
+            unknown += 1;
+            assert_eq!(coverage.status, CoverageStatus::Unknown);
+        }
+    }
+    assert_eq!(unknown, 3);
+}
