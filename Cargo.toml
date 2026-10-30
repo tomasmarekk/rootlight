@@ -51,6 +51,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "third_party/tree-sitter-turtle-0.2.0",
     "third_party/tree-sitter-typespec-0.0.1",
     "third_party/tree-sitter-ron-0.2.0",
     "third_party/tree-sitter-embedded-template-0.25.0",

@@ -1,0 +1,23 @@
+# Local static binding; original manifests remain inert under upstream/files/.
+[package]
+name = "tree-sitter-turtle"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/GordianDziwis/tree-sitter-turtle"
+description = "Pinned Turtle grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = "=0.26.11"

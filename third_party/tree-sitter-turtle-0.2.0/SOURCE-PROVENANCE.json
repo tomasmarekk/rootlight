@@ -1,0 +1,51 @@
+{
+  "schema": "rootlight.turtle-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/GordianDziwis/tree-sitter-turtle",
+    "revision": "7f789ea7ef765080f71a298fc96b7c957fa24422",
+    "git_tree": "99219111971176537be3280e6a8c1665a59f4663",
+    "package_version": "0.2.0",
+    "rust_manifest_version": "0.0.1",
+    "files": 43,
+    "file_bytes": 267643,
+    "all_git_blob_ids_and_executable_modes_verified": true,
+    "lifecycle_executed_during_acquisition": false,
+    "local_signature_verification": false,
+    "archive": {
+      "path": "upstream/source.tar.gz",
+      "source_url": "https://codeload.github.com/GordianDziwis/tree-sitter-turtle/tar.gz/7f789ea7ef765080f71a298fc96b7c957fa24422",
+      "bytes": 34479,
+      "sha256": "119dd456a7d530bc85f2c7ebee731ce7572d65825332bb45a9d20ff4c31952b2"
+    }
+  },
+  "license_scope": {
+    "manifest": "MIT",
+    "retained_notices": [
+      "LICENSE"
+    ],
+    "legal_acceptance_verified": false
+  },
+  "binding": {
+    "local_unpublished": true,
+    "package_version_basis": "The pinned Node grammar manifest declares 0.2.0; the original Rust manifest remains unchanged under upstream/files.",
+    "generated_abi": 14,
+    "parser_unchanged": true,
+    "external_scanner": false,
+    "network_or_generator_in_build": false,
+    "build_inputs": [
+      "src/parser.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ]
+  },
+  "reversible_metadata_paths": {
+    ".gitattributes": "upstream/files/.gitattributes.upstream",
+    ".gitignore": "upstream/files/.gitignore.upstream",
+    ".npmignore": "upstream/files/.npmignore.upstream"
+  },
+  "native_syntax_scope": [
+    "The retained grammar admits Turtle triples and directives and TriG graph blocks.",
+    "This native intake does not establish N3 formula/implication parsing, RDF inference, external IRI resolution or production indexing."
+  ]
+}
