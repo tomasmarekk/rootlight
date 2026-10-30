@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod xml;
+
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const BASE64URL_ALPHABET: &[u8; 64] =

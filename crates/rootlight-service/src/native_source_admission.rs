@@ -1,18 +1,18 @@
-//! Native-origin work refusals preserve a complete file without syntax claims.
+//! Native source-admission refusals preserve a complete file without syntax claims.
 //! Certificates are admitted only for the service's default Structural policy;
 //! source owners and all authenticated origin mappings survive normal sealing.
 
 use super::*;
 use rootlight_adapter_treesitter::{
-    NativeIdentityRefusal, NativeIdentityWorkLimit, NativeScannerRefusal,
+    NativeIdentityRefusal, NativeIdentityWorkLimit, NativeScannerRefusal, NativeXmlEncodingRefusal,
 };
 
-// Share source-document admission without changing the public Match certificate.
-// The new query refusal remains an independently issued opaque native proof.
+// Source publication is shared, while each refusal retains its own opaque proof.
 pub(super) enum NativeSourceRefusal {
     Match(NativeIdentityWorkLimit),
     Query(NativeIdentityRefusal),
     Scanner(NativeScannerRefusal),
+    XmlEncoding(NativeXmlEncodingRefusal),
 }
 
 impl NativeSourceRefusal {
@@ -21,6 +21,7 @@ impl NativeSourceRefusal {
             Self::Match(proof) => proof.matches_source(source, language, encoding),
             Self::Query(proof) => proof.matches_source(source, language, encoding),
             Self::Scanner(proof) => proof.matches_source(source, language, encoding),
+            Self::XmlEncoding(proof) => proof.matches_source(source, language, encoding),
         }
     }
 
@@ -35,6 +36,9 @@ impl NativeSourceRefusal {
             },
             Self::Scanner(proof) => UnsupportedSourceDisposition::NativeScannerRefusal {
                 details: proof.details(),
+            },
+            Self::XmlEncoding(proof) => UnsupportedSourceDisposition::XmlEncodingDeclaration {
+                reason: proof.reason(),
             },
         }
     }
@@ -64,7 +68,8 @@ pub(super) fn certify(
                 ..
             })
         ) || NativeIdentityRefusal::recognizes_error(original)
-            || NativeScannerRefusal::recognizes_error(original))
+            || NativeScannerRefusal::recognizes_error(original)
+            || NativeXmlEncodingRefusal::recognizes_error(original))
         || !analyzer.uses_parse_provider(parser)
     {
         return Ok(None);
@@ -74,6 +79,26 @@ pub(super) fn certify(
     };
     if *limits != defaults {
         return Ok(None);
+    }
+    if NativeXmlEncodingRefusal::recognizes_error(original) {
+        let proof = parser.certify_native_xml_encoding_refusal(request, cancellation)?;
+        cancellation.check()?;
+        return match proof {
+            Some(proof)
+                if parser.owns_native_xml_encoding_refusal(&proof)
+                    && proof.matches_request(request)
+                    && proof.matches_error(original) =>
+            {
+                Ok(Some(NativeSourceRefusal::XmlEncoding(proof)))
+            }
+            Some(_) => Err(AdapterError::ProviderFailed {
+                code: rootlight_adapter_sdk::DiagnosticCode::new(
+                    "native-xml-encoding-certificate-mismatch",
+                )
+                .expect("static diagnostic is valid"),
+            }),
+            None => Ok(None),
+        };
     }
     if NativeScannerRefusal::recognizes_error(original) {
         let proof = parser.certify_native_scanner_refusal(request, cancellation)?;

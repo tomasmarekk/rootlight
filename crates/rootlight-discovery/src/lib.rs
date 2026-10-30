@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.88";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.89";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1544,12 +1544,19 @@ impl<'a> DiscoveryState<'a> {
             },
             |prefix| prefix.as_bytes(),
         );
-        let (class, mut language_signals) = classify_validated_prefix(
+        let (class, mut language_signals) = classify_with_text_evidence(
             &path,
             content,
             classification.prefix_truncated,
             classification.decoded_prefix.is_some(),
             matches!(classification.encoding, "utf-8" | "utf-16le" | "utf-16be"),
+            validated_text_evidence(
+                &path,
+                classification.encoding,
+                (u64::try_from(source.prefix.len()).ok() == Some(observed.length))
+                    .then_some(source.prefix.as_slice()),
+                self.cancellation,
+            )?,
         );
         if let Some(language) = self.config.source_language_for_path(path.as_str()) {
             language_signals.push(LanguageSignal {
@@ -1655,7 +1662,7 @@ impl<'a> DiscoveryState<'a> {
                 .as_ref()
                 .map_or(snapshot.content(), |prefix| prefix.as_bytes())
         };
-        let (class, mut language_signals) = classify_validated_prefix(
+        let (class, mut language_signals) = classify_with_text_evidence(
             &path,
             if container_format.is_some() {
                 b""
@@ -1665,6 +1672,12 @@ impl<'a> DiscoveryState<'a> {
             classification.prefix_truncated,
             classification.decoded_prefix.is_some(),
             matches!(classification.encoding, "utf-8" | "utf-16le" | "utf-16be"),
+            validated_text_evidence(
+                &path,
+                classification.encoding,
+                Some(snapshot.content()),
+                self.cancellation,
+            )?,
         );
         if let Some(format) = container_format {
             language_signals.clear();
@@ -2001,12 +2014,22 @@ fn read_directory_with_entry_budget(
 
 #[cfg(test)]
 fn classify(path: &RelativePath, content: &[u8]) -> (InputClass, Vec<LanguageSignal>) {
-    classify_validated_prefix(
+    classify_with_text_evidence(
         path,
         content,
         content.len() > MAX_CLASSIFICATION_BYTES,
         false,
         std::str::from_utf8(content).is_ok(),
+        std::str::from_utf8(content)
+            .ok()
+            .map(|_| ValidatedTextEvidence {
+                physical: rootlight_encoding::xml::PhysicalEncoding::Utf8,
+                complete_ascii: if content.is_ascii() {
+                    rootlight_encoding::xml::CompleteAscii::Proven
+                } else {
+                    rootlight_encoding::xml::CompleteAscii::Unproven
+                },
+            }),
     )
 }
 
@@ -2017,21 +2040,50 @@ fn classify_prefix(
     prefix_truncated: bool,
     decoded_prefix: bool,
 ) -> (InputClass, Vec<LanguageSignal>) {
-    classify_validated_prefix(
+    classify_with_text_evidence(
         path,
         content,
         prefix_truncated,
         decoded_prefix,
         !prefix_truncated && std::str::from_utf8(content).is_ok(),
+        (!prefix_truncated && std::str::from_utf8(content).is_ok()).then(|| {
+            ValidatedTextEvidence {
+                physical: rootlight_encoding::xml::PhysicalEncoding::Utf8,
+                complete_ascii: if content.is_ascii() {
+                    rootlight_encoding::xml::CompleteAscii::Proven
+                } else {
+                    rootlight_encoding::xml::CompleteAscii::Unproven
+                },
+            }
+        }),
     )
 }
 
+#[cfg(test)]
 fn classify_validated_prefix(
     path: &RelativePath,
     content: &[u8],
     prefix_truncated: bool,
     decoded_prefix: bool,
     validated_text: bool,
+) -> (InputClass, Vec<LanguageSignal>) {
+    classify_with_text_evidence(
+        path,
+        content,
+        prefix_truncated,
+        decoded_prefix,
+        validated_text,
+        None,
+    )
+}
+
+fn classify_with_text_evidence(
+    path: &RelativePath,
+    content: &[u8],
+    prefix_truncated: bool,
+    decoded_prefix: bool,
+    validated_text: bool,
+    text_evidence: Option<ValidatedTextEvidence>,
 ) -> (InputClass, Vec<LanguageSignal>) {
     let normalized = path.as_str().to_ascii_lowercase();
     let class = if generated_path(&normalized) || generated_content(content) {
@@ -2118,7 +2170,9 @@ fn classify_validated_prefix(
     // A complete JSON object has no executable header outside its strings.
     // Generic code hints must not mine schema annotations or example payloads.
     let content_hint = if let Some(roots) = xml_companion_roots(&normalized) {
-        (validated_text && xml_companion_opening(content, roots)).then_some("xml")
+        text_evidence
+            .is_some_and(|evidence| xml_companion_opening(content, roots, evidence))
+            .then_some("xml")
     } else if json_schema_document || extension == Some("qml") {
         None
     } else if Path::new(&normalized)
@@ -3482,6 +3536,8 @@ fn xml_companion_roots(path: &str) -> Option<&'static [&'static str]> {
         "lvproj" => Some(&["Project"]),
         "lvlib" => Some(&["Library"]),
         "lvclass" => Some(&["LVClass"]),
+        "eant" => Some(&["project"]),
+        "ecf" => Some(&["system", "redirection"]),
         _ => None,
     }
 }
@@ -3490,9 +3546,50 @@ fn xml_hint_space(character: char) -> bool {
     matches!(character, ' ' | '\t' | '\r' | '\n')
 }
 
+#[derive(Clone, Copy)]
+struct ValidatedTextEvidence {
+    physical: rootlight_encoding::xml::PhysicalEncoding,
+    complete_ascii: rootlight_encoding::xml::CompleteAscii,
+}
+
+fn validated_text_evidence(
+    path: &RelativePath,
+    encoding: &str,
+    complete_raw: Option<&[u8]>,
+    cancellation: &Cancellation,
+) -> Result<Option<ValidatedTextEvidence>, DiscoveryError> {
+    use rootlight_encoding::xml::{CompleteAscii, PhysicalEncoding};
+    let physical = match encoding {
+        "utf-8" => PhysicalEncoding::Utf8,
+        "utf-16le" => PhysicalEncoding::Utf16Le,
+        "utf-16be" => PhysicalEncoding::Utf16Be,
+        _ => return Ok(None),
+    };
+    let mut complete_ascii = CompleteAscii::Unproven;
+    if physical == PhysicalEncoding::Utf8
+        && xml_companion_roots(&path.as_str().to_ascii_lowercase()).is_some()
+        && let Some(raw) = complete_raw
+    {
+        complete_ascii = CompleteAscii::Proven;
+        // Declaration equivalence cannot borrow an ASCII prefix from a non-ASCII tail.
+        for chunk in raw.chunks(64 * 1024) {
+            cancellation.check()?;
+            if !chunk.is_ascii() {
+                complete_ascii = CompleteAscii::Unproven;
+                break;
+            }
+        }
+    }
+    cancellation.check()?;
+    Ok(Some(ValidatedTextEvidence {
+        physical,
+        complete_ascii,
+    }))
+}
+
 // A complete known opening permits routing; the native parser still owns
 // document syntax and its explicit namespace/entity/validity gaps.
-fn xml_companion_opening(content: &[u8], roots: &[&str]) -> bool {
+fn xml_companion_opening(content: &[u8], roots: &[&str], evidence: ValidatedTextEvidence) -> bool {
     let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
     let mut text = match std::str::from_utf8(sample) {
         Ok(text) => text,
@@ -3504,6 +3601,15 @@ fn xml_companion_opening(content: &[u8], roots: &[&str]) -> bool {
         }
         Err(_) => return false,
     };
+    if rootlight_encoding::xml::validate_declaration(
+        text,
+        evidence.physical,
+        evidence.complete_ascii,
+    )
+    .is_err()
+    {
+        return false;
+    }
     text = text.strip_prefix('\u{feff}').unwrap_or(text);
     loop {
         text = text.trim_start_matches(xml_hint_space);
@@ -8968,6 +9074,9 @@ max_source_file_bytes = 2097152
             ("lvproj", "Project"),
             ("lvlib", "Library"),
             ("lvclass", "LVClass"),
+            ("eant", "project"),
+            ("ecf", "system"),
+            ("ecf", "redirection"),
         ] {
             for path in [
                 format!("written.{suffix}"),
@@ -9010,6 +9119,9 @@ max_source_file_bytes = 2097152
                     "<plist name='unfinished>",
                     "<!-- unfinished",
                 ] {
+                    if source == "<project/>" && root == "project" {
+                        continue;
+                    }
                     let (_, signals) = classify(&path, source.as_bytes());
                     assert!(
                         !signals.iter().any(|signal| signal.language == "xml"),
@@ -9029,7 +9141,7 @@ max_source_file_bytes = 2097152
         }
         let path = RelativePath::parse(Path::new("Info.plist")).unwrap();
         assert!(
-            !classify_validated_prefix(&path, b"<plist/>", false, false, false)
+            !classify_with_text_evidence(&path, b"<plist/>", false, false, false, None)
                 .1
                 .iter()
                 .any(|signal| signal.language == "xml")
@@ -9072,7 +9184,295 @@ max_source_file_bytes = 2097152
                     .any(|signal| signal.language == "xml")
             );
         }
-        assert!(!xml_companion_opening(b"<plist", &["plist"]));
+        assert!(!xml_companion_opening(
+            b"<plist",
+            &["plist"],
+            ValidatedTextEvidence {
+                physical: rootlight_encoding::xml::PhysicalEncoding::Utf8,
+                complete_ascii: rootlight_encoding::xml::CompleteAscii::Proven,
+            },
+        ));
+    }
+
+    #[test]
+    fn xml_companion_declarations_require_complete_physical_ascii_evidence() {
+        use rootlight_encoding::xml::{CompleteAscii, PhysicalEncoding};
+        let path = RelativePath::parse(Path::new("project.ecf")).unwrap();
+        let source = format!(
+            "<?xml version='1.0' encoding='ISO-8859-1'?><system>{}</system>",
+            " ".repeat(MAX_CLASSIFICATION_BYTES + 1024),
+        );
+        let cancel = Cancellation::new();
+        let evidence = validated_text_evidence(&path, "utf-8", Some(source.as_bytes()), &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(evidence.physical, PhysicalEncoding::Utf8);
+        assert_eq!(evidence.complete_ascii, CompleteAscii::Proven);
+        assert!(
+            classify_with_text_evidence(
+                &path,
+                source.as_bytes(),
+                true,
+                false,
+                true,
+                Some(evidence)
+            )
+            .1
+            .iter()
+            .any(|signal| signal.language == "xml")
+        );
+        for raw in [None, Some(format!("{source}λ").into_bytes())] {
+            let evidence = validated_text_evidence(&path, "utf-8", raw.as_deref(), &cancel)
+                .unwrap()
+                .unwrap();
+            assert_eq!(evidence.complete_ascii, CompleteAscii::Unproven);
+            assert!(
+                !classify_with_text_evidence(
+                    &path,
+                    source.as_bytes(),
+                    true,
+                    false,
+                    true,
+                    Some(evidence)
+                )
+                .1
+                .iter()
+                .any(|signal| signal.language == "xml")
+            );
+        }
+        assert!(
+            !classify_with_text_evidence(&path, source.as_bytes(), false, false, false, None)
+                .1
+                .iter()
+                .any(|signal| signal.language == "xml")
+        );
+        for encoding in ["UTF-16", "UTF-16LE", "UTF-16BE", "unknown-encoding"] {
+            let candidate = source.replace("ISO-8859-1", encoding);
+            assert!(
+                !classify(&path, candidate.as_bytes())
+                    .1
+                    .iter()
+                    .any(|signal| signal.language == "xml"),
+                "{encoding}"
+            );
+        }
+        let bom = format!("\u{feff}{source}");
+        assert!(
+            !classify(&path, bom.as_bytes())
+                .1
+                .iter()
+                .any(|signal| signal.language == "xml")
+        );
+        let utf8 = source.replace("ISO-8859-1", "UTF-8");
+        let unproven = ValidatedTextEvidence {
+            physical: PhysicalEncoding::Utf8,
+            complete_ascii: CompleteAscii::Unproven,
+        };
+        assert!(
+            classify_with_text_evidence(&path, utf8.as_bytes(), true, false, true, Some(unproven))
+                .1
+                .iter()
+                .any(|signal| signal.language == "xml")
+        );
+    }
+
+    #[test]
+    fn xml_companion_snapshot_and_stream_keep_physical_encoding_proofs() {
+        use std::io::{self, Write};
+
+        struct Receiver;
+        struct Sink<'a> {
+            prefix: Vec<u8>,
+            validator: rootlight_vfs::StreamingSourceTextValidator,
+            cancellation: &'a Cancellation,
+        }
+        impl Write for Sink<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.validator
+                    .push(bytes, self.cancellation)
+                    .map_err(io::Error::other)?;
+                let count = bytes
+                    .len()
+                    .min(MAX_STREAMED_CLASSIFICATION_BYTES - self.prefix.len());
+                self.prefix.extend_from_slice(&bytes[..count]);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl StreamedSourceReceiver for Receiver {
+            fn capture(
+                &mut self,
+                root: &RepositoryRoot,
+                path: &RelativePath,
+                observed: rootlight_vfs::SnapshotMetadata,
+                cancellation: &Cancellation,
+            ) -> Result<StreamedDiscoverySource, DiscoveryError> {
+                let mut sink = Sink {
+                    prefix: Vec::new(),
+                    validator: rootlight_vfs::StreamingSourceTextValidator::new(),
+                    cancellation,
+                };
+                let capture = root
+                    .capture_streamed_cancellable(
+                        path,
+                        observed.length.max(1),
+                        cancellation,
+                        &mut sink,
+                    )
+                    .map_err(|_| DiscoveryError::StreamedCaptureUnavailable)?;
+                Ok(StreamedDiscoverySource {
+                    capture,
+                    contains_nul: sink.validator.contains_nul(),
+                    encoding: sink.validator.finish(),
+                    prefix: sink.prefix,
+                })
+            }
+        }
+
+        let temporary = local_tempdir();
+        let iso = format!(
+            "<?xml version='1.0' encoding='ISO-8859-1'?><system>{}</system>",
+            " ".repeat(MAX_CLASSIFICATION_BYTES + 1024),
+        );
+        let large_iso = iso.replace(
+            "</system>",
+            &format!("{}</system>", " ".repeat(MAX_STREAMED_CLASSIFICATION_BYTES)),
+        );
+        let mut cases = vec![
+            ("ascii.ECF", iso.as_bytes().to_vec(), "utf-8", true, true),
+            (
+                "late-unicode.ecf",
+                iso.replace("</system>", "λ</system>").into_bytes(),
+                "utf-8",
+                false,
+                false,
+            ),
+            (
+                "large-ascii.ecf",
+                large_iso.into_bytes(),
+                "utf-8",
+                true,
+                false,
+            ),
+            (
+                "redirection.ecf",
+                b"<redirection location='source.ecf'/>".to_vec(),
+                "utf-8",
+                true,
+                true,
+            ),
+            (
+                "build.eant",
+                b"<?xml version='1.0' encoding='UTF-8'?><project/>".to_vec(),
+                "utf-8",
+                true,
+                true,
+            ),
+            (
+                "backup.ecf.bak",
+                iso.as_bytes().to_vec(),
+                "utf-8",
+                false,
+                false,
+            ),
+            (
+                "unknown.ecf",
+                iso.replace("ISO-8859-1", "unknown-encoding").into_bytes(),
+                "utf-8",
+                false,
+                false,
+            ),
+        ];
+        for (name, little, declaration, expected) in [
+            ("le.eant", true, "UTF-16LE", true),
+            ("be.eant", false, "UTF-16BE", true),
+            ("mismatch.eant", true, "UTF-16BE", false),
+        ] {
+            let text =
+                format!("<?xml version='1.0' encoding='{declaration}'?><project name='λ😀'/>");
+            let raw = std::iter::once(0xfeff_u16)
+                .chain(text.encode_utf16())
+                .flat_map(|unit| {
+                    if little {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect();
+            cases.push((
+                name,
+                raw,
+                if little { "utf-16le" } else { "utf-16be" },
+                expected,
+                expected,
+            ));
+        }
+        for (path, raw, _, _, _) in &cases {
+            write_fixture(&temporary, path, raw);
+        }
+        write_fixture(&temporary, "binary.ecf", b"%PDF-1.7\n<system/>");
+        let config = ConfigSnapshot::resolve(&[]).unwrap();
+        let root = fixture_root(&temporary, b"xml-companion-physical-encoding");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let cancel = Cancellation::new();
+        let limits = DiscoveryLimits::from_config(&config);
+        let snapshots =
+            discover_with_snapshots(&root, &config, &policy, limits, BTreeMap::new(), &cancel)
+                .unwrap();
+        let streamed = discover_with_streamed_sources(
+            &root,
+            &config,
+            &policy,
+            limits,
+            StreamedDiscoveryOptions::manifest(1024 * 1024, 1, &mut Receiver).unwrap(),
+            &cancel,
+        )
+        .unwrap();
+        assert!(snapshots.manifest.coverage.complete && streamed.manifest.coverage.complete);
+        for (manifest, lane) in [(&snapshots.manifest, 0), (&streamed.manifest, 1)] {
+            assert_eq!(manifest.inputs.len(), cases.len());
+            assert!(
+                !manifest
+                    .inputs
+                    .iter()
+                    .any(|input| input.path == "binary.ecf")
+            );
+            for (path, raw, encoding, snapshot_xml, streamed_xml) in &cases {
+                let input = manifest
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == *path)
+                    .unwrap();
+                assert_eq!(input.encoding, *encoding, "{path} lane {lane}");
+                assert_eq!(input.content_hash, content_hash(raw));
+                assert_eq!(input.bytes, raw.len() as u64);
+                assert_eq!(
+                    input
+                        .language_signals
+                        .iter()
+                        .any(|signal| signal.language == "xml"
+                            && signal.evidence == LanguageEvidence::Content),
+                    if lane == 0 {
+                        *snapshot_xml
+                    } else {
+                        *streamed_xml
+                    },
+                    "{path} lane {lane}"
+                );
+                assert!(
+                    input
+                        .language_signals
+                        .iter()
+                        .all(|signal| signal.language != "eiffel")
+                );
+                if lane == 0 {
+                    assert_eq!(snapshots.snapshots[&input.file].content(), raw);
+                }
+            }
+        }
     }
 
     #[test]

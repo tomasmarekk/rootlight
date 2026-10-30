@@ -1714,6 +1714,7 @@ dependencies = [
  "proptest",
  "rootlight-adapter-sdk",
  "rootlight-cancel",
+ "rootlight-encoding",
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-thinkscript",
@@ -1746,8 +1747,8 @@ dependencies = [
  "tree-sitter-dart",
  "tree-sitter-dockerfile",
  "tree-sitter-eiffel",
- "tree-sitter-embedded-template",
  "tree-sitter-elixir",
+ "tree-sitter-embedded-template",
  "tree-sitter-fish",
  "tree-sitter-fortran",
  "tree-sitter-fsharp",
@@ -1778,8 +1779,8 @@ dependencies = [
  "tree-sitter-mojo",
  "tree-sitter-nim",
  "tree-sitter-nix",
- "tree-sitter-objc",
  "tree-sitter-nu",
+ "tree-sitter-objc",
  "tree-sitter-ocaml",
  "tree-sitter-pascal",
  "tree-sitter-php",
@@ -2026,6 +2027,7 @@ dependencies = [
  "proptest",
  "rootlight-cancel",
  "rootlight-config",
+ "rootlight-encoding",
  "rootlight-ids",
  "rootlight-incremental",
  "rootlight-thinkscript",
@@ -3309,16 +3311,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-embedded-template"
-version = "0.25.0"
+name = "tree-sitter-elixir"
+version = "0.3.5"
 dependencies = [
  "cc",
  "tree-sitter-language",
 ]
 
 [[package]]
-name = "tree-sitter-elixir"
-version = "0.3.5"
+name = "tree-sitter-embedded-template"
+version = "0.25.0"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3577,16 +3579,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-objc"
-version = "3.0.2"
+name = "tree-sitter-nu"
+version = "0.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",
 ]
 
 [[package]]
-name = "tree-sitter-nu"
-version = "0.0.1"
+name = "tree-sitter-objc"
+version = "3.0.2"
 dependencies = [
  "cc",
  "tree-sitter-language",

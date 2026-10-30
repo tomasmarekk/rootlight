@@ -970,10 +970,10 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/358";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/359";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/155";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/14";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/15";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/4";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
@@ -3230,6 +3230,9 @@ struct RustSourceInput {
 enum UnsupportedSourceDisposition {
     Language,
     Encoding,
+    XmlEncodingDeclaration {
+        reason: rootlight_adapter_treesitter::XmlDeclarationError,
+    },
     AdmissionResourceBounded,
     ParserSizeLimit,
     AggregateFileCapacity,
@@ -6263,6 +6266,21 @@ struct CachedRevisionChangePaths {
 }
 
 trait StructuralPreflight: ParseProvider {
+    fn owns_native_xml_encoding_refusal(
+        &self,
+        _proof: &rootlight_adapter_treesitter::NativeXmlEncodingRefusal,
+    ) -> bool {
+        false
+    }
+
+    fn certify_native_xml_encoding_refusal(
+        &self,
+        _request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        _cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeXmlEncodingRefusal>, AdapterError> {
+        Ok(None)
+    }
+
     fn owns_native_scanner_refusal(
         &self,
         _proof: &rootlight_adapter_treesitter::NativeScannerRefusal,
@@ -6336,6 +6354,32 @@ trait StructuralPreflight: ParseProvider {
 }
 
 impl StructuralPreflight for TreeSitterProvider {
+    fn owns_native_xml_encoding_refusal(
+        &self,
+        proof: &rootlight_adapter_treesitter::NativeXmlEncodingRefusal,
+    ) -> bool {
+        proof.was_issued_by(self)
+    }
+
+    fn certify_native_xml_encoding_refusal(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<Option<rootlight_adapter_treesitter::NativeXmlEncodingRefusal>, AdapterError> {
+        let memory_policy = match self.capabilities().memory_enforcement() {
+            rootlight_adapter_sdk::MemoryEnforcement::Unavailable => {
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback
+            }
+            _ => MemoryAdmissionPolicy::RequireHardOrAccounted,
+        };
+        TreeSitterProvider::certify_native_xml_encoding_refusal(
+            self,
+            request,
+            memory_policy,
+            cancellation,
+        )
+    }
+
     fn owns_native_scanner_refusal(
         &self,
         proof: &rootlight_adapter_treesitter::NativeScannerRefusal,
@@ -19666,6 +19710,8 @@ fn is_xml_companion_source(path: &str) -> bool {
                 "lvproj",
                 "lvlib",
                 "lvclass",
+                "eant",
+                "ecf",
             ]
             .iter()
             .any(|suffix| extension.eq_ignore_ascii_case(suffix))
@@ -20158,6 +20204,11 @@ fn unsupported_source_document(
             },
             SkippedRegionReason::UnsupportedEncoding,
         ),
+        UnsupportedSourceDisposition::XmlEncodingDeclaration { .. } => (
+            "unsupported-encoding",
+            "source remains exact and readable; the XML declaration has no verified native encoding interpretation",
+            SkippedRegionReason::UnsupportedEncoding,
+        ),
         UnsupportedSourceDisposition::AdmissionResourceBounded => (
             "language-admission-resource-bounded",
             "bounded native language admission exhausted its analysis resources and source remains available without a language determination",
@@ -20372,6 +20423,9 @@ fn unsupported_source_document(
                 }
                 UnsupportedSourceDisposition::NativeScannerRefusal { details } => {
                     details.diagnostic(message)
+                }
+                UnsupportedSourceDisposition::XmlEncodingDeclaration { reason } => {
+                    format!("{message}; XML declaration reason {reason:?}")
                 }
                 _ => message.to_owned(),
             },
@@ -27026,6 +27080,7 @@ mod tests {
     mod wesl_discovery;
     mod wolfram_native_source_preservation;
     mod wolfram_source_preservation;
+    mod xml_declaration;
     mod yaml_source_names;
 
     use std::{
@@ -37016,6 +37071,8 @@ mod tests {
             "lvproj",
             "lvlib",
             "lvclass",
+            "eant",
+            "ecf",
         ] {
             let mut input = ManifestInput {
                 file: FileId::from_bytes([3; 20]),
@@ -37078,6 +37135,8 @@ mod tests {
             ("Project.lvproj", "Project"),
             ("Library.lvlib", "Library"),
             ("Class.lvclass", "LVClass"),
+            ("Build.eant", "project"),
+            ("Library.ecf", "redirection"),
         ]
         .into_iter()
         .enumerate()
@@ -40565,7 +40624,8 @@ mod tests {
                         SkippedRegionReason::UnsupportedConstruct,
                         FirstSliceSourceCoverageReason::UnsupportedLanguage,
                     ),
-                    UnsupportedSourceDisposition::Encoding => (
+                    UnsupportedSourceDisposition::Encoding
+                    | UnsupportedSourceDisposition::XmlEncodingDeclaration { .. } => (
                         "unsupported-encoding",
                         SkippedRegionReason::UnsupportedEncoding,
                         FirstSliceSourceCoverageReason::UnsupportedEncoding,

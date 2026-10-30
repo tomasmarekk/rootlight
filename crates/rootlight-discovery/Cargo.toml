@@ -12,6 +12,7 @@ rootlight-thinkscript = { path = "../rootlight-thinkscript" }
 ignore.workspace = true
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-config = { path = "../rootlight-config" }
+rootlight-encoding = { path = "../rootlight-encoding" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-incremental = { path = "../rootlight-incremental" }
 rootlight-vfs = { path = "../rootlight-vfs" }

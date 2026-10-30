@@ -19,6 +19,7 @@ tree-sitter-graphql.workspace = true
 blake3.workspace = true
 rootlight-adapter-sdk = { path = "../rootlight-adapter-sdk" }
 rootlight-cancel = { path = "../rootlight-cancel" }
+rootlight-encoding = { path = "../rootlight-encoding" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-unicode = { path = "../rootlight-unicode" }

@@ -59,6 +59,7 @@ mod wolfram_scope;
 #[cfg(test)]
 #[path = "runtime/wolfram_scope_tests.rs"]
 mod wolfram_scope_tests;
+mod xml_encoding;
 
 pub(crate) use c_preprocessor::C_PREPROCESSOR_PROJECTION_POLICY;
 pub(crate) use cmake_command_template::CMAKE_COMMAND_TEMPLATE_PROJECTION_POLICY;
@@ -102,6 +103,7 @@ pub use identity_refusal::NativeIdentityRefusal;
 pub use identity_work::NativeIdentityWorkLimit;
 pub(crate) use jsonc::JSONC_PARSE_INPUT_POLICY;
 pub use scanner_refusal::{NativeScannerRefusal, NativeScannerRefusalDetails};
+pub use xml_encoding::NativeXmlEncodingRefusal;
 
 mod native_input;
 
@@ -648,6 +650,16 @@ impl TreeSitterProvider {
     }
 
     fn native_source_view<'a>(
+        &self,
+        request: &'a ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<NativeSourceView<'a>, AdapterError> {
+        let view = self.physical_source_view(request, cancellation)?;
+        self.require_xml_declaration(request, &view, cancellation)?;
+        Ok(view)
+    }
+
+    fn physical_source_view<'a>(
         &self,
         request: &'a ParseRequest<'_>,
         cancellation: &Cancellation,

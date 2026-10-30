@@ -47,10 +47,11 @@ pub use rootlight_adapter_sdk::{
     StructuralClassificationGap, structural_captured_name, structural_entity_classification_gap,
     structural_entity_kind, structural_entity_kind_from_source, structural_syntax_fact_order,
 };
+pub use rootlight_encoding::xml::DeclarationError as XmlDeclarationError;
 pub use runtime::{
     CacheStats, FSharpAdmissionKind, FSharpAdmissionWitness, NativeIdentityRefusal,
     NativeIdentityRefusalDetails, NativeIdentityWorkLimit, NativeScannerRefusal,
-    NativeScannerRefusalDetails, RuntimeStats, TreeSitterProvider,
+    NativeScannerRefusalDetails, NativeXmlEncodingRefusal, RuntimeStats, TreeSitterProvider,
 };
 
 /// Exact adapter crate version compiled into this runtime.
