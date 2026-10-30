@@ -26970,6 +26970,7 @@ mod tests {
     mod qml_routing_tests;
     mod racket_reader_routes;
     mod ring_source;
+    mod ron_discovery;
     mod ruby_formal_receivers;
     mod rust_inherent_ownership;
     mod sass_source;
@@ -40182,6 +40183,7 @@ mod tests {
         let parser = first_slice_parser_provider_hash().unwrap();
         for previous_discovery in [
             b"1.44", b"1.60", b"1.61", b"1.62", b"1.63", b"1.79", b"1.83", b"1.84", b"1.85",
+            b"1.86",
         ] {
             let previous = hash_static_components(&[
                 PROVIDER_SET_SEED,

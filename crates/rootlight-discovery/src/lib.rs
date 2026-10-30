@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.86";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.87";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3158,6 +3158,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "ron",
+        suffixes: &[".ron"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "ruby",
         suffixes: &[
             ".rb", ".ruby", ".podspec", ".gemspec", ".rake", ".ru", ".builder",
@@ -4256,6 +4264,7 @@ mod tests {
             "misleading.ru",
             "misleading.builder",
             "misleading.wesl",
+            "misleading.ron",
         ] {
             write_fixture(&temporary, path, pdf);
         }
@@ -4279,6 +4288,7 @@ mod tests {
             "misleading.ru",
             "misleading.builder",
             "misleading.wesl",
+            "misleading.ron",
             "marked.tt",
             "archive.txt",
         ] {
@@ -9395,6 +9405,89 @@ max_source_file_bytes = 2097152
         ] {
             assert_ne!(extension_language(path), Some("graphql"));
         }
+    }
+
+    #[test]
+    fn ron_suffix_uses_its_distinct_shared_source_capability() {
+        for path in ["data.ron", "DATA.RON", "data.rs.ron"] {
+            assert_eq!(extension_language(path), Some("ron"));
+            assert_eq!(
+                classify(
+                    &RelativePath::parse(Path::new(path)).unwrap(),
+                    b"(field: Some(1))\r\n"
+                )
+                .0,
+                InputClass::Source
+            );
+        }
+        assert_eq!(canonical_language("ron"), Some("ron"));
+        for path in [
+            "data.ron.bak",
+            "data.ronx",
+            "data.ron/source",
+            "data.ron.tt",
+        ] {
+            assert_eq!(extension_language(path), None);
+        }
+        assert_eq!(extension_language("data.ron.json"), Some("json"));
+        assert_eq!(extension_language("data.ron.rs"), Some("rust"));
+    }
+
+    #[test]
+    fn configured_ron_keeps_binary_exclusion_and_override_priority() {
+        let temporary = local_tempdir();
+        let raw = b"(field: Some(1))\r\n";
+        write_fixture(&temporary, "configured.ron", raw);
+        write_fixture(&temporary, "explicit.data", raw);
+        write_fixture(&temporary, "binary.ron", b"%PDF-1.7\nopaque\n");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer { source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\ndata='ron'\n[extensions.source-languages.data.paths]\n'configured.ron'='json'\n'binary.ron'='ron'\n" }]).unwrap();
+        let root = fixture_root(&temporary, b"configured-ron");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 2);
+        let configured = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "configured.ron")
+            .unwrap();
+        assert!(
+            configured
+                .language_signals
+                .iter()
+                .any(|s| s.language == "ron" && s.evidence == LanguageEvidence::Extension)
+        );
+        assert!(
+            configured
+                .language_signals
+                .iter()
+                .any(|s| s.language == "json" && s.evidence == LanguageEvidence::Configuration)
+        );
+        let explicit = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "explicit.data")
+            .unwrap();
+        assert!(
+            explicit
+                .language_signals
+                .iter()
+                .any(|s| s.language == "ron" && s.evidence == LanguageEvidence::Configuration)
+        );
+        assert_eq!(explicit.content_hash, content_hash(raw));
+        assert!(
+            manifest
+                .exclusions
+                .iter()
+                .any(|e| e.path == "binary.ron" && e.reason == ExclusionReason::Binary)
+        );
     }
 
     #[test]
