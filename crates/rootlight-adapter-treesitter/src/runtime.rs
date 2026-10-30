@@ -711,7 +711,10 @@ impl TreeSitterProvider {
         if (native_family.is_cobol()
             || matches!(
                 native_family,
-                GrammarFamily::Sed | GrammarFamily::Idris | GrammarFamily::Cuda
+                GrammarFamily::Sed
+                    | GrammarFamily::Idris
+                    | GrammarFamily::Cuda
+                    | GrammarFamily::TypeSpec
             ))
             && !request.included_ranges().is_empty()
         {

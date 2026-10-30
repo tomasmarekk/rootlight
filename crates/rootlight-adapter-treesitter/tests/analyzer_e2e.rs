@@ -160,6 +160,8 @@ mod sql_native;
 mod typescript_calls;
 #[path = "analyzer_e2e/typescript_interface_fields.rs"]
 mod typescript_interface_fields;
+#[path = "analyzer_e2e/typespec_native.rs"]
+mod typespec_native;
 #[path = "analyzer_e2e/v_native.rs"]
 mod v_native;
 #[path = "analyzer_e2e/vba_native.rs"]

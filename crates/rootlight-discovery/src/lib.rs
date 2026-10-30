@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.89";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.90";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3342,6 +3342,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter", "project-adapter"],
     },
     LanguageCapability {
+        language: "typespec",
+        suffixes: &[".tsp"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "vba",
         suffixes: &[],
         aliases: &[],
@@ -4379,6 +4387,7 @@ mod tests {
             "misleading.builder",
             "misleading.wesl",
             "misleading.ron",
+            "misleading.tsp",
         ] {
             write_fixture(&temporary, path, pdf);
         }
@@ -4403,6 +4412,7 @@ mod tests {
             "misleading.builder",
             "misleading.wesl",
             "misleading.ron",
+            "misleading.tsp",
             "marked.tt",
             "archive.txt",
         ] {
@@ -9813,6 +9823,54 @@ max_source_file_bytes = 2097152
         ] {
             assert_ne!(extension_language(path), Some("graphql"));
         }
+    }
+
+    #[test]
+    fn typespec_suffix_has_distinct_authoritative_source_identity() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "typespec")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".tsp"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("typespec"), Some("typespec"));
+        for path in ["main.tsp", "MAIN.TSP", "types.d.tsp", "types.ts.tsp"] {
+            assert_eq!(extension_language(path), Some("typespec"));
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"namespace Example; model Pet { name: string; }\n",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "typespec".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }]
+            );
+        }
+        let (_, signals) = classify(
+            &RelativePath::parse(Path::new("misleading.tsp")).unwrap(),
+            b"def python_looking_text():\n    return 1\n",
+        );
+        assert!(signals.iter().any(|signal| {
+            signal.language == "typespec" && signal.evidence == LanguageEvidence::Extension
+        }));
+        assert!(signals.iter().any(|signal| {
+            signal.language == "python" && signal.evidence == LanguageEvidence::Content
+        }));
+        for path in [
+            "main.tsp.bak",
+            "main.tspx",
+            "main.tsp/source",
+            "main.tsp.tt",
+        ] {
+            assert_ne!(extension_language(path), Some("typespec"));
+        }
+        assert_eq!(extension_language("main.tsp.ts"), Some("typescript"));
+        assert_eq!(extension_language("main.tsp.json"), Some("json"));
     }
 
     #[test]

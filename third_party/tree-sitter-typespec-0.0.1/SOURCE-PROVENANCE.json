@@ -80,7 +80,15 @@
       "path": "packages/http-client-java/generator/http-client-generator-test/tsp/namespace.tsp",
       "retained_path": "tests/fixtures/namespace.tsp",
       "bytes": 417,
-      "sha256": "6482663c6a3ffe561e28aaa2dd08455b9354bea829201f7239303c0045a41d5b"
+      "sha256": "6482663c6a3ffe561e28aaa2dd08455b9354bea829201f7239303c0045a41d5b",
+      "upstream_repository": "https://github.com/microsoft/typespec",
+      "upstream_revision": "6ba281975981910906590563363d16e74b5fbf47",
+      "license": {
+        "spdx": "MIT",
+        "retained_path": "tests/fixtures/LICENSE.typespec",
+        "bytes": 1162,
+        "sha256": "27ebda9d51f0a56b7e281ccd8230a27236dcb51c05f64b07869ecf6e965d68b0"
+      }
     }
   ],
   "scope": "Static native grammar loading and written syntax tests only; production routing, IR, resolution and corpus qualification remain separate."

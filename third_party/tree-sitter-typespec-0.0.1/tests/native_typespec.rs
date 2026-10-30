@@ -129,3 +129,59 @@ fn malformed_written_declarations_retain_native_error_state() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires a pinned source list; reports native syntax, not semantic qualification"]
+fn census_pinned_original_sources() {
+    let list = std::env::var_os("ROOTLIGHT_TYPESPEC_SOURCE_LIST")
+        .expect("pinned source-list path is required");
+    let paths = std::fs::read_to_string(list).expect("source list is UTF-8");
+    let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+    let mut files = 0;
+    let mut incomplete = 0;
+    let mut erroneous = 0;
+    for path in paths.lines() {
+        assert!(!path.is_empty());
+        let source = std::fs::read(path).expect("pinned source is readable");
+        let tree = parse(&source);
+        let root = tree.root_node();
+        let complete = root.kind() == "source_file" && root.byte_range() == (0..source.len());
+        incomplete += usize::from(!complete);
+        erroneous += usize::from(root.has_error());
+        let mut errors = 0;
+        let mut missing = 0;
+        let mut nodes = vec![root];
+        while let Some(node) = nodes.pop() {
+            errors += usize::from(node.is_error());
+            missing += usize::from(node.is_missing());
+            *kinds.entry(node.kind().to_owned()).or_default() += 1;
+            let mut cursor = node.walk();
+            nodes.extend(node.children(&mut cursor));
+        }
+        let path_hex: String = path
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        println!(
+            "typespec-syntax\t{}\t{}\t{}\t{}\t{}\t{}",
+            source.len(),
+            errors,
+            missing,
+            root.has_error(),
+            complete,
+            path_hex
+        );
+        files += 1;
+    }
+    assert!(files > 0);
+    for (kind, count) in kinds {
+        println!("typespec-kind\t{kind}\t{count}");
+    }
+    println!("typespec-files\t{files}");
+    assert_eq!(
+        (incomplete, erroneous),
+        (0, 0),
+        "native syntax gaps remain in the pinned corpus"
+    );
+}

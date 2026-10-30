@@ -115,6 +115,7 @@ mod thrift;
 mod toml;
 mod typescript_calls;
 mod typescript_const;
+mod typespec;
 mod v;
 mod vhdl;
 mod wesl;
@@ -11119,6 +11120,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
         .chain(
             ring::gaps(fact)
                 .chain(wesl::gaps(fact))
+                .chain(typespec::gaps(fact))
                 .chain(ron_source_gaps(fact)),
         )
         .chain(hare::gaps(fact))
@@ -12070,6 +12072,9 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "typespec" {
+        return typespec::written(kind, label);
+    }
     if language == "nu" {
         return matches!(
             (kind, label),
@@ -12475,6 +12480,8 @@ fn written_source_identity(
         "rootlight.assembly-source-occurrence/1"
     } else if language == "glsl" {
         "rootlight.glsl-source-occurrence/1"
+    } else if language == "typespec" {
+        "rootlight.typespec-source-occurrence/1"
     } else if language == "wesl" {
         "rootlight.wesl-source-occurrence/1"
     } else if language == "wgsl" {
@@ -13541,6 +13548,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if fact.syntax_kind().as_str().starts_with("typespec.") {
+        return fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "typespec.file.module"
+            && language == "typespec";
+    }
     if language == "erb" || fact.syntax_kind().as_str().starts_with("erb.") {
         return language == "erb"
             && fact.kind() == SyntaxFactKind::Module
@@ -14477,6 +14489,9 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("typespec.") {
+        return typespec::kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("wesl.") {
         return match (fact.kind(), fact.syntax_kind().as_str()) {
             (SyntaxFactKind::Module, "wesl.file.module") => Some(EntityKind::Module),
@@ -14524,6 +14539,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("typespec.") {
+        return typespec::kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("wesl.") {
         return structural_entity_kind(fact);
     }

@@ -1811,6 +1811,7 @@ dependencies = [
  "tree-sitter-thrift",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
+ "tree-sitter-typespec",
  "tree-sitter-v",
  "tree-sitter-vba",
  "tree-sitter-vhdl",
@@ -3839,6 +3840,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-typescript"
 version = "0.23.2"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typespec"
+version = "0.0.1"
 dependencies = [
  "cc",
  "tree-sitter-language",

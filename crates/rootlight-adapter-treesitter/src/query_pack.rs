@@ -131,6 +131,7 @@ mod sql_admission;
 mod thrift;
 mod typescript_calls;
 mod typescript_const;
+mod typespec;
 mod v;
 pub(super) mod vba;
 mod vba_calls;
@@ -475,6 +476,17 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::TypeSpec {
+            expected.retain(|name| {
+                matches!(
+                    *name,
+                    "root" | "module" | "declaration" | "definition" | "expression" | "comment"
+                )
+            });
+            expected.push("expression");
+            expected.sort_unstable();
+            expected.dedup();
+        }
         if family == GrammarFamily::Idris {
             expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
         }
@@ -1363,6 +1375,15 @@ impl QueryPack {
         let mut native_captures = 0usize;
         let mut refusal = None;
         let mut vba_calls = vba_calls::Calls::default();
+        let typespec_context = if input.family == GrammarFamily::TypeSpec {
+            Some(typespec::Context::new(
+                input.tree.root_node(),
+                input.source,
+                input.cancellation,
+            )?)
+        } else {
+            None
+        };
         if input.normalize_calls && input.family.is_classic_basic() {
             let limit = vba_calls.discover(
                 input,
@@ -3151,7 +3172,16 @@ impl QueryPack {
                     }
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::Protobuf {
+                let candidate = if input.family == GrammarFamily::TypeSpec {
+                    let Some(candidate) = typespec_context
+                        .as_ref()
+                        .ok_or_else(|| query_failure("query-typespec-context"))?
+                        .candidate(capture.node, role, input.source, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
+                } else if input.family == GrammarFamily::Protobuf {
                     protobuf::candidate(capture.node, role, input.source, input.cancellation)
                 } else if input.family == GrammarFamily::Thrift {
                     thrift::candidate(capture.node, role, input.source, input.cancellation)
@@ -4553,6 +4583,7 @@ fn candidate_for_capture(
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
             GrammarFamily::Wgsl => return Err(query_failure("query-wgsl-unproven-call")),
             GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
+            GrammarFamily::TypeSpec => return Err(query_failure("query-typespec-unproven-call")),
             GrammarFamily::Xml | GrammarFamily::Dtd => {
                 return Err(query_failure("query-xml-unproven-call"));
             }
@@ -5766,6 +5797,10 @@ impl QueryPackRegistry {
             (GrammarFamily::Hlsl, include_str!("../queries/hlsl.scm")),
             (GrammarFamily::Wgsl, include_str!("../queries/wgsl.scm")),
             (GrammarFamily::Wesl, include_str!("../queries/wesl.scm")),
+            (
+                GrammarFamily::TypeSpec,
+                include_str!("../queries/typespec.scm"),
+            ),
             (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
             (GrammarFamily::Dtd, include_str!("../queries/dtd.scm")),
@@ -6010,7 +6045,7 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 109);
+        assert_eq!(registry.len(), 110);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
