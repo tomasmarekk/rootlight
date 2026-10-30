@@ -226,8 +226,11 @@ fn original_visual_ids_and_owners_reach_normalized_ir() {
     for (path, count) in [
         ("applications/FromPWCTDocs/program9.pwct", 2),
         ("applications/FromPWCTDocs/program3.pwct", 7),
+        ("applications/FromPWCTDocs/program2.pwct", 6),
+        ("applications/FromPWCTVideos/lesson4.pwct", 11),
         ("applications/FromPWCTVideos/lesson32_part2.pwct", 3),
         ("applications/Cards/cards.pwct", 452),
+        ("src/tools/vsfgenerator/test/test.pwct", 21),
     ] {
         let raw = fs::read(root.join(path)).unwrap();
         let output = analyze(&raw).unwrap();

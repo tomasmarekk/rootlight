@@ -125,6 +125,7 @@ pub struct TextSegment {
 }
 
 /// A closed literal concatenation with source-local segment provenance.
+/// Quoted placeholder text remains literal; no variable or expression is expanded.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Text {
     /// Concatenated literal value, without runtime interpolation.
@@ -311,10 +312,6 @@ impl<'a> Parser<'a> {
                 while let Some(byte) = self.byte() {
                     if byte == quote {
                         break;
-                    }
-                    // Dynamic Ring interpolation is not a literal value.
-                    if byte == b'#' && self.source.get(self.position + 1) == Some(&b'{') {
-                        return Err(self.error(ErrorKind::Unsupported("interpolation")));
                     }
                     self.advance()?;
                 }
@@ -513,15 +510,26 @@ pub struct Interaction {
     pub variables: Text,
 }
 
+/// Header form actually written by the visual-source serializer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFormat {
+    /// All three metadata assignments declare the supported RingPWCT 1.0.0 form.
+    RingPwctV1,
+    /// Only the two tables and their counters are written; metadata is unknown.
+    UnversionedTables,
+}
+
 /// A closed visual source model, not a claim of executable Ring semantics.
 #[derive(Debug)]
 pub struct Model {
+    /// Written header form; absence never supplies a guessed version or language.
+    pub format: SourceFormat,
     /// Literal syntax nodes observed before the required record projection.
     pub literal_values: usize,
     /// Deepest literal nesting observed, independently of emitted fact depth.
     pub literal_depth: usize,
-    /// Written natural-language metadata, without caption-based classification.
-    pub natural_language: Text,
+    /// Written natural-language metadata, absent for unversioned tables.
+    pub natural_language: Option<Text>,
     /// Written high-water counter; it is not the number of live rows.
     pub step_counter: u64,
     /// Written interaction high-water counter, independent of row count.
@@ -810,7 +818,11 @@ fn join(model: &mut Model, parser: &mut Parser<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Decodes the closed PWCT 1.0.0 RingPWCT serialization without repository execution.
+/// Decodes versioned RingPWCT or unversioned visual tables without execution.
+///
+/// The versioned form requires all three metadata assignments and the exact
+/// supported version/language. The unversioned form requires all three to be
+/// absent, retaining unknown metadata. Both require both tables and counters.
 ///
 /// # Errors
 /// Returns a physical refusal for unsupported expressions/version/language, malformed
@@ -868,24 +880,32 @@ pub fn decode(source: &[u8], limits: Limits, cancel: &Cancellation) -> Result<Mo
     let required = |value: Option<Value>| {
         value.ok_or_else(|| malformed(source.len()..source.len(), "missing-assignment"))
     };
-    let version = text(required(version)?)?;
-    if version.text != "1.0.0" {
-        return Err(Error {
-            kind: ErrorKind::Unsupported("visual-source-version"),
-            span: version.span,
-        });
-    }
-    let language = text(required(language)?)?;
-    if language.text != "RingPWCT" {
-        return Err(Error {
-            kind: ErrorKind::Unsupported("visual-language"),
-            span: language.span,
-        });
-    }
+    let (format, natural_language) = match (version, language, natural_language) {
+        (None, None, None) => (SourceFormat::UnversionedTables, None),
+        (Some(version), Some(language), Some(natural_language)) => {
+            let version = text(version)?;
+            if version.text != "1.0.0" {
+                return Err(Error {
+                    kind: ErrorKind::Unsupported("visual-source-version"),
+                    span: version.span,
+                });
+            }
+            let language = text(language)?;
+            if language.text != "RingPWCT" {
+                return Err(Error {
+                    kind: ErrorKind::Unsupported("visual-language"),
+                    span: language.span,
+                });
+            }
+            (SourceFormat::RingPwctV1, Some(text(natural_language)?))
+        }
+        _ => return Err(malformed(source.len()..source.len(), "partial-header")),
+    };
     let mut model = Model {
+        format,
         literal_values: parser.values,
         literal_depth: parser.maximum_depth,
-        natural_language: text(required(natural_language)?)?,
+        natural_language,
         step_counter: number(&required(step_counter)?)?,
         interaction_counter: number(&required(interaction_counter)?)?,
         steps: steps(required(step_rows)?, &mut parser)?,
@@ -1094,6 +1114,12 @@ mod tests {
         )
     }
 
+    fn unversioned_document(rows: &str, interactions: &str) -> String {
+        format!(
+            "aStepsTable=[{rows}]\naInteractionsTable=[{interactions}]\nnStepsID=1000\nnInteractionsID=1000\n"
+        )
+    }
+
     fn parse(source: &str) -> Result<Model, Error> {
         decode(source.as_bytes(), limits(), &Cancellation::new())
     }
@@ -1102,6 +1128,142 @@ mod tests {
         let error = parse(source).unwrap_err();
         assert_eq!(error.kind, expected, "{}", source);
         assert!(error.span.start <= error.span.end && error.span.end <= source.len());
+    }
+
+    #[test]
+    fn unversioned_tables_keep_unknown_metadata_and_the_same_visual_census() {
+        let rows = format!("{},{}", step(2, 1, 1), step(1, 0, 1));
+        let versioned = document(&rows, INTERACTION);
+        let unversioned = unversioned_document(&rows, INTERACTION);
+        let versioned = plan(versioned.as_bytes(), limits(), 7, &Cancellation::new()).unwrap();
+        let legacy = plan(unversioned.as_bytes(), limits(), 7, &Cancellation::new()).unwrap();
+        assert_eq!(versioned.model.format, SourceFormat::RingPwctV1);
+        assert_eq!(versioned.model.natural_language.unwrap().text, "english");
+        assert_eq!(legacy.model.format, SourceFormat::UnversionedTables);
+        assert!(legacy.model.natural_language.is_none());
+        assert_eq!(legacy.model.steps[0].parent_index, Some(1));
+        assert_eq!(legacy.model.steps[0].interaction_index, 0);
+        assert_eq!(legacy.records.len(), versioned.records.len());
+        for (old, new) in versioned.records.iter().zip(&legacy.records) {
+            assert_eq!((new.role, new.step), (old.role, old.step));
+            assert_eq!((new.local_id, new.parent), (old.local_id, old.parent));
+            if new.role == Role::Definition {
+                assert_eq!(
+                    &unversioned[new.span.clone()],
+                    new.step.unwrap().0.to_string()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unversioned_tables_cannot_supply_partial_headers_or_omit_required_assignments() {
+        let source = unversioned_document(&step(1, 0, 1), INTERACTION);
+        let headers = [
+            "cVisualSourceFileVersion='1.0.0'\n",
+            "cVisualLanguageName='RingPWCT'\n",
+            "cNaturalLanguageName='english'\n",
+        ];
+        for mask in 1..7 {
+            let mut partial = String::new();
+            for (index, header) in headers.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    partial.push_str(header);
+                }
+            }
+            partial.push_str(&source);
+            refusal(&partial, ErrorKind::Malformed("partial-header"));
+        }
+        let assignments: Vec<_> = source.lines().collect();
+        assert_eq!(assignments.len(), 4);
+        for missing in 1..16 {
+            let retained = assignments
+                .iter()
+                .enumerate()
+                .filter_map(|(index, assignment)| {
+                    (missing & (1 << index) == 0).then_some(*assignment)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            refusal(&retained, ErrorKind::Malformed("missing-assignment"));
+        }
+    }
+
+    #[test]
+    fn unversioned_tables_reject_execution_and_invalid_ownership() {
+        let source = unversioned_document(&step(1, 0, 1), INTERACTION);
+        for expression in ["eval('see 1')", "char(35)", "new Object"] {
+            let candidate = source.replace(r#""see 1""#, expression);
+            assert!(matches!(
+                parse(&candidate).unwrap_err().kind,
+                ErrorKind::Unsupported(_)
+            ));
+        }
+        refusal(
+            &format!("{source}other=[]\n"),
+            ErrorKind::Unsupported("assignment"),
+        );
+        for (rows, expected) in [
+            (
+                format!("{},{}", step(1, 0, 1), step(1, 0, 1)),
+                "duplicate-step-id",
+            ),
+            (step(1, 99, 1), "missing-parent"),
+            (step(1, 0, 2), "missing-interaction"),
+            (
+                format!("{},{}", step(1, 2, 1), step(2, 1, 1)),
+                "parent-cycle",
+            ),
+        ] {
+            refusal(
+                &unversioned_document(&rows, INTERACTION),
+                ErrorKind::Malformed(expected),
+            );
+        }
+        refusal(
+            &source.replace("nStepsID=1000", "nStepsID=0"),
+            ErrorKind::Malformed("step-counter"),
+        );
+        refusal(
+            &source.replace("nInteractionsID=1000", "nInteractionsID=0"),
+            ErrorKind::Malformed("interaction-counter"),
+        );
+    }
+
+    #[test]
+    fn unversioned_tables_keep_resource_and_cancellation_refusals() {
+        let source = unversioned_document(&step(1, 0, 1), INTERACTION);
+        for limited in [
+            Limits {
+                work: 1,
+                ..limits()
+            },
+            Limits {
+                steps: 0,
+                ..limits()
+            },
+        ] {
+            assert!(matches!(
+                decode(source.as_bytes(), limited, &Cancellation::new())
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Limit(_)
+            ));
+        }
+        assert_eq!(
+            plan(source.as_bytes(), limits(), 3, &Cancellation::new())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Limit("records")
+        );
+        let cancel = Cancellation::new();
+        cancel.cancel(CancellationReason::ClientRequest);
+        assert!(matches!(
+            decode(source.as_bytes(), limits(), &cancel)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Cancelled(_)
+        ));
     }
 
     #[test]
@@ -1180,9 +1342,10 @@ mod tests {
         for expression in [
             r#"eval("see 1")"#,
             r#""a"+eval("see 1")"#,
+            "run()",
+            "system('command')",
             "char(35)",
             "char(other)",
-            r##""#{run()}""##,
             "new Object",
         ] {
             let candidate = source.replace(r#""see 1""#, expression);
@@ -1228,6 +1391,24 @@ mod tests {
             &source.replace("nStepsID=1000\n", "nStepsID=1000\nnStepsID=1000\n"),
             ErrorKind::Malformed("duplicate-assignment"),
         );
+    }
+
+    #[test]
+    fn quoted_placeholders_remain_exact_literal_data_without_execution() {
+        let body = "#{run()} #{PWCT_CURRENT_PATH} #{f1}";
+        for quote in ['\'', '"', '`'] {
+            let value = format!("{quote}{body}{quote}");
+            let source = document(&step(1, 0, 1), INTERACTION).replace(r#""see 1""#, &value);
+            let model = parse(&source).unwrap();
+            let code = model.steps[0].code().unwrap();
+            assert_eq!(code.text, body);
+            assert_eq!(code.segments.len(), 1);
+            let segment = &code.segments[0];
+            assert_eq!(segment.origin, TextOrigin::Literal);
+            assert_eq!(&source[segment.source.clone()], body);
+            assert_eq!(&code.text[segment.decoded.clone()], body);
+            assert_eq!(&source[code.span.clone()], value);
+        }
     }
 
     #[test]
@@ -1449,6 +1630,145 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "requires the independently pinned original PWCT2 checkout"]
+    fn original_visual_source_corpus_reports_every_decode_refusal() {
+        let root = PathBuf::from(
+            std::env::var_os("ROOTLIGHT_PWCT_REPOSITORY")
+                .expect("set ROOTLIGHT_PWCT_REPOSITORY to the independently pinned PWCT2 checkout"),
+        );
+        let mut pending = vec![root.clone()];
+        let mut files = Vec::new();
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                assert!(!metadata.file_type().is_symlink());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    assert_eq!(metadata.file_attributes() & 0x400, 0);
+                }
+                if metadata.is_dir() {
+                    if path.file_name().unwrap() != ".git" {
+                        pending.push(path);
+                    }
+                } else if metadata.is_file()
+                    && path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("pwct"))
+                {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        assert_eq!(files.len(), 1660);
+        let limits = Limits::for_parse(64 * 1024 * 1024, usize::MAX, 4096).unwrap();
+        let cancel = Cancellation::new();
+        let mut formats = [0_usize; 2];
+        let mut steps = 0_usize;
+        let mut interactions = 0_usize;
+        let mut bytes = 0_usize;
+        let mut failures = Vec::new();
+        for path in &files {
+            let source = std::fs::read(path).unwrap();
+            bytes += source.len();
+            match decode(&source, limits, &cancel) {
+                Ok(model) => {
+                    formats[match model.format {
+                        SourceFormat::RingPwctV1 => 0,
+                        SourceFormat::UnversionedTables => 1,
+                    }] += 1;
+                    steps += model.steps.len();
+                    interactions += model.interactions.len();
+                }
+                Err(error) => {
+                    let (category, detail) = match error.kind {
+                        ErrorKind::Malformed(detail) => ("malformed", detail),
+                        ErrorKind::Unsupported(detail) => ("unsupported", detail),
+                        ErrorKind::Limit(detail) => ("limit", detail),
+                        ErrorKind::Cancelled(_) => ("cancelled", "cancelled"),
+                        ErrorKind::Allocation => ("allocation", "allocation"),
+                    };
+                    failures.push(serde_json::json!({
+                        "path": path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"),
+                        "category": category, "detail": detail,
+                        "start_byte": error.span.start, "end_byte": error.span.end,
+                    }));
+                }
+            }
+        }
+        println!(
+            "PWCT_CORPUS_CENSUS={}",
+            serde_json::json!({
+                "files": files.len(), "bytes": bytes,
+                "versioned_files": formats[0], "unversioned_files": formats[1],
+                "steps": steps, "interactions": interactions, "failures": failures,
+                "whole_product_qualified": false,
+            })
+        );
+        assert!(
+            failures.is_empty(),
+            "original corpus has native model refusals"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the independently pinned original PWCT2 checkout"]
+    fn original_unversioned_tables_keep_unknown_metadata_and_written_ownership() {
+        let root = PathBuf::from(
+            std::env::var_os("ROOTLIGHT_PWCT_REPOSITORY")
+                .expect("set ROOTLIGHT_PWCT_REPOSITORY to the independently pinned PWCT2 checkout"),
+        );
+        let source = std::fs::read(root.join("src/tools/vsfgenerator/test/test.pwct"))
+            .expect("original unversioned PWCT witness");
+        assert_eq!(source.len(), 12_127);
+        let plan = plan(&source, limits(), 64, &Cancellation::new()).unwrap();
+        let model = &plan.model;
+        assert_eq!(model.format, SourceFormat::UnversionedTables);
+        assert!(model.natural_language.is_none());
+        assert_eq!((model.steps.len(), model.interactions.len()), (21, 21));
+        assert_eq!((model.step_counter, model.interaction_counter), (21, 21));
+        assert_eq!(plan.records.len(), 64);
+        assert!(model.steps.iter().any(|step| {
+            step.properties
+                .iter()
+                .any(|property| property.name.text == "plainname")
+        }));
+        for step in &model.steps {
+            assert_eq!(
+                &source[step.id_span.clone()],
+                step.id.0.to_string().as_bytes()
+            );
+            assert_eq!(
+                model.interactions[step.interaction_index].id,
+                step.interaction
+            );
+            match step.parent {
+                ParentId::Root => assert_eq!(&source[step.parent_span.clone()], b"0"),
+                ParentId::Step(id) => {
+                    assert_eq!(model.steps[step.parent_index.unwrap()].id, id);
+                    assert_eq!(
+                        &source[step.parent_span.clone()],
+                        id.0.to_string().as_bytes()
+                    );
+                }
+            }
+            for segment in &step.code().unwrap().segments {
+                if segment.origin == TextOrigin::Literal {
+                    assert_eq!(
+                        &source[segment.source.clone()],
+                        step.code().unwrap().text[segment.decoded.clone()].as_bytes()
+                    );
+                } else {
+                    assert_eq!(&source[segment.source.clone()], b"char(34)");
+                }
+            }
+        }
+    }
+
     fn original(relative: &str, bytes: usize) -> (Vec<u8>, Model) {
         let root = PathBuf::from(
             std::env::var_os("ROOTLIGHT_PWCT_REPOSITORY")
@@ -1458,7 +1778,8 @@ mod tests {
         assert_eq!(source.len(), bytes, "{relative}");
         let model =
             decode(&source, limits(), &Cancellation::new()).expect("original schema decode");
-        assert_eq!(model.natural_language.text, "english");
+        assert_eq!(model.format, SourceFormat::RingPwctV1);
+        assert_eq!(model.natural_language.as_ref().unwrap().text, "english");
         let mut code_fields = 0;
         let mut character_segments = 0;
         let mut properties = 0;

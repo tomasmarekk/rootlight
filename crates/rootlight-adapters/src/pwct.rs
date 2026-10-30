@@ -12,7 +12,7 @@ use rootlight_cancel::Cancellation;
 use rootlight_ids::ContentHash;
 use rootlight_ir::{AnalysisTier, CoverageStatus, FactDomain, SourceSpan};
 
-/// Native inert provider for complete PWCT 1.0.0 RingPWCT visual-source files.
+/// Native inert provider for complete PWCT visual tables and RingPWCT 1.0.0 files.
 pub struct PwctParseProvider {
     capabilities: ParseCapabilities,
 }

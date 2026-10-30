@@ -192,6 +192,35 @@ fn normal_pwct_route_publishes_native_symbols_and_exact_source() {
 }
 
 #[test]
+fn unversioned_pwct_tables_keep_symbols_when_headers_are_added() {
+    let versioned = std::str::from_utf8(&synthetic())
+        .unwrap()
+        .replace("\"Start\"", "\"#{PWCT_CURRENT_PATH}\"")
+        .replace("\"see 1\"", "\"see #{run()}\"")
+        .into_bytes();
+    let legacy = std::str::from_utf8(&versioned)
+        .unwrap()
+        .lines()
+        .skip(3)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+    let repository = durable_test_tempdir();
+    let path = repository.path().join("visual.pwct");
+    fs::write(&path, &legacy).unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let initial = index_with_work(&mut service, repository.path());
+    let symbols = assert_source(&service, initial.receipt(), "visual.pwct", &legacy, 2);
+    fs::write(&path, &versioned).unwrap();
+    let updated = index_with_work(&mut service, repository.path());
+    assert_ne!(updated.receipt().generation, initial.receipt().generation);
+    assert_eq!(
+        assert_source(&service, updated.receipt(), "visual.pwct", &versioned, 2),
+        symbols
+    );
+}
+
+#[test]
 fn normal_pwct_configuration_and_outer_suffix_respect_binary_exclusion() {
     let repository = durable_test_tempdir();
     let storage = durable_test_tempdir();
@@ -382,6 +411,98 @@ fn original_pwct_sources_survive_noop_edit_restore_and_reopen() {
     );
     println!(
         "PWCT original pair: native Properties=9 Definitions=9 Contains=9; source-exact fresh/no-op/incremental/byte-restored/reopened; Ring semantics remain pending"
+    );
+}
+
+#[test]
+#[ignore = "requires the independently pinned original PWCT2 checkout"]
+fn original_unversioned_pwct_tables_survive_durable_lifecycle() {
+    let root = PathBuf::from(
+        std::env::var_os("ROOTLIGHT_PWCT_REPOSITORY")
+            .expect("set ROOTLIGHT_PWCT_REPOSITORY to the pinned original checkout"),
+    );
+    let legacy = fs::read(root.join("src/tools/vsfgenerator/test/test.pwct")).unwrap();
+    assert_eq!(legacy.len(), 12_127);
+    let (_, versioned, _) = original_pair().into_iter().next().unwrap();
+    let repository = durable_test_tempdir();
+    fs::write(repository.path().join("legacy.pwct"), &legacy).unwrap();
+    fs::write(repository.path().join("versioned.pwct"), &versioned).unwrap();
+    let storage = durable_test_tempdir();
+    let paths =
+        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let assert_sources =
+        |service: &FirstSliceService, receipt: &FirstSliceIndexReceipt, current_legacy: &[u8]| {
+            assert_eq!(receipt.indexed_files, 2);
+            let mut symbols = assert_source(service, receipt, "legacy.pwct", current_legacy, 21);
+            symbols.extend(assert_source(
+                service,
+                receipt,
+                "versioned.pwct",
+                &versioned,
+                2,
+            ));
+            assert_eq!(symbols.len(), 23);
+            symbols
+        };
+    let mut service = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+    let initial = index_with_work(&mut service, repository.path());
+    let symbols = assert_sources(&service, initial.receipt(), &legacy);
+    assert_noop(
+        &mut service,
+        repository.path(),
+        initial.receipt().generation,
+    );
+
+    let mut changed = legacy.clone();
+    changed.push(b'\n');
+    fs::write(repository.path().join("legacy.pwct"), &changed).unwrap();
+    let updated = index_with_work(&mut service, repository.path());
+    assert_ne!(updated.receipt().generation, initial.receipt().generation);
+    let work = service
+        .incremental_evidence(updated.receipt().generation)
+        .unwrap();
+    assert_eq!(work.parsed_files(), 1);
+    assert_eq!(work.reused_parser_artifacts(), 1);
+    assert_eq!(
+        assert_sources(&service, updated.receipt(), &changed),
+        symbols
+    );
+    drop(service);
+    let mut reopened = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+    assert_eq!(
+        assert_sources(&reopened, updated.receipt(), &changed),
+        symbols
+    );
+    assert_noop(
+        &mut reopened,
+        repository.path(),
+        updated.receipt().generation,
+    );
+
+    fs::write(repository.path().join("legacy.pwct"), &legacy).unwrap();
+    let restored = index_with_work(&mut reopened, repository.path());
+    assert_eq!(
+        restored.receipt().logical_snapshot,
+        initial.receipt().logical_snapshot
+    );
+    assert_eq!(
+        assert_sources(&reopened, restored.receipt(), &legacy),
+        symbols
+    );
+    drop(reopened);
+    let mut final_open = FirstSliceService::new_durable(3, paths.state_dir(), &deadline()).unwrap();
+    assert_eq!(
+        assert_sources(&final_open, restored.receipt(), &legacy),
+        symbols
+    );
+    assert_noop(
+        &mut final_open,
+        repository.path(),
+        restored.receipt().generation,
+    );
+    println!(
+        "PWCT legacy/versioned originals: 23 native Properties/Definitions/Contains; exact source and stable symbols across fresh/no-op/edit/restore/reopen"
     );
 }
 
