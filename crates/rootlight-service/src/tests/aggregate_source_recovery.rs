@@ -2529,6 +2529,8 @@ fn inventory_capacity_refused_native_append_retains_catalog_and_actual_work() {
         fs::write(root.path().join(path), bytes).unwrap();
     }
     let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    service.native_source_batch_limits = Some((1, MAX_SNAPSHOT_BATCH_BYTES));
+    *service.native_source_batch_trace.lock().unwrap() = Some(Default::default());
     let single = individual(&service, "first.rs", sources["first.rs"].clone(), "utf-8");
     let mut limits = service.analysis_limits.ir().clone();
     limits.max_files = 3;
@@ -2544,13 +2546,16 @@ fn inventory_capacity_refused_native_append_retains_catalog_and_actual_work() {
     assert_eq!(snapshot.document().files.len(), 2);
     assert_eq!(snapshot.source_files().len(), 2);
     let evidence = service.incremental_evidence(receipt.generation).unwrap();
+    let expected_attempts = 3 - u64::from(snapshot.document().files.iter().any(|file| {
+        file.language == "rust" && crate::fallback_native::source_only(snapshot, file)
+    }));
     assert_eq!(
-        evidence.parsed_files, 2,
-        "both captured artifacts were actually produced"
+        evidence.parsed_files, expected_attempts,
+        "each captured artifact was actually produced once"
     );
     assert_eq!(
-        evidence.lowered_files, 2,
-        "both native fragments were lowered before combined admission"
+        evidence.lowered_files, expected_attempts,
+        "each native fragment was lowered before combined admission"
     );
     assert_eq!(
         evidence.rebuilt_normalized_facts,
@@ -2568,4 +2573,476 @@ fn inventory_capacity_refused_native_append_retains_catalog_and_actual_work() {
         }
     }
     assert_eq!(unknown, 3);
+    assert_source_windows(
+        service
+            .native_source_batch_trace
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap(),
+    );
+}
+
+fn assert_source_windows(trace: &crate::fallback_native::SourceBatchTrace) {
+    let mut ledger = 0;
+    let mut attempted = BTreeSet::new();
+    let mut total_source_bytes = 0;
+    let mut peak_source_bytes = 0;
+    let mut highwater = 0;
+    for event in &trace.events {
+        assert!(
+            event.ledger >= ledger,
+            "retained output charges never reset"
+        );
+        ledger = event.ledger;
+        assert!(event.highwater >= highwater && event.highwater >= event.actual_reserved);
+        highwater = event.highwater;
+        if let Some(file) = event.file
+            && event.phase == "attempt"
+        {
+            assert!(
+                attempted.insert(file),
+                "a manifest input must be attempted only once"
+            );
+        }
+        if event.source_batch_bytes > 0 {
+            assert!(event.actual_reserved >= event.ledger);
+            assert!(
+                event.source_allowance
+                    >= event.source_batch_bytes * GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR
+            );
+        } else {
+            assert!(event.actual_reserved >= event.ledger - event.source_allowance);
+        }
+        if event.phase == "capture" {
+            total_source_bytes += event.source_batch_bytes;
+            peak_source_bytes = peak_source_bytes.max(event.source_batch_bytes);
+        }
+        if event.phase == "release" {
+            assert_eq!(event.actual_reserved, event.ledger - event.source_allowance);
+        }
+    }
+    if trace.captures > 1 {
+        assert!(total_source_bytes > peak_source_bytes);
+    }
+    assert_eq!(
+        trace.events.last().unwrap().source_allowance,
+        peak_source_bytes * GENERATION_MEMORY_SOURCE_PREFLIGHT_FACTOR
+    );
+}
+
+fn json_batches_case(batch_files: usize, batch_bytes: u64, originals: &[(&str, Vec<u8>)]) {
+    let (_storage, paths) = paths();
+    let root = durable_test_tempdir();
+    let mut sources = BTreeMap::new();
+    for name in ["a_first", "b_second", "c_third", "z_late_a", "z_late_b"] {
+        sources.insert(
+            format!("{name}.json"),
+            format!("{{\"{name}\":1}}\n").into_bytes(),
+        );
+    }
+    sources.insert(
+        "unknown_a.unrecognized".to_owned(),
+        b"exactUnknownA\n".to_vec(),
+    );
+    for (path, bytes) in originals {
+        sources.insert((*path).to_owned(), bytes.clone());
+    }
+    sources.insert(
+        "unknown_b.unrecognized".to_owned(),
+        b"exactUnknownB\n".to_vec(),
+    );
+    for (path, bytes) in &sources {
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    service.native_source_batch_limits = Some((batch_files, batch_bytes));
+    *service.native_source_batch_trace.lock().unwrap() = Some(Default::default());
+    let mut limits = service.analysis_limits.ir().clone();
+    limits.max_files = sources.len() - 1;
+    replace_service_ir_limits(&mut service, limits.clone());
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let native = snapshot
+        .document()
+        .files
+        .iter()
+        .filter(|file| !crate::fallback_native::source_only(&snapshot, file))
+        .collect::<Vec<_>>();
+    assert!(
+        native.len() >= 4,
+        "every fitting JSON input after the first source batch must retain native facts"
+    );
+    let late = snapshot
+        .document()
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.kind == EntityKind::Property
+                && matches!(
+                    entity.canonical_name.as_str(),
+                    "\"z_late_a\"" | "\"z_late_b\""
+                )
+        })
+        .expect("a genuine native JSON property must survive beyond the first batch");
+    let evidence = &snapshot
+        .document()
+        .occurrences
+        .iter()
+        .find(|occurrence| {
+            occurrence.role == rootlight_ir::OccurrenceRole::Definition
+                && occurrence.target
+                    == (rootlight_ir::OccurrenceTarget::Resolved { symbol: late.id })
+        })
+        .unwrap()
+        .source;
+    let file = snapshot.find_file(evidence.span().file()).unwrap();
+    let bytes = &sources[&file.path];
+    let start = usize::try_from(evidence.span().start_byte()).unwrap();
+    let end = usize::try_from(evidence.span().end_byte()).unwrap();
+    assert_eq!(&bytes[start..end], late.canonical_name.as_bytes());
+    let located = service
+        .code_locate(
+            receipt.generation,
+            late.canonical_name.clone(),
+            LocateMode::Exact,
+            10,
+            0,
+            &deadline(),
+        )
+        .unwrap();
+    assert!(
+        located
+            .data
+            .hits
+            .iter()
+            .any(|hit| hit.symbol == Some(late.id))
+    );
+    if !originals.is_empty() {
+        let native_originals: Vec<_> = native
+            .iter()
+            .filter(|file| originals.iter().any(|(path, _)| *path == file.path))
+            .collect();
+        assert!(!native_originals.is_empty());
+        for file in native_originals {
+            let definitions: Vec<_> = snapshot
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == EntityKind::Property
+                        && entity.canonical_name == "\"operationId\""
+                })
+                .flat_map(|entity| {
+                    snapshot
+                        .document()
+                        .occurrences
+                        .iter()
+                        .filter(move |occurrence| {
+                            occurrence.file == file.id
+                                && occurrence.role == rootlight_ir::OccurrenceRole::Definition
+                                && occurrence.target
+                                    == (rootlight_ir::OccurrenceTarget::Resolved {
+                                        symbol: entity.id,
+                                    })
+                        })
+                })
+                .collect();
+            assert_eq!(definitions.len(), 5);
+            for definition in definitions {
+                let span = definition.source.span();
+                assert_eq!(
+                    &sources[&file.path][usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()],
+                    b"\"operationId\""
+                );
+            }
+        }
+    }
+    for (path, bytes) in &sources {
+        assert_exact(&service, &receipt, path, bytes);
+    }
+    assert_eq!(snapshot.file_count(), sources.len());
+    assert!(
+        snapshot
+            .document()
+            .files
+            .iter()
+            .all(|file| snapshot.source_files().find(file.id).is_none())
+    );
+    assert_eq!(
+        service
+            .incremental_evidence(receipt.generation)
+            .unwrap()
+            .parsed_files,
+        u64::try_from(native.len()).unwrap()
+    );
+    {
+        let observed = service.native_source_batch_trace.lock().unwrap();
+        let trace = observed.as_ref().unwrap();
+        assert!(trace.captures >= 2);
+        assert_source_windows(trace);
+    }
+    assert_eq!(
+        service.index_repository(root.path(), &deadline()).unwrap(),
+        receipt
+    );
+    let changed_path = native[0].path.clone();
+    let old_sources = sources.clone();
+    sources.get_mut(&changed_path).unwrap().push(b'\n');
+    fs::write(root.path().join(&changed_path), &sources[&changed_path]).unwrap();
+    let successor = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_ne!(successor.generation, receipt.generation);
+    assert_eq!(successor.parent, Some(receipt.generation));
+    for (path, bytes) in &sources {
+        assert_exact(&service, &successor, path, bytes);
+    }
+    drop(service);
+    for path in sources.keys() {
+        fs::remove_file(root.path().join(path)).unwrap();
+    }
+    let restored = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    for (retained, expected) in [(&receipt, &old_sources), (&successor, &sources)] {
+        let lease = restored
+            .generation_lease(retained.generation, &deadline())
+            .unwrap();
+        assert!(
+            lease
+                .generation()
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.id == late.id)
+        );
+        for (path, bytes) in expected {
+            assert_exact(&restored, retained, path, bytes);
+        }
+    }
+}
+
+#[test]
+fn native_source_batches_cross_file_partition_boundaries() {
+    json_batches_case(2, MAX_SNAPSHOT_BATCH_BYTES, &[]);
+}
+
+#[test]
+fn native_source_batches_cross_byte_partition_boundaries() {
+    json_batches_case(MAX_SNAPSHOT_BATCH_FILES, 32, &[]);
+}
+
+#[test]
+fn native_source_batches_cancel_after_capture_release_only_temporary_then_abort() {
+    let (_storage, paths) = paths();
+    let root = durable_test_tempdir();
+    let mut sources = BTreeMap::new();
+    for index in 0..5 {
+        sources.insert(
+            format!("source_{index}.json"),
+            format!("{{\"value_{index}\":1}}\n").into_bytes(),
+        );
+    }
+    sources.insert(
+        "unknown.unrecognized".to_owned(),
+        b"exactUnknown\n".to_vec(),
+    );
+    for (path, bytes) in &sources {
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    service.native_source_batch_limits = Some((1, MAX_SNAPSHOT_BATCH_BYTES));
+    let mut limits = service.analysis_limits.ir().clone();
+    limits.max_files = 5;
+    replace_service_ir_limits(&mut service, limits);
+    let initial = service.index_repository(root.path(), &deadline()).unwrap();
+    *service.native_source_batch_trace.lock().unwrap() =
+        Some(crate::fallback_native::SourceBatchTrace {
+            cancel_on_capture: Some(2),
+            ..Default::default()
+        });
+    let cancellation = deadline();
+    let result = service.index_repository_with_options(
+        root.path(),
+        FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+        &cancellation,
+    );
+    assert!(matches!(
+        result,
+        Err(FirstSliceError::Cancelled(
+            CancellationReason::ClientRequest
+        ))
+    ));
+    assert_eq!(
+        service.active_generation_for(initial.repository),
+        Some(initial.generation)
+    );
+    assert!(
+        service
+            .generation_cache
+            .lock()
+            .unwrap()
+            .reservations
+            .is_empty()
+    );
+    let observed = service.native_source_batch_trace.lock().unwrap();
+    let trace = observed.as_ref().unwrap();
+    assert_eq!(trace.captures, 2);
+    assert_eq!(trace.events.last().unwrap().phase, "release");
+    assert_source_windows(trace);
+    drop(observed);
+    for (path, bytes) in &sources {
+        assert_exact(&service, &initial, path, bytes);
+    }
+}
+
+#[test]
+#[ignore = "requires the independently retained original OpenAPI corpus checkout"]
+fn native_source_batches_preserve_original_openapi_keys_across_batches() {
+    let repository = PathBuf::from(
+        std::env::var_os("ROOTLIGHT_OPENAPI_REPOSITORY")
+            .expect("original OpenAPI repository is configured"),
+    );
+    let base = "specification/addons/resource-manager/Microsoft.Addons/Addons/preview";
+    let originals = [
+        (
+            "original_a.json",
+            fs::read(repository.join(base).join("2017-05-15/Addons.json")).unwrap(),
+        ),
+        (
+            "original_b.json",
+            fs::read(repository.join(base).join("2018-03-01/addons-swagger.json")).unwrap(),
+        ),
+    ];
+    assert_eq!(originals[0].1.len(), 13_443);
+    assert_eq!(originals[1].1.len(), 13_511);
+    json_batches_case(1, MAX_SNAPSHOT_BATCH_BYTES, &originals);
+}
+
+#[test]
+fn native_source_batches_real_workspace_refusal_preserves_admitted_prefix() {
+    let (_storage, paths) = paths();
+    let root = durable_test_tempdir();
+    let large = format!(
+        "{{{}}}\n",
+        (0..1000)
+            .map(|index| format!("\"field_{index:04}\":1"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+    .into_bytes();
+    let sources = BTreeMap::from([
+        ("a_small_a.json", b"{\"first\":1}\n".to_vec()),
+        ("a_small_b.json", b"{\"second\":1}\n".to_vec()),
+        ("m_large_a.json", large.clone()),
+        ("m_large_b.json", large),
+        ("z_late.json", b"{\"late\":1}\n".to_vec()),
+        ("unknown.unrecognized", b"exactUnknown\n".to_vec()),
+    ]);
+    for (path, bytes) in &sources {
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    service.native_source_batch_limits = Some((1, MAX_SNAPSHOT_BATCH_BYTES));
+    *service.native_source_batch_trace.lock().unwrap() = Some(Default::default());
+    let mut limits = service.analysis_limits.ir().clone();
+    limits.max_files = 5;
+    replace_service_ir_limits(&mut service, limits);
+    let initial = service.index_repository(root.path(), &deadline()).unwrap();
+    let first_peak = service
+        .native_source_batch_trace
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .events
+        .iter()
+        .find(|event| event.phase == "append")
+        .unwrap()
+        .actual_reserved;
+    let lease = service
+        .generation_lease(initial.generation, &deadline())
+        .unwrap();
+    let retained = service
+        .generation_cache
+        .lock()
+        .unwrap()
+        .resident_logical_charge_bytes()
+        .unwrap();
+    let available = first_peak.checked_add(128 * 1024).unwrap();
+    let pressure = GenerationMemoryReservation::new(
+        Arc::clone(&service.generation_cache),
+        GenerationId::from_bytes([47; 20]),
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+            .checked_sub(retained)
+            .unwrap()
+            .checked_sub(available)
+            .unwrap(),
+        PendingGenerationMemory::Reserved,
+        true,
+    )
+    .unwrap();
+    *service.native_source_batch_trace.lock().unwrap() = Some(Default::default());
+    let prepared = service
+        .prepare_repository_with_options(
+            root.path(),
+            FirstSliceIndexOptions::clean_rebuild(FirstSliceIndexMode::Structural),
+            &deadline(),
+        )
+        .unwrap();
+    let peak = match &prepared {
+        FirstSliceIndexPreparation::Pending(prepared) => prepared.reserved_memory_bytes,
+        _ => panic!("forced preparation must produce a successor"),
+    };
+    {
+        let observed = service.native_source_batch_trace.lock().unwrap();
+        let trace = observed.as_ref().unwrap();
+        let refusal = trace
+            .events
+            .iter()
+            .position(|event| event.phase == "workspace-refused")
+            .expect("actual host memory admission must refuse the larger next batch");
+        assert!(refusal > 0);
+        assert_eq!(
+            trace.events[refusal].ledger,
+            trace.events[refusal - 1].ledger,
+            "failed source-workspace admission must not change the ledger"
+        );
+        assert_eq!(
+            trace.events[refusal].actual_reserved,
+            trace.events[refusal].ledger - trace.events[refusal].source_allowance
+        );
+        assert!(peak >= trace.events.last().unwrap().highwater);
+        assert_source_windows(trace);
+    }
+    let successor = service.publish_prepared(prepared, &deadline()).unwrap();
+    drop(pressure);
+    let current = service
+        .generation_lease(successor.generation, &deadline())
+        .unwrap();
+    let native: Vec<_> = current
+        .generation()
+        .document()
+        .files
+        .iter()
+        .filter(|file| !crate::fallback_native::source_only(current.generation(), file))
+        .collect();
+    assert!(!native.is_empty());
+    assert!(native.iter().all(|file| file.path.starts_with("a_small_")));
+    assert!(
+        service
+            .generation_cache
+            .lock()
+            .unwrap()
+            .reservations
+            .is_empty()
+    );
+    assert_eq!(
+        lease.generation().metadata().generation(),
+        initial.generation
+    );
+    for (path, bytes) in &sources {
+        assert_exact(&service, &initial, path, bytes);
+        assert_exact(&service, &successor, path, bytes);
+    }
 }

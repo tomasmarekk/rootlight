@@ -17,13 +17,13 @@ fn bounded_native_batches_invalidate_previous_file_only_generations() {
         INCREMENTAL_SCHEMA_VERSION.as_bytes(),
         DERIVED_PLAN_REVISION_SEED,
         LANGUAGE_DISPOSITION_PROVIDER_SEED,
-        b"rootlight.source-file-fallback/4",
+        b"rootlight.source-file-fallback/5",
         container_sources::REVISION,
     ])
     .unwrap();
     assert_eq!(
         SOURCE_FILE_FALLBACK_PROVIDER_SEED,
-        b"rootlight.source-file-fallback/5"
+        b"rootlight.source-file-fallback/6"
     );
     assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
 }

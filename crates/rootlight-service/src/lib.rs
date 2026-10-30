@@ -974,7 +974,7 @@ const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structura
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/155";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/15";
-const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/5";
+const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/6";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
 const PARSER_ARTIFACT_SEED: &str = "rootlight.first-slice.parser-artifact";
@@ -6740,6 +6740,10 @@ pub struct FirstSliceService {
     pending_durable_compactions: BTreeSet<RepositoryId>,
     #[cfg(test)]
     available_disk_bytes_override: Option<u64>,
+    #[cfg(test)]
+    native_source_batch_limits: Option<(usize, u64)>,
+    #[cfg(test)]
+    native_source_batch_trace: Mutex<Option<fallback_native::SourceBatchTrace>>,
 }
 
 impl FirstSliceService {
@@ -8185,6 +8189,10 @@ impl FirstSliceService {
             pending_durable_compactions: BTreeSet::new(),
             #[cfg(test)]
             available_disk_bytes_override: None,
+            #[cfg(test)]
+            native_source_batch_limits: None,
+            #[cfg(test)]
+            native_source_batch_trace: Mutex::new(None),
         })
     }
 
@@ -11704,12 +11712,7 @@ impl FirstSliceService {
             && durable_restore_capacity.is_none()
             && fresh_projection_capacity.is_none();
         let native_file_bound = if native_batch {
-            source_file_catalog.len().min(MAX_SNAPSHOT_BATCH_FILES).min(
-                self.analysis_limits
-                    .ir()
-                    .max_files
-                    .saturating_sub(document.files.len()),
-            )
+            source_file_catalog.len()
         } else {
             0
         };
@@ -11744,7 +11747,7 @@ impl FirstSliceService {
             .map_err(FirstSlicePreparationError::PlanningObserver)?;
         let mut parsed_files = 0;
         if native_batch {
-            let batch = self.append_fallback_native_batch(
+            let batch = self.append_fallback_native_batches(
                 root,
                 &manifest.inputs,
                 &mut document,
