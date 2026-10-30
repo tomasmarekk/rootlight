@@ -52,11 +52,20 @@ struct ResolutionPlanObservation {
     extensions: u64,
     source_refs: u64,
     identity_registry_rows: u64,
+    entity_flags: u64,
+    occurrence_candidates: u64,
+    provenance_sources: u64,
+    provenance_derivations: u64,
+    evidence_derivations: u64,
     memory: durable::OracleRestoreMemoryBreakdown,
 }
 
 impl ResolutionPlanObservation {
-    fn new(plan: OracleReadMemoryPlan, memory: durable::OracleRestoreMemoryBreakdown) -> Self {
+    fn new(
+        plan: OracleReadMemoryPlan,
+        memory: durable::OracleRestoreMemoryBreakdown,
+        measured: &OracleLayoutFragment,
+    ) -> Self {
         let stats = plan.stats();
         Self {
             files: stats.files(),
@@ -71,6 +80,11 @@ impl ResolutionPlanObservation {
             extensions: stats.extensions(),
             source_refs: stats.source_refs(),
             identity_registry_rows: plan.identity_registry_rows(),
+            entity_flags: measured.entity_flag_rows(),
+            occurrence_candidates: measured.occurrence_candidate_rows(),
+            provenance_sources: measured.provenance_source_rows(),
+            provenance_derivations: measured.provenance_derivation_rows(),
+            evidence_derivations: measured.evidence_derivation_rows(),
             memory,
         }
     }
@@ -918,6 +932,7 @@ impl FinalAdmission {
             Some(ResolutionPlanObservation::new(
                 plan,
                 self.envelope.breakdown(plan)?,
+                &measured,
             ))
         } else {
             None
@@ -957,6 +972,15 @@ impl FinalAdmission {
             .read_memory_plan(context)
             .map_err(|error| map_catalog_error(&error, cancellation))?;
         let observed = self.envelope.observed(rejected_plan)?;
+        let rejected = if before.is_some() && observed > durable::oracle_restore_memory_limit() {
+            Some(ResolutionPlanObservation::new(
+                rejected_plan,
+                self.envelope.breakdown(rejected_plan)?,
+                &measured,
+            ))
+        } else {
+            None
+        };
         drop(measured);
         if observed <= durable::oracle_restore_memory_limit() {
             drop(undo);
@@ -1017,10 +1041,7 @@ impl FinalAdmission {
                 repository: document.repository,
                 generation: document.generation,
                 before,
-                rejected: ResolutionPlanObservation::new(
-                    rejected_plan,
-                    self.envelope.breakdown(rejected_plan)?,
-                ),
+                rejected: rejected.ok_or(FirstSliceError::Identity)?,
                 reserved_sidecars: self.envelope.reserved_sidecar_inputs(),
                 limit: durable::oracle_restore_memory_limit(),
             };

@@ -36,6 +36,9 @@ struct Totals {
     children: u64,
     entity_flag_rows: u64,
     evidence_rows: u64,
+    occurrence_candidate_rows: u64,
+    provenance_source_rows: u64,
+    provenance_derivation_rows: u64,
     symbol_envelopes: u64,
     text: u64,
     skipped_metadata_bytes: u64,
@@ -47,6 +50,9 @@ impl Totals {
         entity_flag_rows: u64,
         symbol_envelopes: u64,
         evidence_rows: u64,
+        occurrence_candidate_rows: u64,
+        provenance_source_rows: u64,
+        provenance_derivation_rows: u64,
     ) -> Result<Self, CatalogError> {
         let records = [
             stats.files(),
@@ -75,6 +81,9 @@ impl Totals {
             children,
             entity_flag_rows,
             evidence_rows,
+            occurrence_candidate_rows,
+            provenance_source_rows,
+            provenance_derivation_rows,
             symbol_envelopes,
             text: stats.text_bytes(),
             skipped_metadata_bytes: 0,
@@ -93,6 +102,9 @@ impl Totals {
         if self
             .entity_flag_rows
             .checked_add(self.evidence_rows)
+            .and_then(|rows| rows.checked_add(self.occurrence_candidate_rows))
+            .and_then(|rows| rows.checked_add(self.provenance_source_rows))
+            .and_then(|rows| rows.checked_add(self.provenance_derivation_rows))
             .ok_or_else(invalid)?
             > self.children
             || self.evidence_rows
@@ -135,6 +147,21 @@ impl Totals {
             .evidence_rows
             .checked_sub(removed.evidence_rows)
             .and_then(|rows| rows.checked_add(added.evidence_rows))
+            .ok_or_else(invalid)?;
+        next.occurrence_candidate_rows = self
+            .occurrence_candidate_rows
+            .checked_sub(removed.occurrence_candidate_rows)
+            .and_then(|rows| rows.checked_add(added.occurrence_candidate_rows))
+            .ok_or_else(invalid)?;
+        next.provenance_source_rows = self
+            .provenance_source_rows
+            .checked_sub(removed.provenance_source_rows)
+            .and_then(|rows| rows.checked_add(added.provenance_source_rows))
+            .ok_or_else(invalid)?;
+        next.provenance_derivation_rows = self
+            .provenance_derivation_rows
+            .checked_sub(removed.provenance_derivation_rows)
+            .and_then(|rows| rows.checked_add(added.provenance_derivation_rows))
             .ok_or_else(invalid)?;
         next.symbol_envelopes = self
             .symbol_envelopes
@@ -203,6 +230,36 @@ pub struct OracleLayoutFragment {
 }
 
 impl OracleLayoutFragment {
+    /// Number of normalized entity flag rows in this contribution.
+    #[must_use]
+    pub const fn entity_flag_rows(&self) -> u64 {
+        self.totals.entity_flag_rows
+    }
+
+    /// Number of normalized occurrence candidate rows in this contribution.
+    #[must_use]
+    pub const fn occurrence_candidate_rows(&self) -> u64 {
+        self.totals.occurrence_candidate_rows
+    }
+
+    /// Number of normalized provenance input and evidence source rows.
+    #[must_use]
+    pub const fn provenance_source_rows(&self) -> u64 {
+        self.totals.provenance_source_rows
+    }
+
+    /// Number of normalized provenance parent derivation rows.
+    #[must_use]
+    pub const fn provenance_derivation_rows(&self) -> u64 {
+        self.totals.provenance_derivation_rows
+    }
+
+    /// Number of typed evidence derivation rows, excluding opaque JSON evidence.
+    #[must_use]
+    pub const fn evidence_derivation_rows(&self) -> u64 {
+        self.totals.evidence_rows
+    }
+
     /// Returns the writer-equivalent plan for this standalone contribution.
     ///
     /// This is useful for one final owned resolver candidate; constructing an
@@ -551,6 +608,11 @@ impl OracleLayoutFragment {
                 rows.checked_add(u64::try_from(evidence.derivation.len()).map_err(|_| invalid())?)
                     .ok_or_else(invalid)
             })?;
+        if auxiliary.entity_flag_rows != entity_flag_rows
+            || auxiliary.evidence_rows != evidence_rows
+        {
+            return Err(invalid().into());
+        }
         let source_capacity = plan.source_ordinals.capacity();
         let source_counts_capacity = auxiliary.source_counts.capacity();
         let payload_capacity = auxiliary.payloads.capacity();
@@ -559,7 +621,10 @@ impl OracleLayoutFragment {
             plan.stats,
             entity_flag_rows,
             symbol_envelopes,
-            evidence_rows,
+            auxiliary.evidence_rows,
+            auxiliary.occurrence_candidate_rows,
+            auxiliary.provenance_source_rows,
+            auxiliary.provenance_derivation_rows,
         )?;
         fragment.totals.skipped_metadata_bytes = auxiliary.skipped_metadata_bytes;
         fragment.totals.validate_counts()?;

@@ -144,6 +144,11 @@ pub(crate) fn measure<'a>(
 
 #[derive(Default)]
 pub(crate) struct AuxiliaryCensus {
+    pub(crate) entity_flag_rows: u64,
+    pub(crate) occurrence_candidate_rows: u64,
+    pub(crate) provenance_source_rows: u64,
+    pub(crate) provenance_derivation_rows: u64,
+    pub(crate) evidence_rows: u64,
     pub(crate) source_counts: Vec<u64>,
     pub(crate) payloads: Vec<u64>,
     pub(crate) skipped_metadata_bytes: u64,
@@ -250,7 +255,13 @@ pub(crate) fn measure_view<'a>(
     for file in document.files {
         context.check().map_err(CatalogError::control)?;
         insert_measured_identity(&mut identities, RegistryIdentity::File(file.id), context)?;
-        collect_evidence(&file.evidence, &mut sources, &mut child_rows, context)?;
+        collect_evidence(
+            &file.evidence,
+            &mut sources,
+            &mut child_rows,
+            &mut auxiliary,
+            context,
+        )?;
         add_text(&mut text_bytes, &file.path, context)?;
         if let Some(locator) = &file.path_locator {
             add_text(&mut text_bytes, locator.encoding().as_str(), context)?;
@@ -268,8 +279,21 @@ pub(crate) fn measure_view<'a>(
             RegistryIdentity::Entity(entity.id),
             context,
         )?;
-        collect_evidence(&entity.evidence, &mut sources, &mut child_rows, context)?;
+        collect_evidence(
+            &entity.evidence,
+            &mut sources,
+            &mut child_rows,
+            &mut auxiliary,
+            context,
+        )?;
         add_rows(&mut child_rows, usize_to_u64(entity.flags.len())?, context)?;
+        if let Some(census) = auxiliary.as_deref_mut() {
+            add_rows(
+                &mut census.entity_flag_rows,
+                usize_to_u64(entity.flags.len())?,
+                context,
+            )?;
+        }
         add_text(&mut text_bytes, &entity.language, context)?;
         add_text(&mut text_bytes, &entity.canonical_name, context)?;
         add_text(&mut text_bytes, &entity.display_name, context)?;
@@ -283,9 +307,22 @@ pub(crate) fn measure_view<'a>(
             context,
         )?;
         collect_source(&occurrence.source, &mut sources, context)?;
-        collect_evidence(&occurrence.evidence, &mut sources, &mut child_rows, context)?;
+        collect_evidence(
+            &occurrence.evidence,
+            &mut sources,
+            &mut child_rows,
+            &mut auxiliary,
+            context,
+        )?;
         if let OccurrenceTarget::Candidates { symbols, .. } = &occurrence.target {
             add_rows(&mut child_rows, usize_to_u64(symbols.len())?, context)?;
+            if let Some(census) = auxiliary.as_deref_mut() {
+                add_rows(
+                    &mut census.occurrence_candidate_rows,
+                    usize_to_u64(symbols.len())?,
+                    context,
+                )?;
+            }
         }
         add_text(&mut text_bytes, &occurrence.syntax_kind, context)?;
     }
@@ -296,7 +333,13 @@ pub(crate) fn measure_view<'a>(
             RegistryIdentity::Fact(relation.id),
             context,
         )?;
-        collect_evidence(&relation.evidence, &mut sources, &mut child_rows, context)?;
+        collect_evidence(
+            &relation.evidence,
+            &mut sources,
+            &mut child_rows,
+            &mut auxiliary,
+            context,
+        )?;
     }
     for provenance in document.provenance {
         context.check().map_err(CatalogError::control)?;
@@ -319,6 +362,17 @@ pub(crate) fn measure_view<'a>(
             usize_to_u64(provenance.derivation_parents.len())?,
             context,
         )?;
+        if let Some(census) = auxiliary.as_deref_mut() {
+            let source_rows = usize_to_u64(provenance.input_sources.len())?
+                .checked_add(usize_to_u64(provenance.evidence_sources.len())?)
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+            add_rows(&mut census.provenance_source_rows, source_rows, context)?;
+            add_rows(
+                &mut census.provenance_derivation_rows,
+                usize_to_u64(provenance.derivation_parents.len())?,
+                context,
+            )?;
+        }
         add_text(&mut text_bytes, provenance.producer.name(), context)?;
         add_text(&mut text_bytes, provenance.producer.version(), context)?;
         add_optional_text(
@@ -346,7 +400,13 @@ pub(crate) fn measure_view<'a>(
             RegistryIdentity::Fact(coverage.id),
             context,
         )?;
-        collect_evidence(&coverage.evidence, &mut sources, &mut child_rows, context)?;
+        collect_evidence(
+            &coverage.evidence,
+            &mut sources,
+            &mut child_rows,
+            &mut auxiliary,
+            context,
+        )?;
     }
     for region in document.skipped_regions {
         context.check().map_err(CatalogError::control)?;
@@ -523,16 +583,18 @@ fn collect_evidence<'a>(
     evidence: &'a FactEvidence,
     sources: &mut Vec<&'a SourceRef>,
     child_rows: &mut u64,
+    auxiliary: &mut Option<&mut AuxiliaryCensus>,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     if let Some(source) = &evidence.source {
         collect_source(source, sources, context)?;
     }
-    add_rows(
-        child_rows,
-        usize_to_u64(evidence.derivation.len())?,
-        context,
-    )
+    let rows = usize_to_u64(evidence.derivation.len())?;
+    add_rows(child_rows, rows, context)?;
+    if let Some(census) = auxiliary.as_deref_mut() {
+        add_rows(&mut census.evidence_rows, rows, context)?;
+    }
+    Ok(())
 }
 
 fn collect_opaque_evidence_source<'a>(

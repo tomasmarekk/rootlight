@@ -81,6 +81,16 @@ fn evidence_rows(document: &NormalizedIrDocument) -> u64 {
         .sum()
 }
 
+fn auxiliary_rows(totals: Totals) -> [u64; 5] {
+    [
+        totals.entity_flag_rows,
+        totals.occurrence_candidate_rows,
+        totals.provenance_source_rows,
+        totals.provenance_derivation_rows,
+        totals.evidence_rows,
+    ]
+}
+
 fn symbol_envelopes(document: &NormalizedIrDocument) -> u64 {
     u64::try_from(
         document
@@ -150,6 +160,12 @@ fn all_layout_features() -> NormalizedIrDocument {
     let whole = document.provenance[0].input_sources[0].clone();
     document.provenance[0].input_sources.push(whole.clone());
     document.provenance[0].evidence_sources.push(whole);
+    let mut derived = document.provenance[0].clone();
+    derived
+        .derivation_parents
+        .push(FactRef::Fact(document.provenance[0].id));
+    derived.id = rootlight_ir::derive_provenance_record_id(&derived).unwrap();
+    document.provenance.push(derived);
     // Opaque evidence is stored only in its JSON payload. Counting a separate
     // evidence child here would diverge from the actual Oracle schema.
     document.source_mappings[0]
@@ -226,6 +242,44 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
+    let fragment = measure(&expected_document, &context);
+    for (table, measured, incremental) in [
+        (
+            "entity_flags",
+            fragment.entity_flag_rows(),
+            census.totals.entity_flag_rows,
+        ),
+        (
+            "occurrence_candidates",
+            fragment.occurrence_candidate_rows(),
+            census.totals.occurrence_candidate_rows,
+        ),
+        (
+            "provenance_sources",
+            fragment.provenance_source_rows(),
+            census.totals.provenance_source_rows,
+        ),
+        (
+            "provenance_derivations",
+            fragment.provenance_derivation_rows(),
+            census.totals.provenance_derivation_rows,
+        ),
+        (
+            "evidence_derivations",
+            fragment.evidence_derivation_rows(),
+            census.totals.evidence_rows,
+        ),
+    ] {
+        let actual: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let actual = u64::try_from(actual).unwrap();
+        assert!(actual > 0, "the fixture must exercise {table}");
+        assert_eq!(measured, actual, "standalone {table}");
+        assert_eq!(incremental, actual, "incremental {table}");
+    }
     let actual_evidence: i64 = connection
         .query_row("SELECT count(*) FROM evidence_derivations", [], |row| {
             row.get(0)
@@ -698,7 +752,7 @@ fn removing_and_replacing_maximum_payload_shrinks_the_exact_plan() {
 fn foreign_duplicate_cancelled_overflow_and_host_refusal_do_not_change_accepted_census() {
     let cancellation = Cancellation::new();
     let context = GenerationContext::new(&cancellation, GenerationBudget::default());
-    let (document, _) = fixture_documents();
+    let document = all_layout_features();
     let mut census = OracleLayoutCensus::new(document.repository, document.generation);
     insert(&mut census, &document, &context);
     let before = census.read_memory_plan(&context).unwrap();
@@ -739,6 +793,25 @@ fn foreign_duplicate_cancelled_overflow_and_host_refusal_do_not_change_accepted_
             )
             .is_err()
     );
+    let before_rows = auxiliary_rows(census.totals);
+    for family in 0..5 {
+        let mut overflow = empty(&document);
+        match family {
+            0 => overflow.totals.entity_flag_rows = u64::MAX,
+            1 => overflow.totals.occurrence_candidate_rows = u64::MAX,
+            2 => overflow.totals.provenance_source_rows = u64::MAX,
+            3 => overflow.totals.provenance_derivation_rows = u64::MAX,
+            _ => overflow.totals.evidence_rows = u64::MAX,
+        }
+        assert!(
+            census
+                .preview(empty(&document), overflow, 0, &context, &mut |_| {
+                    Ok::<_, ()>(())
+                })
+                .is_err()
+        );
+        assert_eq!(auxiliary_rows(census.totals), before_rows);
+    }
     let refused =
         OracleLayoutFragment::measure(&document, 0, &context, &mut |_| Err("workspace refused"));
     assert!(matches!(
@@ -952,6 +1025,9 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
     assert_eq!(combined.totals.entity_flag_rows, 7);
     assert_eq!(combined.totals.evidence_rows, 5);
     assert_eq!(combined.totals.symbol_envelopes, 1);
+    let expected_rows = auxiliary_rows(measure(document, &context).totals);
+    assert!(expected_rows.into_iter().all(|rows| rows > 0));
+    assert_eq!(auxiliary_rows(combined.totals), expected_rows);
     let mut peak = 0;
     let duplicate = combined
         .duplicate(17, &context, &mut |bytes| {
@@ -964,6 +1040,7 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
     assert_eq!(duplicate.totals.entity_flag_rows, 7);
     assert_eq!(duplicate.totals.evidence_rows, 5);
     assert_eq!(duplicate.totals.symbol_envelopes, 1);
+    assert_eq!(auxiliary_rows(duplicate.totals), expected_rows);
     let refused = combined.duplicate(0, &context, &mut |_| Err("duplicate workspace refused"));
     assert!(matches!(
         refused,
@@ -977,6 +1054,38 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
         matches!(failure, Err(OracleReadAdmissionError::Catalog(ref error))
         if error.kind() == CatalogErrorKind::InvalidGeneration)
     );
+    let mut census = OracleLayoutCensus::new(document.repository, document.generation);
+    insert(&mut census, document, &context);
+    for category in categories(document) {
+        let removed_rows = auxiliary_rows(measure(&category, &context).totals);
+        let remaining = std::array::from_fn(|index| expected_rows[index] - removed_rows[index]);
+        {
+            let preview = census
+                .preview(
+                    measure(&category, &context),
+                    empty(document),
+                    0,
+                    &context,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(auxiliary_rows(preview.census.totals), remaining);
+        }
+        assert_eq!(auxiliary_rows(census.totals), expected_rows);
+        census
+            .preview(
+                measure(&category, &context),
+                empty(document),
+                0,
+                &context,
+                &mut |_| Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .commit();
+        assert_eq!(auxiliary_rows(census.totals), remaining);
+        insert(&mut census, &category, &context);
+        assert_eq!(auxiliary_rows(census.totals), expected_rows);
+    }
 }
 
 #[test]

@@ -1206,6 +1206,75 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
         assert_eq!(refusal["before"][key], before, "{key}");
         assert_eq!(refusal["rejected"][key], rejected, "{key}");
     }
+    let auxiliary_rows = |document: &NormalizedIrDocument| {
+        let candidates = document
+            .occurrences
+            .iter()
+            .map(|record| match &record.target {
+                OccurrenceTarget::Candidates { symbols, .. } => symbols.len(),
+                _ => 0,
+            });
+        let evidence = document
+            .files
+            .iter()
+            .map(|record| &record.evidence)
+            .chain(document.entities.iter().map(|record| &record.evidence))
+            .chain(document.occurrences.iter().map(|record| &record.evidence))
+            .chain(document.relations.iter().map(|record| &record.evidence))
+            .chain(
+                document
+                    .coverage_records
+                    .iter()
+                    .map(|record| &record.evidence),
+            );
+        [
+            (
+                "entity_flags",
+                document
+                    .entities
+                    .iter()
+                    .map(|record| record.flags.len())
+                    .sum::<usize>(),
+            ),
+            ("occurrence_candidates", candidates.sum()),
+            (
+                "provenance_sources",
+                document
+                    .provenance
+                    .iter()
+                    .map(|record| record.input_sources.len() + record.evidence_sources.len())
+                    .sum(),
+            ),
+            (
+                "provenance_derivations",
+                document
+                    .provenance
+                    .iter()
+                    .map(|record| record.derivation_parents.len())
+                    .sum(),
+            ),
+            (
+                "evidence_derivations",
+                evidence.map(|record| record.derivation.len()).sum(),
+            ),
+        ]
+    };
+    for ((key, before), (rejected_key, rejected)) in auxiliary_rows(&original)
+        .into_iter()
+        .zip(auxiliary_rows(&candidate))
+    {
+        assert_eq!(key, rejected_key);
+        assert_eq!(
+            refusal["before"][key],
+            u64::try_from(before).unwrap(),
+            "{key}"
+        );
+        assert_eq!(
+            refusal["rejected"][key],
+            u64::try_from(rejected).unwrap(),
+            "{key}"
+        );
+    }
     let encoded = serde_json::to_string(&profile).unwrap();
     for file in &original.files {
         assert!(!encoded.contains(&file.path));
