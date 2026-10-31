@@ -1007,6 +1007,21 @@ fn append_summary_prefix_is_not_committed_after_later_quota_failure() {
     assert_eq!(target, before);
     assert_eq!(state, before_state);
     assert_eq!(profile.append.summary_search_entries_visited, 33);
+    assert_eq!(
+        profile.aggregate_append_rejections.first,
+        Some(AnalysisProfileAggregateAppendRejection {
+            file: None,
+            boundary: AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+            stage: rootlight_ir::AggregateCapacityStage::StructuralAppend,
+            resource: rootlight_ir::AggregateCapacityResource::Coverage,
+            observed: 2,
+            limit: 1,
+        })
+    );
+    assert_eq!(
+        profile.aggregate_append_rejections.rejected_checks.coverage,
+        1
+    );
     assert!(profile.phases.iter().any(|event| {
         matches!(event.phase, AnalysisProfilePhase::AppendSourceUsageAndQuota)
             && matches!(
@@ -1014,6 +1029,318 @@ fn append_summary_prefix_is_not_committed_after_later_quota_failure() {
                 AnalysisProfileScopeExit::EarlyReturnOrUnwind
             )
     }));
+}
+
+#[test]
+fn aggregate_append_profile_preserves_recovery_policy_errors_and_atomicity() {
+    for aggregate_recovery in [false, true] {
+        let (target, incoming, mut state, mut limits) = summary_pressure_fixture();
+        state.aggregate_recovery = aggregate_recovery;
+        limits.max_coverage_records = 1;
+        let mut unprofiled_target = target.clone();
+        let mut unprofiled_state = state.clone();
+        let expected = append_normalized_document(
+            &mut unprofiled_target,
+            incoming.clone(),
+            &limits,
+            &mut unprofiled_state,
+        );
+        let mut observed_target = target.clone();
+        let mut observed_state = state.clone();
+        let (actual, profile) = capture_first_slice_analysis_profile(|| {
+            append_normalized_document(&mut observed_target, incoming, &limits, &mut observed_state)
+        });
+        assert_eq!(actual, expected);
+        assert_eq!(
+            matches!(actual, Err(FirstSliceError::AggregateCapacity(_))),
+            aggregate_recovery
+        );
+        assert_eq!(observed_target, target);
+        assert_eq!(unprofiled_target, target);
+        assert_eq!(observed_state, state);
+        assert_eq!(unprofiled_state, state);
+        assert_eq!(
+            profile.aggregate_append_rejections.rejected_checks.coverage,
+            1
+        );
+        let first = profile.aggregate_append_rejections.first.unwrap();
+        assert_eq!(
+            first.boundary,
+            AnalysisProfileAggregateAppendBoundary::TargetAndSource
+        );
+        assert_eq!((first.observed, first.limit), (2, 1));
+        assert!(profile.counts_complete);
+    }
+}
+
+#[test]
+fn aggregate_append_profile_distinguishes_reserved_ownership_from_source_usage() {
+    for aggregate_recovery in [false, true] {
+        let incoming = extension_document(vec![signature_batch()]);
+        let target = NormalizedIrDocument::empty(incoming.repository, incoming.generation);
+        let mut state = DocumentAppendState::from_document(&target).unwrap();
+        state.aggregate_recovery = aggregate_recovery;
+        let before_state = state.clone();
+        let mut limits = IrLimits::default();
+        limits.max_coverage_records = 1;
+        let reserved = IrDocumentUsage::measure(&incoming, &limits).unwrap();
+        let cancellation = Cancellation::new();
+        assert!(
+            prepare_normalized_document_append(
+                &target,
+                incoming.clone(),
+                &limits,
+                &state,
+                &cancellation,
+                None,
+                None,
+            )
+            .is_ok()
+        );
+        let expected = prepare_normalized_document_append(
+            &target,
+            incoming.clone(),
+            &limits,
+            &state,
+            &cancellation,
+            None,
+            Some(&reserved),
+        )
+        .err()
+        .unwrap();
+        let (actual, profile) = capture_first_slice_analysis_profile(|| {
+            prepare_normalized_document_append(
+                &target,
+                incoming,
+                &limits,
+                &state,
+                &cancellation,
+                None,
+                Some(&reserved),
+            )
+            .err()
+            .unwrap()
+        });
+        assert_eq!(actual, expected);
+        assert_eq!(state, before_state);
+        assert!(target.coverage_records.is_empty() && target.extensions.is_empty());
+        assert_eq!(
+            profile.aggregate_append_rejections.rejected_checks.coverage,
+            1
+        );
+        let first = profile.aggregate_append_rejections.first.unwrap();
+        assert_eq!(first.file, None);
+        assert_eq!(
+            first.boundary,
+            AnalysisProfileAggregateAppendBoundary::TargetSourceAndReserved
+        );
+        assert_eq!(
+            first.resource,
+            rootlight_ir::AggregateCapacityResource::Coverage
+        );
+        assert_eq!((first.observed, first.limit), (2, 1));
+    }
+}
+
+#[test]
+fn aggregate_append_profile_excludes_incoming_only_failures_and_cancellation() {
+    let incoming = metadata_pressure_document(vec![
+        metadata_pressure_batch(100, true),
+        metadata_pressure_batch(104, true),
+    ]);
+    assert_eq!(incoming.coverage_records.len(), 2);
+    let mut target = NormalizedIrDocument::empty(incoming.repository, incoming.generation);
+    let before = target.clone();
+    let mut state = DocumentAppendState::from_document(&target).unwrap();
+    state.aggregate_recovery = true;
+    let before_state = state.clone();
+    let mut limits = IrLimits::default();
+    limits.max_coverage_records = 1;
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        append_normalized_document(&mut target, incoming, &limits, &mut state)
+    });
+    assert!(matches!(
+        result,
+        Err(FirstSliceError::ResourceLimit {
+            resource: FirstSliceResource::Coverage,
+            ..
+        })
+    ));
+    assert!(profile.aggregate_append_rejections.first.is_none());
+    assert_eq!(
+        profile.aggregate_append_rejections.rejected_checks.coverage,
+        0
+    );
+    assert_eq!(target, before);
+    assert_eq!(state, before_state);
+
+    let cancellation = Cancellation::new();
+    cancellation.cancel(CancellationReason::ClientRequest);
+    let error = IrDocumentUsageError::Validation(IrDocumentValidationError::CollectionLimit {
+        collection: "coverage_records",
+        observed: 2,
+        limit: 1,
+    });
+    let (actual, profile) = capture_first_slice_analysis_profile(|| {
+        append_usage_error_at_boundary(
+            error,
+            true,
+            &cancellation,
+            Some((
+                None,
+                AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+            )),
+        )
+    });
+    assert_eq!(
+        actual,
+        FirstSliceError::Cancelled(CancellationReason::ClientRequest)
+    );
+    assert!(profile.aggregate_append_rejections.first.is_none());
+    assert_eq!(
+        profile.aggregate_append_rejections.rejected_checks.coverage,
+        0
+    );
+}
+
+#[test]
+fn aggregate_append_profile_keeps_first_witness_and_closed_resource_counts() {
+    let (mut target, incoming, mut state, mut limits) = summary_pressure_fixture();
+    limits.max_coverage_records = 1;
+    let ((), profile) = capture_first_slice_analysis_profile(|| {
+        for _ in 0..2 {
+            assert!(
+                append_normalized_document(&mut target, incoming.clone(), &limits, &mut state)
+                    .is_err()
+            );
+        }
+        for collection in [
+            "files",
+            "entities",
+            "occurrences",
+            "relations",
+            "provenance",
+            "source_mappings",
+            "coverage_records",
+            "skipped_regions",
+            "diagnostics",
+            "extensions",
+        ] {
+            profile_aggregate_append_rejection(
+                &IrDocumentUsageError::Validation(IrDocumentValidationError::CollectionLimit {
+                    collection,
+                    observed: 17,
+                    limit: 16,
+                }),
+                Some(FileId::from_bytes([99; 20])),
+                AnalysisProfileAggregateAppendBoundary::TargetSourceAndReserved,
+            );
+        }
+        for error in [
+            IrDocumentValidationError::TotalRecordLimit {
+                observed: 17,
+                limit: 16,
+            },
+            IrDocumentValidationError::TotalNestedItemLimit {
+                observed: 17,
+                limit: 16,
+            },
+            IrDocumentValidationError::TotalStringLimit {
+                observed: 17,
+                limit: 16,
+            },
+            IrDocumentValidationError::TotalExtensionBytesLimit {
+                observed: 17,
+                limit: 16,
+            },
+            IrDocumentValidationError::TotalDiagnosticBytesLimit {
+                observed: 17,
+                limit: 16,
+            },
+        ] {
+            profile_aggregate_append_rejection(
+                &IrDocumentUsageError::Validation(error),
+                None,
+                AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+            );
+        }
+        for error in [
+            IrDocumentUsageError::AccountingOverflow,
+            IrDocumentUsageError::Interrupted,
+            IrDocumentUsageError::Validation(IrDocumentValidationError::StringLimit {
+                field: "PrivateQuotaPathCanary",
+                observed: 9,
+                limit: 8,
+            }),
+            IrDocumentUsageError::Validation(IrDocumentValidationError::CollectionLimit {
+                collection: "PrivateQuotaSourceCanary",
+                observed: 9,
+                limit: 8,
+            }),
+            IrDocumentUsageError::Validation(IrDocumentValidationError::CollectionLimit {
+                collection: "entities",
+                observed: 8,
+                limit: 8,
+            }),
+        ] {
+            profile_aggregate_append_rejection(
+                &error,
+                None,
+                AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+            );
+        }
+    });
+    let first = profile.aggregate_append_rejections.first.unwrap();
+    assert_eq!(first.file, None);
+    assert_eq!(
+        first.boundary,
+        AnalysisProfileAggregateAppendBoundary::TargetAndSource
+    );
+    assert_eq!(
+        first.resource,
+        rootlight_ir::AggregateCapacityResource::Coverage
+    );
+    assert_eq!((first.observed, first.limit), (2, 1));
+    let json = serde_json::to_value(&profile).unwrap();
+    let counts = json["aggregate_append_rejections"]["rejected_checks"]
+        .as_object()
+        .unwrap();
+    assert_eq!(counts.len(), 15);
+    assert_eq!(counts["coverage"], 3);
+    assert_eq!(
+        counts
+            .values()
+            .map(|value| value.as_u64().unwrap())
+            .sum::<u64>(),
+        17
+    );
+    assert_eq!(
+        json["aggregate_append_rejections"]["first"]["stage"],
+        "structural_append"
+    );
+    let encoded = json.to_string();
+    assert!(!encoded.contains("PrivateQuotaPathCanary"));
+    assert!(!encoded.contains("PrivateQuotaSourceCanary"));
+    assert!(profile.counts_complete);
+}
+
+#[test]
+fn aggregate_append_profile_counter_overflow_remains_explicit() {
+    let (mut target, incoming, mut state, mut limits) = summary_pressure_fixture();
+    limits.max_coverage_records = 1;
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        with_analysis_profile(|profile| {
+            profile.aggregate_append_rejections.rejected_checks.coverage = u64::MAX
+        });
+        append_normalized_document(&mut target, incoming, &limits, &mut state)
+    });
+    assert!(result.is_err());
+    assert!(!profile.counts_complete);
+    assert_eq!(
+        profile.aggregate_append_rejections.rejected_checks.coverage,
+        u64::MAX
+    );
+    assert!(profile.aggregate_append_rejections.first.is_some());
 }
 
 #[test]

@@ -493,10 +493,28 @@ fn only_checked_aggregate_errors_construct_recovery_and_append_stays_atomic() {
     append_normalized_document(&mut target, document(1), &limits, &mut state).unwrap();
     let before = target.clone();
     let before_state = state.clone();
-    assert!(matches!(
-        append_normalized_document(&mut target, document(2), &limits, &mut state),
-        Err(FirstSliceError::AggregateCapacity(_))
-    ));
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        append_normalized_document(&mut target, document(2), &limits, &mut state)
+    });
+    assert!(matches!(result, Err(FirstSliceError::AggregateCapacity(_))));
+    let first = profile.aggregate_append_rejections.first.unwrap();
+    assert_eq!(first.file, Some(FileId::from_bytes([2; 20])));
+    assert_eq!(
+        first.boundary,
+        AnalysisProfileAggregateAppendBoundary::TargetAndSource
+    );
+    assert_eq!(first.resource, AggregateCapacityResource::StringBytes);
+    assert_eq!((first.observed, first.limit), (38, 37));
+    assert_eq!(
+        profile
+            .aggregate_append_rejections
+            .rejected_checks
+            .string_bytes,
+        1
+    );
+    let encoded = serde_json::to_string(&profile).unwrap();
+    assert!(!encoded.contains("src/one.rs"));
+    assert!(!encoded.contains("\"source\""));
     assert_eq!(target, before);
     assert_eq!(state, before_state);
     for error in [

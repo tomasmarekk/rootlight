@@ -299,6 +299,7 @@ pub struct FirstSliceAnalysisProfile {
     later_oracle_restore_refusals: u64,
     resolution_restore_refusal: Option<oracle_restore_preservation::ResolutionRefusalObservation>,
     last_sealed_oracle_restore_refusal: Option<durable::SealedOracleRestoreRefusal>,
+    aggregate_append_rejections: AnalysisProfileAggregateAppendRejections,
     append: AnalysisProfileAppend,
     append_scope: &'static str,
     phases: Vec<AnalysisProfileEvent>,
@@ -340,6 +341,7 @@ impl Default for FirstSliceAnalysisProfile {
             later_oracle_restore_refusals: 0,
             resolution_restore_refusal: None,
             last_sealed_oracle_restore_refusal: None,
+            aggregate_append_rejections: AnalysisProfileAggregateAppendRejections::default(),
             append: AnalysisProfileAppend::default(),
             append_scope: "inclusive_append_substages_nested_search_and_classification_decoder_times_overlap_decoder_counters_cover_classification_calls_only",
             phases: Vec::new(),
@@ -461,6 +463,114 @@ enum AnalysisProfilePhase {
 enum AnalysisProfileScopeExit {
     ExpressionReturned,
     EarlyReturnOrUnwind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnalysisProfileAggregateAppendBoundary {
+    TargetAndSource,
+    TargetSourceAndReserved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+struct AnalysisProfileAggregateAppendRejection {
+    file: Option<FileId>,
+    boundary: AnalysisProfileAggregateAppendBoundary,
+    stage: rootlight_ir::AggregateCapacityStage,
+    resource: rootlight_ir::AggregateCapacityResource,
+    observed: u64,
+    limit: u64,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct AnalysisProfileAggregateAppendCounts {
+    files: u64,
+    entities: u64,
+    occurrences: u64,
+    relations: u64,
+    provenance: u64,
+    source_mappings: u64,
+    coverage: u64,
+    skipped_regions: u64,
+    diagnostics: u64,
+    extensions: u64,
+    records: u64,
+    nested_items: u64,
+    string_bytes: u64,
+    extension_bytes: u64,
+    diagnostic_bytes: u64,
+}
+
+impl AnalysisProfileAggregateAppendCounts {
+    fn counter(&mut self, resource: rootlight_ir::AggregateCapacityResource) -> Option<&mut u64> {
+        use rootlight_ir::AggregateCapacityResource as Resource;
+        match resource {
+            Resource::Files => Some(&mut self.files),
+            Resource::Entities => Some(&mut self.entities),
+            Resource::Occurrences => Some(&mut self.occurrences),
+            Resource::Relations => Some(&mut self.relations),
+            Resource::Provenance => Some(&mut self.provenance),
+            Resource::SourceMappings => Some(&mut self.source_mappings),
+            Resource::Coverage => Some(&mut self.coverage),
+            Resource::SkippedRegions => Some(&mut self.skipped_regions),
+            Resource::Diagnostics => Some(&mut self.diagnostics),
+            Resource::Extensions => Some(&mut self.extensions),
+            Resource::Records => Some(&mut self.records),
+            Resource::NestedItems => Some(&mut self.nested_items),
+            Resource::StringBytes => Some(&mut self.string_bytes),
+            Resource::ExtensionBytes => Some(&mut self.extension_bytes),
+            Resource::DiagnosticBytes => Some(&mut self.diagnostic_bytes),
+            Resource::GenerationTextBytes
+            | Resource::GenerationEncodedTextBytes
+            | Resource::OracleFilesystemReservationBytes => None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AnalysisProfileAggregateAppendRejections {
+    scope: &'static str,
+    first: Option<AnalysisProfileAggregateAppendRejection>,
+    rejected_checks: AnalysisProfileAggregateAppendCounts,
+}
+
+impl Default for AnalysisProfileAggregateAppendRejections {
+    fn default() -> Self {
+        Self {
+            scope: "checked_combined_usage_rejections_not_distinct_files_or_incoming_only_failures",
+            first: None,
+            rejected_checks: AnalysisProfileAggregateAppendCounts::default(),
+        }
+    }
+}
+
+fn profile_aggregate_append_rejection(
+    error: &IrDocumentUsageError,
+    file: Option<FileId>,
+    boundary: AnalysisProfileAggregateAppendBoundary,
+) {
+    with_analysis_profile(|profile| {
+        let Some(cause) = AggregateCapacityFailure::from_combined_usage(error) else {
+            return;
+        };
+        let (stage, resource, observed, limit) = cause.details();
+        let observations = &mut profile.aggregate_append_rejections;
+        let Some(counter) = observations.rejected_checks.counter(resource) else {
+            profile.counts_complete = false;
+            return;
+        };
+        increment_profile_count(counter, &mut profile.counts_complete);
+        observations
+            .first
+            .get_or_insert(AnalysisProfileAggregateAppendRejection {
+                file,
+                boundary,
+                stage,
+                resource,
+                observed,
+                limit,
+            });
+    });
 }
 
 // Fixed inline labels keep failure observation independent of allocator pressure.
@@ -23220,8 +23330,20 @@ fn append_usage_error(
     aggregate_recovery: bool,
     cancellation: &Cancellation,
 ) -> FirstSliceError {
+    append_usage_error_at_boundary(error, aggregate_recovery, cancellation, None)
+}
+
+fn append_usage_error_at_boundary(
+    error: IrDocumentUsageError,
+    aggregate_recovery: bool,
+    cancellation: &Cancellation,
+    observation: Option<(Option<FileId>, AnalysisProfileAggregateAppendBoundary)>,
+) -> FirstSliceError {
     if let Some(cancelled) = current_cancellation(cancellation) {
         return cancelled;
+    }
+    if let Some((file, boundary)) = observation {
+        profile_aggregate_append_rejection(&error, file, boundary);
     }
     if aggregate_recovery && let Some(cause) = AggregateCapacityFailure::from_combined_usage(&error)
     {
@@ -23410,22 +23532,30 @@ fn prepare_normalized_document_append(
         .clone()
         .checked_add(source_usage.clone(), limits)
         .map_err(|error| {
-            if let Some(cancelled) = current_cancellation(cancellation) {
-                return cancelled;
-            }
-            if append_state.aggregate_recovery
-                && let Some(cause) = AggregateCapacityFailure::from_combined_usage(&error)
-            {
-                return FirstSliceError::AggregateCapacity(cause);
-            }
-            map_ir_usage_error(error, cancellation)
+            append_usage_error_at_boundary(
+                error,
+                append_state.aggregate_recovery,
+                cancellation,
+                Some((
+                    profile_file,
+                    AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                )),
+            )
         })?;
     if let Some(reserved) = reserved {
         combined_usage
             .clone()
             .checked_add(reserved.clone(), limits)
             .map_err(|error| {
-                append_usage_error(error, append_state.aggregate_recovery, cancellation)
+                append_usage_error_at_boundary(
+                    error,
+                    append_state.aggregate_recovery,
+                    cancellation,
+                    Some((
+                        profile_file,
+                        AnalysisProfileAggregateAppendBoundary::TargetSourceAndReserved,
+                    )),
+                )
             })?;
     }
     profile.finish();

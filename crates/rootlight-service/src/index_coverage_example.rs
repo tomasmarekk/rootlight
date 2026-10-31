@@ -10,6 +10,7 @@
 //! normalized binding witnesses or treating absent details as semantic proof.
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     error::Error,
     ffi::OsString,
@@ -130,6 +131,183 @@ enum ServiceLifetime {
     Fresh,
     Reopened,
     Warm,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiagnosticStage {
+    ServiceOpen,
+    Setup,
+    RepositoryRegistration,
+    RepositoryStatus,
+    Index,
+    NoOp,
+    GenerationInspection,
+    SourceAccounting,
+    SourceReadOperation,
+    SourceRead,
+    ReportConstruction,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+struct SourceReadAttempt {
+    repository: rootlight_ids::RepositoryId,
+    generation: rootlight_ids::GenerationId,
+    file: rootlight_ids::FileId,
+    start_byte: u64,
+    end_byte: u64,
+    duration_origin: &'static str,
+    requested_query_duration_micros: u128,
+    requested_explicit_query_duration_micros: Option<u128>,
+    requested_source_duration_micros: u128,
+    requested_verification_duration_micros: Option<u128>,
+}
+
+impl SourceReadAttempt {
+    fn new(reference: &SourceRef, budget: FirstSliceBudget) -> Self {
+        let query = budget.query();
+        let source = budget.source();
+        Self {
+            repository: reference.repository(),
+            generation: reference.generation(),
+            file: reference.span().file(),
+            start_byte: reference.span().start_byte(),
+            end_byte: reference.span().end_byte(),
+            duration_origin: if query.explicit_max_duration().is_some()
+                || source.max_verification_duration.is_some()
+            {
+                "explicit"
+            } else {
+                "default"
+            },
+            requested_query_duration_micros: query.max_duration().as_micros(),
+            requested_explicit_query_duration_micros: query
+                .explicit_max_duration()
+                .map(|duration| duration.as_micros()),
+            requested_source_duration_micros: source.max_duration.as_micros(),
+            requested_verification_duration_micros: source
+                .max_verification_duration
+                .map(|duration| duration.as_micros()),
+        }
+    }
+}
+
+struct DiagnosticFailureContext {
+    started: Instant,
+    stage: Cell<DiagnosticStage>,
+    stage_started: Cell<Instant>,
+    file: Cell<Option<rootlight_ids::FileId>>,
+    request: Cell<Option<SourceReadAttempt>>,
+    index_timing: Option<serde_json::Value>,
+    no_op_timing: Option<serde_json::Value>,
+    failed_analysis_profile: Option<serde_json::Value>,
+}
+
+impl DiagnosticFailureContext {
+    fn new(stage: DiagnosticStage) -> Self {
+        let started = Instant::now();
+        Self {
+            started,
+            stage: Cell::new(stage),
+            stage_started: Cell::new(started),
+            file: Cell::new(None),
+            request: Cell::new(None),
+            index_timing: None,
+            no_op_timing: None,
+            failed_analysis_profile: None,
+        }
+    }
+
+    fn enter(&self, stage: DiagnosticStage) {
+        self.stage.set(stage);
+        self.stage_started.set(Instant::now());
+        self.file.set(None);
+        self.request.set(None);
+    }
+
+    fn enter_file(&self, file: rootlight_ids::FileId) {
+        self.enter(DiagnosticStage::SourceAccounting);
+        self.file.set(Some(file));
+    }
+
+    fn enter_request(&self, stage: DiagnosticStage, request: SourceReadAttempt) {
+        self.enter(stage);
+        self.file.set(Some(request.file));
+        self.request.set(Some(request));
+    }
+}
+
+#[derive(serde::Serialize)]
+struct DiagnosticFailureRecord<'a> {
+    schema: &'static str,
+    diagnostic_result: &'static str,
+    index_result: &'static str,
+    profile_scope: &'static str,
+    diagnostic_stage: DiagnosticStage,
+    elapsed_scope: &'static str,
+    elapsed_micros: u128,
+    stage_elapsed_micros: u128,
+    file: Option<rootlight_ids::FileId>,
+    source_read: Option<SourceReadAttempt>,
+    completed_index_timing: Option<&'a serde_json::Value>,
+    completed_no_op_timing: Option<&'a serde_json::Value>,
+    analysis_profile: Option<&'a serde_json::Value>,
+}
+
+fn finish_diagnostic_with_writer<T, Writer: Write>(
+    result: Result<T, Box<dyn Error>>,
+    context: &DiagnosticFailureContext,
+    errors: impl FnOnce() -> Writer,
+) -> Result<T, Box<dyn Error>> {
+    if result.is_err() {
+        let index_result = match context.stage.get() {
+            DiagnosticStage::Index | DiagnosticStage::NoOp if context.no_op_timing.is_none() => {
+                "error"
+            }
+            DiagnosticStage::Index | DiagnosticStage::NoOp => "ok",
+            DiagnosticStage::ServiceOpen
+            | DiagnosticStage::Setup
+            | DiagnosticStage::RepositoryRegistration
+            | DiagnosticStage::RepositoryStatus
+            | DiagnosticStage::GenerationInspection
+            | DiagnosticStage::SourceAccounting
+            | DiagnosticStage::SourceReadOperation
+            | DiagnosticStage::SourceRead
+            | DiagnosticStage::ReportConstruction => {
+                if context.index_timing.is_some() {
+                    "ok"
+                } else {
+                    "unknown"
+                }
+            }
+        };
+        let finished = Instant::now();
+        let record = DiagnosticFailureRecord {
+            schema: "rootlight-index-analysis-profile-failure/1",
+            diagnostic_result: "error",
+            index_result,
+            profile_scope: "completed_operations_and_partial_failed_operation",
+            diagnostic_stage: context.stage.get(),
+            elapsed_scope: match context.stage.get() {
+                DiagnosticStage::ServiceOpen => "service_open_call",
+                _ => "inspection_call",
+            },
+            elapsed_micros: finished.duration_since(context.started).as_micros(),
+            stage_elapsed_micros: finished
+                .duration_since(context.stage_started.get())
+                .as_micros(),
+            file: context.file.get(),
+            source_read: context.request.get(),
+            completed_index_timing: context.index_timing.as_ref(),
+            completed_no_op_timing: context.no_op_timing.as_ref(),
+            analysis_profile: context.failed_analysis_profile.as_ref(),
+        };
+        let mut errors = errors();
+        // An unavailable diagnostic sink must not replace the operation's error.
+        let _ = serde_json::to_writer(&mut errors, &record)
+            .and_then(|()| errors.write_all(b"\n").map_err(serde_json::Error::io));
+    }
+    result
 }
 
 struct DiagnosticSession {
@@ -276,6 +454,17 @@ impl DiagnosticSession {
         config: Option<&str>,
         mode: StateMode,
     ) -> Result<Self, Box<dyn Error>> {
+        let context = DiagnosticFailureContext::new(DiagnosticStage::ServiceOpen);
+        let result = Self::open_inner(repository, state, config, mode);
+        finish_diagnostic_with_writer(result, &context, || std::io::stderr().lock())
+    }
+
+    fn open_inner(
+        repository: &Path,
+        state: &Path,
+        config: Option<&str>,
+        mode: StateMode,
+    ) -> Result<Self, Box<dyn Error>> {
         let repository = fs::canonicalize(repository)?;
         let policy = FirstSliceStoragePolicy::resolve_user_config(config, 2)?;
         match mode {
@@ -310,6 +499,15 @@ impl DiagnosticSession {
     }
 
     fn inspect(&mut self) -> Result<serde_json::Value, Box<dyn Error>> {
+        let mut context = DiagnosticFailureContext::new(DiagnosticStage::Setup);
+        let result = self.inspect_with_context(&mut context);
+        finish_diagnostic_with_writer(result, &context, || std::io::stderr().lock())
+    }
+
+    fn inspect_with_context(
+        &mut self,
+        context: &mut DiagnosticFailureContext,
+    ) -> Result<serde_json::Value, Box<dyn Error>> {
         let Self {
             service,
             repository,
@@ -323,12 +521,14 @@ impl DiagnosticSession {
         {
             return Err("source-accounting does not support warm sequences".into());
         }
+        context.enter(DiagnosticStage::RepositoryRegistration);
         let previous_generation = match lifetime {
             ServiceLifetime::Fresh => None,
             ServiceLifetime::Reopened | ServiceLifetime::Warm => {
                 let registered = service
                     .registered_repository_for_root(repository, &Cancellation::new())?
                     .ok_or("resume repository is not registered in this state")?;
+                context.enter(DiagnosticStage::RepositoryStatus);
                 Some(
                     service
                         .repository_status(registered, None)?
@@ -336,16 +536,28 @@ impl DiagnosticSession {
                 )
             }
         };
-        let (cold, cold_timing) =
-            index_with_optional_analysis_profile(service, repository, *analysis_profile)
-                .map_err(|error| format!("index operation failed: {error}"))?;
-        let (no_op, no_op_timing) =
-            index_with_optional_analysis_profile(service, repository, *analysis_profile)
-                .map_err(|error| format!("no-op verification failed: {error}"))?;
+        context.enter(DiagnosticStage::Index);
+        let (cold, cold_timing) = index_with_optional_analysis_profile(
+            service,
+            repository,
+            *analysis_profile,
+            &mut context.failed_analysis_profile,
+        )?;
+        context.index_timing = Some(cold_timing);
+        context.enter(DiagnosticStage::NoOp);
+        let (no_op, no_op_timing) = index_with_optional_analysis_profile(
+            service,
+            repository,
+            *analysis_profile,
+            &mut context.failed_analysis_profile,
+        )?;
+        context.no_op_timing = Some(no_op_timing);
         if cold != no_op {
             return Err("unchanged repository produced a different receipt".into());
         }
+        context.enter(DiagnosticStage::RepositoryStatus);
         let status = service.repository_status(cold.repository, Some(cold.generation))?;
+        context.enter(DiagnosticStage::GenerationInspection);
         let (rows, configuration_hash, details) =
             service.inspect_generation(
                 cold.repository,
@@ -358,7 +570,9 @@ impl DiagnosticSession {
                             service,
                             repository,
                             cold.generation,
+                            Some(context),
                         )?;
+                        context.enter(DiagnosticStage::GenerationInspection);
                         return Ok((rows, snapshot.metadata().configuration_hash(), json!({
                             "report_scope":"retained_source_accounting",
                             "source_file_fallback_diagnostics":source_file_fallback_diagnostics(
@@ -388,7 +602,9 @@ impl DiagnosticSession {
                         cold.generation,
                         &mut evidence,
                         &mut census,
+                        Some(context),
                     )?;
+                    context.enter(DiagnosticStage::GenerationInspection);
                     evidence.finish(snapshot.document())?;
                     let census = census.finish(
                         &snapshot.document().diagnostics,
@@ -410,6 +626,15 @@ impl DiagnosticSession {
                     ))
                 },
             )??;
+        context.enter(DiagnosticStage::ReportConstruction);
+        let cold_timing = context
+            .index_timing
+            .as_ref()
+            .ok_or("index timing missing")?;
+        let no_op_timing = context
+            .no_op_timing
+            .as_ref()
+            .ok_or("no-op timing missing")?;
         let mut report = json!({
             "schema":if *report_mode == ReportMode::Full { "rootlight-index-coverage-diagnostic/4" }
                 else { "rootlight-index-source-accounting-diagnostic/1" }, "explicit_configuration":config.is_some(),
@@ -417,7 +642,7 @@ impl DiagnosticSession {
             "configuration_hash":configuration_hash,
             "open_wall_micros":open_wall_micros,
             "process_id":std::process::id(),
-            "no_op_same_generation":true,"no_op_wall_micros":no_op_timing["wall_micros"],"no_op_timing":no_op_timing,
+            "no_op_same_generation":true,"no_op_wall_micros":no_op_timing["wall_micros"],
             "generation_inspection_method":"local_identity_verified_snapshot",
             "shared_bundle_roundtrip":false,
             "coverage":status.coverage.iter().map(|entry| json!({"language":entry.language,"indexed_files":entry.indexed_files,
@@ -437,7 +662,6 @@ impl DiagnosticSession {
                 report["service_lifetime"] = json!("fresh");
                 report["cold"] = serde_json::to_value(cold)?;
                 report["cold_wall_micros"] = cold_timing["wall_micros"].clone();
-                report["cold_timing"] = cold_timing;
             }
             ServiceLifetime::Reopened | ServiceLifetime::Warm => {
                 report["schema"] = json!(if *report_mode == ReportMode::Full {
@@ -454,9 +678,15 @@ impl DiagnosticSession {
                 report["previous_generation"] = serde_json::to_value(previous_generation)?;
                 report["update"] = serde_json::to_value(cold)?;
                 report["update_wall_micros"] = cold_timing["wall_micros"].clone();
-                report["update_timing"] = cold_timing;
             }
         }
+        report["no_op_timing"] = context.no_op_timing.take().ok_or("no-op timing missing")?;
+        let timing_key = if matches!(lifetime, ServiceLifetime::Fresh) {
+            "cold_timing"
+        } else {
+            "update_timing"
+        };
+        report[timing_key] = context.index_timing.take().ok_or("index timing missing")?;
         *lifetime = ServiceLifetime::Warm;
         Ok(report)
     }
@@ -477,6 +707,7 @@ fn index_with_optional_analysis_profile(
     service: &mut FirstSliceService,
     repository: &Path,
     enabled: bool,
+    failed_profile: &mut Option<serde_json::Value>,
 ) -> Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>> {
     if !enabled {
         return index_with_timing(service, repository);
@@ -491,13 +722,13 @@ fn index_with_optional_analysis_profile(
             "error_code":"profile_serialization_failed"
         })
     });
-    finish_profiled_index_with_writer(result, profile, || std::io::stderr().lock())
+    finish_profiled_index(result, profile, failed_profile)
 }
 
-fn finish_profiled_index_with_writer<Writer: Write>(
+fn finish_profiled_index(
     result: Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>>,
     profile: serde_json::Value,
-    errors: impl FnOnce() -> Writer,
+    failed_profile: &mut Option<serde_json::Value>,
 ) -> Result<(rootlight_service::FirstSliceIndexReceipt, serde_json::Value), Box<dyn Error>> {
     match result {
         Ok((receipt, mut timing)) => {
@@ -505,11 +736,7 @@ fn finish_profiled_index_with_writer<Writer: Write>(
             Ok((receipt, timing))
         }
         Err(error) => {
-            // Diagnostic output failure cannot replace the original indexing result.
-            let record = json!({"schema":"rootlight-index-analysis-profile-failure/1", "index_result":"error", "profile_scope":"partial_failed_operation", "analysis_profile":profile});
-            let mut errors = errors();
-            let _ = serde_json::to_writer(&mut errors, &record)
-                .and_then(|()| errors.write_all(b"\n").map_err(serde_json::Error::io));
+            *failed_profile = Some(profile);
             Err(error)
         }
     }
@@ -721,6 +948,7 @@ struct FileSourceVerifier<'a> {
     generation: rootlight_ids::GenerationId,
     verified_containers: BTreeSet<rootlight_ids::FileId>,
     accounting_reads: Option<AccountingReads<'a>>,
+    failure_context: Option<&'a DiagnosticFailureContext>,
 }
 
 impl<'a> FileSourceVerifier<'a> {
@@ -737,7 +965,13 @@ impl<'a> FileSourceVerifier<'a> {
             generation,
             verified_containers: BTreeSet::new(),
             accounting_reads: None,
+            failure_context: None,
         }
+    }
+
+    fn with_failure_context(mut self, context: Option<&'a DiagnosticFailureContext>) -> Self {
+        self.failure_context = context;
+        self
     }
 
     fn with_accounting_reads(
@@ -765,6 +999,9 @@ impl<'a> FileSourceVerifier<'a> {
         origin: Option<&SourceRef>,
         gap_spans: Option<Vec<(usize, usize)>>,
     ) -> Result<VerifiedSource, Box<dyn Error>> {
+        if let Some(context) = self.failure_context {
+            context.enter_file(file.id);
+        }
         let source = file
             .evidence
             .source
@@ -862,10 +1099,18 @@ impl<'a> FileSourceVerifier<'a> {
                 }
                 Ok(())
             };
+            let budget = FirstSliceBudget::default();
+            let request = SourceReadAttempt::new(&part, budget);
+            if let Some(context) = self.failure_context {
+                context.enter_request(DiagnosticStage::SourceReadOperation, request);
+            }
             let active = match &mut self.accounting_reads {
                 Some(reads) => reads.current(self.service, self.generation)?,
                 None => None,
             };
+            if let Some(context) = self.failure_context {
+                context.enter_request(DiagnosticStage::SourceRead, request);
+            }
             if let Some(operation) = active {
                 let mut callback_error = None;
                 let outcome = operation.read(
@@ -874,7 +1119,7 @@ impl<'a> FileSourceVerifier<'a> {
                         .with_context_lines_before(0)
                         .with_context_lines_after(0)
                         .with_encoding(encoding),
-                    FirstSliceBudget::default(),
+                    budget,
                     |read| {
                         consume(read).map_err(|error| {
                             callback_error = Some(error);
@@ -895,10 +1140,13 @@ impl<'a> FileSourceVerifier<'a> {
                         .with_context_lines_before(0)
                         .with_context_lines_after(0)
                         .with_encoding(encoding),
-                    FirstSliceBudget::default(),
+                    budget,
                     &Cancellation::new(),
                 )?;
                 consume(&read)?;
+            }
+            if let Some(context) = self.failure_context {
+                context.enter_file(file.id);
             }
             if end == file_length {
                 break;
@@ -994,7 +1242,11 @@ fn inspect_source_files(
     service: &FirstSliceService,
     repository: &Path,
     generation: rootlight_ids::GenerationId,
+    failure_context: Option<&DiagnosticFailureContext>,
 ) -> Result<(Vec<serde_json::Value>, serde_json::Value), Box<dyn Error>> {
+    if let Some(context) = failure_context {
+        context.enter(DiagnosticStage::SourceAccounting);
+    }
     let document = snapshot.document();
     let origins = source_origins(document)?;
     let mut files = BTreeMap::new();
@@ -1054,7 +1306,8 @@ fn inspect_source_files(
         generation,
         &cancellation,
         limits,
-    );
+    )
+    .with_failure_context(failure_context);
     let mut rows = Vec::new();
     let mut gap_total = 0_usize;
     let mut occurrence_total = 0_usize;
@@ -1146,10 +1399,12 @@ fn inspect_files<'snapshot>(
     generation: rootlight_ids::GenerationId,
     evidence: &mut binding_proofs::BindingEvidence,
     census: &mut gap_census::GapCensus<'snapshot>,
+    failure_context: Option<&DiagnosticFailureContext>,
 ) -> Result<Vec<serde_json::Value>, Box<dyn Error>> {
     let document = snapshot.document();
     let origins = source_origins(document)?;
-    let mut verifier = FileSourceVerifier::new(snapshot, service, repository, generation);
+    let mut verifier = FileSourceVerifier::new(snapshot, service, repository, generation)
+        .with_failure_context(failure_context);
     let mut rows = Vec::new();
     for (file, normalized) in document.files.iter().map(|file| (file, true)).chain(
         snapshot
@@ -1345,11 +1600,13 @@ mod tests {
                 reject_json,
                 reject_newline,
             };
-            let result = finish_profiled_index_with_writer(
+            let mut context = DiagnosticFailureContext::new(DiagnosticStage::Index);
+            let result = finish_profiled_index(
                 Err(original),
                 json!({"events_complete":false,"counts_complete":false}),
-                || writer,
+                &mut context.failed_analysis_profile,
             );
+            let result = finish_diagnostic_with_writer(result, &context, || writer);
             let returned = result
                 .unwrap_err()
                 .downcast::<OriginalIndexCancellation>()
@@ -1380,12 +1637,17 @@ mod tests {
         let (receipt, timing) = index_with_timing(&mut service, directory.path()).unwrap();
         assert!(timing.get("analysis_profile").is_none());
         let profile = json!({"events_complete":true,"counts_complete":true});
-        let (returned, mut updated) = finish_profiled_index_with_writer(
+        let mut context = DiagnosticFailureContext::new(DiagnosticStage::Index);
+        let result = finish_profiled_index(
             Ok((receipt.clone(), timing.clone())),
             profile.clone(),
-            || -> Vec<u8> { panic!("successful indexing must not acquire the error writer") },
-        )
-        .unwrap();
+            &mut context.failed_analysis_profile,
+        );
+        let (returned, mut updated) =
+            finish_diagnostic_with_writer(result, &context, || -> Vec<u8> {
+                panic!("successful indexing must not acquire the error writer")
+            })
+            .unwrap();
         assert_eq!(returned, receipt);
         assert_eq!(
             updated
@@ -1396,6 +1658,103 @@ mod tests {
             profile
         );
         assert_eq!(updated, timing);
+    }
+
+    #[test]
+    fn diagnostic_failure_after_completed_index_and_no_op_retains_both_profiles() {
+        let directory = tempdir();
+        fs::write(
+            directory.path().join("private.rs"),
+            "pub fn private_source() {}\n",
+        )
+        .unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let mut context = DiagnosticFailureContext::new(DiagnosticStage::Index);
+        let (receipt, timing) = index_with_optional_analysis_profile(
+            &mut service,
+            directory.path(),
+            true,
+            &mut context.failed_analysis_profile,
+        )
+        .unwrap();
+        context.index_timing = Some(timing);
+        context.enter(DiagnosticStage::NoOp);
+        let (no_op, timing) = index_with_optional_analysis_profile(
+            &mut service,
+            directory.path(),
+            true,
+            &mut context.failed_analysis_profile,
+        )
+        .unwrap();
+        assert_eq!(receipt, no_op);
+        context.no_op_timing = Some(timing);
+        let index_expected = context.index_timing.as_ref().unwrap().clone();
+        let no_op_expected = context.no_op_timing.as_ref().unwrap().clone();
+        context.enter(DiagnosticStage::GenerationInspection);
+        let original = Box::new(OriginalIndexCancellation {
+            reason: rootlight_service::CancellationReason::DeadlineExceeded,
+        });
+        let address = std::ptr::from_ref(original.as_ref());
+        let mut output = Vec::new();
+        let returned =
+            finish_diagnostic_with_writer::<(), _>(Err(original), &context, || &mut output)
+                .unwrap_err()
+                .downcast::<OriginalIndexCancellation>()
+                .unwrap();
+        assert!(std::ptr::eq(address, returned.as_ref()));
+        assert_eq!(
+            returned.reason,
+            rootlight_service::CancellationReason::DeadlineExceeded
+        );
+        let record: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(record["diagnostic_stage"], "generation_inspection");
+        assert_eq!(record["index_result"], "ok");
+        assert_eq!(record["completed_index_timing"], index_expected);
+        assert_eq!(record["completed_no_op_timing"], no_op_expected);
+        assert!(record["completed_index_timing"]["analysis_profile"].is_object());
+        assert!(record["completed_no_op_timing"]["analysis_profile"].is_object());
+        assert!(record["analysis_profile"].is_null());
+        assert!(record["source_read"].is_null());
+        assert!(record["file"].is_null());
+        assert!(
+            record["stage_elapsed_micros"].as_u64().unwrap()
+                <= record["elapsed_micros"].as_u64().unwrap()
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("private_source"));
+        assert!(!output.contains("private.rs"));
+        assert_eq!(output.lines().count(), 1);
+    }
+
+    #[test]
+    fn diagnostic_open_failure_keeps_index_result_unknown_and_original_io_error() {
+        let directory = tempdir();
+        let missing = directory.path().join("private-missing-repository");
+        let context = DiagnosticFailureContext::new(DiagnosticStage::ServiceOpen);
+        let result = DiagnosticSession::open_inner(
+            &missing,
+            &directory.path().join("state"),
+            None,
+            StateMode::Fresh,
+        );
+        let mut output = Vec::new();
+        let returned = finish_diagnostic_with_writer(result, &context, || &mut output)
+            .err()
+            .unwrap()
+            .downcast::<std::io::Error>()
+            .unwrap();
+        assert_eq!(returned.kind(), std::io::ErrorKind::NotFound);
+        let record: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(record["diagnostic_stage"], "service_open");
+        assert_eq!(record["index_result"], "unknown");
+        assert!(record["completed_index_timing"].is_null());
+        assert!(record["completed_no_op_timing"].is_null());
+        assert!(record["analysis_profile"].is_null());
+        assert!(
+            !String::from_utf8(output)
+                .unwrap()
+                .contains("private-missing-repository")
+        );
     }
 
     #[test]
@@ -3668,7 +4027,13 @@ mod tests {
                     Some(generation),
                     &Cancellation::new(),
                     |snapshot| {
-                        inspect_source_files(snapshot, &session.service, &repository, generation)
+                        inspect_source_files(
+                            snapshot,
+                            &session.service,
+                            &repository,
+                            generation,
+                            None,
+                        )
                     },
                 )
                 .unwrap();
@@ -3801,7 +4166,7 @@ mod tests {
                 Some(generation),
                 &Cancellation::new(),
                 |snapshot| {
-                    inspect_source_files(snapshot, &session.service, &repository, generation)
+                    inspect_source_files(snapshot, &session.service, &repository, generation, None)
                 },
             )
             .unwrap();
@@ -4124,10 +4489,12 @@ mod tests {
         let state = directory.path().join("state");
         let mut session =
             DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
-        let receipt = session
-            .service
-            .index_repository(&repository, &Cancellation::new())
-            .unwrap();
+        let (receipt, index_timing) = index_with_timing(&mut session.service, &repository).unwrap();
+        let (no_op, no_op_timing) = index_with_timing(&mut session.service, &repository).unwrap();
+        assert_eq!(receipt, no_op);
+        let mut context = DiagnosticFailureContext::new(DiagnosticStage::GenerationInspection);
+        context.index_timing = Some(index_timing);
+        context.no_op_timing = Some(no_op_timing);
         session
             .service
             .inspect_generation(
@@ -4167,17 +4534,67 @@ mod tests {
                         receipt.generation,
                         &cancellation,
                         limits,
-                    );
+                    )
+                    .with_failure_context(Some(&context));
                     let expected = ordinary
                         .verify(&substituted, None, None)
                         .err()
                         .unwrap()
                         .to_string();
-                    let actual = accounting
-                        .verify(&substituted, None, None)
-                        .err()
-                        .unwrap()
-                        .to_string();
+                    let error = accounting.verify(&substituted, None, None).err().unwrap();
+                    let actual = error.to_string();
+                    let mut failure_output = Vec::new();
+                    let returned =
+                        finish_diagnostic_with_writer::<(), _>(Err(error), &context, || {
+                            &mut failure_output
+                        })
+                        .unwrap_err();
+                    assert_eq!(returned.to_string(), actual);
+                    assert_eq!(
+                        failure_output.iter().filter(|byte| **byte == b'\n').count(),
+                        1
+                    );
+                    let record: serde_json::Value =
+                        serde_json::from_slice(&failure_output).unwrap();
+                    assert_eq!(record["diagnostic_stage"], "source_read");
+                    assert_eq!(record["index_result"], "ok");
+                    assert_eq!(record["diagnostic_result"], "error");
+                    assert_eq!(record["file"], serde_json::to_value(valid.id).unwrap());
+                    assert_eq!(
+                        record["source_read"]["repository"],
+                        serde_json::to_value(valid.repository).unwrap()
+                    );
+                    assert_eq!(
+                        record["source_read"]["generation"],
+                        serde_json::to_value(valid.generation).unwrap()
+                    );
+                    assert_eq!(record["source_read"]["start_byte"], 0);
+                    assert_eq!(record["source_read"]["end_byte"], valid.byte_length);
+                    assert_eq!(record["source_read"]["duration_origin"], "default");
+                    assert!(record["completed_index_timing"]["wall_micros"].is_number());
+                    assert!(record["completed_no_op_timing"]["wall_micros"].is_number());
+                    let output = String::from_utf8(failure_output).unwrap();
+                    for private in [
+                        "notes.txt",
+                        "retained exact bytes",
+                        repository.to_str().unwrap(),
+                    ] {
+                        assert!(!output.contains(private));
+                    }
+                    let explicit = SourceReadAttempt::new(
+                        valid.evidence.source.as_ref().unwrap(),
+                        FirstSliceBudget::default()
+                            .reduce_max_duration(std::time::Duration::from_millis(50)),
+                    );
+                    assert_eq!(explicit.duration_origin, "explicit");
+                    assert_eq!(
+                        explicit.requested_explicit_query_duration_micros,
+                        Some(50_000)
+                    );
+                    assert_eq!(
+                        explicit.requested_verification_duration_micros,
+                        Some(50_000)
+                    );
                     assert!(expected.starts_with(
                         "source retrieval differs from indexed evidence: notes.txt at "
                     ));

@@ -17,6 +17,10 @@ pub struct AggregateCapacityFailure {
 }
 
 impl AggregateCapacityFailure {
+    pub(super) const fn details(self) -> (Stage, Resource, u64, u64) {
+        (self.stage, self.resource, self.observed, self.limit)
+    }
+
     pub(super) fn is_structural_append(self) -> bool {
         self.stage == Stage::StructuralAppend
     }
