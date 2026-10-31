@@ -108,3 +108,61 @@ fn retained_turtle_parser_preserves_spans_errors_and_edits() {
         );
     }
 }
+
+#[test]
+fn trig_graph_keyword_is_case_insensitive_with_named_native_labels() {
+    let prefix = "@prefix ex: <https://example.test/> .\n";
+    for keyword in ["GRAPH", "graph", "GrApH"] {
+        let source = format!("{prefix}{keyword} ex:g {{ ex:s ex:p ex:o }}\n");
+        let tree = parser().parse(&source, None).unwrap();
+        clean(source.as_bytes(), &tree);
+        let mut cursor = tree.root_node().walk();
+        let graph = tree
+            .root_node()
+            .named_children(&mut cursor)
+            .find(|node| node.kind() == "graph")
+            .unwrap();
+        let mut labels = graph.walk();
+        let label = graph
+            .children_by_field_name("label", &mut labels)
+            .find(|node| node.is_named())
+            .unwrap();
+        assert_eq!(label.kind(), "prefixed_name");
+        assert_eq!(label.utf8_text(source.as_bytes()).unwrap(), "ex:g");
+    }
+    let source = format!("{prefix}GRAPH ex:g {{ ex:s ex:p ex:o }}\n");
+    let mut edited = parser().parse(&source, None).unwrap();
+    let mut changed = source.into_bytes();
+    let start = prefix.len();
+    changed[start..start + 5].copy_from_slice(b"graph");
+    edited.edit(&InputEdit {
+        start_byte: start,
+        old_end_byte: start + 5,
+        new_end_byte: start + 5,
+        start_position: Point::new(1, 0),
+        old_end_position: Point::new(1, 5),
+        new_end_position: Point::new(1, 5),
+    });
+    let incremental = parser().parse(&changed, Some(&edited)).unwrap();
+    let fresh = parser().parse(&changed, None).unwrap();
+    clean(&changed, &incremental);
+    clean(&changed, &fresh);
+    assert_eq!(shape(&incremental), shape(&fresh));
+}
+
+#[test]
+fn trig_graph_keyword_requires_a_label_and_does_not_accept_longer_keywords() {
+    for source in [
+        b"GRAPH { }".as_slice(),
+        b"graph { }".as_slice(),
+        b"GRAPHIC <https://example.test/g> { }".as_slice(),
+    ] {
+        assert!(
+            parser()
+                .parse(source, None)
+                .unwrap()
+                .root_node()
+                .has_error()
+        );
+    }
+}

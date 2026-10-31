@@ -1,4 +1,5 @@
 {
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
   "name": "turtle",
   "word": "pn_prefix",
   "rules": {
@@ -82,7 +83,15 @@
           "type": "CHOICE",
           "members": [
             {
-              "type": "STRING",
+              "type": "ALIAS",
+              "content": {
+                "type": "TOKEN",
+                "content": {
+                  "type": "PATTERN",
+                  "value": "[Gg][Rr][Aa][Pp][Hh]"
+                }
+              },
+              "named": false,
               "value": "GRAPH"
             },
             {
@@ -2290,5 +2299,6 @@
   "precedences": [],
   "externals": [],
   "inline": [],
-  "supertypes": []
+  "supertypes": [],
+  "reserved": {}
 }

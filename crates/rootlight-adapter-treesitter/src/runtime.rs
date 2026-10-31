@@ -715,6 +715,7 @@ impl TreeSitterProvider {
                     | GrammarFamily::Idris
                     | GrammarFamily::Cuda
                     | GrammarFamily::TypeSpec
+                    | GrammarFamily::Trig
                     | GrammarFamily::Turtle
                     | GrammarFamily::N3
                     | GrammarFamily::Sparql

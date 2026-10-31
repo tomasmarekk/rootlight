@@ -31,9 +31,9 @@ pub(super) fn candidate(
     } else {
         Some(node)
     }
-    .filter(|owner| owner.kind() == "triple");
+    .filter(|owner| matches!(owner.kind(), "triple" | "graph"));
     if let Some(owner) = resource_owner {
-        let Some(syntax) = context.resources.get(&owner.id()).copied() else {
+        let Some(resource) = context.resources.get(&owner.id()).copied() else {
             return Ok(None);
         };
         if !matches!(
@@ -44,9 +44,13 @@ pub(super) fn candidate(
         }
         return Ok(Some(QueryCandidate {
             start: node.start_byte(),
-            end: node.end_byte(),
+            end: if role == StructuralRole::Declaration {
+                resource.end
+            } else {
+                node.end_byte()
+            },
             role,
-            syntax,
+            syntax: resource.syntax,
             required: true,
             native_depth: native_depth(node, cancel)?,
         }));
@@ -91,9 +95,15 @@ pub(super) fn candidate(
     }))
 }
 
-/// File-local proof is built in source order and never expands graph syntax.
+/// File-local prefix proof is shared by Turtle and native TriG statement capture.
 pub(super) struct Context {
-    resources: HashMap<usize, &'static str>,
+    resources: HashMap<usize, Resource>,
+}
+
+#[derive(Clone, Copy)]
+struct Resource {
+    syntax: &'static str,
+    end: usize,
 }
 
 fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
@@ -115,6 +125,25 @@ impl Context {
         source: &[u8],
         cancel: &Cancellation,
         maximum: usize,
+    ) -> Result<Option<Self>, AdapterError> {
+        Self::with_graphs(root, source, cancel, maximum, false)
+    }
+
+    pub(super) fn new_trig(
+        root: Node<'_>,
+        source: &[u8],
+        cancel: &Cancellation,
+        maximum: usize,
+    ) -> Result<Option<Self>, AdapterError> {
+        Self::with_graphs(root, source, cancel, maximum, true)
+    }
+
+    fn with_graphs(
+        root: Node<'_>,
+        source: &[u8],
+        cancel: &Cancellation,
+        maximum: usize,
+        graphs: bool,
     ) -> Result<Option<Self>, AdapterError> {
         let mut result = Self {
             resources: HashMap::new(),
@@ -162,115 +191,182 @@ impl Context {
                 }
                 continue;
             }
-            if child.kind() != "triple" || child.has_error() || child.is_missing() {
+            if child.has_error() || child.is_missing() {
                 continue;
             }
-            let mut subject = None;
-            let mut properties = None;
-            let mut cursor = child.walk();
-            for part in child.named_children(&mut cursor) {
-                if !charge()? {
+            if child.kind() == "triple" {
+                if !result.triple(child, source, &bindings, &mut charge)? {
                     return Ok(None);
                 }
-                match part.kind() {
-                    "subject" => subject = Some(part),
-                    "property_list" => properties = Some(part),
-                    _ => {}
-                }
-            }
-            let (Some(subject), Some(properties)) = (subject, properties) else {
-                continue;
-            };
-            let mut subject_term = None;
-            let mut cursor = subject.walk();
-            for term in subject.named_children(&mut cursor) {
-                if !charge()? {
-                    return Ok(None);
-                }
-                if is_iri(term) {
-                    subject_term = Some(term)
-                }
-            }
-            let Some(term) = subject_term else { continue };
-            if text(term, source)
-                .and_then(|name| expanded(name, &bindings))
-                .is_none()
-            {
-                continue;
-            }
-            let mut class = false;
-            let mut property = false;
-            let mut cursor = properties.walk();
-            for written in properties.named_children(&mut cursor) {
-                if !charge()? {
-                    return Ok(None);
-                }
-                if written.kind() != "property" {
-                    continue;
-                }
-                let mut predicate = None;
-                let mut objects = None;
-                let mut cursor = written.walk();
-                for part in written.named_children(&mut cursor) {
+            } else if graphs && child.kind() == "graph" {
+                let mut subject = None;
+                let mut properties = None;
+                let mut cursor = child.walk();
+                for part in child.named_children(&mut cursor) {
                     if !charge()? {
                         return Ok(None);
                     }
                     match part.kind() {
-                        "predicate" => predicate = Some(part),
-                        "object_list" => objects = Some(part),
+                        "triple" => {
+                            if !result.triple(part, source, &bindings, &mut charge)? {
+                                return Ok(None);
+                            }
+                        }
+                        "subject" => subject = Some(part),
+                        "property_list" => properties = Some(part),
                         _ => {}
                     }
                 }
-                let (Some(predicate), Some(objects)) = (predicate, objects) else {
-                    continue;
-                };
-                let Some(predicate_text) = text(predicate, source) else {
-                    continue;
-                };
-                if predicate_text != "a"
-                    && !resolved_is(
-                        predicate_text,
+                // The grammar exposes the final undotted statement as direct
+                // graph children, rather than wrapping it in a triple node.
+                if let (Some(subject), Some(properties)) = (subject, properties)
+                    && !result.resource(
+                        child,
+                        subject,
+                        properties,
+                        source,
                         &bindings,
-                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-                    )
+                        &mut charge,
+                    )?
                 {
-                    continue;
-                }
-                let mut cursor = objects.walk();
-                for object in objects.named_children(&mut cursor) {
-                    if !charge()? {
-                        return Ok(None);
-                    }
-                    if !is_iri(object) {
-                        continue;
-                    }
-                    let Some(name) = text(object, source) else {
-                        continue;
-                    };
-                    class |= resolved_is(
-                        name,
-                        &bindings,
-                        "http://www.w3.org/2000/01/rdf-schema#Class",
-                    );
-                    property |= resolved_is(
-                        name,
-                        &bindings,
-                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property",
-                    );
+                    return Ok(None);
                 }
             }
-            // A resource with both metatypes needs a multi-role resource model.
-            let syntax = match (class, property) {
-                (true, false) => "turtle.class",
-                (false, true) => "turtle.property",
-                _ => continue,
-            };
-            result
-                .resources
-                .try_reserve(1)
-                .map_err(|_| SinkError::AllocationFailed)?;
-            result.resources.insert(child.id(), syntax);
         }
         Ok(Some(result))
+    }
+
+    fn triple(
+        &mut self,
+        owner: Node<'_>,
+        source: &[u8],
+        bindings: &HashMap<&str, Option<&str>>,
+        charge: &mut impl FnMut() -> Result<bool, AdapterError>,
+    ) -> Result<bool, AdapterError> {
+        let mut subject = None;
+        let mut properties = None;
+        let mut cursor = owner.walk();
+        for part in owner.named_children(&mut cursor) {
+            if !charge()? {
+                return Ok(false);
+            }
+            match part.kind() {
+                "subject" => subject = Some(part),
+                "property_list" => properties = Some(part),
+                _ => {}
+            }
+        }
+        let (Some(subject), Some(properties)) = (subject, properties) else {
+            return Ok(true);
+        };
+        self.resource(owner, subject, properties, source, bindings, charge)
+    }
+
+    fn resource(
+        &mut self,
+        owner: Node<'_>,
+        subject: Node<'_>,
+        properties: Node<'_>,
+        source: &[u8],
+        bindings: &HashMap<&str, Option<&str>>,
+        charge: &mut impl FnMut() -> Result<bool, AdapterError>,
+    ) -> Result<bool, AdapterError> {
+        let mut subject_term = None;
+        let mut cursor = subject.walk();
+        for term in subject.named_children(&mut cursor) {
+            if !charge()? {
+                return Ok(false);
+            }
+            if is_iri(term) {
+                subject_term = Some(term);
+            }
+        }
+        let Some(term) = subject_term else {
+            return Ok(true);
+        };
+        if text(term, source)
+            .and_then(|name| expanded(name, bindings))
+            .is_none()
+        {
+            return Ok(true);
+        }
+        let mut class = false;
+        let mut property = false;
+        let mut cursor = properties.walk();
+        for written in properties.named_children(&mut cursor) {
+            if !charge()? {
+                return Ok(false);
+            }
+            if written.kind() != "property" {
+                continue;
+            }
+            let mut predicate = None;
+            let mut objects = None;
+            let mut cursor = written.walk();
+            for part in written.named_children(&mut cursor) {
+                if !charge()? {
+                    return Ok(false);
+                }
+                match part.kind() {
+                    "predicate" => predicate = Some(part),
+                    "object_list" => objects = Some(part),
+                    _ => {}
+                }
+            }
+            let (Some(predicate), Some(objects)) = (predicate, objects) else {
+                continue;
+            };
+            let Some(predicate_text) = text(predicate, source) else {
+                continue;
+            };
+            if predicate_text != "a"
+                && !resolved_is(
+                    predicate_text,
+                    bindings,
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                )
+            {
+                continue;
+            }
+            let mut cursor = objects.walk();
+            for object in objects.named_children(&mut cursor) {
+                if !charge()? {
+                    return Ok(false);
+                }
+                if !is_iri(object) {
+                    continue;
+                }
+                let Some(name) = text(object, source) else {
+                    continue;
+                };
+                class |= resolved_is(name, bindings, "http://www.w3.org/2000/01/rdf-schema#Class");
+                property |= resolved_is(
+                    name,
+                    bindings,
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property",
+                );
+            }
+        }
+        // A resource with both metatypes needs a multi-role resource model.
+        let syntax = match (class, property) {
+            (true, false) => "turtle.class",
+            (false, true) => "turtle.property",
+            _ => return Ok(true),
+        };
+        self.resources
+            .try_reserve(1)
+            .map_err(|_| SinkError::AllocationFailed)?;
+        self.resources.insert(
+            owner.id(),
+            Resource {
+                syntax,
+                end: if owner.kind() == "triple" {
+                    owner.end_byte()
+                } else {
+                    properties.end_byte()
+                },
+            },
+        );
+        Ok(true)
     }
 }

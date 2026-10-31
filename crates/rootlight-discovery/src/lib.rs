@@ -85,7 +85,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.95";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.96";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3359,6 +3359,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "toml",
         suffixes: &[".toml"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "trig",
+        suffixes: &[".trig"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -10104,6 +10112,50 @@ max_source_file_bytes = 2097152
         for path in ["data.trig", "query.rq", "rules.n3.bak", "rules.n3x"] {
             assert_ne!(extension_language(path), Some("n3"));
         }
+    }
+
+    #[test]
+    fn trig_suffix_is_distinct_from_turtle_and_preserves_outer_extension_authority() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "trig")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".trig"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("trig"), Some("trig"));
+        for path in ["data.trig", "DATA.TRIG", "data/schema.ttl.trig"] {
+            let path = RelativePath::parse(Path::new(path)).unwrap();
+            let (class, signals) = classify(&path, b"{ }\n");
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "trig".to_owned(),
+                    evidence: LanguageEvidence::Extension
+                }]
+            );
+        }
+        for path in [
+            "data.trig.bak",
+            "data.trigx",
+            "data.trig/fragment",
+            "data.ttl",
+            "data.n3",
+            "query.rq",
+            "notes.txt",
+        ] {
+            assert_ne!(extension_language(path), Some("trig"));
+            assert!(
+                classify(
+                    &RelativePath::parse(Path::new(path)).unwrap(),
+                    b"GRAPH <urn:g> { }\n"
+                )
+                .1
+                .iter()
+                .all(|signal| signal.language != "trig")
+            );
+        }
+        assert_eq!(extension_language("data.trig.json"), Some("json"));
     }
 
     #[test]

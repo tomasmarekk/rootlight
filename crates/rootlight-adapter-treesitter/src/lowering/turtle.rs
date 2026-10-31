@@ -35,8 +35,15 @@ pub(super) fn resolve(
     for fact in facts {
         cancellation.check()?;
         let signature = fact.kind() == SyntaxFactKind::Signature
-            && fact.syntax_kind().as_str() == "turtle.prefix_binding.signature";
-        if signature || kind(fact).is_some_and(|kind| kind != EntityKind::Module) {
+            && matches!(
+                fact.syntax_kind().as_str(),
+                "turtle.prefix_binding.signature" | "trig.prefix_binding.signature"
+            );
+        if signature
+            || kind(fact)
+                .or_else(|| trig::kind(fact))
+                .is_some_and(|kind| kind != EntityKind::Module)
+        {
             events
                 .try_reserve(1)
                 .map_err(|_| SinkError::AllocationFailed)?;
@@ -99,7 +106,11 @@ pub(super) fn resolve(
         qualified.push_str(prefix);
         qualified.push_str(local);
         let mut digest = blake3::Hasher::new();
-        digest.update(b"rootlight.turtle.written-declaration/1\0");
+        digest.update(if fact.syntax_kind().as_str().starts_with("trig.") {
+            b"rootlight.trig.written-declaration/1\0"
+        } else {
+            b"rootlight.turtle.written-declaration/1\0"
+        });
         digest.update(fact.syntax_kind().as_str().as_bytes());
         digest.update(&[0]);
         digest.update(draft.name.as_bytes());

@@ -115,6 +115,7 @@ mod sparql;
 mod thinkscript;
 mod thrift;
 mod toml;
+mod trig;
 mod turtle;
 mod typescript_calls;
 mod typescript_const;
@@ -9025,6 +9026,19 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     continue;
                 };
                 (name, Some(definition.local_id()))
+            } else if fact.syntax_kind().as_str() == "trig.named_graph.module" {
+                let Some(signature) = select_unique_capture(&capture.signatures) else {
+                    nearest_entity_ancestor.insert(fact.local_id(), parent_entity);
+                    nearest_scope_ancestor.insert(fact.local_id(), parent_scope);
+                    continue;
+                };
+                (
+                    std::borrow::Cow::Borrowed(self.text_for_span(signature.span())?),
+                    None,
+                )
+            } else if fact.syntax_kind().as_str() == "trig.default_graph.module" {
+                // The unlabelled block owns source without introducing a written binding.
+                (std::borrow::Cow::Borrowed("<default-graph>"), None)
             } else if is_explicit_file_module(fact, self.language_for_fact(fact)) {
                 let name = self.request.source().path().as_str();
                 (std::borrow::Cow::Borrowed(name), None)
@@ -9263,7 +9277,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     label,
                     position,
                 ))
-            } else if fact.syntax_kind().as_str() == "markdown.code_block.module"
+            } else if trig::is_graph(fact)
+                || fact.syntax_kind().as_str() == "markdown.code_block.module"
                 || matches!(
                     kind,
                     EntityKind::MarkupElement
@@ -9281,7 +9296,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 let position = *next;
                 *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                 Some(blake3::derive_key(
-                    if fact.syntax_kind().as_str() == "markdown.code_block.module"
+                    if trig::is_graph(fact) {
+                        "rootlight.trig-graph-source-occurrence/1"
+                    } else if fact.syntax_kind().as_str() == "markdown.code_block.module"
                         || matches!(
                             kind,
                             EntityKind::DocumentSection | EntityKind::LinkDefinition
@@ -9396,30 +9413,31 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let qualified_prefix = parent_scope
                 .as_ref()
                 .and_then(|scope| scope.qualified_prefix.as_deref());
-            let qualified_length = if matches!(language.as_str(), "toml" | "yaml" | "turtle")
-                && kind != EntityKind::Module
-            {
-                // Data lowering replaces lexical nesting with its bounded address
-                // below; charging a filename/lexical prefix here can reject an
-                // otherwise representable data path.
-                name.len()
-            } else {
-                match parent_entity.and_then(|parent| drafts.get(&parent)) {
-                    Some(parent) => parent
-                        .qualified_length
-                        .checked_add(2)
-                        .and_then(|length| length.checked_add(name.len()))
-                        .ok_or(SinkError::AccountingOverflow)?,
-                    None => match qualified_prefix {
-                        Some(prefix) => prefix
-                            .len()
+            let qualified_length =
+                if matches!(language.as_str(), "toml" | "yaml" | "turtle" | "trig")
+                    && kind != EntityKind::Module
+                {
+                    // Data lowering replaces lexical nesting with its bounded address
+                    // below; charging a filename/lexical prefix here can reject an
+                    // otherwise representable data path.
+                    name.len()
+                } else {
+                    match parent_entity.and_then(|parent| drafts.get(&parent)) {
+                        Some(parent) => parent
+                            .qualified_length
                             .checked_add(2)
                             .and_then(|length| length.checked_add(name.len()))
                             .ok_or(SinkError::AccountingOverflow)?,
-                        None => name.len(),
-                    },
-                }
-            };
+                        None => match qualified_prefix {
+                            Some(prefix) => prefix
+                                .len()
+                                .checked_add(2)
+                                .and_then(|length| length.checked_add(name.len()))
+                                .ok_or(SinkError::AccountingOverflow)?,
+                            None => name.len(),
+                        },
+                    }
+                };
             require_resource_limit(
                 ResourceKind::StringBytes,
                 qualified_length,
@@ -9517,7 +9535,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 cancellation,
             )?;
         }
-        if self.request.language().as_str() == "turtle" {
+        if matches!(self.request.language().as_str(), "turtle" | "trig") {
             turtle::resolve(
                 self.coordinates.facts(),
                 self.source_text,
@@ -11214,6 +11232,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
             ring::gaps(fact)
                 .chain(wesl::gaps(fact))
                 .chain(typespec::gaps(fact))
+                .chain(trig::gaps(fact))
                 .chain(turtle::gaps(fact))
                 .chain(n3::gaps(fact))
                 .chain(sparql::gaps(fact))
@@ -12173,6 +12192,9 @@ fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -
     }
     if language == "n3" {
         return n3::written(kind, label);
+    }
+    if language == "trig" {
+        return trig::written(kind, label);
     }
     if language == "turtle" {
         return turtle::written(kind, label);
@@ -13657,6 +13679,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "trig" || fact.syntax_kind().as_str().starts_with("trig.") {
+        return language == "trig"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "trig.file.module";
+    }
     if language == "sparql" || fact.syntax_kind().as_str().starts_with("sparql.") {
         return language == "sparql"
             && fact.kind() == SyntaxFactKind::Module
@@ -14283,6 +14310,9 @@ fn supports_declaration_signature(
     declaration: &SyntaxFact,
     definition: Option<&SyntaxFact>,
 ) -> bool {
+    if language == "trig" && trig::is_graph(declaration) {
+        return true;
+    }
     if is_c_macro_signature_owner(kind, language, declaration) {
         return true;
     }
@@ -14614,6 +14644,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     if fact.syntax_kind().as_str().starts_with("n3.") {
         return n3::kind(fact);
     }
+    if fact.syntax_kind().as_str().starts_with("trig.") {
+        return trig::kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("turtle.") {
         return turtle::kind(fact);
     }
@@ -14672,6 +14705,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
     }
     if fact.syntax_kind().as_str().starts_with("n3.") {
         return n3::kind(fact);
+    }
+    if fact.syntax_kind().as_str().starts_with("trig.") {
+        return trig::kind(fact);
     }
     if fact.syntax_kind().as_str().starts_with("turtle.") {
         return turtle::kind(fact);

@@ -29,7 +29,7 @@
     "local_unpublished": true,
     "package_version_basis": "The pinned Node grammar manifest declares 0.2.0; the original Rust manifest remains unchanged under upstream/files.",
     "generated_abi": 14,
-    "parser_unchanged": true,
+    "parser_unchanged": false,
     "external_scanner": false,
     "network_or_generator_in_build": false,
     "build_inputs": [
@@ -47,5 +47,72 @@
   "native_syntax_scope": [
     "The retained grammar admits Turtle triples and directives and TriG graph blocks.",
     "This native intake does not establish N3 formula/implication parsing, RDF inference, external IRI resolution or production indexing."
-  ]
+  ],
+  "native_changes": [
+    {
+      "rule": "_label",
+      "purpose": "TriG GRAPH is an ASCII case-insensitive keyword; graph labels retain their native term nodes",
+      "specification": "https://www.w3.org/TR/trig/#sec-grammar-grammar",
+      "upstream_original": "upstream/files/grammar.js",
+      "before": "optional('GRAPH')",
+      "after": "optional('GRAPH'.toCaseInsensitive())"
+    }
+  ],
+  "generation": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "environment_role": "declared maintainer tool; never invoked during compilation or packaging",
+    "observed_executable_bytes": 9720320,
+    "observed_executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "command": [
+      "tree-sitter",
+      "generate",
+      "--abi",
+      "14",
+      "--js-runtime",
+      "native"
+    ],
+    "preferred_inputs": [
+      {
+        "path": "grammar.js",
+        "bytes": 7872,
+        "sha256": "55983c245d52b2f58e12abb0440c55b2c1d4a0b86c9c6343524ed92eb77d42bc"
+      }
+    ],
+    "outputs": [
+      {
+        "path": "src/parser.c",
+        "bytes": 135839,
+        "sha256": "22c25990cf8f2ff30f9832b22d8fb4ec5abb7015a52f161cc63bdb39770d6bbb"
+      },
+      {
+        "path": "src/grammar.json",
+        "bytes": 63210,
+        "sha256": "f206837d1c559dee8e156535dfe21cf34d266eb427e539e260f77cf4ad86c59f"
+      },
+      {
+        "path": "src/node-types.json",
+        "bytes": 11140,
+        "sha256": "8fcddb272a71436e69ca13b9f36bdeb7996eb5a45aa4713eaf6faffdb269d04b"
+      },
+      {
+        "path": "src/tree_sitter/parser.h",
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      },
+      {
+        "path": "src/tree_sitter/alloc.h",
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      {
+        "path": "src/tree_sitter/array.h",
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      }
+    ],
+    "generated_files_hand_edited": false,
+    "upstream_originals_preserved": true,
+    "executed_during_compilation_or_packaging": false
+  }
 }

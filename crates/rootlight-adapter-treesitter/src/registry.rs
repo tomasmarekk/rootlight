@@ -17,6 +17,8 @@ pub enum GrammarFamily {
     Sparql,
     /// Notation3 written source without logical inference or external IRI loading.
     N3,
+    /// TriG written graph containers without inference or external IRI loading.
+    Trig,
     /// Turtle written RDF declarations without inference or external IRI loading.
     Turtle,
     /// TypeSpec written declarations without imported type or decorator evaluation.
@@ -331,10 +333,11 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(111);
+        let mut descriptors = Vec::with_capacity(112);
         for family in [
             GrammarFamily::Sparql,
             GrammarFamily::N3,
+            GrammarFamily::Trig,
             GrammarFamily::Turtle,
             GrammarFamily::TypeSpec,
             GrammarFamily::Ron,
@@ -547,7 +550,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
         GrammarFamily::Sparql => tree_sitter_sparql::LANGUAGE.into(),
         GrammarFamily::N3 => tree_sitter_n3::LANGUAGE.into(),
-        GrammarFamily::Turtle => tree_sitter_turtle::LANGUAGE.into(),
+        GrammarFamily::Trig | GrammarFamily::Turtle => tree_sitter_turtle::LANGUAGE.into(),
         GrammarFamily::TypeSpec => tree_sitter_typespec::LANGUAGE.into(),
         GrammarFamily::Ron => tree_sitter_ron::LANGUAGE.into(),
         GrammarFamily::Wesl => tree_sitter_wesl::LANGUAGE.into(),
@@ -765,11 +768,18 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "bc6ae706653aa9f154a6c719c37baf3406c59278be59cdc1c4ffefb75ad2a1d8",
             scanner_sha256: None,
         },
+        GrammarFamily::Trig => GrammarIdentity {
+            language_id: "trig",
+            grammar_version: "0.2.0",
+            source_package_sha256: "e5b900ed1aca6b20f4f7c508d2fcba54757aa661f993843cf5eaa292dcde817e",
+            parser_sha256: "22c25990cf8f2ff30f9832b22d8fb4ec5abb7015a52f161cc63bdb39770d6bbb",
+            scanner_sha256: None,
+        },
         GrammarFamily::Turtle => GrammarIdentity {
             language_id: "turtle",
             grammar_version: "0.2.0",
-            source_package_sha256: "e9fda0651ae1c20788f50073766558391623ceaa482c0bd66a1597d0c4d46bb2",
-            parser_sha256: "ab856e4c7669ecb8c65214e09fbb9477c8655c661cce55e0385ac356891f6b8d",
+            source_package_sha256: "e5b900ed1aca6b20f4f7c508d2fcba54757aa661f993843cf5eaa292dcde817e",
+            parser_sha256: "22c25990cf8f2ff30f9832b22d8fb4ec5abb7015a52f161cc63bdb39770d6bbb",
             scanner_sha256: None,
         },
         GrammarFamily::TypeSpec => GrammarIdentity {
@@ -1635,10 +1645,11 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 111);
+        assert_eq!(registry.descriptors().len(), 112);
         for family in [
             GrammarFamily::Sparql,
             GrammarFamily::N3,
+            GrammarFamily::Trig,
             GrammarFamily::Turtle,
             GrammarFamily::TypeSpec,
             GrammarFamily::Ron,
@@ -2006,6 +2017,7 @@ mod tests {
         for (family, language, package) in [
             (GrammarFamily::Sparql, "sparql", "tree-sitter-sparql"),
             (GrammarFamily::N3, "n3", "tree-sitter-n3"),
+            (GrammarFamily::Trig, "trig", "tree-sitter-turtle"),
             (GrammarFamily::Turtle, "turtle", "tree-sitter-turtle"),
             (GrammarFamily::TypeSpec, "typespec", "tree-sitter-typespec"),
             (GrammarFamily::Ron, "ron", "tree-sitter-ron"),
@@ -2190,6 +2202,7 @@ mod tests {
                             family,
                             GrammarFamily::Sparql
                                 | GrammarFamily::N3
+                                | GrammarFamily::Trig
                                 | GrammarFamily::Turtle
                                 | GrammarFamily::TypeSpec
                                 | GrammarFamily::Ron

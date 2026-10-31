@@ -120,7 +120,7 @@ module.exports = grammar({
     ),
 
     // [7g] labelOrSubject ::= iri | BlankNode
-    _label: $ => seq(optional('GRAPH'), choice($._iri, $._blank_node)),
+    _label: $ => seq(optional('GRAPH'.toCaseInsensitive()), choice($._iri, $._blank_node)),
 
     comment: _ => token(prec(-1, /#.*/)),
 

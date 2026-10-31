@@ -131,6 +131,7 @@ mod sparql;
 mod sql;
 mod sql_admission;
 mod thrift;
+mod trig;
 mod turtle;
 mod typescript_calls;
 mod typescript_const;
@@ -492,6 +493,14 @@ impl QueryPack {
                 matches!(
                     *name,
                     "root" | "module" | "declaration" | "definition" | "scope"
+                )
+            });
+        }
+        if family == GrammarFamily::Trig {
+            expected.retain(|name| {
+                matches!(
+                    *name,
+                    "root" | "module" | "signature" | "declaration" | "definition"
                 )
             });
         }
@@ -1402,14 +1411,24 @@ impl QueryPack {
         let mut native_captures = 0usize;
         let mut refusal = None;
         let mut vba_calls = vba_calls::Calls::default();
-        let turtle_context = if input.family == GrammarFamily::Turtle {
-            let Some(context) = turtle::Context::new(
-                input.tree.root_node(),
-                input.source,
-                input.cancellation,
-                limits.body_nodes.min(HARD_MAX_QUERY_CAPTURES),
-            )?
-            else {
+        let turtle_context = if matches!(input.family, GrammarFamily::Turtle | GrammarFamily::Trig)
+        {
+            let context = if input.family == GrammarFamily::Trig {
+                turtle::Context::new_trig(
+                    input.tree.root_node(),
+                    input.source,
+                    input.cancellation,
+                    limits.body_nodes.min(HARD_MAX_QUERY_CAPTURES),
+                )?
+            } else {
+                turtle::Context::new(
+                    input.tree.root_node(),
+                    input.source,
+                    input.cancellation,
+                    limits.body_nodes.min(HARD_MAX_QUERY_CAPTURES),
+                )?
+            };
+            let Some(context) = context else {
                 return Ok(Some(QueryLimit::Capture));
             };
             Some(context)
@@ -3235,6 +3254,20 @@ impl QueryPack {
                         continue;
                     };
                     Ok(candidate)
+                } else if input.family == GrammarFamily::Trig {
+                    let Some(candidate) = trig::candidate(
+                        turtle_context
+                            .as_ref()
+                            .ok_or_else(|| query_failure("query-trig-context"))?,
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                    )?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
                 } else if input.family == GrammarFamily::Turtle {
                     let Some(candidate) = turtle::candidate(
                         turtle_context
@@ -4735,6 +4768,7 @@ fn candidate_for_capture(
             GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
             GrammarFamily::Sparql => return Err(query_failure("query-sparql-unproven-call")),
             GrammarFamily::N3 => return Err(query_failure("query-n3-unproven-call")),
+            GrammarFamily::Trig => return Err(query_failure("query-trig-unproven-call")),
             GrammarFamily::Turtle => return Err(query_failure("query-turtle-unproven-call")),
             GrammarFamily::TypeSpec => return Err(query_failure("query-typespec-unproven-call")),
             GrammarFamily::Xml | GrammarFamily::Dtd => {
@@ -5260,6 +5294,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
     match (family, native) {
         (GrammarFamily::Sparql, "unit") => Some("sparql.file"),
         (GrammarFamily::N3, "n3_doc") => Some("n3.file"),
+        (GrammarFamily::Trig, "document") => Some("trig.file"),
         (GrammarFamily::Turtle, "document") => Some("turtle.file"),
         (GrammarFamily::Idris, "idris") => Some("idris.file"),
         (GrammarFamily::Idris, "comment") => Some("idris.comment"),
@@ -5869,7 +5904,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(111);
+        let mut packs = Vec::with_capacity(112);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5960,6 +5995,7 @@ impl QueryPackRegistry {
             ),
             (GrammarFamily::Sparql, include_str!("../queries/sparql.scm")),
             (GrammarFamily::N3, include_str!("../queries/n3.scm")),
+            (GrammarFamily::Trig, include_str!("../queries/trig.scm")),
             (GrammarFamily::Turtle, include_str!("../queries/turtle.scm")),
             (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
@@ -6342,12 +6378,14 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 113);
+        assert_eq!(registry.len(), 114);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
             GrammarFamily::Sparql,
             GrammarFamily::N3,
+            GrammarFamily::Trig,
+            GrammarFamily::Turtle,
             GrammarFamily::Erb,
             GrammarFamily::Wesl,
             GrammarFamily::Ron,
@@ -6461,6 +6499,14 @@ mod tests {
                     matches!(
                         *name,
                         "root" | "module" | "declaration" | "definition" | "scope"
+                    )
+                });
+            }
+            if matches!(family, GrammarFamily::Trig | GrammarFamily::Turtle) {
+                expected.retain(|name| {
+                    matches!(
+                        *name,
+                        "root" | "module" | "declaration" | "definition" | "signature"
                     )
                 });
             }
