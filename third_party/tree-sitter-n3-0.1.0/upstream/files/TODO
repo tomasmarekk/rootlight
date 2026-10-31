@@ -1,0 +1,5 @@
+- add tests for n3 / ttl
+- add tests for syntax highlighting
+- add queries for ttl or remove queries for n3
+- add tagging queries
+- build python package

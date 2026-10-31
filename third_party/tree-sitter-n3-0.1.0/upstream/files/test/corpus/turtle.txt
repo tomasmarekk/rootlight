@@ -1,0 +1,889 @@
+===============
+Simple triples
+===============
+
+<http://example.org/#spiderman> <http://www.perceive.net/schemas/relationship/enemyOf> <http://example.org/#green-goblin> .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))))))
+
+================
+Predicate lists
+================
+
+<http://example.org/#spiderman> <http://www.perceive.net/schemas/relationship/enemyOf> <http://example.org/#green-goblin> ;
+                                <http://xmlns.com/foaf/0.1/name> "Spiderman" .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)))))))))))
+
+=============
+Object lists
+=============
+
+<http://example.org/#spiderman> <http://xmlns.com/foaf/0.1/name> "Spiderman", "Человек-паук"@ru .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string))))))
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)
+                    (lang_tag)))))))))))
+
+=============
+Absolute iri
+=============
+
+<http://one.example/subject1> <http://one.example/predicate1> <http://one.example/object1> .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))))))
+
+============
+Relative iri
+============
+
+<subject2> <predicate2> <object2> .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))))))
+
+==============
+Prefixed name
+==============
+
+p:subject3 p:predicate3 p:object3 .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns
+                    (pn_prefix))
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))))))
+
+=============
+Empty prefix
+=============
+
+:subject5 a :object5 .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns)
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb)
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))))))
+
+=================
+Multi-script iri
+=================
+
+<http://伝言.example/?user=أكرم&amp;channel=R%26D> a :subject8 .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb)
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))))))
+
+=====
+Base
+=====
+
+@base <http://one.example/> .
+BASE <http://one.example/>
+BAse <http://one.example/>
+
+---
+
+(n3_doc
+  (n3_statement
+    (n3_directive
+      (base
+        (iri_reference))))
+  (sparql_directive
+    (sparql_base
+      (iri_reference)))
+  (sparql_directive
+    (sparql_base
+      (iri_reference))))
+
+=======
+Prefix
+=======
+
+@prefix p: <http://two.example/> .
+PREFIX p: <http://two.example/>
+PREfix p: <http://two.example/>
+
+---
+
+(n3_doc
+  (n3_statement
+    (n3_directive
+      (prefix_id
+        (pname_ns
+          (pn_prefix))
+        (iri_reference))))
+  (sparql_directive
+    (sparql_prefix
+      (pname_ns
+        (pn_prefix))
+      (iri_reference)))
+  (sparql_directive
+    (sparql_prefix
+      (pname_ns
+        (pn_prefix))
+      (iri_reference))))
+
+================
+Quoted literals
+================
+
+show:218 rdfs:label "That Seventies Show"^^xsd:string .
+show:218 rdfs:label "That Seventies Show"^^<http://www.w3.org/2001/XMLSchema#string> .
+show:218 rdfs:label "That Seventies Show" .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns
+                    (pn_prefix))
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)
+                    (prefixed_name
+                      (pname_ln
+                        (pname_ns
+                          (pn_prefix))
+                        (pn_local))))))))))))
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns
+                    (pn_prefix))
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)
+                    (iri_reference))))))))))
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns
+                    (pn_prefix))
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)))))))))))
+
+=============
+Language Tag
+=============
+
+show:218 show:localName 'That Seventies Show'@fr-be .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns
+                    (pn_prefix))
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)
+                    (lang_tag)))))))))))
+
+
+=======================
+Literal with new lines
+=======================
+
+show:218 show:blurb '''This is a multi-line
+literal with many quotes (""""")
+and up to two sequential apostrophes ('').''' .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns
+                    (pn_prefix))
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)))))))))))
+
+=================
+String with Hash
+=================
+
+<s> <p> "foo#" .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string)))))))))))
+
+========
+Numbers
+========
+
+<http://en.wikipedia.org/wiki/Helium>
+    :atomicNumber 2 ;               # xsd:integer
+    :atomicMass 4.002602 ;          # xsd:decimal
+    :specificGravity 1.663E-4 .     # xsd:double
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (numeric_literal
+                    (integer)))))))
+        (comment)
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (numeric_literal
+                    (decimal)))))))
+        (comment)
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (numeric_literal
+                    (double))))))))))
+  (comment))
+
+
+=========
+Booleans
+=========
+
+<http://somecountry.example/census2007> :isLandlocked false .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (boolean_literal))))))))))
+
+============
+Blank nodes
+============
+
+_:alice foaf:knows _:bob .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (blank_node_label)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (blank_node_label))))))))))
+
+===================
+Nested blank nodes
+===================
+
+[] foaf:knows [ foaf:name "Bob" ] .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (anon)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns
+                        (pn_prefix))
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (blank_node_property_list
+                    (predicate_object_list
+                      (verb
+                        (predicate
+                          (expression
+                            (path
+                              (path_item
+                                (prefixed_name
+                                  (pname_ln
+                                    (pname_ns
+                                      (pn_prefix))
+                                    (pn_local))))))))
+                      (object_list
+                        (object
+                          (expression
+                            (path
+                              (path_item
+                                (rdf_literal
+                                  (string))))))))))))))))))
+
+============
+Collections
+============
+
+() :predicate ( :a :b :c ) .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (collection)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (collection
+                    (expression
+                      (path
+                        (path_item
+                          (prefixed_name
+                            (pname_ln
+                              (pname_ns)
+                              (pn_local))))))
+                    (expression
+                      (path
+                        (path_item
+                          (prefixed_name
+                            (pname_ln
+                              (pname_ns)
+                              (pn_local))))))
+                    (expression
+                      (path
+                        (path_item
+                          (prefixed_name
+                            (pname_ln
+                              (pname_ns)
+                              (pn_local))))))))))))))))
+
+=====
+Verb
+=====
+
+:a :a :a .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (prefixed_name
+                (pname_ln
+                  (pname_ns)
+                  (pn_local)))))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (prefixed_name
+                    (pname_ln
+                      (pname_ns)
+                      (pn_local))))))))))))
+
+=================
+Escape sequences
+=================
+
+<s> <p> '\ta\b' .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (rdf_literal
+                    (string
+                      (echar)
+                      (echar))))))))))))
+
+==============
+Hex sequences
+==============
+
+<s> <p> <http://www.dit.unitn.it/\u0020pavel/om2017/papers/oaei17_paper11.pdf> .
+
+---
+
+(n3_doc
+  (n3_statement
+    (triples
+      (subject
+        (expression
+          (path
+            (path_item
+              (iri_reference)))))
+      (predicate_object_list
+        (verb
+          (predicate
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))
+        (object_list
+          (object
+            (expression
+              (path
+                (path_item
+                  (iri_reference))))))))))
+

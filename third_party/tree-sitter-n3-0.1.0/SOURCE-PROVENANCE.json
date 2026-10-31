@@ -1,0 +1,128 @@
+{
+  "schema": "rootlight.n3-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/eyusupov/tree-sitter-n3",
+    "revision": "62816526edba86e8c899919f75fbf1101311b6a2",
+    "git_tree": "c39a89e3cfd35ac990776b90e68ff8d16c521fa6",
+    "node_package_version": "0.1.0",
+    "original_rust_version": "0.0.1",
+    "original_rust_edition": "2025",
+    "files": 46,
+    "file_bytes": 55476,
+    "all_git_blobs_and_archive_payload_verified": true,
+    "archive": {
+      "path": "upstream/source.tar.gz",
+      "source_url": "https://codeload.github.com/eyusupov/tree-sitter-n3/tar.gz/62816526edba86e8c899919f75fbf1101311b6a2",
+      "bytes": 15234,
+      "sha256": "96e97d05a1ec349df3dfabbe138034580e60ad31add31afdd8eddae71850af15"
+    },
+    "upstream_generated_c_parser": false,
+    "upstream_lifecycle_executed": false
+  },
+  "license_scope": {
+    "spdx": "MIT",
+    "retained_notices": [
+      "LICENSE",
+      "upstream/files/LICENSE"
+    ],
+    "original_author_notices": [
+      "Gordian Dziwis (2021)",
+      "Eldar Yusupov (2025)"
+    ]
+  },
+  "local_binding": {
+    "unpublished": true,
+    "package_version_basis": "Pinned upstream Node manifest; original Cargo manifest retained inert",
+    "edition": "2024",
+    "external_scanner": false,
+    "runtime": "tree-sitter0.26.11",
+    "language_ffi": "tree-sitter-language0.1.7",
+    "c_build": "cc1.2.67",
+    "network_or_generator_in_build": false
+  },
+  "local_derivation": {
+    "preferred_grammar": "grammar.js",
+    "preferred_grammar_sha256": "a7e48c5c62a8f770c94c501815b4ea84ba09ae10ebc9f8c71318b5a61bb77340",
+    "base_grammar": "upstream/files/grammar.js",
+    "base_grammar_sha256": "d26ab3ac220a2bfd4fa6ee094ea1a90e11555d3b6a29545d5a5bdaec8c709f58",
+    "changes": [
+      "Legacy universal and existential IRI/QName comma lists, including empty lists, remain statements inside formulas."
+    ],
+    "legacy_syntax_reference": "https://www.w3.org/2000/10/swap/grammar/n3-report.html",
+    "generator": {
+      "name": "tree-sitter-cli",
+      "version": "0.26.8",
+      "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+      "javascript_runtime": "bundled native QuickJS",
+      "abi": 15,
+      "arguments": [
+        "generate",
+        "--js-runtime",
+        "native",
+        "--abi",
+        "15",
+        "grammar.js"
+      ],
+      "role": "Declared maintainer environment prerequisite; not a product dependency"
+    },
+    "generated_outputs": {
+      "src/grammar.json": {
+        "bytes": 69261,
+        "sha256": "16a3ca423054acca7f5bb19956b27b38793aa8cb2e55d5fcc4846006492fd688"
+      },
+      "src/node-types.json": {
+        "bytes": 13775,
+        "sha256": "1eb43af24fb23989c5e276ba3fe7499a6501d0d4fd9518c989f7b4a57d3b201c"
+      },
+      "src/parser.c": {
+        "bytes": 284110,
+        "sha256": "bc6ae706653aa9f154a6c719c37baf3406c59278be59cdc1c4ffefb75ad2a1d8"
+      },
+      "src/tree_sitter/alloc.h": {
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "src/tree_sitter/array.h": {
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      },
+      "src/tree_sitter/parser.h": {
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      }
+    },
+    "generation_at_product_build_time": false
+  },
+  "reversible_metadata_paths": {
+    ".gitattributes": "upstream/files/.gitattributes.upstream",
+    ".gitignore": "upstream/files/.gitignore.upstream",
+    ".npmignore": "upstream/files/.npmignore.upstream"
+  },
+  "corpus_witnesses": [
+    {
+      "repository": "45_Prolog_eye",
+      "revision": "f14729b5bd1c6f25b54ab6490d6c17639f7353cf",
+      "path": "reasoning/euq/euq.n3",
+      "bytes": 173,
+      "sha256": "5511fcf5f6debf577d22f9afd94a6a36ab9c73742292d7b21438070cca93a412",
+      "scope": "External original bytes read by opt-in test; not copied into package"
+    },
+    {
+      "repository": "45_Prolog_eye",
+      "revision": "f14729b5bd1c6f25b54ab6490d6c17639f7353cf",
+      "path": "reasoning/sequents/proof/beetle.n3",
+      "bytes": 1751,
+      "sha256": "1c8b86e8ffc78ab1c1497079cd27de283e7284975619269b40d83e9c194619a5",
+      "scope": "External original bytes read by opt-in test; not copied into package"
+    },
+    {
+      "repository": "45_Prolog_eye",
+      "revision": "f14729b5bd1c6f25b54ab6490d6c17639f7353cf",
+      "path": "reasoning/rgb/blueproof003.n3",
+      "bytes": 2305,
+      "sha256": "0b14820f54719fc7b6a9de6e60bbb0c0a3b7123f8f59cbeccaa24cc40268104a",
+      "scope": "External original bytes read by opt-in test; not copied into package"
+    }
+  ],
+  "scope": "Native syntax loading, physical spans, recovery and edit equivalence only; production discovery, structural IR, semantic binding and inference remain unqualified."
+}

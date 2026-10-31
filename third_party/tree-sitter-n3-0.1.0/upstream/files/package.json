@@ -1,0 +1,65 @@
+{
+  "name": "tree-sitter-n3",
+  "version": "0.1.0",
+  "description": "Notation3 grammar for tree-sitter",
+  "main": "bindings/node",
+  "types": "bindings/node",
+  "scripts": {
+    "test": "tree-sitter test && node test.js",
+    "install": "node-gyp-build",
+    "prebuildify": "prebuildify --napi --strip"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eyusupov/tree-sitter-n3.git"
+  },
+  "keywords": [
+    "parser",
+    "lexer"
+  ],
+  "files": [
+    "grammar.js",
+    "binding.gyp",
+    "prebuilds/**",
+    "bindings/node/*",
+    "queries/*",
+    "src/**"
+  ],
+  "author": "Gordian Dziwis, Eldar Yusupov",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/BonaBeavis/tree-sitter-n3/issues"
+  },
+  "homepage": "https://github.com/BonaBeavis/tree-sitter-n3#readme",
+  "dependencies": {
+    "node-addon-api": "^7.1.0",
+    "node-gyp": "^11.4.2",
+    "node-gyp-build": "^4.8.0"
+  },
+  "peerDependencies": {
+    "tree-sitter": "^0.21.0"
+  },
+  "peerDependenciesMeta": {
+    "tree_sitter": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "prebuildify": "^6.0.0",
+    "tree-sitter-cli": "^0.21.0"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.n3",
+      "file-types": [
+        "n3"
+      ]
+    },
+    {
+      "scope": "source.turtle",
+      "file-types": [
+        "ttl"
+      ]
+    }
+  ]
+}
