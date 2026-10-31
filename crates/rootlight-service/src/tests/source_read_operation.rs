@@ -210,6 +210,192 @@ fn successive_source_accounting_sized_reads_reuse_one_index_and_pack_after_shedd
 }
 
 #[test]
+fn streamed_utf8_chunks_reuse_one_immutable_body_with_ordinary_line_metadata() {
+    let Fixture {
+        _storage,
+        root,
+        paths,
+        service,
+        receipt,
+        references,
+    } = fixture();
+    drop(service);
+    let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+        source: rootlight_config::ConfigSource::User,
+        contents: "version = \"1.1\"\n[analysis]\nmax_source_file_bytes = 4096\n",
+    }])
+    .unwrap();
+    let cancellation = deadline();
+    let service = FirstSliceService::new_durable_with_policy(
+        FirstSliceStoragePolicy::from_config(config, 4),
+        paths.state_dir(),
+        &cancellation,
+    )
+    .unwrap();
+    let fixture = Fixture {
+        _storage,
+        root,
+        paths,
+        service,
+        receipt,
+        references,
+    };
+    let reference = alpha(&fixture);
+    let original = fs::read(fixture.root.path().join("alpha.rs")).unwrap();
+    assert!(
+        u64::try_from(original.len()).unwrap()
+            > fixture.service.config.analysis().max_source_file_bytes
+    );
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    let mut output = Vec::new();
+    for start in (0..original.len()).step_by(64 * 1024) {
+        let selected = part(
+            &reference,
+            start.try_into().unwrap(),
+            (start + 64 * 1024).min(original.len()).try_into().unwrap(),
+        );
+        let expected = fixture
+            .service
+            .source_read_with_options_and_budget(
+                fixture.receipt.generation,
+                vec![selected.clone()],
+                options(),
+                FirstSliceBudget::new(),
+                &cancellation,
+            )
+            .unwrap();
+        operation
+            .read(
+                vec![selected],
+                options(),
+                FirstSliceBudget::new(),
+                |actual| {
+                    assert_eq!(actual.data, expected.data);
+                    assert_eq!(actual.plan, expected.plan);
+                    output.extend_from_slice(&actual.data.chunks[0].bytes);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(output, original);
+    assert_eq!(operation.test_io_counts(), (1, 1, 0));
+    let owner = operation.owner.as_ref().unwrap();
+    assert_eq!(
+        owner.prepared.as_ref().unwrap().view.snapshot().file(),
+        reference.span().file()
+    );
+}
+
+#[test]
+fn prepared_view_has_one_charged_slot_and_inadmissible_views_keep_ordinary_results() {
+    let fixture = fixture();
+    let cancellation = deadline();
+    let baseline = reserved(&fixture.service);
+    let file_bytes = alpha(&fixture).span().end_byte();
+    let alpha = part(&alpha(&fixture), 0, 8);
+    let beta = fixture
+        .references
+        .iter()
+        .find(|reference| {
+            let lease = fixture
+                .service
+                .generation_lease(fixture.receipt.generation, &cancellation)
+                .unwrap();
+            lease
+                .generation()
+                .find_file(reference.span().file())
+                .unwrap()
+                .path
+                == "beta.rs"
+        })
+        .unwrap();
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    let opened = reserved(&fixture.service);
+    operation
+        .read(
+            vec![alpha.clone()],
+            options(),
+            FirstSliceBudget::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let owner = operation.owner.as_ref().unwrap();
+    let first = Arc::downgrade(owner.prepared.as_ref().unwrap().view.snapshot());
+    let alpha_bytes = owner.prepared.as_ref().unwrap().bytes;
+    assert_eq!(reserved(&fixture.service), opened + alpha_bytes);
+    operation
+        .read(
+            vec![beta.clone()],
+            options(),
+            FirstSliceBudget::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(
+        first.upgrade().is_none(),
+        "replacing the slot releases the old body"
+    );
+    let owner = operation.owner.as_ref().unwrap();
+    assert_eq!(
+        owner.prepared.as_ref().unwrap().view.snapshot().file(),
+        beta.span().file()
+    );
+    assert_eq!(
+        reserved(&fixture.service),
+        opened + owner.prepared.as_ref().unwrap().bytes
+    );
+    operation
+        .read(
+            vec![alpha.clone()],
+            options(),
+            FirstSliceBudget::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(reserved(&fixture.service), opened + alpha_bytes);
+    let held = operation.owner.as_ref().unwrap().held_bytes;
+    drop(operation);
+    assert_eq!(reserved(&fixture.service), baseline);
+
+    let maximum = held + file_bytes + 2 * FirstSliceBudget::new().query().max_memory_bytes();
+    let small =
+        FirstSliceSourceReadOperationLimits::new(10, limits().maximum_work, maximum).unwrap();
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, small, &cancellation)
+        .unwrap()
+        .unwrap();
+    let expected = fixture
+        .service
+        .source_read_with_options_and_budget(
+            fixture.receipt.generation,
+            vec![alpha.clone()],
+            options(),
+            FirstSliceBudget::new(),
+            &cancellation,
+        )
+        .unwrap();
+    operation
+        .read(vec![alpha], options(), FirstSliceBudget::new(), |actual| {
+            assert_eq!(actual.data, expected.data);
+            Ok(())
+        })
+        .unwrap();
+    assert!(operation.owner.as_ref().unwrap().prepared.is_none());
+    drop(operation);
+    assert_eq!(reserved(&fixture.service), baseline);
+}
+
+#[test]
 fn duplicate_order_context_empty_and_reduced_byte_errors_match_ordinary_reads() {
     let fixture = fixture();
     let cancellation = deadline();

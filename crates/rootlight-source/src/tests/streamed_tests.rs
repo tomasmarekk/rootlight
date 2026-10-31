@@ -385,6 +385,49 @@ fn streamed_raw_bytes_preserve_unknown_and_malformed_text_without_false_text_suc
 }
 
 #[test]
+fn a_prepared_snapshot_cannot_bypass_an_independent_provider_final_failure() {
+    let bytes = b"selected\nvalid tail";
+    let fixture = fixture(bytes, "utf-8", (0, 4));
+    let prepared = PreparedUtf8Source::new(
+        immutable_fixture_snapshot(&fixture),
+        &fixture.generation,
+        &Cancellation::new(),
+        None,
+    )
+    .unwrap();
+    let options = SourceReadOptions::new()
+        .with_context_lines_before(0)
+        .with_context_lines_after(0);
+    let cached = SourceService::from_prepared_utf8(&prepared, &fixture.generation).unwrap();
+    assert_eq!(
+        cached
+            .read(
+                std::slice::from_ref(&fixture.reference),
+                options,
+                SourceBudget::new(),
+                &Cancellation::new(),
+            )
+            .unwrap()
+            .chunks[0]
+            .bytes,
+        b"sele"
+    );
+    let mut backing = Backing::new(&fixture.generation, bytes, 3);
+    backing.final_error = true;
+    let streamed = SourceService::from_verified_backing(&backing, &fixture.generation).unwrap();
+    assert_eq!(
+        streamed.read(
+            std::slice::from_ref(&fixture.reference),
+            options,
+            SourceBudget::new(),
+            &Cancellation::new(),
+        ),
+        Err(SourceError::StaleSource)
+    );
+    assert_eq!(backing.calls.get(), 1);
+}
+
+#[test]
 fn streamed_verification_and_provider_failures_never_release_a_selected_prefix() {
     let bytes = b"selected\nvalid tail";
     let fixture = fixture(bytes, "utf-8", (0, 4));

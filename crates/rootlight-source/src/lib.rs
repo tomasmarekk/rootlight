@@ -16,6 +16,7 @@ mod literal_search;
 mod lossless_text;
 mod metadata;
 pub mod opc;
+mod prepared_utf8;
 mod streamed;
 mod streamed_find;
 pub mod vba_compression;
@@ -41,6 +42,7 @@ pub use lossless_text::{
     LosslessTextReadOptions, SourceTextChunk, SourceTextPrefixReadResult, SourceTextReadResult,
 };
 pub use metadata::{SourceMetadata, source_metadata_memory_upper, validate_source_metadata};
+pub use prepared_utf8::PreparedUtf8Source;
 pub use streamed::VerifiedSourceBacking;
 
 use std::{
@@ -457,10 +459,36 @@ impl<'a> SourceService<'a> {
         })
     }
 
+    /// Binds an explicitly owned immutable UTF-8 view to its generation.
+    ///
+    /// This serves the admitted snapshot, not a live file or a new visit to a
+    /// provider. Callers must preserve their operation's publication authority.
+    ///
+    /// # Errors
+    /// Rejects a view from another generation or file identity.
+    pub fn from_prepared_utf8(
+        prepared: &'a PreparedUtf8Source,
+        generation: &'a GenerationSnapshot,
+    ) -> Result<Self, SourceError> {
+        let file = generation
+            .find_file(prepared.snapshot().file())
+            .ok_or(SourceError::FileNotFound)?;
+        if !prepared.matches(file) {
+            return Err(SourceError::StaleSource);
+        }
+        Ok(Self {
+            backing: SourceBacking::Prepared(prepared),
+            generation: generation_view::GenerationView::Full(generation),
+        })
+    }
+
     /// Reports whether source operations use authenticated bounded visits.
     #[must_use]
     pub const fn uses_verified_backing(&self) -> bool {
-        matches!(self.backing, SourceBacking::Verified(_))
+        matches!(
+            self.backing,
+            SourceBacking::Verified(_) | SourceBacking::Prepared(_)
+        )
     }
 
     /// Reads verified UTF-8 text with line context or exact source bytes.
@@ -525,6 +553,19 @@ impl<'a> SourceService<'a> {
             budget,
             &control,
         )?;
+        let prepared_utf8 = match self.backing {
+            SourceBacking::Prepared(view) => Some(view),
+            _ => None,
+        }
+        .filter(|view| {
+            prepared
+                .files
+                .iter()
+                .all(|file| file.file == view.snapshot().file())
+                && matches!(mode, SourceReadMode::Legacy(SourceEncoding::Utf8))
+                && options.context_lines_before == 0
+                && options.context_lines_after == 0
+        });
         if let SourceBacking::Verified(backing) = self.backing {
             return streamed::read(
                 self, backing, references, options, budget, mode, prepared, &control,
@@ -541,7 +582,12 @@ impl<'a> SourceService<'a> {
                 .generation
                 .find_file(prepared_file.file)
                 .ok_or(SourceError::FileNotFound)?;
-            let snapshot = self.resolve_snapshot(prepared_file, file, cancellation, &control)?;
+            let snapshot = if let Some(view) = prepared_utf8 {
+                control.check()?;
+                ResolvedSnapshot::Retained(view.snapshot())
+            } else {
+                self.resolve_snapshot(prepared_file, file, cancellation, &control)?
+            };
             let snapshot_ref = snapshot.as_ref();
             if snapshot_ref.file() != file.id
                 || snapshot_ref.metadata().length != file.byte_length
@@ -553,7 +599,7 @@ impl<'a> SourceService<'a> {
                 let encoding =
                     lossless_text::validate_snapshot(file, snapshot_ref.content(), &control)?;
                 push_preallocated(&mut file_encodings, encoding, &control)?;
-            } else if matches!(options.encoding, SourceEncoding::Utf8) {
+            } else if matches!(options.encoding, SourceEncoding::Utf8) && prepared_utf8.is_none() {
                 ensure_utf8(file, snapshot_ref.content(), &control)?;
             }
             push_preallocated(&mut snapshots, snapshot, &control)?;
@@ -627,8 +673,13 @@ impl<'a> SourceService<'a> {
             } else {
                 match options.encoding {
                     SourceEncoding::Utf8 => {
-                        let expanded =
-                            expand_context(snapshot.content(), reference, options, &control)?;
+                        let expanded = expand_context_prepared(
+                            snapshot.content(),
+                            reference,
+                            options,
+                            &control,
+                            prepared_utf8,
+                        )?;
                         ExpandedRange {
                             start: expanded.start,
                             end: expanded.end,
@@ -914,6 +965,8 @@ impl<'a> SourceService<'a> {
             }
             SourceBacking::Live(_) => Err(SourceError::InvalidIndexedPath),
             SourceBacking::Verified(_) => Ok(path),
+            SourceBacking::Prepared(view) if view.snapshot().path() == &path => Ok(path),
+            SourceBacking::Prepared(_) => Err(SourceError::InvalidIndexedPath),
         }
     }
 
@@ -943,6 +996,13 @@ impl<'a> SourceService<'a> {
                 Ok(ResolvedSnapshot::Retained(snapshot))
             }
             SourceBacking::Verified(_) => Err(SourceError::ReadFailed),
+            SourceBacking::Prepared(view) => {
+                control.check()?;
+                if !view.matches(file) {
+                    return Err(SourceError::StaleSource);
+                }
+                Ok(ResolvedSnapshot::Retained(view.snapshot()))
+            }
         }
     }
 }
@@ -997,6 +1057,7 @@ enum SourceBacking<'a> {
     Live(&'a RepositoryRoot),
     Retained(&'a [Arc<SourceSnapshot>]),
     Verified(&'a dyn VerifiedSourceBacking),
+    Prepared(&'a PreparedUtf8Source),
 }
 
 // Live snapshots stay inline because boxing would add one infallible
@@ -1202,6 +1263,30 @@ fn validate_file(file: &FileRecord, reference: &SourceRef) -> Result<(), SourceE
     Ok(())
 }
 
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy)]
+struct SourceScanWork {
+    utf8_bytes: usize,
+    newline_bytes: usize,
+    prefix_bytes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_SCAN_WORK: std::cell::Cell<SourceScanWork> = const {
+        std::cell::Cell::new(SourceScanWork { utf8_bytes: 0, newline_bytes: 0, prefix_bytes: 0 })
+    };
+}
+
+#[cfg(test)]
+fn record_source_scan(update: impl FnOnce(&mut SourceScanWork)) {
+    SOURCE_SCAN_WORK.with(|counter| {
+        let mut work = counter.get();
+        update(&mut work);
+        counter.set(work);
+    });
+}
+
 fn ensure_utf8(
     file: &FileRecord,
     content: &[u8],
@@ -1215,6 +1300,8 @@ fn ensure_utf8(
         let end = offset
             .saturating_add(UTF8_CHECK_CHUNK_BYTES)
             .min(content.len());
+        #[cfg(test)]
+        record_source_scan(|work| work.utf8_bytes += end - offset);
         match std::str::from_utf8(&content[offset..end]) {
             Ok(_) => offset = end,
             Err(error) if error.error_len().is_none() && end < content.len() => {
@@ -1227,6 +1314,8 @@ fn ensure_utf8(
                     .checked_add(sequence_width)
                     .filter(|sequence_end| *sequence_end <= content.len())
                     .ok_or(SourceError::EncodingUnsupported)?;
+                #[cfg(test)]
+                record_source_scan(|work| work.utf8_bytes += sequence_end - sequence_start);
                 std::str::from_utf8(&content[sequence_start..sequence_end])
                     .map_err(|_| SourceError::EncodingUnsupported)?;
                 offset = sequence_end;
@@ -1251,6 +1340,16 @@ fn expand_context(
     reference: &SourceRef,
     options: SourceReadOptions,
     control: &SourceControl<'_>,
+) -> Result<ExpandedRange, SourceError> {
+    expand_context_prepared(content, reference, options, control, None)
+}
+
+fn expand_context_prepared(
+    content: &[u8],
+    reference: &SourceRef,
+    options: SourceReadOptions,
+    control: &SourceControl<'_>,
+    prepared: Option<&PreparedUtf8Source>,
 ) -> Result<ExpandedRange, SourceError> {
     let selection_start = usize::try_from(reference.span().start_byte())
         .map_err(|_| SourceError::InvalidSourceSpan)?;
@@ -1285,7 +1384,10 @@ fn expand_context(
         }
         starts.front().copied().unwrap_or(0)
     };
-    let start_line = count_lines_before(content, start, control)?;
+    let start_line = match prepared {
+        Some(view) => view.line_before(start, control)?,
+        None => count_lines_before(content, start, control)?,
+    };
 
     let mut end = selection_end;
     if options.context_lines_after > 0 {
@@ -1348,6 +1450,8 @@ fn count_lines_before(
     boundary: usize,
     control: &SourceControl<'_>,
 ) -> Result<u64, SourceError> {
+    #[cfg(test)]
+    record_source_scan(|work| work.prefix_bytes += boundary);
     let newlines = count_newlines(&content[..boundary], control)?;
     u64::try_from(newlines)
         .ok()
@@ -1356,6 +1460,8 @@ fn count_lines_before(
 }
 
 fn count_newlines(content: &[u8], control: &SourceControl<'_>) -> Result<usize, SourceError> {
+    #[cfg(test)]
+    record_source_scan(|work| work.newline_bytes += content.len());
     let mut count = 0usize;
     for (index, byte) in content.iter().copied().enumerate() {
         check_iteration(index, control)?;
@@ -4075,6 +4181,238 @@ mod tests {
         assert_eq!(chunk.bytes, b"one\nTWO\nthree\n");
         assert_eq!(chunk.encoding, SourceEncoding::Utf8);
         assert_eq!(chunk.trust, SourceTrust::UntrustedRepositoryData);
+    }
+
+    fn immutable_fixture_snapshot(fixture: &Fixture) -> Arc<SourceSnapshot> {
+        let path = RelativePath::parse(Path::new("src/sample.rs")).unwrap();
+        Arc::new(
+            fixture
+                .root
+                .snapshot(&path, rootlight_vfs::MAX_SNAPSHOT_BYTES)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn prepared_utf8_multichunk_reads_reuse_validation_and_bound_prefix_work() {
+        let mut content: Vec<u8> = b"row\r\n"
+            .iter()
+            .copied()
+            .cycle()
+            .take(64 * 1024 - 1)
+            .collect();
+        content.extend_from_slice("🦀\r\n".as_bytes());
+        let padding = 140 * 1024 - content.len();
+        content.extend(b"tail\r\n".iter().copied().cycle().take(padding));
+        let text = std::str::from_utf8(&content).unwrap();
+        let fixture = fixture(&content, "utf-8", (0, content.len().try_into().unwrap()));
+        let retained = [immutable_fixture_snapshot(&fixture)];
+        let options = SourceReadOptions::new()
+            .with_context_lines_before(0)
+            .with_context_lines_after(0);
+        let mut references = Vec::new();
+        let mut start = 0;
+        while start < content.len() {
+            let mut end = (start + 64 * 1024).min(content.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            references.push(SourceRef::new(
+                fixture.reference.repository(),
+                fixture.reference.generation(),
+                SourceSpan::new(
+                    fixture.reference.span().file(),
+                    start.try_into().unwrap(),
+                    end.try_into().unwrap(),
+                )
+                .unwrap(),
+                fixture.reference.content_hash(),
+                None,
+            ));
+            start = end;
+        }
+        assert_eq!(references.len(), 3);
+        assert_eq!(references[0].span().end_byte(), 64 * 1024 - 1);
+        let ordinary = SourceService::from_snapshots(&retained, &fixture.generation).unwrap();
+        SOURCE_SCAN_WORK.with(|counter| counter.set(SourceScanWork::default()));
+        let expected: Vec<_> = references
+            .iter()
+            .map(|reference| {
+                ordinary
+                    .read(
+                        std::slice::from_ref(reference),
+                        options,
+                        SourceBudget::new(),
+                        &Cancellation::new(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let baseline = SOURCE_SCAN_WORK.with(|counter| counter.replace(SourceScanWork::default()));
+        assert_eq!(
+            baseline.prefix_bytes,
+            references
+                .iter()
+                .map(|reference| usize::try_from(reference.span().start_byte()).unwrap())
+                .sum::<usize>()
+        );
+        let prepared = PreparedUtf8Source::new(
+            Arc::clone(&retained[0]),
+            &fixture.generation,
+            &Cancellation::new(),
+            None,
+        )
+        .unwrap();
+        let construction = SOURCE_SCAN_WORK.with(|counter| counter.get());
+        assert!((content.len()..=content.len() + 4).contains(&construction.utf8_bytes));
+        assert_eq!(construction.newline_bytes, content.len());
+        assert!(
+            prepared.retained_memory_bytes().unwrap()
+                <= PreparedUtf8Source::memory_upper(&retained[0]).unwrap()
+        );
+        let service = SourceService::from_prepared_utf8(&prepared, &fixture.generation).unwrap();
+        let mut assembled = Vec::new();
+        for (reference, expected) in references.iter().zip(&expected) {
+            let actual = service
+                .read(
+                    std::slice::from_ref(reference),
+                    options,
+                    SourceBudget::new(),
+                    &Cancellation::new(),
+                )
+                .unwrap();
+            assert_eq!(&actual, expected);
+            assert!(actual.chunks[0].start_line.is_some());
+            assert!(actual.chunks[0].end_line.is_some());
+            assembled.extend_from_slice(&actual.chunks[0].bytes);
+        }
+        assert_eq!(assembled, content);
+        let work = SOURCE_SCAN_WORK.with(|counter| counter.replace(SourceScanWork::default()));
+        assert_eq!(work.utf8_bytes, construction.utf8_bytes);
+        assert_eq!(baseline.utf8_bytes, work.utf8_bytes * references.len());
+        assert_eq!(work.prefix_bytes, 0);
+        assert!(work.newline_bytes <= 2 * content.len() + references.len() * 4096);
+        assert!(baseline.newline_bytes > work.newline_bytes);
+        let invalid = SourceRef::new(
+            fixture.reference.repository(),
+            fixture.reference.generation(),
+            SourceSpan::new(fixture.reference.span().file(), 65536, 65537).unwrap(),
+            fixture.reference.content_hash(),
+            None,
+        );
+        assert_eq!(
+            service.read(
+                &[invalid],
+                options,
+                SourceBudget::new(),
+                &Cancellation::new()
+            ),
+            Err(SourceError::InvalidSourceSpan)
+        );
+    }
+
+    #[test]
+    fn prepared_utf8_rejects_malformed_tails_foreign_identity_and_expired_controls() {
+        let mut malformed = vec![b'a'; 70 * 1024];
+        malformed.push(0xff);
+        let invalid = fixture(&malformed, "utf-8", (0, 4));
+        assert!(matches!(
+            PreparedUtf8Source::new(
+                immutable_fixture_snapshot(&invalid),
+                &invalid.generation,
+                &Cancellation::new(),
+                None
+            ),
+            Err(SourceError::EncodingUnsupported)
+        ));
+        let valid = fixture(b"original\r\n", "utf-8", (0, 8));
+        let snapshot = immutable_fixture_snapshot(&valid);
+        let changed = fixture(b"different\r\n", "utf-8", (0, 8));
+        assert!(matches!(
+            PreparedUtf8Source::new(
+                Arc::clone(&snapshot),
+                &changed.generation,
+                &Cancellation::new(),
+                None
+            ),
+            Err(SourceError::StaleSource)
+        ));
+        let prepared = PreparedUtf8Source::new(
+            Arc::clone(&snapshot),
+            &valid.generation,
+            &Cancellation::new(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            SourceService::from_prepared_utf8(&prepared, &changed.generation),
+            Err(SourceError::StaleSource)
+        ));
+        let cancellation = Cancellation::new();
+        cancellation.cancel(CancellationReason::ParentCancelled);
+        assert!(matches!(
+            PreparedUtf8Source::new(
+                Arc::clone(&snapshot),
+                &valid.generation,
+                &cancellation,
+                None
+            ),
+            Err(SourceError::Cancelled(CancellationReason::ParentCancelled))
+        ));
+        assert!(matches!(
+            PreparedUtf8Source::new(
+                snapshot,
+                &valid.generation,
+                &Cancellation::new(),
+                Some(Instant::now())
+            ),
+            Err(SourceError::Cancelled(CancellationReason::DeadlineExceeded))
+        ));
+    }
+
+    #[test]
+    fn prepared_utf8_preserves_pinned_bytes_without_authorizing_changed_live_source() {
+        let original = b"original\r\n";
+        let fixture = fixture(original, "utf-8", (0, original.len().try_into().unwrap()));
+        let prepared = PreparedUtf8Source::new(
+            immutable_fixture_snapshot(&fixture),
+            &fixture.generation,
+            &Cancellation::new(),
+            None,
+        )
+        .unwrap();
+        fs::write(
+            fixture._temporary.path().join("src/sample.rs"),
+            b"modified\r\n",
+        )
+        .unwrap();
+        let options = SourceReadOptions::new()
+            .with_context_lines_before(0)
+            .with_context_lines_after(0);
+        let service = SourceService::from_prepared_utf8(&prepared, &fixture.generation).unwrap();
+        assert_eq!(
+            service
+                .read(
+                    std::slice::from_ref(&fixture.reference),
+                    options,
+                    SourceBudget::new(),
+                    &Cancellation::new()
+                )
+                .unwrap()
+                .chunks[0]
+                .bytes,
+            original
+        );
+        assert_eq!(
+            read(
+                &fixture,
+                std::slice::from_ref(&fixture.reference),
+                options,
+                SourceBudget::new(),
+                &Cancellation::new()
+            ),
+            Err(SourceError::StaleSource)
+        );
     }
 
     #[test]

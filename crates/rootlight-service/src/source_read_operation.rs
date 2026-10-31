@@ -3,7 +3,7 @@
 //! during the caller's provisional callback, outside service and pack locks.
 
 use crate::*;
-use rootlight_source::{SourceService, VerifiedSourceBacking};
+use rootlight_source::{PreparedUtf8Source, SourceService, VerifiedSourceBacking};
 use std::{cell::Cell, fmt};
 
 /// Lifetime bounds for an explicitly opened packed source read operation.
@@ -45,6 +45,7 @@ impl FirstSliceSourceReadOperationLimits {
 
 pub(crate) struct OperationWork {
     remaining: Cell<u64>,
+    deadline: Cell<Option<std::time::Instant>>,
 }
 
 impl OperationWork {
@@ -52,6 +53,7 @@ impl OperationWork {
     pub(crate) fn for_test(maximum: u64) -> Self {
         Self {
             remaining: Cell::new(maximum),
+            deadline: Cell::new(None),
         }
     }
     pub(crate) fn charge(
@@ -60,6 +62,15 @@ impl OperationWork {
         cancellation: &Cancellation,
     ) -> Result<(), FirstSliceError> {
         check_cancellation(cancellation)?;
+        if self
+            .deadline
+            .get()
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Err(FirstSliceError::Cancelled(
+                CancellationReason::DeadlineExceeded,
+            ));
+        }
         let remaining = self
             .remaining
             .get()
@@ -75,6 +86,13 @@ struct Owner {
     reader: durable::read_operation::PackedReadOperation,
     reservation: RestoredMemoryReservation,
     held_bytes: u64,
+    prepared: Option<PreparedRead>,
+}
+
+struct PreparedRead {
+    view: PreparedUtf8Source,
+    _reservation: RestoredMemoryReservation,
+    bytes: u64,
 }
 
 /// One explicitly authorized immutable view of a loaded packed generation.
@@ -151,6 +169,7 @@ impl FirstSliceService {
             .ok_or(FirstSliceError::CatalogCorrupt)?;
         let work = OperationWork {
             remaining: Cell::new(limits.maximum_work),
+            deadline: Cell::new(None),
         };
         // This precedes directory/manifest decoding and bounds that workspace.
         let base = GENERATION_MEMORY_FIXED_OVERHEAD_BYTES;
@@ -179,6 +198,7 @@ impl FirstSliceService {
                 reader,
                 reservation,
                 held_bytes,
+                prepared: None,
             }),
             failure: None,
         };
@@ -224,6 +244,25 @@ impl FirstSliceSourceReadOperation<'_> {
                 .checked_add(1)
                 .filter(|count| *count <= self.limits.maximum_reads)
                 .ok_or(FirstSliceError::BudgetExceeded)?;
+            let owner = self.owner.as_ref().ok_or(FirstSliceError::Retention)?;
+            let source_budget = budget.source();
+            let query_budget = budget.query();
+            let duration = if streamed_request(self.service, owner.lease.generation(), &references)
+            {
+                match (
+                    query_budget.explicit_max_duration(),
+                    source_budget.max_verification_duration,
+                ) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
+            } else {
+                Some(query_budget.max_duration().min(source_budget.max_duration))
+            };
+            let started = std::time::Instant::now();
+            self.work
+                .deadline
+                .set(duration.map(|duration| started.checked_add(duration).unwrap_or(started)));
             self.authorize()?;
             let response = self.execute(references, options, budget)?;
             self.authorize()?;
@@ -321,8 +360,94 @@ impl FirstSliceSourceReadOperation<'_> {
                     .and_then(|response| bytes.checked_add(response))
             })
             .ok_or(FirstSliceError::Limits)?;
+        let view_file = references.first().and_then(|reference| {
+            (references.len() == 1
+                && options.encoding == rootlight_source::SourceEncoding::Utf8
+                && options.context_lines_before == 0
+                && options.context_lines_after == 0)
+                .then(|| generation.find_file(reference.span().file()))
+                .flatten()
+                .filter(|file| {
+                    matches!(file.encoding.as_str(), "utf-8" | "utf8")
+                        && file.byte_length <= rootlight_vfs::MAX_SNAPSHOT_BYTES
+                        && (streamed_request(self.service, generation, &references)
+                            || file.byte_length <= budget.source().max_snapshot_bytes)
+                })
+        });
+        if owner.prepared.as_ref().is_some_and(|prepared| {
+            view_file.is_none_or(|file| prepared.view.snapshot().file() != file.id)
+                || request_bytes
+                    .checked_add(prepared.bytes)
+                    .is_none_or(|bytes| bytes > self.limits.maximum_memory_bytes)
+        }) {
+            owner.prepared = None;
+        }
         ensure_memory(request_bytes, self.limits)?;
-        owner.reservation.resize(request_bytes, true)?;
+        if let Err(error) = owner.reservation.resize(request_bytes, true) {
+            if matches!(error, FirstSliceError::GenerationMemoryLimit { .. })
+                && owner.prepared.take().is_some()
+            {
+                owner.reservation.resize(request_bytes, true)?;
+            } else {
+                return Err(error);
+            }
+        }
+        if owner.prepared.is_none()
+            && let Some(file) = view_file
+        {
+            let snapshot = operation_snapshot(
+                self.service,
+                &owner.reader,
+                generation,
+                file,
+                &self.work,
+                self.cancellation,
+            )?;
+            let upper = PreparedUtf8Source::memory_upper(&snapshot)
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .ok_or(FirstSliceError::Limits)?;
+            // The request already owns snapshot construction. This separate
+            // charge covers the view before checkpoint allocation and remains
+            // live after the request workspace is released.
+            if request_bytes
+                .checked_add(upper)
+                .is_some_and(|bytes| bytes <= self.limits.maximum_memory_bytes)
+            {
+                let admitted = match RestoredMemoryReservation::new(
+                    Arc::clone(&self.service.generation_cache),
+                    upper,
+                    true,
+                ) {
+                    Ok(reservation) => Some(reservation),
+                    Err(FirstSliceError::GenerationMemoryLimit { .. }) => None,
+                    Err(error) => return Err(error),
+                };
+                if let Some(mut reservation) = admitted {
+                    match PreparedUtf8Source::new(
+                        snapshot,
+                        generation,
+                        self.cancellation,
+                        self.work.deadline.get(),
+                    ) {
+                        Ok(view) => {
+                            let bytes = view
+                                .retained_memory_bytes()
+                                .and_then(|bytes| u64::try_from(bytes).ok())
+                                .filter(|bytes| *bytes <= upper)
+                                .ok_or(FirstSliceError::Limits)?;
+                            reservation.resize(bytes, true)?;
+                            owner.prepared = Some(PreparedRead {
+                                view,
+                                _reservation: reservation,
+                                bytes,
+                            });
+                        }
+                        Err(rootlight_source::SourceError::MemoryUnavailable) => {}
+                        Err(error) => return Err(map_source_error(error, self.cancellation)),
+                    }
+                }
+            }
+        }
         let snapshot_limit = self
             .service
             .config
@@ -346,6 +471,16 @@ impl FirstSliceSourceReadOperation<'_> {
             .lease
             .query()
             .map_err(|error| map_query_error(error, self.cancellation))?;
+        if let Some(prepared) = &owner.prepared {
+            let source = SourceService::from_prepared_utf8(&prepared.view, generation)
+                .map_err(|error| map_source_error(error, self.cancellation))?;
+            let plan = query
+                .plan_source_read(references, options, budget.source(), budget.query())
+                .map_err(|error| map_query_error(error, self.cancellation))?;
+            return query
+                .execute_source_read(&plan, &source, self.cancellation)
+                .map_err(|error| map_query_error(error, self.cancellation));
+        }
         if streamed {
             let backing = OperationBacking {
                 service: self.service,
@@ -403,6 +538,104 @@ impl FirstSliceSourceReadOperation<'_> {
             .execute_source_read(&plan, &source, self.cancellation)
             .map_err(|error| map_query_error(error, self.cancellation))
     }
+}
+
+fn operation_snapshot(
+    service: &FirstSliceService,
+    reader: &durable::read_operation::PackedReadOperation,
+    generation: &rootlight_storage::GenerationSnapshot,
+    file: &FileRecord,
+    work: &OperationWork,
+    cancellation: &Cancellation,
+) -> Result<Arc<rootlight_vfs::SourceSnapshot>, FirstSliceError> {
+    if service
+        .streamed_sources
+        .get(&file.generation)
+        .is_some_and(|sources| sources.contains(file.id))
+    {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(
+                usize::try_from(file.byte_length).map_err(|_| FirstSliceError::Limits)?,
+            )
+            .map_err(|_| FirstSliceError::Retention)?;
+        let backing = crate::source_backing::GenerationBacking::new(service, generation);
+        backing
+            .visit_verified(
+                file,
+                file.byte_length,
+                cancellation,
+                &mut |offset, chunk| {
+                    work.charge(0, cancellation).map_err(|error| match error {
+                        FirstSliceError::Cancelled(reason) => {
+                            rootlight_source::SourceError::Cancelled(reason)
+                        }
+                        _ => rootlight_source::SourceError::VerificationBudgetExceeded,
+                    })?;
+                    if usize::try_from(offset).ok() != Some(bytes.len()) {
+                        return Err(rootlight_source::SourceError::StaleSource);
+                    }
+                    if bytes.len().checked_add(chunk.len()).is_none_or(|end| {
+                        u64::try_from(end)
+                            .ok()
+                            .is_none_or(|end| end > file.byte_length)
+                    }) {
+                        return Err(rootlight_source::SourceError::StaleSource);
+                    }
+                    bytes.extend_from_slice(chunk);
+                    Ok(())
+                },
+            )
+            .map_err(|error| map_source_error(error, cancellation))?;
+        let path = rootlight_vfs::RelativePath::from_locator(
+            file.path_locator
+                .as_ref()
+                .ok_or(FirstSliceError::CatalogCorrupt)?,
+        )
+        .map_err(|_| FirstSliceError::CatalogCorrupt)?;
+        return rootlight_vfs::SourceSnapshot::from_persisted(
+            file.repository,
+            path,
+            file.id,
+            file.content_hash,
+            bytes,
+        )
+        .map(Arc::new)
+        .map_err(|_| FirstSliceError::CatalogCorrupt);
+    }
+    if let Some(sources) = service.source_snapshots.snapshots(file.generation)
+        && let Ok(index) = sources.binary_search_by_key(&file.id, |source| source.file())
+    {
+        return sources
+            .get(index)
+            .map(Arc::clone)
+            .ok_or(FirstSliceError::Query);
+    }
+    reader.read(file, work, cancellation).map(Arc::new)
+}
+
+fn streamed_request(
+    service: &FirstSliceService,
+    generation: &rootlight_storage::GenerationSnapshot,
+    references: &[SourceRef],
+) -> bool {
+    let maximum = service
+        .config
+        .analysis()
+        .max_source_file_bytes
+        .min(rootlight_vfs::MAX_SNAPSHOT_BYTES);
+    references.iter().any(|reference| {
+        generation
+            .find_file(reference.span().file())
+            .is_some_and(|file| {
+                file.byte_length > maximum
+                    || file.encoding == "bytes"
+                    || service
+                        .streamed_sources
+                        .get(&file.generation)
+                        .is_some_and(|sources| sources.contains(file.id))
+            })
+    })
 }
 
 fn ensure_memory(
