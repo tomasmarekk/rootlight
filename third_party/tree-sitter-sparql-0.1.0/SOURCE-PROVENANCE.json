@@ -1,0 +1,103 @@
+{
+  "schema": "rootlight.sparql-source-provenance/1",
+  "upstream": {
+    "repository": "https://github.com/GordianDziwis/tree-sitter-sparql",
+    "revision": "1ef52d35a73a2a5f2e433ecfd1c751c1360a923b",
+    "git_tree": "f8c48de8091dfc2c0f3147ba756cff2800a924a1",
+    "files": 44,
+    "file_bytes": 2299008,
+    "archive": {
+      "path": "upstream/source.tar.gz",
+      "source_url": "https://codeload.github.com/GordianDziwis/tree-sitter-sparql/tar.gz/1ef52d35a73a2a5f2e433ecfd1c751c1360a923b",
+      "bytes": 141098,
+      "sha256": "6a801c0ac67036b12b62aed19b391391f83fda22d0451d009a1e3caf3a8d0d8a"
+    }
+  },
+  "license_scope": {
+    "spdx": "MIT",
+    "retained_notices": [
+      "LICENSE",
+      "upstream/files/LICENSE"
+    ],
+    "original_author_notices": [
+      "Gordian Dziwis (2021)"
+    ]
+  },
+  "local_binding": {
+    "unpublished": true,
+    "package_version_basis": "Pinned upstream Node and tree-sitter manifests; original Cargo0.0.1 retained inert",
+    "edition": "2024",
+    "msrv": "1.90",
+    "external_scanner": false,
+    "language_ffi": "tree-sitter-language0.1.7",
+    "c_build": "cc1.2.67",
+    "test_runtime": "tree-sitter0.26.11",
+    "network_or_generator_in_build": false
+  },
+  "parser": {
+    "origin": "Exact pinned upstream generated C and headers; no local regeneration",
+    "upstream_generator_label": "tree-sitter0.25.3",
+    "abi": 15,
+    "preferred_grammar_sha256": "528acef18e7b874a999a354d294011a7aed25f947b9890a6a248491ed29c8556",
+    "outputs": {
+      "src/parser.c": {
+        "bytes": 1983613,
+        "sha256": "b639abc5bccc6f63cd0da98df97d46b6ee614529e27a09405d0a933d68259318"
+      },
+      "src/grammar.json": {
+        "bytes": 184509,
+        "sha256": "1703b602843300cf986c7d551605fc1f8df703078897648401dbacc6adf9bd40"
+      },
+      "src/node-types.json": {
+        "bytes": 48294,
+        "sha256": "937f88680f3e223795d88f4ac7a7fed796590489e32e345bc39ed9c96579defc"
+      },
+      "src/tree_sitter/parser.h": {
+        "bytes": 7678,
+        "sha256": "11b654fbba7770b1c710cc14b169be2deb5d89c0f87233d4605037c26c1ff657"
+      },
+      "src/tree_sitter/alloc.h": {
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "src/tree_sitter/array.h": {
+        "bytes": 10431,
+        "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+      }
+    }
+  },
+  "reversible_metadata_paths": {
+    ".gitignore": "upstream/files/.gitignore.upstream",
+    ".npmignore": "upstream/files/.npmignore.upstream"
+  },
+  "all_git_blobs_and_archive_payload_verified": true,
+  "upstream_lifecycle_executed": false,
+  "grammar_modified": false,
+  "production_or_semantic_qualification": false,
+  "corpus_witnesses": [
+    {
+      "repository": "183_N3_rdflib",
+      "revision": "f87db10f58264d619e5b55f1567bfdca4bb02afc",
+      "path": "test/data/suites/w3c/sparql11/property-path/path-2-2.rq",
+      "bytes": 68,
+      "sha256": "bb0430981000c7e2afe26595e78591d440a3de02bb7caf42086e1c0a55136b26",
+      "scope": "Approved upstream evaluation fixture; external original bytes read by opt-in CST test, not copied or evaluated"
+    },
+    {
+      "repository": "183_N3_rdflib",
+      "revision": "f87db10f58264d619e5b55f1567bfdca4bb02afc",
+      "path": "test/data/suites/w3c/sparql11/basic-update/insert-data-spo1.ru",
+      "bytes": 60,
+      "sha256": "96db9941ae5de6ce6c62b9b4ffaa4cf9a38f6fa342ac947ce49d9c07a761cbf0",
+      "scope": "Approved upstream evaluation fixture; external original bytes read by opt-in CST test, not copied or evaluated"
+    },
+    {
+      "repository": "183_N3_rdflib",
+      "revision": "f87db10f58264d619e5b55f1567bfdca4bb02afc",
+      "path": "test/data/suites/w3c/dawg-data-r2/i18n/kanji-02.rq",
+      "bytes": 280,
+      "sha256": "9a58d6cf80756cbef75da9eb5507df0be594a2c1f7ea82d473bbeb584b2b77e5",
+      "scope": "Approved upstream evaluation fixture; external original bytes read by opt-in CST test, not copied or evaluated"
+    }
+  ]
+}

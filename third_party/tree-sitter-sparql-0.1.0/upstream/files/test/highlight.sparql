@@ -1,0 +1,36 @@
+BASE <http://www.example.org>
+PREFIX ex: <http://www.example.org>
+
+# ?x ?y are bound
+SELECT (?s AS ?x) ?y {
+  SELECT * {
+    BIND (?s AS ?x)
+    VALUES (?x ?y) { ('a') }
+  } GROUP BY ?x
+}
+GROUP BY (?s AS ?x)
+VALUES ?x { 'a' }
+
+# Signed and unsigned numeric
+SELECT (- 1 AS ?x) (-1 AS ?y) {
+  # Seperate triples by highlight
+  ?s  <p> foo:o .
+  _:s <p> $o .
+  # Paths
+  ?s ^:p/:p|:p? ?o .
+  ?s !(^:p|:p) ?o
+  # Different highlight for build in function and function call
+  FILTER RAND()
+  FILTER function:foo()
+  FILTER <foo>()
+}
+VALUES ?a {
+  # Types in one highlight
+  'foo'@foo-bar
+  'foo'^^<http://example.org/foo>
+  'foo'^^foo:bar
+  # String escapes
+  'foo\tbar\\foo\bar'
+  # Hash in string
+  '#foo'
+}
