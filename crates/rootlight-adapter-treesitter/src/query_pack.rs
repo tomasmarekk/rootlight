@@ -129,6 +129,7 @@ mod sml_wat;
 mod sql;
 mod sql_admission;
 mod thrift;
+mod turtle;
 mod typescript_calls;
 mod typescript_const;
 mod typespec;
@@ -476,6 +477,14 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Turtle {
+            expected.retain(|name| {
+                matches!(
+                    *name,
+                    "root" | "module" | "declaration" | "definition" | "signature"
+                )
+            });
+        }
         if family == GrammarFamily::TypeSpec {
             expected.retain(|name| {
                 matches!(
@@ -1375,6 +1384,20 @@ impl QueryPack {
         let mut native_captures = 0usize;
         let mut refusal = None;
         let mut vba_calls = vba_calls::Calls::default();
+        let turtle_context = if input.family == GrammarFamily::Turtle {
+            let Some(context) = turtle::Context::new(
+                input.tree.root_node(),
+                input.source,
+                input.cancellation,
+                limits.body_nodes.min(HARD_MAX_QUERY_CAPTURES),
+            )?
+            else {
+                return Ok(Some(QueryLimit::Capture));
+            };
+            Some(context)
+        } else {
+            None
+        };
         let typespec_context = if input.family == GrammarFamily::TypeSpec {
             Some(typespec::Context::new(
                 input.tree.root_node(),
@@ -3175,7 +3198,21 @@ impl QueryPack {
                     }
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::TypeSpec {
+                let candidate = if input.family == GrammarFamily::Turtle {
+                    let Some(candidate) = turtle::candidate(
+                        turtle_context
+                            .as_ref()
+                            .ok_or_else(|| query_failure("query-turtle-context"))?,
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                    )?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
+                } else if input.family == GrammarFamily::TypeSpec {
                     let Some(candidate) = typespec_context
                         .as_ref()
                         .ok_or_else(|| query_failure("query-typespec-context"))?
@@ -4586,6 +4623,7 @@ fn candidate_for_capture(
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
             GrammarFamily::Wgsl => return Err(query_failure("query-wgsl-unproven-call")),
             GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
+            GrammarFamily::Turtle => return Err(query_failure("query-turtle-unproven-call")),
             GrammarFamily::TypeSpec => return Err(query_failure("query-typespec-unproven-call")),
             GrammarFamily::Xml | GrammarFamily::Dtd => {
                 return Err(query_failure("query-xml-unproven-call"));
@@ -5108,6 +5146,7 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Turtle, "document") => Some("turtle.file"),
         (GrammarFamily::Idris, "idris") => Some("idris.file"),
         (GrammarFamily::Idris, "comment") => Some("idris.comment"),
         (GrammarFamily::Idris, "string" | "raw_string" | "triple_quote_string") => {
@@ -5804,6 +5843,7 @@ impl QueryPackRegistry {
                 GrammarFamily::TypeSpec,
                 include_str!("../queries/typespec.scm"),
             ),
+            (GrammarFamily::Turtle, include_str!("../queries/turtle.scm")),
             (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
             (GrammarFamily::Dtd, include_str!("../queries/dtd.scm")),
@@ -6017,6 +6057,27 @@ impl QueryPackRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turtle_pack_loads_distinct_native_document() {
+        let registry = crate::GrammarRegistry::audited().expect("native registry");
+        let descriptor = registry
+            .get(GrammarFamily::Turtle)
+            .expect("Turtle registered");
+        assert_eq!(descriptor.language().as_str(), "turtle");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Turtle))
+            .expect("native grammar");
+        let source = b"@prefix ex: <https://example.test/> .\nex:s ex:p ex:o .\n";
+        let tree = parser.parse(source, None).expect("Turtle tree");
+        assert!(!tree.root_node().has_error());
+        assert_eq!(tree.root_node().kind(), "document");
+        assert_eq!(tree.root_node().end_byte(), source.len());
+        let pack = QueryPack::compile(GrammarFamily::Turtle, include_str!("../queries/turtle.scm"))
+            .expect("reviewed Turtle query");
+        assert!(pack.identity_query.capture_names().contains(&"module"));
+    }
 
     #[test]
     fn pascal_pack_compiles_with_only_written_source_captures() {

@@ -31,6 +31,7 @@ mod query_pack;
 mod registry;
 mod runtime;
 mod source_view;
+mod turtle_terms;
 mod vba_bindings;
 mod vba_pointer;
 

@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.91";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.92";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3328,6 +3328,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "toml",
         suffixes: &[".toml"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "turtle",
+        suffixes: &[".ttl"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -9873,6 +9881,56 @@ max_source_file_bytes = 2097152
         }
         assert_eq!(extension_language("main.tsp.ts"), Some("typescript"));
         assert_eq!(extension_language("main.tsp.json"), Some("json"));
+    }
+
+    #[test]
+    fn turtle_suffix_has_distinct_authoritative_source_identity() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "turtle")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".ttl"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.detectors, ["extension"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("turtle"), Some("turtle"));
+        let source = b"@prefix : <https://example.test/> .\n:3DModel a <http://www.w3.org/2000/01/rdf-schema#Class> .\n";
+        for path in [
+            "schema.ttl",
+            "SCHEMA.TTL",
+            "data/schema.ttl",
+            "schema.n3.ttl",
+        ] {
+            assert_eq!(extension_language(path), Some("turtle"), "{path}");
+            let (class, signals) = classify(&RelativePath::parse(Path::new(path)).unwrap(), source);
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "turtle".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }],
+                "{path}"
+            );
+        }
+        for path in [
+            "schema.n3",
+            "schema.trig",
+            "query.rq",
+            "schema.ttl.bak",
+            "schema.ttlx",
+            "schema.ttl/fragment",
+        ] {
+            assert_ne!(extension_language(path), Some("turtle"), "{path}");
+            let (_, signals) = classify(&RelativePath::parse(Path::new(path)).unwrap(), source);
+            assert!(
+                signals.iter().all(|signal| signal.language != "turtle"),
+                "{path}"
+            );
+        }
+        assert_eq!(extension_language("schema.ttl.json"), Some("json"));
+        assert_eq!(extension_language("schema.ttl.py"), Some("python"));
     }
 
     #[test]

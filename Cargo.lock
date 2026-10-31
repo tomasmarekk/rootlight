@@ -1810,6 +1810,7 @@ dependencies = [
  "tree-sitter-systemverilog",
  "tree-sitter-thrift",
  "tree-sitter-toml-ng",
+ "tree-sitter-turtle",
  "tree-sitter-typescript",
  "tree-sitter-typespec",
  "tree-sitter-v",
@@ -3832,6 +3833,14 @@ dependencies = [
 [[package]]
 name = "tree-sitter-toml-ng"
 version = "0.7.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-turtle"
+version = "0.2.0"
 dependencies = [
  "cc",
  "tree-sitter-language",

@@ -156,6 +156,8 @@ mod scheme_native;
 mod solidity_native;
 #[path = "analyzer_e2e/sql_native.rs"]
 mod sql_native;
+#[path = "analyzer_e2e/turtle_native.rs"]
+mod turtle_native;
 #[path = "analyzer_e2e/typescript_calls.rs"]
 mod typescript_calls;
 #[path = "analyzer_e2e/typescript_interface_fields.rs"]

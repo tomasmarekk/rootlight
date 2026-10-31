@@ -113,6 +113,7 @@ mod source_coordinates;
 mod thinkscript;
 mod thrift;
 mod toml;
+mod turtle;
 mod typescript_calls;
 mod typescript_const;
 mod typespec;
@@ -9330,29 +9331,30 @@ impl<'context, 'source> Lowering<'context, 'source> {
             let qualified_prefix = parent_scope
                 .as_ref()
                 .and_then(|scope| scope.qualified_prefix.as_deref());
-            let qualified_length =
-                if matches!(language.as_str(), "toml" | "yaml") && kind != EntityKind::Module {
-                    // Data lowering replaces lexical nesting with its bounded address
-                    // below; charging a filename/lexical prefix here can reject an
-                    // otherwise representable data path.
-                    name.len()
-                } else {
-                    match parent_entity.and_then(|parent| drafts.get(&parent)) {
-                        Some(parent) => parent
-                            .qualified_length
+            let qualified_length = if matches!(language.as_str(), "toml" | "yaml" | "turtle")
+                && kind != EntityKind::Module
+            {
+                // Data lowering replaces lexical nesting with its bounded address
+                // below; charging a filename/lexical prefix here can reject an
+                // otherwise representable data path.
+                name.len()
+            } else {
+                match parent_entity.and_then(|parent| drafts.get(&parent)) {
+                    Some(parent) => parent
+                        .qualified_length
+                        .checked_add(2)
+                        .and_then(|length| length.checked_add(name.len()))
+                        .ok_or(SinkError::AccountingOverflow)?,
+                    None => match qualified_prefix {
+                        Some(prefix) => prefix
+                            .len()
                             .checked_add(2)
                             .and_then(|length| length.checked_add(name.len()))
                             .ok_or(SinkError::AccountingOverflow)?,
-                        None => match qualified_prefix {
-                            Some(prefix) => prefix
-                                .len()
-                                .checked_add(2)
-                                .and_then(|length| length.checked_add(name.len()))
-                                .ok_or(SinkError::AccountingOverflow)?,
-                            None => name.len(),
-                        },
-                    }
-                };
+                        None => name.len(),
+                    },
+                }
+            };
             require_resource_limit(
                 ResourceKind::StringBytes,
                 qualified_length,
@@ -9428,6 +9430,16 @@ impl<'context, 'source> Lowering<'context, 'source> {
         if let Some(plan) = &pwct_plan {
             pwct::resolve(
                 plan,
+                &mut drafts,
+                total_string_bytes,
+                self.request.limits().ir(),
+                cancellation,
+            )?;
+        }
+        if self.request.language().as_str() == "turtle" {
+            turtle::resolve(
+                self.coordinates.facts(),
+                self.source_text,
                 &mut drafts,
                 total_string_bytes,
                 self.request.limits().ir(),
@@ -11121,6 +11133,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
             ring::gaps(fact)
                 .chain(wesl::gaps(fact))
                 .chain(typespec::gaps(fact))
+                .chain(turtle::gaps(fact))
                 .chain(ron_source_gaps(fact)),
         )
         .chain(hare::gaps(fact))
@@ -12072,6 +12085,9 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "turtle" {
+        return turtle::written(kind, label);
+    }
     if language == "typespec" {
         return typespec::written(kind, label);
     }
@@ -14489,6 +14505,9 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("turtle.") {
+        return turtle::kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("typespec.") {
         return typespec::kind(fact);
     }
@@ -14539,6 +14558,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("turtle.") {
+        return turtle::kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("typespec.") {
         return typespec::kind(fact);
     }

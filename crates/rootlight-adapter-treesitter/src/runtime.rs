@@ -715,6 +715,7 @@ impl TreeSitterProvider {
                     | GrammarFamily::Idris
                     | GrammarFamily::Cuda
                     | GrammarFamily::TypeSpec
+                    | GrammarFamily::Turtle
             ))
             && !request.included_ranges().is_empty()
         {

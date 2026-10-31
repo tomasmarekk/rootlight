@@ -1454,6 +1454,70 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "turtle" || label.starts_with("turtle.") {
+        if language != "turtle" || fact.kind() != SyntaxFactKind::Occurrence {
+            return None;
+        }
+        if matches!(
+            label,
+            "turtle.class.definition" | "turtle.property.definition"
+        ) {
+            return (!text.is_empty()
+                && text.len() <= maximum_bytes
+                && !text.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+                && !text.contains('\\')
+                && if let Some(iri) = text.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+                    iri.split_once(':').is_some_and(|(scheme, _)| {
+                        scheme
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphabetic)
+                            && scheme.bytes().all(|b| {
+                                b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
+                            })
+                    }) && !iri.contains(['<', '>', '"', '{', '}', '|', '^', '`'])
+                } else {
+                    text.contains(':')
+                        && !text.contains([
+                            '<', '>', '"', '\'', '/', '?', '#', '@', '[', ']', '(', ')', '{', '}',
+                            ';', ',', '=', '^', '`', '|',
+                        ])
+                })
+            .then_some(Cow::Borrowed(text));
+        }
+        if label != "turtle.prefix.definition" {
+            return None;
+        }
+
+        return (fact.kind() == SyntaxFactKind::Occurrence
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && !text.chars().any(|ch| {
+                ch.is_control()
+                    || ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        ':' | '<'
+                            | '>'
+                            | '\\'
+                            | '\"'
+                            | '\''
+                            | '/'
+                            | '?'
+                            | '#'
+                            | '@'
+                            | '['
+                            | ']'
+                            | '('
+                            | ')'
+                            | '{'
+                            | '}'
+                            | ';'
+                            | ','
+                    )
+            }))
+        .then_some(Cow::Borrowed(text));
+    }
     if language == "pwct" {
         return (fact.kind() == SyntaxFactKind::Occurrence
             && label == "pwct.step.definition"
@@ -5023,6 +5087,105 @@ mod javascript_default_class_export_name_tests {
                 "javascript.default_class_export.reference",
                 "x\\u0079",
                 8,
+                false,
+            ),
+        ] {
+            let fact = SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 8).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            );
+            assert_eq!(
+                structural_captured_name_for_fact(language, &fact, name, maximum).is_some(),
+                expected,
+                "{language} {label} {name:?}"
+            );
+        }
+    }
+    #[test]
+    fn turtle_written_names_require_exact_language_label_role_and_bounds() {
+        for (language, kind, label, name, maximum, expected) in [
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.prefix.definition",
+                "rdf",
+                3,
+                true,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.class.definition",
+                ":3DModel",
+                8,
+                true,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.property.definition",
+                "<urn:written:p>",
+                15,
+                true,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.class.definition",
+                ":3DModel",
+                7,
+                false,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Signature,
+                "turtle.class.definition",
+                "ex:Name",
+                32,
+                false,
+            ),
+            (
+                "rust",
+                SyntaxFactKind::Occurrence,
+                "turtle.prefix.definition",
+                "rdf",
+                32,
+                false,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.unknown.definition",
+                "rdf",
+                32,
+                false,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.class.definition",
+                "<relative>",
+                32,
+                false,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.class.definition",
+                "ex:escaped\\~",
+                32,
+                false,
+            ),
+            (
+                "turtle",
+                SyntaxFactKind::Occurrence,
+                "turtle.prefix.definition",
+                "",
+                32,
                 false,
             ),
         ] {

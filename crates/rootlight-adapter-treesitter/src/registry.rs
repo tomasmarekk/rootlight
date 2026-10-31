@@ -13,6 +13,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// Turtle written RDF declarations without inference or external IRI loading.
+    Turtle,
     /// TypeSpec written declarations without imported type or decorator evaluation.
     TypeSpec,
     /// RON written data structure without Rust binding or deserialization evaluation.
@@ -325,8 +327,9 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(108);
+        let mut descriptors = Vec::with_capacity(109);
         for family in [
+            GrammarFamily::Turtle,
             GrammarFamily::TypeSpec,
             GrammarFamily::Ron,
             GrammarFamily::Wesl,
@@ -536,6 +539,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::Turtle => tree_sitter_turtle::LANGUAGE.into(),
         GrammarFamily::TypeSpec => tree_sitter_typespec::LANGUAGE.into(),
         GrammarFamily::Ron => tree_sitter_ron::LANGUAGE.into(),
         GrammarFamily::Wesl => tree_sitter_wesl::LANGUAGE.into(),
@@ -739,10 +743,17 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
             ),
         },
+        GrammarFamily::Turtle => GrammarIdentity {
+            language_id: "turtle",
+            grammar_version: "0.2.0",
+            source_package_sha256: "e9fda0651ae1c20788f50073766558391623ceaa482c0bd66a1597d0c4d46bb2",
+            parser_sha256: "ab856e4c7669ecb8c65214e09fbb9477c8655c661cce55e0385ac356891f6b8d",
+            scanner_sha256: None,
+        },
         GrammarFamily::TypeSpec => GrammarIdentity {
             language_id: "typespec",
             grammar_version: "0.0.1",
-            source_package_sha256: "814bffffd13167f41020520c138f159c35ec7e744540508bec1c321ec97bd2f7",
+            source_package_sha256: "3fee2e85621c3613e57d035411c685bd1b70adfe0623a754eab388c4fb6bbbfe",
             parser_sha256: "3cd651682b278e8eb1688d9163e3b612f612cab649178d9d0391822addf1848c",
             scanner_sha256: None,
         },
@@ -1602,8 +1613,9 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 108);
+        assert_eq!(registry.descriptors().len(), 109);
         for family in [
+            GrammarFamily::Turtle,
             GrammarFamily::TypeSpec,
             GrammarFamily::Ron,
             GrammarFamily::Wesl,
@@ -1968,6 +1980,7 @@ mod tests {
 
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
         for (family, language, package) in [
+            (GrammarFamily::Turtle, "turtle", "tree-sitter-turtle"),
             (GrammarFamily::TypeSpec, "typespec", "tree-sitter-typespec"),
             (GrammarFamily::Ron, "ron", "tree-sitter-ron"),
             (GrammarFamily::Wesl, "wesl", "tree-sitter-wesl"),
@@ -2149,7 +2162,8 @@ mod tests {
                     ) || family.is_cobol()
                         || matches!(
                             family,
-                            GrammarFamily::TypeSpec
+                            GrammarFamily::Turtle
+                                | GrammarFamily::TypeSpec
                                 | GrammarFamily::Ron
                                 | GrammarFamily::Wesl
                                 | GrammarFamily::Erb
