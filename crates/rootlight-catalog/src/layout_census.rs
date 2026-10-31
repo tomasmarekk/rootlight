@@ -290,6 +290,7 @@ impl OracleLayoutFragment {
                 evidence_rows: self.totals.evidence_rows,
                 occurrence_candidate_rows: self.totals.occurrence_candidate_rows,
                 provenance_derivation_rows: self.totals.provenance_derivation_rows,
+                provenance_source_rows: self.totals.provenance_source_rows,
             },
             self.totals.symbol_envelopes,
         )?
@@ -1040,6 +1041,7 @@ impl OracleLayoutCensus {
                 evidence_rows: self.totals.evidence_rows,
                 occurrence_candidate_rows: self.totals.occurrence_candidate_rows,
                 provenance_derivation_rows: self.totals.provenance_derivation_rows,
+                provenance_source_rows: self.totals.provenance_source_rows,
             },
             self.totals.symbol_envelopes,
         )?

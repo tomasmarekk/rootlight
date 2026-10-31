@@ -14,6 +14,7 @@ thread_local! {
     pub(super) static PROJECTION_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
     pub(super) static EVIDENCE_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
     pub(super) static FIXED_CHILD_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
+    pub(super) static PROVENANCE_SOURCE_PREDECESSOR_POLICY: Cell<bool> = const { Cell::new(false) };
 }
 
 fn predecessor<T>(
@@ -63,6 +64,11 @@ fn evidence_policy_fence_requalifies_unchanged_capacity_fallback_before_noop_reu
 #[test]
 fn fixed_child_policy_fence_requalifies_unchanged_capacity_fallback_before_noop_reuse() {
     assert_prior_policy_cache_requalification(&FIXED_CHILD_PREDECESSOR_POLICY);
+}
+
+#[test]
+fn provenance_source_policy_fence_requalifies_unchanged_capacity_fallback_before_noop_reuse() {
+    assert_prior_policy_cache_requalification(&PROVENANCE_SOURCE_PREDECESSOR_POLICY);
 }
 
 fn assert_prior_policy_cache_requalification(policy: &'static std::thread::LocalKey<Cell<bool>>) {

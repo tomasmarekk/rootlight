@@ -957,7 +957,7 @@ const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
 // Host admission policy must requalify old whole-source fallbacks even when
 // language parsers and resolver facts retain their independent revisions.
-const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/11";
+const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/12";
 const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/32";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";
@@ -19386,6 +19386,10 @@ fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
     } else if oracle_restore_policy_tests::FIXED_CHILD_PREDECESSOR_POLICY.with(std::cell::Cell::get)
     {
         b"rootlight.first-slice.providers/10".as_slice()
+    } else if oracle_restore_policy_tests::PROVENANCE_SOURCE_PREDECESSOR_POLICY
+        .with(std::cell::Cell::get)
+    {
+        b"rootlight.first-slice.providers/11".as_slice()
     } else {
         policy_seed
     };

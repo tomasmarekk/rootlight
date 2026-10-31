@@ -3,7 +3,6 @@
 //! Every query has fixed SQL and stable-ID ordering. Persisted scalars are
 //! decoded as hostile input before normalized IR validation runs again.
 
-use std::collections::BTreeMap;
 use std::io::Write as _;
 
 use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
@@ -432,7 +431,13 @@ pub(crate) fn read_generation_with_admission<E>(
         stats.occurrences(),
         context,
     )?;
-    let mut provenance_sources = read_provenance_sources(&transaction, &sources, context)?;
+    let mut provenance_sources = read_provenance_sources(
+        &transaction,
+        &sources,
+        cardinality.provenance_source_rows,
+        stats.provenance(),
+        context,
+    )?;
     let mut provenance_derivations = read_provenance_derivations(
         &transaction,
         cardinality.provenance_derivation_rows,
@@ -594,6 +599,7 @@ pub(crate) fn oracle_read_memory_plan(
         evidence_rows,
         occurrence_candidate_rows,
         provenance_derivation_rows,
+        provenance_source_rows,
     } = cardinality;
     if symbol_envelopes > stats.extensions() {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
@@ -646,6 +652,7 @@ pub(crate) fn oracle_read_memory_plan(
         .and_then(|rows| rows.checked_sub(evidence_rows))
         .and_then(|rows| rows.checked_sub(occurrence_candidate_rows))
         .and_then(|rows| rows.checked_sub(provenance_derivation_rows))
+        .and_then(|rows| rows.checked_sub(provenance_source_rows))
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     let evidence_workspace = evidence_workspace_bytes(evidence_rows, evidence_owner_count(stats)?)?;
     let flag_workspace = flag_workspace_bytes(entity_flag_rows, stats.entities())?;
@@ -653,6 +660,8 @@ pub(crate) fn oracle_read_memory_plan(
         fact_group_workspace_bytes::<SymbolId>(occurrence_candidate_rows, stats.occurrences())?;
     let derivation_workspace =
         fact_group_workspace_bytes::<FactRef>(provenance_derivation_rows, stats.provenance())?;
+    let provenance_source_workspace =
+        provenance_source_workspace_bytes(provenance_source_rows, stats.provenance())?;
 
     // Exact buffers are allocated only after the same-transaction census and
     // admission. Canonicalization sorts one collection at a time; its validation
@@ -667,8 +676,9 @@ pub(crate) fn oracle_read_memory_plan(
     // Evidence groups retain fixed typed headers and exact reference vectors;
     // each vector moves into its record while the empty group header remains.
     // Fixed-ID groups retain their reserved headers while exact item buffers move
-    // into occurrences and provenance. Borrowed decoding and in-place reversal
-    // need one item slot; the spare typed header covers the current owner and
+    // into occurrences and provenance. Source groups use closed role keys and
+    // retain both owned input and evidence vectors. Borrowed decoding and
+    // in-place reversal need one item slot; the spare typed header covers the current owner and
     // the in-place header reversal after a primary-key reverse scan.
     // Symbol claims have closed outer records and sequential bounded decoders;
     // their opaque text retains the unchanged text and largest-payload charges.
@@ -763,6 +773,7 @@ pub(crate) fn oracle_read_memory_plan(
         .and_then(|bytes| bytes.checked_add(evidence_workspace))
         .and_then(|bytes| bytes.checked_add(candidate_workspace))
         .and_then(|bytes| bytes.checked_add(derivation_workspace))
+        .and_then(|bytes| bytes.checked_add(provenance_source_workspace))
         .and_then(|bytes| bytes.checked_add(retained_record_bytes))
         .and_then(|bytes| bytes.checked_add(temporary_workspace))
         .and_then(|bytes| bytes.checked_add(source_buffers))
@@ -843,11 +854,22 @@ fn evidence_workspace_bytes(rows: u64, owners: u64) -> Result<u64, CatalogError>
 }
 
 fn fact_group_workspace_bytes<T>(rows: u64, owners: u64) -> Result<u64, CatalogError> {
+    positioned_group_workspace_bytes::<T, FactId>(rows, owners)
+}
+
+fn provenance_source_workspace_bytes(rows: u64, owners: u64) -> Result<u64, CatalogError> {
+    positioned_group_workspace_bytes::<SourceRef, (FactId, ProvenanceSourceKind)>(
+        rows,
+        owners.checked_mul(2).ok_or_else(memory_plan_overflow)?,
+    )
+}
+
+fn positioned_group_workspace_bytes<T, K>(rows: u64, owners: u64) -> Result<u64, CatalogError> {
     let limit = usize_to_u64(IrLimits::default().max_nested_items_per_record)?;
     if rows > owners.checked_mul(limit).ok_or_else(memory_plan_overflow)? {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
-    typed_record_buffer_bytes::<FactGroup<T>>(rows.min(owners))?
+    typed_record_buffer_bytes::<FactGroup<T, K>>(rows.min(owners))?
         .checked_add(
             rows.checked_mul(
                 u64::try_from(std::mem::size_of::<T>()).map_err(|_| memory_plan_overflow())?,
@@ -855,7 +877,7 @@ fn fact_group_workspace_bytes<T>(rows: u64, owners: u64) -> Result<u64, CatalogE
             .ok_or_else(memory_plan_overflow)?,
         )
         .and_then(|bytes| {
-            bytes.checked_add(u64::try_from(std::mem::size_of::<FactGroups<T>>()).ok()?)
+            bytes.checked_add(u64::try_from(std::mem::size_of::<FactGroups<T, K>>()).ok()?)
         })
         .and_then(|bytes| bytes.checked_add(u64::try_from(std::mem::size_of::<T>()).ok()?))
         .ok_or_else(memory_plan_overflow)
@@ -1240,6 +1262,7 @@ fn validate_document_hash(
 pub(crate) struct PayloadCardinality {
     pub(crate) occurrence_candidate_rows: u64,
     pub(crate) provenance_derivation_rows: u64,
+    pub(crate) provenance_source_rows: u64,
     pub(crate) entity_flag_rows: u64,
     pub(crate) evidence_rows: u64,
 }
@@ -1255,6 +1278,9 @@ pub(crate) fn validate_payload_cardinality(
              )";
     const DERIVATION_COUNT_SQL: &str = "SELECT count(*) FROM (
                 SELECT 1 FROM provenance_derivations LIMIT ?1
+             )";
+    const SOURCE_COUNT_SQL: &str = "SELECT count(*) FROM (
+                SELECT 1 FROM provenance_sources LIMIT ?1
              )";
     const EVIDENCE_COUNT_SQL: &str = "SELECT count(*) FROM (
                 SELECT 1 FROM evidence_derivations LIMIT ?1
@@ -1360,12 +1386,7 @@ pub(crate) fn validate_payload_cardinality(
             Some(stats.extensions()),
         ),
         (EVIDENCE_COUNT_SQL, None),
-        (
-            "SELECT count(*) FROM (
-                SELECT 1 FROM provenance_sources LIMIT ?1
-             )",
-            None,
-        ),
+        (SOURCE_COUNT_SQL, None),
         (DERIVATION_COUNT_SQL, None),
         (
             "SELECT count(*) FROM (
@@ -1387,6 +1408,7 @@ pub(crate) fn validate_payload_cardinality(
     let mut evidence_rows = 0_u64;
     let mut occurrence_candidate_rows = 0_u64;
     let mut provenance_derivation_rows = 0_u64;
+    let mut provenance_source_rows = 0_u64;
     for (sql, expected) in tables {
         let remaining = physical_row_limit
             .checked_sub(observed_total)
@@ -1411,6 +1433,9 @@ pub(crate) fn validate_payload_cardinality(
         if sql == DERIVATION_COUNT_SQL {
             provenance_derivation_rows = count;
         }
+        if sql == SOURCE_COUNT_SQL {
+            provenance_source_rows = count;
+        }
         if expected.is_some_and(|expected| expected != count) {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         }
@@ -1425,6 +1450,7 @@ pub(crate) fn validate_payload_cardinality(
     Ok(PayloadCardinality {
         occurrence_candidate_rows,
         provenance_derivation_rows,
+        provenance_source_rows,
         entity_flag_rows,
         evidence_rows,
     })
@@ -1763,23 +1789,23 @@ const PROVENANCE_GROUPS_SQL: &str = "SELECT provenance_id, position, reference_k
     FROM provenance_derivations ORDER BY provenance_id DESC, position DESC";
 
 #[derive(Debug)]
-struct FactGroup<T> {
-    owner: FactId,
+struct FactGroup<T, K = FactId> {
+    owner: K,
     items: Vec<T>,
 }
 
 #[derive(Debug)]
-struct FactGroups<T> {
-    groups: Vec<FactGroup<T>>,
+struct FactGroups<T, K = FactId> {
+    groups: Vec<FactGroup<T, K>>,
     next: usize,
 }
 
-impl<T> FactGroups<T> {
+impl<T, K: Ord> FactGroups<T, K> {
     fn is_empty(&self) -> bool {
         self.next == self.groups.len()
     }
 
-    fn take(&mut self, owner: FactId) -> Result<Vec<T>, CatalogError> {
+    fn take(&mut self, owner: K) -> Result<Vec<T>, CatalogError> {
         let Some(group) = self.groups.get_mut(self.next) else {
             return Ok(Vec::new());
         };
@@ -1811,6 +1837,26 @@ fn read_fact_groups<T>(
     context: &GenerationContext<'_>,
     read_item: impl Fn(&Row<'_>) -> Result<T, CatalogError>,
 ) -> Result<FactGroups<T>, CatalogError> {
+    read_positioned_groups(
+        connection,
+        sql,
+        expected_rows,
+        expected_owners,
+        context,
+        |row| Ok((FactId::from_bytes(borrowed_id(row, 0)?), 1)),
+        read_item,
+    )
+}
+
+fn read_positioned_groups<T, K: Copy + Ord>(
+    connection: &Connection,
+    sql: &str,
+    expected_rows: u64,
+    expected_owners: u64,
+    context: &GenerationContext<'_>,
+    read_owner: impl Fn(&Row<'_>) -> Result<(K, usize), CatalogError>,
+    read_item: impl Fn(&Row<'_>) -> Result<T, CatalogError>,
+) -> Result<FactGroups<T, K>, CatalogError> {
     context.check().map_err(CatalogError::control)?;
     let nested_limit = usize_to_u64(IrLimits::default().max_nested_items_per_record)?;
     if expected_rows
@@ -1821,7 +1867,7 @@ fn read_fact_groups<T>(
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     let maximum_groups = expected_rows.min(expected_owners);
-    let mut groups: Vec<FactGroup<T>> = exact_record_buffer(maximum_groups)?;
+    let mut groups: Vec<FactGroup<T, K>> = exact_record_buffer(maximum_groups)?;
     let mut statement = connection.prepare(sql).map_err(CatalogError::sqlite)?;
     let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
     let mut observed_rows = 0_u64;
@@ -1832,9 +1878,9 @@ fn read_fact_groups<T>(
             .checked_sub(observed_rows)
             .filter(|remaining| *remaining > 0)
             .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
-        let owner = FactId::from_bytes(borrowed_id(row, 0)?);
+        let (owner, position_column) = read_owner(row)?;
         let item = read_item(row)?;
-        let position = row.get_ref(1).map_err(CatalogError::sqlite)?;
+        let position = row.get_ref(position_column).map_err(CatalogError::sqlite)?;
         let position = position
             .as_i64()
             .ok()
@@ -1907,30 +1953,51 @@ fn read_candidates(
     )
 }
 
+// The enum order matches SQLite's text order for the two persisted source roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ProvenanceSourceKind {
+    Evidence,
+    Input,
+}
+
+type ProvenanceSourceGroups = FactGroups<SourceRef, (FactId, ProvenanceSourceKind)>;
+
+const PROVENANCE_SOURCES_SQL: &str =
+    "SELECT provenance_id, source_kind, position, source_ordinal FROM provenance_sources
+     ORDER BY provenance_id DESC, source_kind DESC, position DESC";
+
 fn read_provenance_sources(
     connection: &Connection,
     sources: &[SourceRef],
+    expected_rows: u64,
+    expected_owners: u64,
     context: &GenerationContext<'_>,
-) -> Result<BTreeMap<(FactId, String), Vec<SourceRef>>, CatalogError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT provenance_id, source_kind, position, source_ordinal
-             FROM provenance_sources
-             ORDER BY provenance_id, source_kind, position",
-        )
-        .map_err(CatalogError::sqlite)?;
-    let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
-    let mut values = BTreeMap::new();
-    while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
-        context.check().map_err(CatalogError::control)?;
-        push_positioned(
-            &mut values,
-            (codec::fact_id(get(row, 0)?)?, get(row, 1)?),
-            get(row, 2)?,
-            codec::source_by_ordinal(sources, get(row, 3)?)?,
-        )?;
-    }
-    Ok(values)
+) -> Result<ProvenanceSourceGroups, CatalogError> {
+    read_positioned_groups(
+        connection,
+        PROVENANCE_SOURCES_SQL,
+        expected_rows,
+        expected_owners
+            .checked_mul(2)
+            .ok_or_else(memory_plan_overflow)?,
+        context,
+        |row| {
+            let kind = match row.get_ref(1).map_err(CatalogError::sqlite)? {
+                rusqlite::types::ValueRef::Text(b"evidence") => ProvenanceSourceKind::Evidence,
+                rusqlite::types::ValueRef::Text(b"input") => ProvenanceSourceKind::Input,
+                _ => return Err(CatalogError::new(CatalogErrorKind::Corrupt)),
+            };
+            Ok(((FactId::from_bytes(borrowed_id(row, 0)?), kind), 2))
+        },
+        |row| {
+            let ordinal = row
+                .get_ref(3)
+                .map_err(CatalogError::sqlite)?
+                .as_i64()
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
+            codec::source_by_ordinal(sources, ordinal)
+        },
+    )
 }
 
 fn read_provenance_derivations(
@@ -1952,7 +2019,7 @@ fn read_provenance_derivations(
 fn read_provenance(
     connection: &Connection,
     expected_count: u64,
-    sources: &mut BTreeMap<(FactId, String), Vec<SourceRef>>,
+    sources: &mut ProvenanceSourceGroups,
     derivations: &mut FactGroups<FactRef>,
     context: &GenerationContext<'_>,
 ) -> Result<Vec<ProvenanceRecord>, CatalogError> {
@@ -1990,12 +2057,8 @@ fn read_provenance(
             language: get(row, 9)?,
             tier: codec::decode_enum::<AnalysisTier>(get(row, 10)?)?,
             build_context: BuildContextIdentity::new(codec::content_hash(get(row, 11)?)?),
-            input_sources: sources
-                .remove(&(id, "input".to_owned()))
-                .unwrap_or_default(),
-            evidence_sources: sources
-                .remove(&(id, "evidence".to_owned()))
-                .unwrap_or_default(),
+            evidence_sources: sources.take((id, ProvenanceSourceKind::Evidence))?,
+            input_sources: sources.take((id, ProvenanceSourceKind::Input))?,
             derivation_parents: derivations.take(id)?,
             rule: get(row, 12)?,
         });
@@ -2479,20 +2542,6 @@ fn take_evidence(
     })
 }
 
-fn push_positioned<K: Ord, V>(
-    values: &mut BTreeMap<K, Vec<V>>,
-    key: K,
-    position: i64,
-    value: V,
-) -> Result<(), CatalogError> {
-    let group = values.entry(key).or_default();
-    if position != usize_to_i64(group.len())? {
-        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
-    }
-    group.push(value);
-    Ok(())
-}
-
 fn get<T: FromSql>(row: &Row<'_>, index: usize) -> Result<T, CatalogError> {
     row.get(index).map_err(CatalogError::sqlite)
 }
@@ -2811,6 +2860,15 @@ mod tests {
                             u64::try_from(symbols.len()).unwrap()
                         }
                         _ => 0,
+                    })
+                    .sum(),
+                provenance_source_rows: snapshot
+                    .document()
+                    .provenance
+                    .iter()
+                    .map(|record| {
+                        u64::try_from(record.input_sources.len() + record.evidence_sources.len())
+                            .unwrap()
                     })
                     .sum(),
                 provenance_derivation_rows: snapshot
@@ -3924,7 +3982,12 @@ mod tests {
     #[test]
     fn fixed_child_queries_use_native_indexes_without_temporary_sort() {
         let connection = crate::schema::create_ephemeral_oracle().unwrap();
-        let plans = [CANDIDATE_GROUPS_SQL, PROVENANCE_GROUPS_SQL].map(|sql| {
+        let plans = [
+            CANDIDATE_GROUPS_SQL,
+            PROVENANCE_GROUPS_SQL,
+            PROVENANCE_SOURCES_SQL,
+        ]
+        .map(|sql| {
             let mut statement = connection
                 .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
                 .unwrap();
@@ -3941,6 +4004,392 @@ mod tests {
                 .all(|detail| !detail.contains("TEMP B-TREE")),
             "fixed-ID reads must not add an unmodeled SQLite sort: {plans:?}"
         );
+    }
+
+    fn provenance_source_table() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE provenance_sources(provenance_id, source_kind, position, source_ordinal);"
+        ).unwrap();
+        connection
+    }
+
+    fn insert_provenance_source(
+        connection: &Connection,
+        owner: FactId,
+        kind: &str,
+        position: i64,
+        ordinal: i64,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO provenance_sources VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![owner.as_bytes().as_slice(), kind, position, ordinal],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn provenance_sources_preserve_both_roles_with_exact_capacity_and_identity() {
+        let connection = provenance_source_table();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let source = &document.provenance[0].input_sources[0];
+        let maximum = IrLimits::default().max_nested_items_per_record;
+        let sources: Vec<_> = (0..maximum)
+            .map(|position| {
+                SourceRef::new(
+                    source.repository(),
+                    source.generation(),
+                    rootlight_ir::SourceSpan::new(
+                        source.span().file(),
+                        u64::try_from(position).unwrap(),
+                        u64::try_from(position + 1).unwrap(),
+                    )
+                    .unwrap(),
+                    source.content_hash(),
+                    source.line_hint(),
+                )
+            })
+            .collect();
+        let owner = document.provenance[0].id;
+        for position in 0..maximum {
+            for kind in ["input", "evidence"] {
+                insert_provenance_source(
+                    &connection,
+                    owner,
+                    kind,
+                    i64::try_from(position).unwrap(),
+                    i64::try_from(position).unwrap(),
+                );
+            }
+        }
+        let mut groups = read_provenance_sources(
+            &connection,
+            &sources,
+            u64::try_from(maximum * 2).unwrap(),
+            1,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(groups.groups.capacity(), 2);
+        assert!(
+            groups
+                .groups
+                .iter()
+                .all(|group| group.items.capacity() == maximum)
+        );
+        let mut restored = document.provenance[0].clone();
+        restored.evidence_sources = groups
+            .take((owner, ProvenanceSourceKind::Evidence))
+            .unwrap();
+        restored.input_sources = groups.take((owner, ProvenanceSourceKind::Input)).unwrap();
+        assert!(groups.is_empty());
+        assert_eq!(restored.input_sources, sources);
+        assert_eq!(restored.evidence_sources, sources);
+        let mut expected = document.provenance[0].clone();
+        expected.input_sources = sources.clone();
+        expected.evidence_sources = sources;
+        assert_eq!(
+            rootlight_ir::derive_provenance_record_id(&restored).unwrap(),
+            rootlight_ir::derive_provenance_record_id(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn provenance_sources_bound_headers_across_many_owners() {
+        let connection = provenance_source_table();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let sources: Vec<_> = document
+            .files
+            .iter()
+            .map(|file| file.evidence.source.clone().unwrap())
+            .collect();
+        let owners: Vec<_> = (0_u64..512)
+            .map(|index| {
+                let mut bytes = [0; 20];
+                bytes[..8].copy_from_slice(&index.to_be_bytes());
+                FactId::from_bytes(bytes)
+            })
+            .collect();
+        for owner in &owners {
+            for kind in ["input", "evidence"] {
+                for position in 0..2 {
+                    insert_provenance_source(&connection, *owner, kind, position, position);
+                }
+            }
+        }
+        let mut groups =
+            read_provenance_sources(&connection, &sources, 2048, 512, &context).unwrap();
+        assert_eq!(groups.groups.len(), 1024);
+        assert_eq!(groups.groups.capacity(), 1024);
+        assert!(
+            groups
+                .groups
+                .iter()
+                .all(|group| group.items.capacity() == 2)
+        );
+        for owner in owners {
+            for kind in [ProvenanceSourceKind::Evidence, ProvenanceSourceKind::Input] {
+                assert_eq!(groups.take((owner, kind)).unwrap(), sources);
+            }
+        }
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn provenance_sources_keep_distinct_role_contents_and_missing_roles() {
+        let connection = provenance_source_table();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let sources: Vec<_> = document
+            .files
+            .iter()
+            .map(|file| file.evidence.source.clone().unwrap())
+            .collect();
+        assert!(sources.len() >= 2);
+        let owners = [1, 2, 3, 4].map(|byte| FactId::from_bytes([byte; 20]));
+        for (owner, kind, position, ordinal) in [
+            (owners[0], "evidence", 0, 1),
+            (owners[0], "input", 0, 0),
+            (owners[0], "input", 1, 1),
+            (owners[1], "input", 0, 1),
+            (owners[2], "evidence", 0, 0),
+        ] {
+            insert_provenance_source(&connection, owner, kind, position, ordinal);
+        }
+        let mut groups = read_provenance_sources(&connection, &sources, 5, 4, &context).unwrap();
+        for (owner, evidence, input) in [
+            (owners[0], vec![sources[1].clone()], sources.clone()),
+            (owners[1], vec![], vec![sources[1].clone()]),
+            (owners[2], vec![sources[0].clone()], vec![]),
+            (owners[3], vec![], vec![]),
+        ] {
+            assert_eq!(
+                groups
+                    .take((owner, ProvenanceSourceKind::Evidence))
+                    .unwrap(),
+                evidence
+            );
+            assert_eq!(
+                groups.take((owner, ProvenanceSourceKind::Input)).unwrap(),
+                input
+            );
+        }
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn provenance_source_admission_precedes_child_workspace_and_allows_retry() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let generation = crate::oracle_roundtrip_tests::snapshot(
+            crate::oracle_roundtrip_tests::fixture_documents().0,
+        );
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let reader = OracleWriter::create_in(directory.path())
+            .unwrap()
+            .seal_unverified_for_test(generation.clone(), &context)
+            .unwrap();
+        let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+        connection
+            .execute_batch("UPDATE provenance_sources SET position = position + 1000000000")
+            .unwrap();
+        let mut called = false;
+        let rejected = read_generation_with_admission(
+            &connection,
+            reader.metadata(),
+            reader.stats(),
+            &context,
+            |plan| {
+                called = true;
+                assert!(plan.record_workspace_bytes() > 1);
+                Err::<(), _>("budget")
+            },
+        );
+        assert!(called);
+        assert!(matches!(
+            rejected,
+            Err(OracleReadAdmissionError::Admission("budget"))
+        ));
+        assert!(
+            matches!(read_generation_with_admission(&connection, reader.metadata(), reader.stats(), &context, |_| Ok::<(), ()>(())), Err(OracleReadAdmissionError::Catalog(error)) if error.kind() == CatalogErrorKind::Corrupt)
+        );
+        connection
+            .execute_batch("UPDATE provenance_sources SET position = position - 1000000000")
+            .unwrap();
+        assert_eq!(
+            read_generation_with_admission(
+                &connection,
+                reader.metadata(),
+                reader.stats(),
+                &context,
+                |_| Ok::<(), ()>(())
+            )
+            .unwrap(),
+            generation
+        );
+    }
+
+    #[test]
+    fn provenance_sources_reject_hostile_roles_ordinals_positions_and_orphans() {
+        let connection = provenance_source_table();
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let sources = &document.provenance[0].input_sources;
+        let owner = document.provenance[0].id;
+        for (column, value) in [
+            ("source_kind", "'unknown'"),
+            ("source_kind", "NULL"),
+            ("source_kind", "zeroblob(65536)"),
+            ("source_kind", "CAST(zeroblob(65536) AS TEXT)"),
+            ("source_ordinal", "-1"),
+            ("source_ordinal", "9223372036854775807"),
+            ("source_ordinal", "'0'"),
+            ("source_ordinal", "0.5"),
+            ("source_ordinal", "NULL"),
+            ("position", "-1"),
+            ("position", "'0'"),
+            ("position", "0.5"),
+            ("position", "NULL"),
+            ("position", "9223372036854775807"),
+            ("position", "4096"),
+            ("provenance_id", "zeroblob(19)"),
+            ("provenance_id", "zeroblob(65536)"),
+            ("provenance_id", "'owner'"),
+        ] {
+            connection
+                .execute("DELETE FROM provenance_sources", [])
+                .unwrap();
+            insert_provenance_source(&connection, owner, "input", 0, 0);
+            connection
+                .execute_batch(&format!("UPDATE provenance_sources SET {column} = {value}"))
+                .unwrap();
+            assert_eq!(
+                read_provenance_sources(&connection, sources, 1, 1, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt,
+                "{column}={value}"
+            );
+        }
+        for positions in [[0, 0], [0, 2]] {
+            connection
+                .execute("DELETE FROM provenance_sources", [])
+                .unwrap();
+            for position in positions {
+                insert_provenance_source(&connection, owner, "input", position, 0);
+            }
+            assert_eq!(
+                read_provenance_sources(&connection, sources, 2, 1, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        connection
+            .execute("DELETE FROM provenance_sources", [])
+            .unwrap();
+        insert_provenance_source(&connection, owner, "input", 0, 0);
+        for (rows, owners) in [(0, 1), (2, 1), (1, 0)] {
+            assert_eq!(
+                read_provenance_sources(&connection, sources, rows, owners, &context)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        let mut orphan = read_provenance_sources(&connection, sources, 1, 1, &context).unwrap();
+        assert!(!orphan.is_empty());
+        assert_eq!(
+            orphan
+                .take((FactId::from_bytes([255; 20]), ProvenanceSourceKind::Input))
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+        assert!(cancellation.cancel(CancellationReason::ClientRequest));
+        assert_eq!(
+            read_provenance_sources(&connection, sources, 1, 1, &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+    }
+
+    #[test]
+    fn provenance_source_workspace_replaces_only_its_authenticated_envelope() {
+        let stats =
+            GenerationStats::new(1, 0, 0, 0, 1000, 0, 0, 0, 0, 0, 0, 1_000_000, 17).unwrap();
+        let empty = PayloadCardinality::default();
+        let baseline =
+            oracle_read_memory_plan(GENERATION_CONTRACT_VERSION, stats, 97, empty, 0).unwrap();
+        let empty_bytes = provenance_source_workspace_bytes(0, stats.provenance()).unwrap();
+        for rows in [1, 2, 1000, 400_000] {
+            let plan = oracle_read_memory_plan(
+                GENERATION_CONTRACT_VERSION,
+                stats,
+                97,
+                PayloadCardinality {
+                    provenance_source_rows: rows,
+                    ..empty
+                },
+                0,
+            )
+            .unwrap();
+            let typed_bytes = (rows.min(stats.provenance() * 2) + 1)
+                * u64::try_from(std::mem::size_of::<
+                    FactGroup<SourceRef, (FactId, ProvenanceSourceKind)>,
+                >())
+                .unwrap()
+                + rows * u64::try_from(std::mem::size_of::<SourceRef>()).unwrap()
+                + u64::try_from(
+                    std::mem::size_of::<ProvenanceSourceGroups>()
+                        + std::mem::size_of::<SourceRef>(),
+                )
+                .unwrap();
+            assert_eq!(
+                provenance_source_workspace_bytes(rows, stats.provenance()).unwrap(),
+                typed_bytes
+            );
+            assert_eq!(
+                plan.record_workspace_bytes() + rows * 4096 - typed_bytes,
+                baseline.record_workspace_bytes() - empty_bytes
+            );
+            assert_eq!(
+                plan.materialization_bytes() + rows * 4096 - typed_bytes,
+                baseline.materialization_bytes() - empty_bytes
+            );
+            assert_eq!(plan.stats(), baseline.stats());
+            assert_eq!(plan.physical_rows(), baseline.physical_rows());
+            assert_eq!(plan.retained_text_bytes(), baseline.retained_text_bytes());
+            assert_eq!(
+                plan.identity_registry_rows(),
+                baseline.identity_registry_rows()
+            );
+            assert_eq!(
+                plan.maximum_payload_bytes(),
+                baseline.maximum_payload_bytes()
+            );
+            assert_eq!(
+                plan.transient_decode_bytes(),
+                baseline.transient_decode_bytes()
+            );
+        }
+        for (rows, owners) in [(8193, 1), (1, 0)] {
+            assert_eq!(
+                provenance_source_workspace_bytes(rows, owners)
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
+        assert!(provenance_source_workspace_bytes(u64::MAX, u64::MAX).is_err());
     }
 
     #[test]

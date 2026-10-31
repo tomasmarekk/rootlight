@@ -243,6 +243,18 @@ fn incremental_census_matches_actual_writer_seal_and_reopen_for_all_layout_featu
     )
     .unwrap();
     let fragment = measure(&expected_document, &context);
+    let expected_source_rows: u64 = expected_document
+        .provenance
+        .iter()
+        .map(|record| {
+            assert!(!record.input_sources.is_empty());
+            assert!(!record.evidence_sources.is_empty());
+            u64::try_from(record.input_sources.len() + record.evidence_sources.len()).unwrap()
+        })
+        .sum();
+    assert_eq!(fragment.provenance_source_rows(), expected_source_rows);
+    assert_eq!(fragment.read_memory_plan(&context).unwrap(), prospective);
+
     for (table, measured, incremental) in [
         (
             "entity_flags",
@@ -1027,6 +1039,14 @@ fn merged_owned_floors_and_target_deltas_match_single_document_census() {
                         u64::try_from(symbols.len()).unwrap()
                     }
                     _ => 0,
+                })
+                .sum(),
+            provenance_source_rows: document
+                .provenance
+                .iter()
+                .map(|record| {
+                    u64::try_from(record.input_sources.len() + record.evidence_sources.len())
+                        .unwrap()
                 })
                 .sum(),
             provenance_derivation_rows: document
