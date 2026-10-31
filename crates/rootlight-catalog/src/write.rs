@@ -151,7 +151,7 @@ pub(crate) struct AuxiliaryCensus {
     pub(crate) evidence_rows: u64,
     pub(crate) source_counts: Vec<u64>,
     pub(crate) payloads: Vec<u64>,
-    pub(crate) skipped_metadata_bytes: u64,
+    pub(crate) nonretained_metadata_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -423,8 +423,8 @@ pub(crate) fn measure_view<'a>(
                 .checked_sub(2)
                 .and_then(|detail| bytes.checked_sub(detail))
                 .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
-            census.skipped_metadata_bytes = census
-                .skipped_metadata_bytes
+            census.nonretained_metadata_bytes = census
+                .nonretained_metadata_bytes
                 .checked_add(metadata_bytes)
                 .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
         }
@@ -455,6 +455,13 @@ pub(crate) fn measure_view<'a>(
         )?;
         collect_opaque_evidence_source(&extension.evidence, &mut sources, context)?;
         let bytes = add_serialized_text(&mut text_bytes, extension, context)?;
+        if let Some(census) = auxiliary.as_deref_mut() {
+            let metadata = symbol_envelope_metadata_bytes(extension, bytes, context)?;
+            census.nonretained_metadata_bytes = census
+                .nonretained_metadata_bytes
+                .checked_add(metadata)
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+        }
         record_payload(&mut auxiliary, bytes)?;
         maximum_payload_bytes = maximum_payload_bytes.max(bytes);
     }
@@ -774,6 +781,37 @@ fn add_optional_text(
         add_text(bytes, value, context)?;
     }
     Ok(())
+}
+
+fn symbol_envelope_metadata_bytes(
+    envelope: &rootlight_ir::ExtensionEnvelope,
+    encoded_bytes: u64,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    if envelope.namespace != rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE
+        || envelope.version != rootlight_ir::SYMBOL_IDENTITY_CLAIM_VERSION
+        || envelope.criticality != rootlight_ir::ExtensionCriticality::Noncritical
+        || !matches!(
+            envelope.evidence.derivation.as_slice(),
+            [rootlight_ir::FactRef::Entity(_)]
+        )
+        || !envelope.evidence.source.as_ref().is_some_and(|source| {
+            source.repository() == envelope.repository && source.generation() == envelope.generation
+        })
+    {
+        return Ok(0);
+    }
+    let mut retained = 0;
+    for value in [&envelope.namespace, &envelope.version, &envelope.payload] {
+        add_serialized_text(&mut retained, value, context)?;
+    }
+    retained
+        .checked_sub(6)
+        .and_then(|bytes| {
+            bytes.checked_add(u64::try_from(crate::read::SYMBOL_EVIDENCE_CHILD_BYTES).ok()?)
+        })
+        .map(|retained| encoded_bytes.saturating_sub(retained))
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))
 }
 
 fn add_serialized_text<T: serde::Serialize + ?Sized>(

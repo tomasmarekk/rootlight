@@ -303,7 +303,7 @@ impl OracleWriter {
             written.stats,
             context,
         )?;
-        let symbol_envelopes = read::count_symbol_envelopes(
+        let symbol_envelopes = read::symbol_envelope_census(
             &transaction,
             generation.metadata(),
             written.stats.extensions(),
@@ -316,9 +316,13 @@ impl OracleWriter {
             written.stats,
             written.maximum_payload_bytes,
             cardinality,
-            symbol_envelopes,
+            symbol_envelopes.rows,
         )?
-        .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
+        .with_nonretained_metadata_bytes(
+            skipped_metadata_bytes
+                .checked_add(symbol_envelopes.metadata_bytes)
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::Storage))?,
+        )?;
         transaction.commit().map_err(CatalogError::sqlite)?;
         drop(connection);
         let reader = OracleReader::open_path(path, context)?;
@@ -381,16 +385,19 @@ impl OracleReadMemoryPlan {
         self.stats
     }
 
-    /// Returns conservative retained text, excluding eligible inline JSON metadata.
+    /// Returns retained encoded text and closed-child allowance, excluding JSON metadata.
     ///
     /// Persisted statistics continue to count complete encoded payloads. Escaping
-    /// overhead remains in this allowance, as do all nonempty derivation payloads.
+    /// overhead remains for retained strings. Only recognized closed transport
+    /// metadata is excluded; dynamic extension and nonempty skipped-derivation
+    /// payloads retain their complete encoded allowance. Recognized symbol envelopes
+    /// also retain the fixed derivation-buffer reserve for single-copy consumers.
     #[must_use]
     pub const fn retained_text_bytes(self) -> u64 {
         self.retained_text_bytes
     }
 
-    pub(crate) fn with_skipped_metadata_bytes(
+    pub(crate) fn with_nonretained_metadata_bytes(
         mut self,
         metadata_bytes: u64,
     ) -> Result<Self, CatalogError> {

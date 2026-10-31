@@ -5,7 +5,7 @@
 
 use std::io::Write as _;
 
-use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
+use rootlight_ids::{ContentHash, FactId, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, CoverageRecord, CoverageStatus, DiagnosticRecord,
     EntityFlag, EntityKind, EntityRecord, EntityVisibility, EvidenceKind, ExtensionEnvelope,
@@ -402,16 +402,20 @@ pub(crate) fn read_generation_with_admission<E>(
     let entity_flag_rows = cardinality.entity_flag_rows;
     let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
     let symbol_envelopes =
-        count_symbol_envelopes(&transaction, metadata, stats.extensions(), context)?;
+        symbol_envelope_census(&transaction, metadata, stats.extensions(), context)?;
     let skipped_metadata_bytes = skipped_metadata_bytes(&transaction, stats, context)?;
     let memory_plan = oracle_read_memory_plan(
         metadata.contract_version(),
         stats,
         maximum_payload_bytes,
         cardinality,
-        symbol_envelopes,
+        symbol_envelopes.rows,
     )?
-    .with_skipped_metadata_bytes(skipped_metadata_bytes)?;
+    .with_nonretained_metadata_bytes(
+        skipped_metadata_bytes
+            .checked_add(symbol_envelopes.metadata_bytes)
+            .ok_or_else(memory_plan_overflow)?,
+    )?;
     validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
     validate_source_reference_layout(&transaction, stats.source_refs(), context)?;
     admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
@@ -1170,12 +1174,191 @@ fn canonical_skipped_metadata_bytes(
     u64::try_from(bytes.len() - detail_bytes).map_err(|_| memory_plan_overflow())
 }
 
-pub(crate) fn count_symbol_envelopes(
+fn take_json_literal(input: &mut &[u8], literal: &[u8]) -> Option<()> {
+    *input = input.strip_prefix(literal)?;
+    Some(())
+}
+
+fn take_json_id<I: std::str::FromStr>(input: &mut &[u8]) -> Option<I> {
+    let quoted = input.strip_prefix(b"\"")?;
+    let length = quoted.iter().take(64).position(|byte| *byte == b'"')?;
+    let id = std::str::from_utf8(quoted.get(..length)?)
+        .ok()?
+        .parse()
+        .ok()?;
+    *input = quoted.get(length + 1..)?;
+    Some(id)
+}
+
+fn take_json_unsigned(input: &mut &[u8]) -> Option<u64> {
+    let length = input
+        .iter()
+        .take(21)
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    let digits = input.get(..length)?;
+    if length == 0 || length > 20 || (length > 1 && digits.first() == Some(&b'0')) {
+        return None;
+    }
+    let value = std::str::from_utf8(digits).ok()?.parse().ok()?;
+    *input = input.get(length..)?;
+    Some(value)
+}
+
+fn take_canonical_json_string(
+    input: &mut &[u8],
+    mut checkpoint: impl FnMut() -> Result<(), CatalogError>,
+) -> Result<Option<usize>, CatalogError> {
+    let Some(quoted) = input.strip_prefix(b"\"") else {
+        return Ok(None);
+    };
+    let mut index = 0;
+    let mut next_checkpoint = 0;
+    while let Some(byte) = quoted.get(index) {
+        if index >= next_checkpoint {
+            checkpoint()?;
+            next_checkpoint = index.saturating_add(write::JSON_CHECKPOINT_BYTES);
+        }
+        match byte {
+            b'"' => {
+                *input = &quoted[index + 1..];
+                return Ok(Some(index));
+            }
+            b'\\' => {
+                index += 1;
+                match quoted.get(index) {
+                    Some(b'"' | b'\\' | b'b' | b'f' | b'n' | b'r' | b't') => {}
+                    Some(b'u') => {
+                        let Some(hex) = quoted.get(index + 1..index + 5) else {
+                            return Ok(None);
+                        };
+                        // The writer uses Unicode escapes only for remaining controls.
+                        if hex.get(..2) != Some(b"00")
+                            || !hex
+                                .iter()
+                                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                        {
+                            return Ok(None);
+                        }
+                        let Some(value) = std::str::from_utf8(hex)
+                            .ok()
+                            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                        else {
+                            return Ok(None);
+                        };
+                        if value >= 32 || matches!(value, 8 | 9 | 10 | 12 | 13) {
+                            return Ok(None);
+                        }
+                        index += 4;
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            0..=31 => return Ok(None),
+            _ => {}
+        }
+        index += 1;
+    }
+    Ok(None)
+}
+
+// A one-item JSON derivation retains at most four vector slots after conversion.
+// Keep this child reserve for consumers that charge retained encoded bytes once;
+// single-row wire/domain overlap remains in the unchanged decoder allowance.
+pub(crate) const SYMBOL_EVIDENCE_CHILD_BYTES: usize = 4 * std::mem::size_of::<FactRef>();
+
+fn canonical_symbol_metadata_bytes(
+    payload: &str,
+    prefix_length: usize,
+    metadata: GenerationMetadata,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let Some(mut input) = payload.as_bytes().get(prefix_length..) else {
+        return Ok(0);
+    };
+    let version = rootlight_ir::SYMBOL_IDENTITY_CLAIM_VERSION;
+    if take_json_literal(&mut input, b"\"version\":\"").is_none()
+        || take_json_literal(&mut input, version.as_bytes()).is_none()
+        || take_json_literal(
+            &mut input,
+            b"\",\"criticality\":\"noncritical\",\"payload\":",
+        )
+        .is_none()
+    {
+        return Ok(0);
+    }
+    let Some(retained_payload) = take_canonical_json_string(&mut input, || {
+        context.check().map_err(CatalogError::control)
+    })?
+    else {
+        return Ok(0);
+    };
+    // Only the three dynamic strings survive this closed outer transport shape.
+    // Keep their escaped bytes under the unchanged text multiplier, and keep all
+    // typed/evidence and single-payload decoder charges. Strict decoding and full
+    // identity verification remain authoritative, including for the inner claim.
+    let recognized = (|| {
+        take_json_literal(&mut input, b",\"provenance\":")?;
+        take_json_id::<FactId>(&mut input)?;
+        take_json_literal(&mut input, b",\"evidence\":{\"source\":{\"repository\":")?;
+        if take_json_id::<RepositoryId>(&mut input)? != metadata.repository() {
+            return None;
+        }
+        take_json_literal(&mut input, b",\"generation\":")?;
+        if take_json_id::<GenerationId>(&mut input)? != metadata.generation() {
+            return None;
+        }
+        take_json_literal(&mut input, b",\"span\":{\"file\":")?;
+        take_json_id::<FileId>(&mut input)?;
+        take_json_literal(&mut input, b",\"start_byte\":")?;
+        let start = take_json_unsigned(&mut input)?;
+        take_json_literal(&mut input, b",\"end_byte\":")?;
+        if take_json_unsigned(&mut input)? < start {
+            return None;
+        }
+        take_json_literal(&mut input, b"},\"content_hash\":")?;
+        take_json_id::<ContentHash>(&mut input)?;
+        if input.starts_with(b",\"line_hint\":") {
+            take_json_literal(&mut input, b",\"line_hint\":{\"start_line\":")?;
+            let start = take_json_unsigned(&mut input)?;
+            take_json_literal(&mut input, b",\"end_line\":")?;
+            if start == 0 || take_json_unsigned(&mut input)? < start {
+                return None;
+            }
+            take_json_literal(&mut input, b"}")?;
+        }
+        take_json_literal(
+            &mut input,
+            b"},\"derivation\":[{\"kind\":\"entity\",\"id\":",
+        )?;
+        take_json_id::<SymbolId>(&mut input)?;
+        take_json_literal(&mut input, b"}]}}")?;
+        input.is_empty().then_some(())
+    })();
+    if recognized.is_none() {
+        return Ok(0);
+    }
+    let retained = retained_payload
+        .checked_add(rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE.len())
+        .and_then(|bytes| bytes.checked_add(version.len()))
+        .and_then(|bytes| bytes.checked_add(SYMBOL_EVIDENCE_CHILD_BYTES))
+        .ok_or_else(memory_plan_overflow)?;
+    u64::try_from(payload.len().saturating_sub(retained)).map_err(|_| memory_plan_overflow())
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SymbolEnvelopeCensus {
+    pub(crate) rows: u64,
+    pub(crate) metadata_bytes: u64,
+}
+
+pub(crate) fn symbol_envelope_census(
     connection: &Connection,
     metadata: GenerationMetadata,
     expected_rows: u64,
     context: &GenerationContext<'_>,
-) -> Result<u64, CatalogError> {
+) -> Result<SymbolEnvelopeCensus, CatalogError> {
     context.check().map_err(CatalogError::control)?;
     let mut statement = connection
         .prepare("SELECT extension_id, payload FROM extensions ORDER BY extension_id LIMIT ?1")
@@ -1188,7 +1371,7 @@ pub(crate) fn count_symbol_envelopes(
         )?])
         .map_err(CatalogError::sqlite)?;
     let mut observed = 0_u64;
-    let mut eligible = 0_u64;
+    let mut census = SymbolEnvelopeCensus::default();
     let mut prefix = [0_u8; 256];
     while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
         context.check().map_err(CatalogError::control)?;
@@ -1222,14 +1405,23 @@ pub(crate) fn count_symbol_envelopes(
         .map_err(|_| memory_plan_overflow())?;
         let length = usize::try_from(cursor.position()).map_err(|_| memory_plan_overflow())?;
         if payload.as_bytes().starts_with(&prefix[..length]) {
-            eligible = eligible.checked_add(1).ok_or_else(memory_plan_overflow)?;
+            census.rows = census
+                .rows
+                .checked_add(1)
+                .ok_or_else(memory_plan_overflow)?;
+            census.metadata_bytes = census
+                .metadata_bytes
+                .checked_add(canonical_symbol_metadata_bytes(
+                    payload, length, metadata, context,
+                )?)
+                .ok_or_else(memory_plan_overflow)?;
         }
     }
     if observed != expected_rows {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
     context.check().map_err(CatalogError::control)?;
-    Ok(eligible)
+    Ok(census)
 }
 
 fn validate_document_hash(
@@ -2482,7 +2674,10 @@ fn read_opaque_records<T: OpaqueRecord>(
         let repository = codec::repository_id(get(row, 1)?)?;
         let generation = codec::generation_id(get(row, 2)?)?;
         let provenance = codec::fact_id(get(row, 3)?)?;
-        let payload: String = get(row, 4)?;
+        let raw_payload = row.get_ref(4).map_err(CatalogError::sqlite)?;
+        let payload = raw_payload
+            .as_str()
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
         payload_bytes = payload_bytes
             .checked_add(usize_to_u64(payload.len())?)
             .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
@@ -2683,7 +2878,7 @@ mod tests {
         .unwrap();
         let credit = canonical_skipped_metadata_bytes(&malformed, &context).unwrap();
         assert!(credit > 0);
-        let after = before.with_skipped_metadata_bytes(credit).unwrap();
+        let after = before.with_nonretained_metadata_bytes(credit).unwrap();
         assert_eq!(
             after.maximum_payload_bytes(),
             before.maximum_payload_bytes()
@@ -2702,7 +2897,7 @@ mod tests {
         );
         assert!(
             before
-                .with_skipped_metadata_bytes(before.stats().text_bytes() + 1)
+                .with_nonretained_metadata_bytes(before.stats().text_bytes() + 1)
                 .is_err()
         );
     }
@@ -2891,7 +3086,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
-        .with_skipped_metadata_bytes(skipped_metadata)
+        .with_nonretained_metadata_bytes(skipped_metadata)
         .unwrap();
         drop(connection);
         let reader = OracleReader::open_in(directory.path(), &context).unwrap();
@@ -4700,6 +4895,128 @@ mod tests {
     }
 
     #[test]
+    fn symbol_metadata_preserves_escaped_text_and_refuses_unrecognized_outer_shapes() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
+        let metadata = crate::oracle_roundtrip_tests::snapshot(document.clone()).metadata();
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE extensions(extension_id, payload)")
+            .unwrap();
+        let mut envelope = document.extensions[0].clone();
+        envelope.namespace = rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE.into();
+        envelope.version = rootlight_ir::SYMBOL_IDENTITY_CLAIM_VERSION.into();
+        envelope.evidence.derivation = vec![FactRef::Entity(document.entities[0].id)];
+        for text in [
+            "",
+            "ordinary",
+            "λ 雪 🦀",
+            "\0\n\r\t\u{0008}\u{000c}\u{001b}",
+            r#"quoted \"payload\",\"provenance\":\" and trailing \\"#,
+        ] {
+            envelope.payload = text.into();
+            for lines in [None, Some(rootlight_ir::LineRange::new(1, 2).unwrap())] {
+                let source = envelope.evidence.source.as_ref().unwrap();
+                envelope.evidence.source = Some(SourceRef::new(
+                    source.repository(),
+                    source.generation(),
+                    source.span(),
+                    source.content_hash(),
+                    lines,
+                ));
+                let encoded = serde_json::to_string(&envelope).unwrap();
+                let retained: usize = [&envelope.namespace, &envelope.version, &envelope.payload]
+                    .into_iter()
+                    .map(|value| serde_json::to_vec(value).unwrap().len() - 2)
+                    .sum();
+                connection.execute("DELETE FROM extensions", []).unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO extensions VALUES (?1,?2)",
+                        rusqlite::params![envelope.id.as_bytes().as_slice(), encoded],
+                    )
+                    .unwrap();
+                let observed = symbol_envelope_census(&connection, metadata, 1, &context).unwrap();
+                assert_eq!(observed.rows, 1);
+                assert_eq!(
+                    observed.metadata_bytes,
+                    u64::try_from(encoded.len() - retained - SYMBOL_EVIDENCE_CHILD_BYTES).unwrap()
+                );
+                let decoded = decode_extension_envelope_with_checkpoint(
+                    encoded.as_bytes(),
+                    &IrLimits::default(),
+                    || true,
+                )
+                .unwrap();
+                let child_bytes = decoded
+                    .evidence
+                    .derivation
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<FactRef>())
+                    .unwrap();
+                assert!(child_bytes <= SYMBOL_EVIDENCE_CHILD_BYTES);
+                assert!(
+                    u64::try_from(retained + child_bytes).unwrap()
+                        <= u64::try_from(encoded.len()).unwrap() - observed.metadata_bytes
+                );
+                assert_eq!(decoded, envelope);
+            }
+        }
+        envelope.payload = "payload".into();
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        let reordered = serde_json::to_string(&serde_json::to_value(&envelope).unwrap()).unwrap();
+        for rejected in [
+            reordered,
+            format!("{encoded} "),
+            encoded.replacen("\"payload\":", "\"extra\":[],\"payload\":", 1),
+            encoded.replacen("\"payload\":", "\"payload\":\"duplicate\",\"payload\":", 1),
+            encoded.replacen("\"payload\":\"payload\"", "\"payload\":null", 1),
+            encoded.replacen("\"payload\":\"payload\"", r#""payload":"\uD800""#, 1),
+            encoded.replacen("\"payload\":\"payload\"", r#""payload":"\q""#, 1),
+            encoded.replacen("\"version\":\"1.3\"", "\"version\":\"future\"", 1),
+            encoded.replacen("\"kind\":\"entity\"", "\"kind\":\"file\"", 1),
+            encoded.replacen("\"start_byte\":1", "\"start_byte\":01", 1),
+            encoded.replacen("\"line_hint\":{", "\"line_hint\":null,\"extra\":{", 1),
+        ] {
+            connection.execute("DELETE FROM extensions", []).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO extensions VALUES (?1,?2)",
+                    rusqlite::params![envelope.id.as_bytes().as_slice(), rejected],
+                )
+                .unwrap();
+            assert_eq!(
+                symbol_envelope_census(&connection, metadata, 1, &context)
+                    .unwrap()
+                    .metadata_bytes,
+                0,
+                "{rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn escaped_symbol_text_checks_cancellation_after_crossing_chunk_boundaries() {
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let encoded = format!("\"a{}\"", r"\u0000".repeat(4096));
+        let mut input = encoded.as_bytes();
+        let mut checks = 0;
+        let error = take_canonical_json_string(&mut input, || {
+            checks += 1;
+            if checks == 2 {
+                cancellation.cancel(CancellationReason::ClientRequest);
+            }
+            context.check().map_err(CatalogError::control)
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), CatalogErrorKind::Cancelled);
+        assert_eq!(checks, 2);
+        assert_eq!(input, encoded.as_bytes());
+    }
+
+    #[test]
     fn symbol_envelope_classifier_keeps_noncanonical_and_spoofed_headers_coarse() {
         let (document, _) = crate::oracle_roundtrip_tests::fixture_documents();
         let metadata = crate::oracle_roundtrip_tests::snapshot(document.clone()).metadata();
@@ -4733,7 +5050,9 @@ mod tests {
         let cancellation = Cancellation::new();
         let context = GenerationContext::new(&cancellation, GenerationBudget::default());
         assert_eq!(
-            count_symbol_envelopes(&connection, metadata, 0, &context).unwrap(),
+            symbol_envelope_census(&connection, metadata, 0, &context)
+                .unwrap()
+                .rows,
             0
         );
         for (id, text, expected) in [
@@ -4769,7 +5088,9 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                count_symbol_envelopes(&connection, metadata, 1, &context).unwrap(),
+                symbol_envelope_census(&connection, metadata, 1, &context)
+                    .unwrap()
+                    .rows,
                 expected
             );
         }
@@ -4780,7 +5101,9 @@ mod tests {
         ] {
             connection.execute_batch(sql).unwrap();
             assert_eq!(
-                count_symbol_envelopes(&connection, metadata, 1, &context).unwrap(),
+                symbol_envelope_census(&connection, metadata, 1, &context)
+                    .unwrap()
+                    .rows,
                 0
             );
         }
@@ -4804,19 +5127,21 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            count_symbol_envelopes(&connection, metadata, 6, &context).unwrap(),
+            symbol_envelope_census(&connection, metadata, 6, &context)
+                .unwrap()
+                .rows,
             4
         );
         for expected_rows in [5, 7] {
             assert_eq!(
-                count_symbol_envelopes(&connection, metadata, expected_rows, &context)
+                symbol_envelope_census(&connection, metadata, expected_rows, &context)
                     .unwrap_err()
                     .kind(),
                 CatalogErrorKind::Corrupt
             );
         }
         assert_eq!(
-            count_symbol_envelopes(&connection, metadata, u64::MAX, &context)
+            symbol_envelope_census(&connection, metadata, u64::MAX, &context)
                 .unwrap_err()
                 .kind(),
             CatalogErrorKind::Storage
@@ -4832,14 +5157,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            count_symbol_envelopes(&connection, metadata, 6, &context)
+            symbol_envelope_census(&connection, metadata, 6, &context)
                 .unwrap_err()
                 .kind(),
             CatalogErrorKind::Cancelled
         );
         // A retry must also stop before SQLite work once the token is cancelled.
         assert_eq!(
-            count_symbol_envelopes(&connection, metadata, 6, &context)
+            symbol_envelope_census(&connection, metadata, 6, &context)
                 .unwrap_err()
                 .kind(),
             CatalogErrorKind::Cancelled

@@ -463,6 +463,9 @@ fn symbol_envelope_replacements_conserve_preview_commit_and_rollback_counts() {
         let mut replacement = NormalizedIrDocument::empty(template.repository, template.generation);
         for index in 0_u8..4 {
             let mut envelope = template.extensions[0].clone();
+            envelope.version = rootlight_ir::SYMBOL_IDENTITY_CLAIM_VERSION.into();
+            envelope.payload = format!("symbol \u{3bb} {index} \" \\");
+            envelope.evidence.derivation = vec![FactRef::Entity(template.entities[0].id)];
             envelope.id = FactId::from_bytes([index + 0x60; 20]);
             envelope.namespace = if index < count {
                 rootlight_ir::SYMBOL_IDENTITY_CLAIM_NAMESPACE
@@ -472,9 +475,9 @@ fn symbol_envelope_replacements_conserve_preview_commit_and_rollback_counts() {
             .to_owned();
             replacement.extensions.push(envelope);
         }
-        let expected = measure(&replacement, &context)
-            .read_memory_plan(&context)
-            .unwrap();
+        let measured = measure(&replacement, &context);
+        assert_eq!(measured.totals.nonretained_metadata_bytes > 0, count > 0);
+        let expected = measured.read_memory_plan(&context).unwrap();
         {
             let preview = census
                 .preview(

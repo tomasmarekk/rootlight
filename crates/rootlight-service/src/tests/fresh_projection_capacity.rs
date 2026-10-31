@@ -168,7 +168,7 @@ fn typed_projection_uses_final_owned_records_and_text_without_changing_wire_byte
 
 fn authored(file: usize) -> Vec<u8> {
     let mut source = String::from("// ababa\n");
-    for ordinal in 0..512 {
+    for ordinal in 0..32 {
         use std::fmt::Write as _;
         writeln!(
             source,
@@ -179,20 +179,37 @@ fn authored(file: usize) -> Vec<u8> {
     source.into_bytes()
 }
 
-fn fixture() -> (TempDir, TempDir, RuntimePaths) {
-    let storage = durable_test_tempdir();
-    let root = durable_test_tempdir();
-    for file in 0..64 {
-        fs::write(
-            root.path().join(format!("member_{file:02}.rs")),
-            authored(file),
+fn projection_members() -> Vec<SourceMember> {
+    let mut members: Vec<_> = (0..64)
+        .map(|file| SourceMember {
+            path: format!("member_{file:02}.rs"),
+            bytes: authored(file),
+            language: "rust",
+            generated: false,
+        })
+        .collect();
+    members.extend((0..128).map(|target| SourceMember {
+        path: format!("target_{target:03}.ts"),
+        bytes: b"function selectTarget() {}\n".to_vec(),
+        language: "typescript",
+        generated: false,
+    }));
+    members.push(SourceMember {
+        path: "caller.ts".to_owned(),
+        bytes: format!(
+            "function invoke() {{ /*{}*/ {} }}\n",
+            "physical source trivia ".repeat(1024),
+            "selectTarget();".repeat(1024)
         )
-        .unwrap();
-    }
-    let paths =
-        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
-    paths.prepare_owner().unwrap();
-    (storage, root, paths)
+        .into_bytes(),
+        language: "typescript",
+        generated: false,
+    });
+    members
+}
+
+fn fixture() -> (TempDir, TempDir, RuntimePaths) {
+    write_members(&projection_members())
 }
 
 fn observe_cache(phase: &str, service: &FirstSliceService, generation: GenerationId) {
@@ -226,6 +243,12 @@ fn assert_sources(
     changed: bool,
     phase: &str,
 ) {
+    let members = projection_members();
+    let expected_by_path: BTreeMap<_, _> = members
+        .iter()
+        .map(|member| (member.path.as_str(), member))
+        .collect();
+    assert_eq!(expected_by_path.len(), members.len());
     let cancellation = Cancellation::new();
     observe_cache(phase, service, receipt.generation);
     let leased = service.generation_lease(receipt.generation, &cancellation);
@@ -243,7 +266,7 @@ fn assert_sources(
     let lease = leased.unwrap();
     observe_cache(phase, service, receipt.generation);
     let snapshot = lease.generation();
-    assert_eq!(snapshot.file_count(), 64);
+    assert_eq!(snapshot.file_count(), members.len());
     let mut count = 0;
     for file in snapshot.document().files.iter().chain(
         snapshot
@@ -252,19 +275,14 @@ fn assert_sources(
             .iter()
             .map(|entry| entry.file()),
     ) {
-        let ordinal: usize = file
-            .path
-            .strip_prefix("member_")
-            .unwrap()
-            .strip_suffix(".rs")
-            .unwrap()
-            .parse()
-            .unwrap();
-        let mut expected = authored(ordinal);
-        if changed && ordinal == 0 {
+        let member = expected_by_path
+            .get(file.path.as_str())
+            .expect("every indexed path belongs to the complete authored denominator");
+        let mut expected = member.bytes.clone();
+        if changed && file.path == "member_00.rs" {
             expected.extend_from_slice(b"// changed source\n");
         }
-        assert_eq!(file.language, "rust");
+        assert_eq!(file.language, member.language);
         assert_eq!(file.encoding, "utf-8");
         assert!(!file.generated);
         assert_eq!(file.content_hash, content_hash(&expected));
@@ -304,7 +322,7 @@ fn assert_sources(
         }
         count += 1;
     }
-    assert_eq!(count, 64);
+    assert_eq!(count, members.len());
     if !unknown {
         let first = snapshot
             .document()
@@ -314,6 +332,23 @@ fn assert_sources(
             .expect("native definition retained");
         assert_eq!(first.kind, EntityKind::Function);
         assert!(first.evidence.source.is_some());
+        let calls: Vec<_> = snapshot
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == rootlight_ir::OccurrenceRole::CallSite
+                    && site.syntactic_text_hash == content_hash(b"selectTarget")
+            })
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1024,
+            "the fixture retains real native call amplification"
+        );
+        assert!(calls.iter().all(|site| matches!(&site.target,
+            rootlight_ir::OccurrenceTarget::Candidates { symbols, total_count:128,
+                completeness:CoverageStatus::Complete } if symbols.len()==128)));
     }
 }
 
@@ -334,9 +369,12 @@ fn measured() -> Measured {
         let (_storage, root, paths) = fixture();
         let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
-        let (receipt, (before_projection, projection)) = capture(|| {
+        let (receipt, document, projection) = capture_details(|| {
             service.index_repository(root.path(), &cancellation).unwrap()
         });
+        let (before_document, document_footprint) = document.expect("actual document footprint reached");
+        let (before_projection, projection) = projection.expect("actual full projection reached");
+        let before_projection = before_projection.max(before_document);
         assert_sources(&service, &receipt, false, false, "calibration-native");
         drop(service);
 
@@ -365,12 +403,15 @@ fn measured() -> Measured {
         // decoding. Pending preparation alone does not include that envelope.
         let source_only_cold_reload = source_only_resident.checked_mul(3).unwrap();
         let lower = before_projection
+            .max(document_footprint)
             .max(source_only_peak)
             .max(source_only_cold_reload);
         assert!(lower < projection,
             "no real admission interval: before={before_projection}, source_only={source_only_peak}, resident={source_only_resident}, cold_reload={source_only_cold_reload}, projection={projection}");
         let ceiling = lower + (projection - lower) / 2;
         assert!(lower <= ceiling && ceiling < projection);
+        assert!(document_footprint < ceiling,
+            "the document must fit before the later projection refuses");
         assert!(projection < MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES);
         eprintln!("{}", serde_json::json!({
             "schema": "rootlight.fresh-projection-test-observation/1",
@@ -379,6 +420,7 @@ fn measured() -> Measured {
             "source_only_resident": source_only_resident,
             "source_only_cold_reload": source_only_cold_reload,
             "projection": projection,
+            "document_footprint": document_footprint,
             "ceiling": ceiling, "hard_ceiling": MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
         }));
         drop(prepared);
@@ -537,7 +579,10 @@ fn explicit_deep_and_custom_limits_keep_their_real_refusal() {
 #[test]
 fn unrelated_memory_and_cancellation_never_mint_projection_recovery() {
     let measured = measured();
-    let ceiling = measured.projection.checked_mul(2).unwrap();
+    // Foreign pressure can leave the original serialized projection path active.
+    // Typed P covers D+L+I and W+M+A+I, so 3*(D+L)+W+M+A+I <= 4*P.
+    // Cover either intrinsic model while testing only the unrelated reservation.
+    let ceiling = measured.projection.checked_mul(4).unwrap();
     assert!(ceiling <= MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES);
     let pressure_bytes = ceiling
         - measured.before_projection
@@ -556,8 +601,15 @@ fn unrelated_memory_and_cancellation_never_mint_projection_recovery() {
         )
         .unwrap();
         aggregate_source_recovery::FRAME_SEALS.with(|value| value.set(0));
-        let (result, (_, own_peak)) =
-            capture(|| service.index_repository(root.path(), &cancellation));
+        let ((result, (_, own_peak)), profile) = capture_first_slice_analysis_profile(|| {
+            capture(|| service.index_repository(root.path(), &cancellation))
+        });
+        let observed = profile
+            .last_fresh_projection_admission
+            .expect("the pressured candidate reaches actual projection admission");
+        assert_eq!(observed.total_bytes, own_peak);
+        assert_eq!(observed.ceiling_bytes, ceiling);
+        eprintln!("{}", serde_json::to_string(&observed).unwrap());
         assert!(
             own_peak <= ceiling,
             "the intrinsic candidate fits independently"
@@ -713,13 +765,8 @@ fn mixed_members() -> Vec<SourceMember> {
             generated: false,
         },
     ]);
-    // Reuse the real native density already calibrated by fixture()/measured().
-    members.extend((0..64).map(|file| SourceMember {
-        path: format!("member_{file:02}.rs"),
-        bytes: authored(file),
-        language: "rust",
-        generated: false,
-    }));
+    // Both lifecycles share the actual calibrated native amplification.
+    members.extend(projection_members());
     members
 }
 
@@ -861,6 +908,15 @@ fn run_preservation_lifecycle(members: &[SourceMember], early: bool) {
             .unwrap()
     });
     assert_members(&baseline, &receipt, members, false);
+    assert!(
+        peak.expect("the full native baseline reaches projection").1
+            >= baseline
+                .generation_cache
+                .lock()
+                .unwrap()
+                .logical_charge_bytes_by_generation[&receipt.generation],
+        "the admitted projection must cover its actual resident cache charge"
+    );
     {
         let lease = baseline
             .generation_lease(receipt.generation, &cancellation)
@@ -993,7 +1049,11 @@ fn run_preservation_lifecycle(members: &[SourceMember], early: bool) {
     } else {
         (before_peak, peak_bytes)
     };
-    let lower = before.max(source_peak).max(cold_reload);
+    let lower =
+        before
+            .max(source_peak)
+            .max(cold_reload)
+            .max(if early { 0 } else { document_bytes });
     assert!(
         lower < own,
         "no actual preservation interval: early={early} before_document={before_document} document={document_bytes} before_peak={before_peak} peak={peak_bytes} source_peak={source_peak} cold_reload={cold_reload}"

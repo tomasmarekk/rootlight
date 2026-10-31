@@ -13,7 +13,7 @@ fn assert_components(
         "computed_conservative_modeled_bytes_not_rss_or_allocation_measurement"
     );
     match observed.model {
-        "B+3*(T+L)+W+M+A+I" => {
+        "max(B+3*(T+L)+W+M+A+I,D+L+I)" => {
             assert!(observed.document_materialization_bytes > 0);
         }
         "3*(D+L)+W+M+A+I" => {
@@ -48,6 +48,14 @@ fn assert_components(
             .unwrap()
             .checked_add(observed.explain_index_bytes)
             .unwrap()
+            .max(
+                observed
+                    .document_bytes
+                    .checked_add(observed.lexical_coverage_bytes)
+                    .unwrap()
+                    .checked_add(observed.explain_index_bytes)
+                    .unwrap()
+            )
     );
     let encoded = serde_json::to_value(profile).unwrap();
     assert_eq!(
@@ -86,7 +94,7 @@ fn actual_fresh_projection_profile_includes_metadata_and_noop_has_no_new_project
             .unwrap()
     });
     let observed = assert_components(&profile);
-    assert_eq!(observed.model, "B+3*(T+L)+W+M+A+I");
+    assert_eq!(observed.model, "max(B+3*(T+L)+W+M+A+I,D+L+I)");
     assert_eq!(
         observed.ceiling_bytes,
         MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES

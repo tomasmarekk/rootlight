@@ -41,7 +41,7 @@ struct Totals {
     provenance_derivation_rows: u64,
     symbol_envelopes: u64,
     text: u64,
-    skipped_metadata_bytes: u64,
+    nonretained_metadata_bytes: u64,
 }
 
 impl Totals {
@@ -86,7 +86,7 @@ impl Totals {
             provenance_derivation_rows,
             symbol_envelopes,
             text: stats.text_bytes(),
-            skipped_metadata_bytes: 0,
+            nonretained_metadata_bytes: 0,
         };
         totals.validate_counts()?;
         Ok(totals)
@@ -118,7 +118,7 @@ impl Totals {
                     .ok_or_else(invalid)?
             || self.entity_flag_rows > self.records[1].checked_mul(6).ok_or_else(invalid)?
             || self.symbol_envelopes > self.records[9]
-            || self.skipped_metadata_bytes > self.text
+            || self.nonretained_metadata_bytes > self.text
         {
             return Err(invalid());
         }
@@ -173,10 +173,10 @@ impl Totals {
             .checked_sub(removed.text)
             .and_then(|n| n.checked_add(added.text))
             .ok_or_else(invalid)?;
-        next.skipped_metadata_bytes = self
-            .skipped_metadata_bytes
-            .checked_sub(removed.skipped_metadata_bytes)
-            .and_then(|n| n.checked_add(added.skipped_metadata_bytes))
+        next.nonretained_metadata_bytes = self
+            .nonretained_metadata_bytes
+            .checked_sub(removed.nonretained_metadata_bytes)
+            .and_then(|n| n.checked_add(added.nonretained_metadata_bytes))
             .ok_or_else(invalid)?;
         next.validate_counts()?;
         Ok(next)
@@ -294,7 +294,7 @@ impl OracleLayoutFragment {
             },
             self.totals.symbol_envelopes,
         )?
-        .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
+        .with_nonretained_metadata_bytes(self.totals.nonretained_metadata_bytes)
     }
 
     /// Copies fixed-layout accounting keys while retaining the original owner.
@@ -631,7 +631,7 @@ impl OracleLayoutFragment {
             auxiliary.provenance_source_rows,
             auxiliary.provenance_derivation_rows,
         )?;
-        fragment.totals.skipped_metadata_bytes = auxiliary.skipped_metadata_bytes;
+        fragment.totals.nonretained_metadata_bytes = auxiliary.nonretained_metadata_bytes;
         fragment.totals.validate_counts()?;
         fragment
             .identities
@@ -1045,7 +1045,7 @@ impl OracleLayoutCensus {
             },
             self.totals.symbol_envelopes,
         )?
-        .with_skipped_metadata_bytes(self.totals.skipped_metadata_bytes)
+        .with_nonretained_metadata_bytes(self.totals.nonretained_metadata_bytes)
     }
 
     /// Previews an owned record transition without committing its matching document.

@@ -1870,10 +1870,32 @@ fn real_treesitter_generation_obtains_verified_capability_and_round_trips() {
         )
     );
 
-    let reader = OracleWriter::create_in(&generation_directory)
+    let prospective =
+        crate::OracleLayoutFragment::measure(verified.document(), 0, &context, &mut |_| {
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .read_memory_plan(&context)
+        .unwrap();
+    assert!(prospective.retained_text_bytes() < prospective.stats().text_bytes());
+    let (reader, verified, producer_plan) = OracleWriter::create_in(&generation_directory)
         .expect("oracle target is created")
-        .seal(verified, &context)
+        .seal_preserving_verified_with_read_plan(verified, &context)
         .expect("verified Tree-sitter generation seals");
+    assert_eq!(producer_plan, prospective);
+    assert_eq!(verified.document(), output.document());
+    let mut independent_plan = None;
+    let refused = reader.read_with_admission(&context, |plan| {
+        independent_plan = Some(plan);
+        Err::<(), _>("before materialization")
+    });
+    assert!(matches!(
+        refused,
+        Err(crate::OracleReadAdmissionError::Admission(
+            "before materialization"
+        ))
+    ));
+    assert_eq!(independent_plan, Some(producer_plan));
     let queried = reader
         .read_generation(&context)
         .expect("backend-neutral verified query succeeds");
