@@ -95,15 +95,40 @@ fn ordinary_function_locals_keep_distinct_function_owned_definitions() {
         .iter()
         .filter(|site| {
             site.role == OccurrenceRole::Reference
-                && site.syntax_kind == "python.local_binding_unavailable.reference"
+                && site.syntax_kind == "python.local_read.reference"
         })
         .collect();
     assert_eq!(reads.len(), 2);
-    assert!(
-        reads
+    for site in reads {
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            panic!("the exact native local read must bind to its own variable")
+        };
+        let local = document
+            .entities
             .iter()
-            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
-    );
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(local.kind, EntityKind::Variable);
+        let owner = site.enclosing.unwrap();
+        assert!(owners.contains(&owner));
+        assert_eq!(
+            local.container,
+            Some(rootlight_ir::ContainerRef::Entity(owner))
+        );
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::RefersTo
+                        && edge.subject == RelationEndpoint::Occurrence(site.id)
+                        && edge.object == RelationEndpoint::Entity(symbol)
+                        && edge.evidence.source.as_ref() == Some(&site.source)
+                })
+                .count(),
+            1
+        );
+    }
     assert!(!document.skipped_regions.iter().any(|gap| {
         gap.domain == rootlight_ir::FactDomain::Entities
             && gap.detail == "python-assignment-general-binding-and-nonmodule-or-complex-target-identity-unavailable"
@@ -129,6 +154,9 @@ fn function_local_proof_refuses_competing_binders_and_unmodeled_scopes() {
         "def owned():\n    global value\n    value = 1\n",
         "def owned():\n    nonlocal value\n    value = 1\n",
         "def owned():\n    value, other = [1, 2]\n",
+        "def owned():\n    other = 0\n    value, peer = [1, 2]\n    return other\n",
+        "def owned():\n    other = 0\n    global value\n    value = 1\n    return other\n",
+        "def owned():\n    other = 0\n    nonlocal value\n    value = 1\n    return other\n",
         "def owned():\n    if True:\n        value = 1\n",
         "def owned():\n    value = 1\n    for value in []:\n        pass\n",
         "def owned():\n    value = 1\n    def inner():\n        return value\n",
@@ -144,7 +172,8 @@ fn function_local_proof_refuses_competing_binders_and_unmodeled_scopes() {
         let result = output(source.as_bytes());
         assert!(
             !result.document().entities.iter().any(|entity| {
-                entity.kind == EntityKind::Variable && entity.canonical_name == "value"
+                entity.kind == EntityKind::Variable
+                    && matches!(entity.canonical_name.as_str(), "value" | "other")
             }),
             "unsupported local binder must remain unavailable: {source}"
         );
@@ -177,6 +206,177 @@ fn function_local_call_targets_remain_unavailable() {
         calls[0].target,
         OccurrenceTarget::Unresolved { .. }
     ));
+}
+
+#[test]
+fn function_local_reads_bind_only_to_their_exact_written_owner() {
+    let source = "def first(seed):\n    value = seed + 1\n    return value * 2\n\ndef second(seed):\n    value = seed + 2\n    return value + 3\n\nprint(value)\n";
+    let result = output(source.as_bytes());
+    let document = result.document();
+    for (name, start) in [
+        ("first", source.find("return value").unwrap() + 7),
+        ("second", source.rfind("return value").unwrap() + 7),
+    ] {
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == name)
+            .unwrap();
+        let local = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Variable
+                    && entity.canonical_name == "value"
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(owner.id))
+            })
+            .unwrap();
+        let start = u64::try_from(start).unwrap();
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 5
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        let site = sites[0];
+        assert_eq!(site.syntax_kind, "python.local_read.reference");
+        assert_eq!(site.enclosing, Some(owner.id));
+        assert_eq!(site.source.content_hash(), content_hash(source.as_bytes()));
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: local.id });
+        let edges: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+                    && edge.object == RelationEndpoint::Entity(local.id)
+            })
+            .collect();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].evidence.source.as_ref(), Some(&site.source));
+        assert_eq!(edges[0].provenance, site.provenance);
+    }
+    let outside = u64::try_from(source.rfind("value").unwrap()).unwrap();
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Reference && site.source.span().start_byte() == outside
+        })
+        .unwrap();
+    assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+}
+
+#[test]
+fn local_read_proof_separates_operands_from_callees_and_written_labels() {
+    let source = "def owned(seed):\n    value = seed\n    value()\n    other.value\n    consume(value=value)\n    return value\n";
+    let result = output(source.as_bytes());
+    let document = result.document();
+    let definition_start = u64::try_from(source.find("value =").unwrap()).unwrap();
+    let target = definition(document, "value", definition_start, definition_start + 5);
+    for start in [
+        source.find("value=value").unwrap() + 6,
+        source.find("return value").unwrap() + 7,
+    ] {
+        let start = u64::try_from(start).unwrap();
+        certified_reference(
+            document,
+            target,
+            start,
+            start + 5,
+            "python.local_read.reference",
+        );
+    }
+    for start in [
+        source.find("value()").unwrap(),
+        source.find("other.value").unwrap() + 6,
+        source.find("value=value").unwrap(),
+    ] {
+        let start = u64::try_from(start).unwrap();
+        let sites: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                matches!(
+                    site.role,
+                    OccurrenceRole::Reference | OccurrenceRole::CallSite
+                ) && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == start + 5
+            })
+            .collect();
+        assert!(!sites.is_empty());
+        for site in sites {
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(!document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(site.id)
+            }));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires the original Python corpus checkout"]
+fn original_python_local_reads_keep_exact_targets_and_source() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("ROOTLIGHT_DIAGNOSTIC_CORPUS_ROOT").expect("original corpus root"),
+    )
+    .join("2_Python_Python");
+    for (relative, witnesses) in [
+        (
+            "audio_filters/butterworth_filter.py",
+            &[
+                ("w0", 759, 761, 809, 811),
+                ("w0", 759, 761, 829, 831),
+                ("alpha", 838, 843, 930, 935),
+                ("alpha", 838, 843, 970, 975),
+            ][..],
+        ),
+        (
+            "maths/area.py",
+            &[
+                ("semi_perimeter", 11807, 11821, 11879, 11893),
+                ("semi_perimeter", 11807, 11821, 11906, 11920),
+                ("semi_perimeter", 11807, 11821, 11942, 11956),
+                ("area", 11857, 11861, 12021, 12025),
+            ][..],
+        ),
+    ] {
+        let raw = std::fs::read(root.join(relative)).unwrap();
+        let result = output(&raw);
+        let document = result.document();
+        for &(name, declaration_start, declaration_end, start, end) in witnesses {
+            assert_eq!(
+                raw.get(usize::try_from(start).unwrap()..usize::try_from(end).unwrap()),
+                Some(name.as_bytes())
+            );
+            let target = definition(document, name, declaration_start, declaration_end);
+            certified_reference(document, target, start, end, "python.local_read.reference");
+            let local = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == target)
+                .unwrap();
+            let rootlight_ir::ContainerRef::Entity(owner) = local.container.unwrap() else {
+                panic!("the original local has a written function owner")
+            };
+            let site = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Reference
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap();
+            assert_eq!(site.enclosing, Some(owner));
+            assert_eq!(site.source.content_hash(), content_hash(&raw));
+        }
+    }
 }
 
 #[test]
@@ -521,6 +721,16 @@ fn reference(
     start: u64,
     end: u64,
 ) {
+    certified_reference(document, target, start, end, "python.module_read.reference");
+}
+
+fn certified_reference(
+    document: &rootlight_ir::NormalizedIrDocument,
+    target: SymbolId,
+    start: u64,
+    end: u64,
+    syntax: &str,
+) {
     let sites: Vec<_> = document
         .occurrences
         .iter()
@@ -532,7 +742,7 @@ fn reference(
         .collect();
     assert_eq!(sites.len(), 1);
     let site = sites[0];
-    assert_eq!(site.syntax_kind, "python.module_read.reference");
+    assert_eq!(site.syntax_kind, syntax);
     assert!(matches!(site.target, OccurrenceTarget::Resolved { symbol } if symbol == target));
     let edges: Vec<_> = document
         .relations

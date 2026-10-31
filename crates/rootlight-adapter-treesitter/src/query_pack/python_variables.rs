@@ -1,6 +1,6 @@
 //! Prove unique module and function-owned written assignment definitions.
 //! Separate bounded censuses preserve scope and refuse competing binders.
-//! Function-local identity does not certify values, execution or reads.
+//! Function-local identity and lexical reads do not certify values or execution.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +11,15 @@ use tree_sitter::Node;
 use super::{HARD_MAX_QUERY_CAPTURES, QueryCandidate, StructuralRole};
 
 type NameKey = [u8; 32];
-type LocalBindings = HashMap<NameKey, Option<(usize, usize)>>;
+type LocalBindings = HashMap<NameKey, LocalBinding>;
+
+// Annotation/default names withhold declarations without proving local writes.
+// Real targets remain distinct so a refused local cannot inherit an import.
+#[derive(Clone, Copy)]
+struct LocalBinding {
+    assignment: Option<(usize, usize)>,
+    written: bool,
+}
 
 pub(super) struct CaptureCache<'source> {
     source: &'source [u8],
@@ -772,7 +780,13 @@ impl<'source> CaptureCache<'source> {
                     .try_reserve(1)
                     .map_err(|_| SinkError::AllocationFailed)?;
                 // Annotation/default names conservatively withhold a local too.
-                bindings.insert(key, None);
+                bindings.insert(
+                    key,
+                    LocalBinding {
+                        assignment: None,
+                        written: false,
+                    },
+                );
             }
             if walk.goto_first_child() {
                 continue;
@@ -789,12 +803,16 @@ impl<'source> CaptureCache<'source> {
                 break;
             }
         }
+        let mut admissible = true;
         let mut walk = body.walk();
         loop {
             if !self.step(cancel)? {
                 return Ok(None);
             }
             let node = walk.node();
+            if matches!(node.kind(), "global_statement" | "nonlocal_statement") {
+                admissible = false;
+            }
             if node.is_error()
                 || node.is_missing()
                 || (node.is_named()
@@ -843,6 +861,13 @@ impl<'source> CaptureCache<'source> {
                             | "string_end"
                             | "escape_sequence"
                             | "comment"
+                            | "global_statement"
+                            | "nonlocal_statement"
+                            | "pattern_list"
+                            | "tuple_pattern"
+                            | "list_pattern"
+                            | "list_splat_pattern"
+                            | "dictionary_splat_pattern"
                     ))
             {
                 return Ok(None);
@@ -851,33 +876,41 @@ impl<'source> CaptureCache<'source> {
                 node.kind(),
                 "assignment" | "augmented_assignment" | "for_statement"
             ) {
-                let Some(target) = node
+                if let Some(target) = node
                     .child_by_field_name("left")
                     .filter(|n| n.kind() == "identifier")
-                else {
-                    return Ok(None);
-                };
-                let Some(key) = self.key(target, cancel)? else {
-                    return Ok(None);
-                };
-                let direct = node.kind() == "assignment"
-                    && node
-                        .parent()
-                        .filter(|n| n.kind() == "expression_statement")
-                        .and_then(|n| n.parent())
-                        == Some(body)
-                    && node.child_by_field_name("type").is_none()
-                    && node
-                        .child_by_field_name("right")
-                        .is_some_and(|n| n.kind() != "assignment")
-                    && !seen.contains(&key);
-                bindings
-                    .try_reserve(1)
-                    .map_err(|_| SinkError::AllocationFailed)?;
-                bindings
-                    .entry(key)
-                    .and_modify(|old| *old = None)
-                    .or_insert(direct.then_some((node.id(), node.end_byte())));
+                {
+                    let Some(key) = self.key(target, cancel)? else {
+                        return Ok(None);
+                    };
+                    let direct = node.kind() == "assignment"
+                        && node
+                            .parent()
+                            .filter(|n| n.kind() == "expression_statement")
+                            .and_then(|n| n.parent())
+                            == Some(body)
+                        && node.child_by_field_name("type").is_none()
+                        && node
+                            .child_by_field_name("right")
+                            .is_some_and(|n| n.kind() != "assignment")
+                        && !seen.contains(&key);
+                    bindings
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    bindings
+                        .entry(key)
+                        .and_modify(|old| {
+                            old.assignment = None;
+                            old.written = true;
+                        })
+                        .or_insert(LocalBinding {
+                            assignment: direct.then_some((node.id(), node.end_byte())),
+                            written: true,
+                        });
+                } else {
+                    // Destructuring keeps refusal names, never newly admitted slots.
+                    admissible = false;
+                }
             }
             if node.kind() == "identifier" {
                 let Some(key) = self.key(node, cancel)? else {
@@ -888,12 +921,19 @@ impl<'source> CaptureCache<'source> {
                 }) {
                     return Ok(None);
                 }
-                let target = node.parent().is_some_and(|parent| {
-                    matches!(
-                        parent.kind(),
-                        "assignment" | "augmented_assignment" | "for_statement"
-                    ) && parent.child_by_field_name("left") == Some(node)
-                });
+                let target = self.local_target(node, cancel)?;
+                if target {
+                    bindings
+                        .try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    bindings
+                        .entry(key)
+                        .or_insert(LocalBinding {
+                            assignment: None,
+                            written: true,
+                        })
+                        .written = true;
+                }
                 let label = node.parent().is_some_and(|parent| {
                     (parent.kind() == "attribute"
                         && parent.child_by_field_name("attribute") == Some(node))
@@ -905,9 +945,11 @@ impl<'source> CaptureCache<'source> {
                         .map_err(|_| SinkError::AllocationFailed)?;
                     seen.insert(key);
                     if let Some(binding) = bindings.get_mut(&key)
-                        && binding.is_some_and(|(_, end)| node.start_byte() < end)
+                        && binding
+                            .assignment
+                            .is_some_and(|(_, end)| node.start_byte() < end)
                     {
-                        *binding = None;
+                        binding.assignment = None;
                     }
                 }
             }
@@ -919,9 +961,108 @@ impl<'source> CaptureCache<'source> {
                     break;
                 }
                 if !walk.goto_parent() || walk.node() == body {
+                    if !admissible {
+                        for binding in bindings.values_mut() {
+                            if !self.step(cancel)? {
+                                return Ok(None);
+                            }
+                            binding.assignment = None;
+                        }
+                    }
                     return Ok(Some(bindings));
                 }
             }
+        }
+    }
+
+    fn local_target(
+        &mut self,
+        mut node: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        loop {
+            if !self.step(cancel)? {
+                return Ok(false);
+            }
+            let Some(parent) = node.parent() else {
+                return Ok(false);
+            };
+            match parent.kind() {
+                "global_statement" | "nonlocal_statement" => return Ok(true),
+                "assignment" | "augmented_assignment" | "for_statement" => {
+                    return Ok(parent.child_by_field_name("left") == Some(node));
+                }
+                "pattern_list"
+                | "tuple_pattern"
+                | "list_pattern"
+                | "list_splat_pattern"
+                | "dictionary_splat_pattern" => node = parent,
+                _ => return Ok(false),
+            }
+        }
+    }
+
+    fn local_read(
+        &mut self,
+        function: Node<'_>,
+        node: Node<'_>,
+        assignment_end: usize,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        let Some(body) = function.child_by_field_name("body") else {
+            return Ok(false);
+        };
+        if node.kind() != "identifier"
+            || node.start_byte() < assignment_end
+            || node.start_byte() < body.start_byte()
+            || node.end_byte() > body.end_byte()
+        {
+            return Ok(false);
+        }
+        let mut current = node;
+        loop {
+            if !self.step(cancel)? {
+                return Ok(false);
+            }
+            let Some(parent) = current.parent() else {
+                return Ok(false);
+            };
+            match parent.kind() {
+                "assignment" => {
+                    return Ok(parent.child_by_field_name("right") == Some(current));
+                }
+                "return_statement" | "expression_statement" => return Ok(true),
+                "call" if parent.child_by_field_name("arguments") != Some(current) => {
+                    return Ok(false);
+                }
+                "attribute" if parent.child_by_field_name("attribute") == Some(current) => {
+                    return Ok(false);
+                }
+                "keyword_argument" if parent.child_by_field_name("name") == Some(current) => {
+                    return Ok(false);
+                }
+                "binary_operator"
+                | "unary_operator"
+                | "boolean_operator"
+                | "not_operator"
+                | "comparison_operator"
+                | "conditional_expression"
+                | "parenthesized_expression"
+                | "argument_list"
+                | "call"
+                | "attribute"
+                | "keyword_argument"
+                | "subscript"
+                | "slice"
+                | "expression_list"
+                | "tuple"
+                | "list"
+                | "set"
+                | "dictionary"
+                | "pair" => {}
+                _ => return Ok(false),
+            }
+            current = parent;
         }
     }
 
@@ -960,13 +1101,13 @@ impl<'source> CaptureCache<'source> {
         let Some(key) = self.key(name, cancel)? else {
             return Ok(None);
         };
-        let admitted = self
+        let binding = self
             .local_functions
             .get(&function.id())
             .and_then(Option::as_ref)
             .and_then(|bindings| bindings.get(&key))
-            .copied()
-            .flatten();
+            .copied();
+        let admitted = binding.and_then(|binding| binding.assignment);
         if let Some(assignment) = assignment {
             if role == StructuralRole::Reference {
                 return Ok(Some(false));
@@ -993,7 +1134,20 @@ impl<'source> CaptureCache<'source> {
                 return Ok(Some(true));
             }
         }
-        if admitted.is_some() && matches!(role, StructuralRole::Reference | StructuralRole::Call) {
+        if let Some((_, end)) = admitted
+            && role == StructuralRole::Reference
+            && self.local_read(function, node, end, cancel)?
+        {
+            candidate.syntax = "python.local_read";
+            candidate.required = true;
+            return Ok(Some(true));
+        }
+        if binding.is_some_and(|binding| binding.written)
+            && matches!(role, StructuralRole::Reference | StructuralRole::Call)
+            && function.child_by_field_name("body").is_some_and(|body| {
+                node.start_byte() >= body.start_byte() && node.end_byte() <= body.end_byte()
+            })
+        {
             candidate.syntax = if role == StructuralRole::Call {
                 "python.local_call_unavailable"
             } else {
@@ -1231,7 +1385,46 @@ mod tests {
             .inspect_locals(root, function, &Cancellation::new())
             .unwrap()
             .unwrap();
-        assert_eq!(bindings.values().flatten().count(), 1);
+        assert_eq!(
+            bindings
+                .values()
+                .filter(|binding| binding.assignment.is_some())
+                .count(),
+            1
+        );
+        let start = source
+            .windows(12)
+            .position(|bytes| bytes == b"return value")
+            .unwrap()
+            + 7;
+        let read = root.descendant_for_byte_range(start, start + 5).unwrap();
+        let (_, end) = bindings
+            .values()
+            .find_map(|binding| binding.assignment)
+            .unwrap();
+        let mut no_read_work = CaptureCache::new(source, 0, true);
+        assert!(
+            !no_read_work
+                .local_read(function, read, end, &Cancellation::new())
+                .unwrap()
+        );
+        assert!(no_read_work.exhausted());
+        assert!(matches!(
+            complete.local_read(function, read, end, &cancel),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        let mut partial = CaptureCache::new(source, 256, false);
+        let mut occurrence = candidate(read, StructuralRole::Reference);
+        partial
+            .refine(
+                root,
+                read,
+                StructuralRole::Reference,
+                &mut occurrence,
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert_ne!(occurrence.syntax, "python.local_read");
     }
 
     #[test]

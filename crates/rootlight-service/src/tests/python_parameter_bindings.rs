@@ -57,11 +57,29 @@ fn written_python_locals_do_not_escape_to_other_scopes() {
             .collect();
         assert_eq!(reads.len(), 3);
         for site in reads {
-            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
-            assert!(!document.relations.iter().any(|edge| {
-                edge.predicate == RelationPredicate::RefersTo
-                    && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
-            }));
+            if site.enclosing == Some(owner.id) {
+                assert_eq!(site.syntax_kind, "python.local_read.reference");
+                assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: local.id });
+                assert_eq!(
+                    document
+                        .relations
+                        .iter()
+                        .filter(|edge| {
+                            edge.predicate == RelationPredicate::RefersTo
+                                && edge.subject
+                                    == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+                                && edge.object == rootlight_ir::RelationEndpoint::Entity(local.id)
+                        })
+                        .count(),
+                    1
+                );
+            } else {
+                assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+                assert!(!document.relations.iter().any(|edge| {
+                    edge.predicate == RelationPredicate::RefersTo
+                        && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+                }));
+            }
         }
     }
 }

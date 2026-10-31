@@ -1476,6 +1476,7 @@ fn mandatory_project_syntax_fact_ids(facts: &[SyntaxFact]) -> BTreeSet<u64> {
             || is_ocaml_written_binding_metadata(fact)
             || go::mandatory(fact)
             || php::mandatory(fact)
+            || fact.syntax_kind().as_str() == "python.local_read.reference"
             || (fact.kind() == SyntaxFactKind::Signature
                 && matches!(
                     fact.syntax_kind().as_str(),
@@ -1818,6 +1819,33 @@ struct OccurrenceDraft {
     source: SourceRef,
 }
 
+#[derive(Debug, Clone)]
+struct PythonLocalTarget {
+    declaration: u64,
+    source: SourceRef,
+    owner: SourceRef,
+}
+
+impl PythonLocalTarget {
+    fn admits(&self, occurrence: &OccurrenceDraft) -> bool {
+        let current = &occurrence.source;
+        let same_frame = |source: &SourceRef| {
+            source.repository() == current.repository()
+                && source.generation() == current.generation()
+                && source.content_hash() == current.content_hash()
+                && source.span().file() == current.span().file()
+        };
+        occurrence.role == OccurrenceRole::Reference
+            && occurrence.qualifier.is_none()
+            && occurrence.spelling_hash == content_hash(occurrence.name.as_bytes())
+            && same_frame(&self.source)
+            && same_frame(&self.owner)
+            && self.owner.span().start_byte() <= self.source.span().start_byte()
+            && self.source.span().end_byte() <= current.span().start_byte()
+            && current.span().end_byte() <= self.owner.span().end_byte()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RustDirectCallDraft {
     declaration: u64,
@@ -1917,6 +1945,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     php_bindings: BTreeMap<SourceSpan, php::Proof>,
     rust_local_symbols: BTreeSet<SymbolId>,
     python_local_symbols: BTreeSet<SymbolId>,
+    python_local_targets: BTreeMap<(FileId, u64), BTreeMap<String, Option<PythonLocalTarget>>>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1956,6 +1985,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             php_bindings: BTreeMap::new(),
             rust_local_symbols: BTreeSet::new(),
             python_local_symbols: BTreeSet::new(),
+            python_local_targets: BTreeMap::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -2734,6 +2764,23 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     }
                     declaration_kinds.insert(declaration.local_id(), draft.kind);
                     declaration_names.insert(declaration.local_id(), draft.name.clone());
+                    if draft.python_local
+                        && draft.kind == EntityKind::Variable
+                        && let Some(owner) = draft.parent_declaration
+                        && declaration_kinds.get(&owner) == Some(&EntityKind::Function)
+                        && let Some(owner_fact) = facts_by_id.get(&owner)
+                    {
+                        self.python_local_targets
+                            .entry((draft.file, owner))
+                            .or_default()
+                            .entry(draft.name.clone())
+                            .and_modify(|target| *target = None)
+                            .or_insert(Some(PythonLocalTarget {
+                                declaration: draft.local_id,
+                                source: draft.source.clone(),
+                                owner: source_for_span(input, owner_fact.span()),
+                            }));
+                    }
                     self.declarations.push(draft);
                     materialized_declarations.insert(declaration.local_id());
                     nearest_materialized_declaration
@@ -3028,6 +3075,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                         // Parser recovery can leave the parent-first cache incomplete,
                         // so the bounded ancestry walk provides the same exact fallback.
                         let enclosing_declaration = if role == OccurrenceRole::CallSite
+                            || fact.syntax_kind().as_str() == "python.local_read.reference"
                             || (self.analyzer.language == SemanticProjectLanguage::Go
                                 && fact.syntax_kind().as_str() == "go.function_value.reference")
                         {
@@ -4475,6 +4523,29 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     .copied()
                     .into_iter()
                     .collect(),
+                kind: ResolutionKind::Binding,
+            };
+        }
+        if self.analyzer.language == SemanticProjectLanguage::Python
+            && occurrence.syntax_kind == "python.local_read.reference"
+        {
+            let symbol = occurrence
+                .enclosing_declaration
+                .and_then(|owner| {
+                    self.python_local_targets
+                        .get(&(occurrence.file, owner))
+                        .and_then(|targets| targets.get(occurrence.name.as_str()))
+                })
+                .and_then(Option::as_ref)
+                .filter(|target| target.admits(occurrence))
+                .and_then(|target| {
+                    self.symbol_by_declaration
+                        .get(&(occurrence.file, target.declaration))
+                })
+                .copied()
+                .filter(|symbol| self.python_local_symbols.contains(symbol));
+            return ResolutionCandidates {
+                symbols: symbol.into_iter().collect(),
                 kind: ResolutionKind::Binding,
             };
         }
@@ -7585,6 +7656,14 @@ mod python_required_context_qualification_tests {
                 source.len() as u64 - 1,
                 "python.parameter_body.reference",
             ),
+            fact(
+                8,
+                Some(1),
+                SyntaxFactKind::Occurrence,
+                source.len() as u64 - 6,
+                source.len() as u64 - 1,
+                "python.local_read.reference",
+            ),
         ];
         let context = facts[5].clone();
         let signature = facts[2].clone();
@@ -7614,6 +7693,10 @@ mod python_required_context_qualification_tests {
         assert!(
             facts.iter().all(|fact| fact.local_id() != 7),
             "zero optional allowance genuinely removes the optional body read"
+        );
+        assert!(
+            facts.iter().any(|fact| fact.local_id() == 8),
+            "native local-read proof remains required when optional syntax allowance is zero"
         );
         let signatures: Vec<_> = facts
             .iter()

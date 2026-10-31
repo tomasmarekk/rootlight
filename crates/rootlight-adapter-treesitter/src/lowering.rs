@@ -967,6 +967,7 @@ fn required_syntax_fact_count_from_output(
             || ruby_bindings::required(fact)
             || ruby_formal_receivers::required(fact)
             || python_module_reads::required(fact)
+            || python_variables::required(fact)
             || python_module_functions::required(fact)
             || (fact.kind() == SyntaxFactKind::Occurrence
                 && fact.syntax_kind().as_str() == "python.call.call"
@@ -3503,6 +3504,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let python_locals = if python_parameters.is_some()
+            && self
+                .coordinates
+                .facts()
+                .iter()
+                .any(python_variables::required)
+        {
+            Some(python_variables::LocalTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let liquid_reads = if self.request.language().as_str() == "liquid" {
             Some(liquid::Targets::new(
                 self.coordinates.facts(),
@@ -5206,6 +5223,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                             .flatten()
                             .and_then(|local_id| materialized.get(&local_id))
                     });
+                let enclosing_entity = if python_variables::required(fact) {
+                    python_locals
+                        .as_ref()
+                        .and_then(|bindings| bindings.owner(enclosing_entity))
+                } else {
+                    enclosing_entity
+                };
                 let enclosing = enclosing_entity.map(|entity| entity.record.id);
                 let mut occurrence = unresolved_occurrence(
                     fact,
@@ -5567,6 +5591,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     occurrence.id = derive_occurrence_record_id(&occurrence).map_err(|_| {
                         provider_failure("python-module-function-occurrence-identity")
                     })?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &python_locals
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("python-local-read-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
@@ -14819,6 +14859,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     }
     if python_module_reads::required(fact) {
         return Some("python-native-module-rhs-binding-unavailable");
+    }
+    if python_variables::required(fact) {
+        return Some("python-native-function-local-read-binding-unavailable");
     }
     if fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str() == "python.parameter_body.reference"

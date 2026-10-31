@@ -221,6 +221,172 @@ impl FirstSliceProjectAnalyzer for SourceBackedPythonProjectAnalyzer {
     }
 }
 
+fn assert_python_local_read_targets(
+    document: &rootlight_ir::NormalizedIrDocument,
+    raw: &[u8],
+) -> Vec<SourceRef> {
+    let text = std::str::from_utf8(raw).unwrap();
+    let owner = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "owned")
+        .unwrap();
+    let mut sources = Vec::new();
+    for (name, start) in [
+        ("value", text.find("= value +").unwrap() + 2),
+        ("result", text.find("return result").unwrap() + 7),
+    ] {
+        let local = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.kind == EntityKind::Variable
+                    && entity.canonical_name == name
+                    && entity.container == Some(ContainerRef::Entity(owner.id))
+            })
+            .unwrap();
+        let start = u64::try_from(start).unwrap();
+        let end = start + u64::try_from(name.len()).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+            })
+            .unwrap();
+        assert_eq!(site.syntax_kind, "python.local_read.reference");
+        assert_eq!(site.enclosing, Some(owner.id));
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: local.id });
+        assert_eq!(site.source.content_hash(), content_hash(raw));
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::RefersTo
+                        && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+                        && edge.object == rootlight_ir::RelationEndpoint::Entity(local.id)
+                        && edge.evidence.source.as_ref() == Some(&site.source)
+                })
+                .count(),
+            1
+        );
+        sources.push(site.source.clone());
+    }
+    for start in [
+        text.find("print(value)").unwrap() + 6,
+        text.rfind("return value").unwrap() + 7,
+    ] {
+        let start = u64::try_from(start).unwrap();
+        let site = document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.role == OccurrenceRole::Reference && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+        }));
+    }
+    sources
+}
+
+#[test]
+fn deep_python_local_reads_keep_project_bindings_across_updates_and_restore() {
+    let fixture = TempDir::new().unwrap();
+    let state = durable_test_tempdir();
+    let paths =
+        RuntimePaths::new(state.path().join("state"), state.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let source = b"def owned():\n    value = 1\n    result = value + 2\n    return result\n\nprint(value)\n\ndef other():\n    return value\n";
+    let changed = b"def owned():\n    value = 3\n    result = value + 2\n    return result\n\nprint(value)\n\ndef other():\n    return value\n";
+    let analyzer = Arc::new(SourceBackedPythonProjectAnalyzer {
+        calls: AtomicUsize::new(0),
+    });
+    let mut service = FirstSliceService::new_durable_with_project_analyzer(
+        2,
+        paths.state_dir(),
+        analyzer.clone(),
+        &deadline(),
+    )
+    .unwrap();
+    let mut generation = None;
+    for (index, raw) in [source.as_slice(), changed.as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        fs::write(fixture.path().join("written.py"), raw).unwrap();
+        let receipt = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .unwrap();
+        assert_eq!(analyzer.calls.load(Ordering::Relaxed), index + 1);
+        assert!(
+            receipt
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.code.ends_with("-fallback"))
+        );
+        let sources = {
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            assert_python_local_read_targets(snapshot.document(), raw)
+        };
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                sources,
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 2);
+        for chunk in read.data.chunks {
+            let span = chunk.reference.span();
+            assert_eq!(
+                chunk.bytes.as_slice(),
+                raw.get(
+                    usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()
+                )
+                .unwrap()
+            );
+        }
+        let no_op = service
+            .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+            .unwrap();
+        assert_eq!(no_op.generation, receipt.generation);
+        assert_eq!(analyzer.calls.load(Ordering::Relaxed), index + 1);
+        generation = Some(receipt.generation);
+    }
+    drop(service);
+    let mut restored = FirstSliceService::new_durable_with_project_analyzer(
+        2,
+        paths.state_dir(),
+        analyzer.clone(),
+        &deadline(),
+    )
+    .unwrap();
+    let generation = generation.unwrap();
+    {
+        let snapshot = restored.loaded_generation_snapshot(generation).unwrap();
+        assert_python_local_read_targets(snapshot.document(), changed);
+    }
+    let no_op = restored
+        .index_repository_with_mode(fixture.path(), FirstSliceIndexMode::Deep, &deadline())
+        .unwrap();
+    assert_eq!(no_op.generation, generation);
+    assert_eq!(analyzer.calls.load(Ordering::Relaxed), 2);
+}
+
 #[test]
 fn deep_refinement_preserves_named_parameter_containment_and_exact_source() {
     let fixture = TempDir::new().unwrap();

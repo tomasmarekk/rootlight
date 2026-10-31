@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn python_written_locals_preserve_owners_without_cross_scope_name_fallback() {
-    let text = "def owned():\n    value = 1\n    return value\n\nprint(value)\n\ndef other():\n    return value\n";
+    let text = "def owned():\n    value = 1\n    result = value + 2\n    return value\n\nprint(value)\n\ndef other():\n    return value\n";
     let fixture = ProjectFixture::new(["written.py"], [text], SemanticProjectLanguage::Python);
     let output = analyze_with_real_parser(&fixture);
     let document = output.document();
@@ -47,12 +47,106 @@ fn python_written_locals_preserve_owners_without_cross_scope_name_fallback() {
                 ) == Some(b"value".as_slice())
         })
         .collect();
-    assert_eq!(reads.len(), 3);
-    assert!(
-        reads
+    assert_eq!(reads.len(), 4);
+    let own_reads = [
+        u64::try_from(text.find("value + 2").unwrap()).unwrap(),
+        u64::try_from(text.find("return value").unwrap() + 7).unwrap(),
+    ];
+    for site in reads {
+        if own_reads.contains(&site.source.span().start_byte()) {
+            assert_eq!(site.syntax_kind, "python.local_read.reference");
+            assert_eq!(site.enclosing, Some(owner.id));
+            assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: local.id });
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|edge| {
+                        edge.predicate == RelationPredicate::RefersTo
+                            && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+                            && edge.object == rootlight_ir::RelationEndpoint::Entity(local.id)
+                            && edge.evidence.source.as_ref() == Some(&site.source)
+                    })
+                    .count(),
+                1
+            );
+        } else {
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(!document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+            }));
+        }
+    }
+}
+
+#[test]
+fn refused_python_local_reads_do_not_adopt_same_named_imports() {
+    for (header, body) in [
+        (
+            "owned()",
+            "    value = 1\n    value = 2\n    return value\n",
+        ),
+        (
+            "owned()",
+            "    value = 1\n    value += 2\n    return value\n",
+        ),
+        (
+            "owned()",
+            "    consume(value)\n    value = 1\n    return value\n",
+        ),
+        ("owned(value)", "    value = 1\n    return value\n"),
+        (
+            "owned()",
+            "    global value\n    value = 1\n    return value\n",
+        ),
+        (
+            "owned()",
+            "    nonlocal value\n    value = 1\n    return value\n",
+        ),
+        ("owned()", "    value, peer = [1, 2]\n    return value\n"),
+        (
+            "owned()",
+            "    if True:\n        value = 1\n    return value\n",
+        ),
+    ] {
+        let text = format!("from peer import value\n\ndef {header}:\n{body}");
+        let fixture = ProjectFixture::new(
+            ["peer.py", "written.py"],
+            ["value = 0\n", text.as_str()],
+            SemanticProjectLanguage::Python,
+        );
+        let output = analyze_with_real_parser(&fixture);
+        let document = output.document();
+        assert!(
+            document.entities.iter().any(|entity| {
+                entity.kind == EntityKind::Variable
+                    && entity.canonical_name == "value"
+                    && entity.evidence.source.as_ref().is_some_and(|source| {
+                        source.span().file() == fixture.sources[0].span().file()
+                    })
+            }),
+            "the imported same-name target must exist: {text}"
+        );
+        let start = u64::try_from(text.rfind("return value").unwrap() + 7).unwrap();
+        let site = document
+            .occurrences
             .iter()
-            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
-    );
+            .find(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.file == fixture.sources[1].span().file()
+                    && site.source.span().start_byte() == start
+            })
+            .unwrap();
+        assert!(
+            matches!(site.target, OccurrenceTarget::Unresolved { .. }),
+            "refused local cannot inherit its import: {text}"
+        );
+        assert!(!document.relations.iter().any(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+        }));
+    }
 }
 
 #[test]

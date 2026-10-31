@@ -1602,6 +1602,7 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | "python.module_call_unavailable.call"
             | "python.local_binding_unavailable.reference"
             | "python.local_call_unavailable.call"
+            | "python.local_read.reference"
             | "typescript.const_value.reference"
             | "javascript.const_receiver.reference"
             | "typescript.const_value_read.read"
@@ -3163,6 +3164,7 @@ mod python_parameter_source_tests {
         for (label, role) in [
             ("python.parameter_body.reference", OccurrenceRole::Reference),
             ("python.module_read.reference", OccurrenceRole::Reference),
+            ("python.local_read.reference", OccurrenceRole::Reference),
             (
                 "python.module_binding_unavailable.reference",
                 OccurrenceRole::Reference,
