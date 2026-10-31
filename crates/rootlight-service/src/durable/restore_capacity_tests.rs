@@ -253,9 +253,11 @@ fn producer_and_consumer_share_actual_sidecar_and_catalog_charges() {
         if mode == 2 {
             force_file_catalog(&mut service);
         }
-        let receipt = service
-            .index_repository(root.path(), &cancellation)
-            .unwrap();
+        let (receipt, profile) = crate::capture_first_slice_analysis_profile(|| {
+            service.index_repository(root.path(), &cancellation)
+        });
+        let receipt = receipt.unwrap();
+        assert!(profile.last_sealed_oracle_restore_refusal.is_none());
         let snapshot = service
             .loaded_generation_snapshot(receipt.generation)
             .unwrap();
@@ -317,6 +319,24 @@ fn producer_and_consumer_share_actual_sidecar_and_catalog_charges() {
             recovery_sidecar_memory_bytes(&manifest).unwrap(),
         )
         .unwrap();
+        let expected_breakdown = oracle_restore_memory_breakdown(
+            read_plan.unwrap(),
+            actual_nonempty,
+            recovery_sidecar_memory_bytes(&manifest).unwrap(),
+        )
+        .unwrap();
+        let producer_breakdown = prepared
+            .oracle_restore_memory_breakdown(written, receipt.indexed_files, actual_nonempty)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&producer_breakdown).unwrap(),
+            serde_json::to_value(&expected_breakdown).unwrap()
+        );
+        assert_eq!(producer_breakdown.total_bytes, consumer);
+        assert_eq!(
+            producer_breakdown.text_copies,
+            if mode == 2 { 14 } else { 6 }
+        );
         assert_eq!(
             prepared
                 .oracle_restore_memory_bytes(written, receipt.indexed_files, actual_nonempty)
@@ -489,14 +509,51 @@ fn unfit_source_only_output_and_derived_sources_remain_typed_failures() {
             FirstSliceService::new_durable(2, paths.state_dir(), &cancellation).unwrap();
         crate::aggregate_source_recovery::FRAME_SEALS.with(|count| count.set(0));
         let limit = GENERATION_MEMORY_FIXED_OVERHEAD_BYTES - 1;
-        let error = with_ceiling(limit, || {
-            service.index_repository(root.path(), &cancellation)
-        })
-        .unwrap_err();
+        let (result, profile) = with_ceiling(limit, || {
+            crate::capture_first_slice_analysis_profile(|| {
+                service.index_repository(root.path(), &cancellation)
+            })
+        });
+        let error = result.unwrap_err();
+        let observed = match &error {
+            FirstSliceError::GenerationMemoryLimit { observed, .. } => *observed,
+            other => panic!("expected typed restore refusal, got {other:?}"),
+        };
         assert!(
             matches!(error, FirstSliceError::GenerationMemoryLimit { observed, limit: actual, .. } if observed > limit && actual == limit),
             "{error:?}"
         );
+        let observation = profile.last_sealed_oracle_restore_refusal.as_ref().unwrap();
+        assert_eq!(
+            observation.scope,
+            "sealed_full_restore_model_not_heap_or_rss"
+        );
+        assert_eq!(
+            observation.sidecar_input_scope,
+            "actual_written_descriptors"
+        );
+        assert_eq!(
+            observation.stage,
+            if derived {
+                "ordinary_sealed_output"
+            } else {
+                "degraded_sealed_output"
+            }
+        );
+        assert_eq!(observation.limit, limit);
+        assert_eq!(observation.memory.total_bytes, observed);
+        assert_eq!(
+            observation.memory.total_bytes,
+            observation.memory.materialization_bytes
+                + observation.memory.index_build_bytes
+                + observation.memory.text_memory_bytes
+                + observation.memory.sidecar_staging_bytes
+        );
+        let encoded = serde_json::to_value(&profile).unwrap();
+        let encoded = &encoded["last_sealed_oracle_restore_refusal"];
+        assert_eq!(encoded["memory"]["total_bytes"], observed);
+        assert_eq!(encoded["limit"], limit);
+        assert!(encoded.get("file").is_none());
         assert_eq!(
             crate::aggregate_source_recovery::FRAME_SEALS.with(Cell::get),
             usize::from(!derived)
@@ -517,9 +574,11 @@ fn cancellation_and_competing_memory_never_turn_into_capacity_recovery() {
     )
     .unwrap();
     crate::aggregate_source_recovery::FRAME_SEALS.with(|count| count.set(0));
-    let error = service
-        .index_repository(root.path(), &cancellation)
-        .unwrap_err();
+    let (result, profile) = crate::capture_first_slice_analysis_profile(|| {
+        service.index_repository(root.path(), &cancellation)
+    });
+    let error = result.unwrap_err();
+    assert!(profile.last_sealed_oracle_restore_refusal.is_none());
     assert!(matches!(
         error,
         FirstSliceError::GenerationMemoryLimit {
@@ -534,16 +593,21 @@ fn cancellation_and_competing_memory_never_turn_into_capacity_recovery() {
     drop(pressure);
     assert_no_publication(&service, &paths);
     let cancelled = Cancellation::new();
-    let result = service.prepare_repository_with_mode_and_progress(
-        root.path(),
-        crate::FirstSliceIndexMode::Structural,
-        &cancelled,
-        |progress| {
-            if progress.stage == crate::FirstSliceIndexStage::Search {
-                cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
-            }
-        },
-    );
+    let (result, profile) = with_ceiling(GENERATION_MEMORY_FIXED_OVERHEAD_BYTES - 1, || {
+        crate::capture_first_slice_analysis_profile(|| {
+            service.prepare_repository_with_mode_and_progress(
+                root.path(),
+                crate::FirstSliceIndexMode::Structural,
+                &cancelled,
+                |progress| {
+                    if progress.stage == crate::FirstSliceIndexStage::Search {
+                        cancelled.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+                    }
+                },
+            )
+        })
+    });
+    assert!(profile.last_sealed_oracle_restore_refusal.is_none());
     assert!(matches!(
         result,
         Err(FirstSliceError::Cancelled(

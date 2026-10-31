@@ -3697,12 +3697,28 @@ impl DurableCatalog {
 
 impl DurablePreparedGeneration {
     /// Measures later hydration from descriptors already written by this owner.
+    #[cfg(test)]
     pub(super) fn oracle_restore_memory_bytes(
         &self,
         plan: OracleReadMemoryPlan,
         indexed_files: u64,
         has_source_catalog: bool,
     ) -> Result<u64, FirstSliceError> {
+        Ok(self
+            .oracle_restore_memory_breakdown(plan, indexed_files, has_source_catalog)?
+            .total_bytes)
+    }
+
+    /// Measures the unchanged restore envelope using this owner's written descriptors.
+    ///
+    /// # Errors
+    /// Propagates invalid descriptors, poisoned ownership locks, and arithmetic overflow.
+    pub(super) fn oracle_restore_memory_breakdown(
+        &self,
+        plan: OracleReadMemoryPlan,
+        indexed_files: u64,
+        has_source_catalog: bool,
+    ) -> Result<OracleRestoreMemoryBreakdown, FirstSliceError> {
         let incremental = *self
             .incremental_state
             .lock()
@@ -3726,7 +3742,44 @@ impl DurablePreparedGeneration {
             storage,
             indexed_files,
         )?;
-        oracle_restore_memory_bytes(plan, has_source_catalog, staging)
+        oracle_restore_memory_breakdown(plan, has_source_catalog, staging)
+    }
+
+    pub(super) fn observe_sealed_restore_refusal(
+        &self,
+        stage: &'static str,
+        plan: OracleReadMemoryPlan,
+        indexed_files: u64,
+        has_source_catalog: bool,
+        memory: OracleRestoreMemoryBreakdown,
+    ) {
+        super::with_analysis_profile(|profile| {
+            let stats = plan.stats();
+            // Ordinary refusal can recover; the final degraded refusal must remain visible.
+            profile.last_sealed_oracle_restore_refusal = Some(SealedOracleRestoreRefusal {
+                scope: "sealed_full_restore_model_not_heap_or_rss",
+                sidecar_input_scope: "actual_written_descriptors",
+                stage,
+                repository: self.repository_id,
+                generation: self.generation,
+                indexed_files,
+                has_source_catalog,
+                files: stats.files(),
+                entities: stats.entities(),
+                occurrences: stats.occurrences(),
+                relations: stats.relations(),
+                provenance: stats.provenance(),
+                source_mappings: stats.source_mappings(),
+                coverage: stats.coverage(),
+                skipped_regions: stats.skipped_regions(),
+                diagnostics: stats.diagnostics(),
+                extensions: stats.extensions(),
+                source_refs: stats.source_refs(),
+                identity_registry_rows: plan.identity_registry_rows(),
+                memory,
+                limit: oracle_restore_memory_limit(),
+            });
+        });
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -7395,6 +7448,31 @@ pub(super) struct OracleRestoreMemoryBreakdown {
     pub(super) text_memory_bytes: u64,
     pub(super) sidecar_staging_bytes: u64,
     pub(super) total_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SealedOracleRestoreRefusal {
+    scope: &'static str,
+    sidecar_input_scope: &'static str,
+    stage: &'static str,
+    repository: RepositoryId,
+    generation: GenerationId,
+    indexed_files: u64,
+    has_source_catalog: bool,
+    files: u64,
+    entities: u64,
+    occurrences: u64,
+    relations: u64,
+    provenance: u64,
+    source_mappings: u64,
+    coverage: u64,
+    skipped_regions: u64,
+    diagnostics: u64,
+    extensions: u64,
+    source_refs: u64,
+    identity_registry_rows: u64,
+    memory: OracleRestoreMemoryBreakdown,
+    limit: u64,
 }
 
 pub(super) fn oracle_restore_memory_breakdown(

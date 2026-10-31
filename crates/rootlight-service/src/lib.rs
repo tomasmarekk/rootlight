@@ -298,6 +298,7 @@ pub struct FirstSliceAnalysisProfile {
     first_oracle_restore_refusal: Option<oracle_restore_preservation::RefusalObservation>,
     later_oracle_restore_refusals: u64,
     resolution_restore_refusal: Option<oracle_restore_preservation::ResolutionRefusalObservation>,
+    last_sealed_oracle_restore_refusal: Option<durable::SealedOracleRestoreRefusal>,
     append: AnalysisProfileAppend,
     append_scope: &'static str,
     phases: Vec<AnalysisProfileEvent>,
@@ -338,6 +339,7 @@ impl Default for FirstSliceAnalysisProfile {
             first_oracle_restore_refusal: None,
             later_oracle_restore_refusals: 0,
             resolution_restore_refusal: None,
+            last_sealed_oracle_restore_refusal: None,
             append: AnalysisProfileAppend::default(),
             append_scope: "inclusive_append_substages_nested_search_and_classification_decoder_times_overlap_decoder_counters_cover_classification_calls_only",
             phases: Vec::new(),
@@ -11301,9 +11303,12 @@ impl FirstSliceService {
             )?;
             if let (Some(prepared), Some(plan)) = (durable.as_ref(), oracle_restore_plan) {
                 if let Some(restore) = &restore_final { restore.verify_written(prepared, plan)?; }
-                let observed = prepared.oracle_restore_memory_bytes(plan, indexed_files, !verified.snapshot().source_files().is_empty())?;
+                let has_source_catalog = !verified.snapshot().source_files().is_empty();
+                let restore_memory = prepared.oracle_restore_memory_breakdown(plan, indexed_files, has_source_catalog)?;
+                let observed = restore_memory.total_bytes;
                 if let Some(cause) = aggregate_source_recovery::DurableRestoreCapacity::from_sealed_plan(observed) {
                     check_cancellation(cancellation)?;
+                    prepared.observe_sealed_restore_refusal("ordinary_sealed_output", plan, indexed_files, has_source_catalog, restore_memory);
                     durable_restore_failure = Some(cause);
                     return Err(cause.error().into());
                 }
@@ -12186,15 +12191,24 @@ impl FirstSliceService {
 
         // A degraded generation must itself pass the identical later restore
         // envelope. A refusal stays typed; it never recursively degrades again.
-        let restore_bytes = prepared.oracle_restore_memory_bytes(
+        let has_source_catalog = !verified.snapshot().source_files().is_empty();
+        let restore_memory = prepared.oracle_restore_memory_breakdown(
             restore_plan,
             streamed_files,
-            !verified.snapshot().source_files().is_empty(),
+            has_source_catalog,
         )?;
+        let restore_bytes = restore_memory.total_bytes;
         if let Some(cause) =
             aggregate_source_recovery::DurableRestoreCapacity::from_sealed_plan(restore_bytes)
         {
             check_cancellation(cancellation)?;
+            prepared.observe_sealed_restore_refusal(
+                "degraded_sealed_output",
+                restore_plan,
+                streamed_files,
+                has_source_catalog,
+                restore_memory,
+            );
             return Err(cause.error().into());
         }
 
