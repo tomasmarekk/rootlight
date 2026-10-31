@@ -35,34 +35,34 @@
     "network_or_generator_in_build": false
   },
   "parser": {
-    "origin": "Exact pinned upstream generated C and headers; no local regeneration",
+    "origin": "Locally derived grammar generated separately with pinned Tree-sitter CLI; original generated sources remain immutable under upstream/files",
     "upstream_generator_label": "tree-sitter0.25.3",
     "abi": 15,
-    "preferred_grammar_sha256": "528acef18e7b874a999a354d294011a7aed25f947b9890a6a248491ed29c8556",
+    "preferred_grammar_sha256": "a0a08f219bdeff4eaeae4ee9d3b7281526e8e6be557afc8f41a73e054b2f07c6",
     "outputs": {
       "src/parser.c": {
-        "bytes": 1983613,
-        "sha256": "b639abc5bccc6f63cd0da98df97d46b6ee614529e27a09405d0a933d68259318"
+        "bytes": 1984991,
+        "sha256": "c5a21950820f3a167f32ac61d0b710da163fa30290a134770d4fc95904e7a18d"
       },
       "src/grammar.json": {
-        "bytes": 184509,
-        "sha256": "1703b602843300cf986c7d551605fc1f8df703078897648401dbacc6adf9bd40"
+        "bytes": 185428,
+        "sha256": "7d5cdcd34c5a3dca0042cb8af0861c106d7b9b40675583851a69cfeaae8ff105"
       },
       "src/node-types.json": {
-        "bytes": 48294,
-        "sha256": "937f88680f3e223795d88f4ac7a7fed796590489e32e345bc39ed9c96579defc"
+        "bytes": 48295,
+        "sha256": "34667d0b2caeefd6629b920d1fa153bab5ece27f9ec5648b860c7023cb4b6041"
       },
       "src/tree_sitter/parser.h": {
-        "bytes": 7678,
-        "sha256": "11b654fbba7770b1c710cc14b169be2deb5d89c0f87233d4605037c26c1ff657"
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
       },
       "src/tree_sitter/alloc.h": {
         "bytes": 985,
         "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
       },
       "src/tree_sitter/array.h": {
-        "bytes": 10431,
-        "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
       }
     }
   },
@@ -72,7 +72,7 @@
   },
   "all_git_blobs_and_archive_payload_verified": true,
   "upstream_lifecycle_executed": false,
-  "grammar_modified": false,
+  "grammar_modified": true,
   "production_or_semantic_qualification": false,
   "corpus_witnesses": [
     {
@@ -81,7 +81,7 @@
       "path": "test/data/suites/w3c/sparql11/property-path/path-2-2.rq",
       "bytes": 68,
       "sha256": "bb0430981000c7e2afe26595e78591d440a3de02bb7caf42086e1c0a55136b26",
-      "scope": "Approved upstream evaluation fixture; external original bytes read by opt-in CST test, not copied or evaluated"
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
     },
     {
       "repository": "183_N3_rdflib",
@@ -89,7 +89,7 @@
       "path": "test/data/suites/w3c/sparql11/basic-update/insert-data-spo1.ru",
       "bytes": 60,
       "sha256": "96db9941ae5de6ce6c62b9b4ffaa4cf9a38f6fa342ac947ce49d9c07a761cbf0",
-      "scope": "Approved upstream evaluation fixture; external original bytes read by opt-in CST test, not copied or evaluated"
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
     },
     {
       "repository": "183_N3_rdflib",
@@ -97,7 +97,112 @@
       "path": "test/data/suites/w3c/dawg-data-r2/i18n/kanji-02.rq",
       "bytes": 280,
       "sha256": "9a58d6cf80756cbef75da9eb5507df0be594a2c1f7ea82d473bbeb584b2b77e5",
-      "scope": "Approved upstream evaluation fixture; external original bytes read by opt-in CST test, not copied or evaluated"
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
+    },
+    {
+      "repository": "183_N3_rdflib",
+      "revision": "f87db10f58264d619e5b55f1567bfdca4bb02afc",
+      "path": "test/data/suites/w3c/dawg-data-r2/syntax-sparql2/syntax-form-construct06.rq",
+      "bytes": 22,
+      "sha256": "bcc5decf25f4c30da1eaef472abc94c030494a10182edaa58c17d6b1a13d788a",
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
+    },
+    {
+      "repository": "184_SPARQL_jena",
+      "revision": "73713dcc5417385fd0d2bbcfaf97f50a7f521e8a",
+      "path": "jena-arq/testing/rdf-tests-cg/sparql/sparql10/syntax-sparql2/syntax-form-construct06.rq",
+      "bytes": 22,
+      "sha256": "bcc5decf25f4c30da1eaef472abc94c030494a10182edaa58c17d6b1a13d788a",
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
+    },
+    {
+      "repository": "183_N3_rdflib",
+      "revision": "f87db10f58264d619e5b55f1567bfdca4bb02afc",
+      "path": "test/data/suites/w3c/sparql11/syntax-update-1/syntax-update-39.ru",
+      "bytes": 41,
+      "sha256": "ab310767b53fb3dae5f1d41e5322aab1aa352c7db562230371a2929bf9310555",
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
+    },
+    {
+      "repository": "184_SPARQL_jena",
+      "revision": "73713dcc5417385fd0d2bbcfaf97f50a7f521e8a",
+      "path": "jena-arq/testing/rdf-tests-cg/sparql/sparql11/syntax-update-1/syntax-update-39.ru",
+      "bytes": 41,
+      "sha256": "ab310767b53fb3dae5f1d41e5322aab1aa352c7db562230371a2929bf9310555",
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
+    },
+    {
+      "repository": "183_N3_rdflib",
+      "revision": "f87db10f58264d619e5b55f1567bfdca4bb02afc",
+      "path": "test/data/suites/w3c/sparql11/syntax-update-1/syntax-update-40.ru",
+      "bytes": 45,
+      "sha256": "07cc022cee172c3f8215d35fcd278f9f095517fcb60830cd44db0fafd127eef2",
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
+    },
+    {
+      "repository": "184_SPARQL_jena",
+      "revision": "73713dcc5417385fd0d2bbcfaf97f50a7f521e8a",
+      "path": "jena-arq/testing/rdf-tests-cg/sparql/sparql11/syntax-update-1/syntax-update-40.ru",
+      "bytes": 45,
+      "sha256": "07cc022cee172c3f8215d35fcd278f9f095517fcb60830cd44db0fafd127eef2",
+      "scope": "Untouched external original bytes read by opt-in native syntax tests; no request evaluation or production corpus qualification"
     }
-  ]
+  ],
+  "local_derivation": {
+    "preferred_grammar": "grammar.js",
+    "preferred_grammar_sha256": "a0a08f219bdeff4eaeae4ee9d3b7281526e8e6be557afc8f41a73e054b2f07c6",
+    "base_grammar": "upstream/files/grammar.js",
+    "base_grammar_sha256": "528acef18e7b874a999a354d294011a7aed25f947b9890a6a248491ed29c8556",
+    "configuration": "tree-sitter.json",
+    "configuration_sha256": "88447ead2d6faf9374dc0beb003d409913437081b8f75bf49f4ddd0f36b103ce",
+    "changes": [
+      "Empty CONSTRUCT templates preserve the required where group and its optional WHERE keyword.",
+      "Non-nullable empty update requests retain prologues, greedy adjacent declarations and empty recursive semicolon tails."
+    ],
+    "syntax_reference": "https://www.w3.org/TR/sparql11-query/#sparqlGrammar",
+    "generator": {
+      "name": "tree-sitter-cli",
+      "version": "0.26.8",
+      "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+      "javascript_runtime": "bundled native QuickJS",
+      "abi": 15,
+      "working_directory": "package root",
+      "arguments": [
+        "generate",
+        "--js-runtime",
+        "native",
+        "--abi",
+        "15",
+        "grammar.js"
+      ],
+      "role": "Declared maintainer environment prerequisite; not a product dependency"
+    },
+    "generated_outputs": {
+      "src/parser.c": {
+        "bytes": 1984991,
+        "sha256": "c5a21950820f3a167f32ac61d0b710da163fa30290a134770d4fc95904e7a18d"
+      },
+      "src/grammar.json": {
+        "bytes": 185428,
+        "sha256": "7d5cdcd34c5a3dca0042cb8af0861c106d7b9b40675583851a69cfeaae8ff105"
+      },
+      "src/node-types.json": {
+        "bytes": 48295,
+        "sha256": "34667d0b2caeefd6629b920d1fa153bab5ece27f9ec5648b860c7023cb4b6041"
+      },
+      "src/tree_sitter/parser.h": {
+        "bytes": 7624,
+        "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+      },
+      "src/tree_sitter/alloc.h": {
+        "bytes": 985,
+        "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+      },
+      "src/tree_sitter/array.h": {
+        "bytes": 13269,
+        "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+      }
+    },
+    "generation_at_product_build_time": false
+  }
 }

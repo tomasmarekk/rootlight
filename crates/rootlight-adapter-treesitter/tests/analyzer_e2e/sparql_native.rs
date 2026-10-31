@@ -35,6 +35,47 @@ fn output(source: &[u8], original: bool) -> AnalysisOutput {
 }
 
 #[test]
+fn sparql_empty_construct_and_prologue_updates_keep_native_ir_without_recovery() {
+    for source in [
+        "CONSTRUCT {} WHERE {}\n",
+        "BASE <http://example/>\n# Otherwise empty\n",
+        "PREFIX : <http://example/>\n# Otherwise empty\n",
+    ] {
+        let result = output(source.as_bytes(), true);
+        let document = result.document();
+        assert_eq!(document.files.len(), 1);
+        assert_eq!(document.files[0].language, "sparql");
+        assert_eq!(
+            document.files[0].content_hash,
+            content_hash(source.as_bytes())
+        );
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Module && entity.language == "sparql")
+        );
+        assert!(
+            !document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "syntax-error-recovery")
+        );
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| gap.reason == SkippedRegionReason::ParseError)
+        );
+        for entity in &document.entities {
+            let source_ref = entity.evidence.source.as_ref().unwrap();
+            assert_eq!(source_ref.content_hash(), content_hash(source.as_bytes()));
+            assert!(source_ref.span().end_byte() <= u64::try_from(source.len()).unwrap());
+        }
+    }
+}
+
+#[test]
 fn sparql_explicit_aliases_keep_bare_names_full_tokens_and_query_scope_identity() {
     let source = b"PREFIX ex: <urn:example:>\r\nSELECT ?ordinary (1 AS # comment\r\n ?same) WHERE { BIND(\"AS ?fake\" AS ?inner) { SELECT (3 AS ?same) WHERE {} } ?s ex:p ?ordinary . }\r\nSELECT (4 AS $same) WHERE {}\r\nSELECT (5 AS ?0) WHERE { BIND(6 AS $1) }\r\n# SELECT (0 AS ?commented) WHERE {}\r\n";
     let result = output(source, false);

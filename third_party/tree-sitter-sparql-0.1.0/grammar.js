@@ -129,9 +129,10 @@ module.exports = grammar({
     ),
 
     // [3, 29-30]
-    _update: $ => seq(
-      optional($.prologue),
+    _update: $ => prec.right(choice(
+      $.prologue,
       seq(
+        optional($.prologue),
         choice(
           $.load,
           $.clear,
@@ -147,16 +148,16 @@ module.exports = grammar({
         ),
         optional(seq(
           ';',
-          $._update
+          optional($._update)
         ))
       )
-    ),
+    )),
 
     // [4]
-    prologue: $ => repeat1(choice(
+    prologue: $ => prec.right(repeat1(choice(
       $.base_declaration,
       $.prefix_declaration
-    )),
+    ))),
 
     // [5]
     base_declaration: $ => seq(
@@ -681,7 +682,7 @@ module.exports = grammar({
     // [73]
     construct_template: $ => seq(
       '{',
-      $.construct_triples,
+      optional($.construct_triples),
       '}'
     ),
 

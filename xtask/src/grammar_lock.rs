@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "ba44af24bb0f38b9f63c488897cc165aa6e8d0ea32d328c6bb0c41aba43ccab0";
+    "7f009ad7881b00771b78f0c434b330d16ed03b17c2ae247a97e477b4563841d2";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,31 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 64] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 68] = [
+    (
+        "tree-sitter-turtle",
+        "0.2.0",
+        "third_party/tree-sitter-turtle-0.2.0",
+        "e9fda0651ae1c20788f50073766558391623ceaa482c0bd66a1597d0c4d46bb2",
+    ),
+    (
+        "tree-sitter-typespec",
+        "0.0.1",
+        "third_party/tree-sitter-typespec-0.0.1",
+        "3fee2e85621c3613e57d035411c685bd1b70adfe0623a754eab388c4fb6bbbfe",
+    ),
+    (
+        "tree-sitter-n3",
+        "0.1.0",
+        "third_party/tree-sitter-n3-0.1.0",
+        "1af5b38bcf68e39511130e3603b9c2eeae1f860af0ccd70375374912dd295ff1",
+    ),
+    (
+        "tree-sitter-sparql",
+        "0.1.0",
+        "third_party/tree-sitter-sparql-0.1.0",
+        "0c17d0beed92c348bdeba51499fbcdc2390c179621f00cd2e974b6e6e18d351d",
+    ),
     (
         "tree-sitter-ron",
         "0.2.0",
@@ -899,7 +923,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 104 {
+    if manifest.grammars.len() != 108 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -924,6 +948,10 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "turtle",
+        "typespec",
+        "n3",
+        "sparql",
         "ron",
         "wesl",
         "erb",
@@ -1854,6 +1882,56 @@ mod tests {
         let manifest: GrammarLock = toml::from_str(include_str!("../../adapters/grammars.lock"))
             .expect("grammar lock parses");
         validate_manifest(&manifest).expect("reviewed runtime and grammar identities agree");
+    }
+
+    #[test]
+    fn complete_native_manifest_passes_dependency_and_source_admission() {
+        let metadata = crate::cargo_metadata::MetadataCommand::new()
+            .all_features()
+            .locked()
+            .exec()
+            .unwrap();
+        check(&metadata, metadata.workspace_root.as_path())
+            .expect("all declared native inputs remain authenticated");
+    }
+
+    #[test]
+    fn native_manifest_rejects_missing_or_extra_languages() {
+        for language in ["turtle", "typespec", "n3", "sparql"] {
+            let mut manifest: GrammarLock =
+                toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+            manifest
+                .grammars
+                .retain(|grammar| grammar.language != language);
+            assert!(matches!(
+                validate_manifest(&manifest),
+                Err(GrammarLockError::GrammarCount(107))
+            ));
+        }
+        let mut manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        manifest.grammars.last_mut().unwrap().language = "unreviewed-language".into();
+        assert!(matches!(
+            validate_manifest(&manifest),
+            Err(GrammarLockError::LanguageSet)
+        ));
+    }
+
+    #[test]
+    fn native_dependency_roster_requires_each_declared_local_package() {
+        for package in [
+            "tree-sitter-turtle",
+            "tree-sitter-typespec",
+            "tree-sitter-n3",
+            "tree-sitter-sparql",
+        ] {
+            let mut dependencies = audited_dependency_fixtures();
+            dependencies.retain(|dependency| dependency.name != package);
+            assert!(matches!(
+                validate_tree_sitter_dependencies(&dependencies, Path::new("/workspace")),
+                Err(GrammarLockError::DependencySet)
+            ));
+        }
     }
 
     #[test]

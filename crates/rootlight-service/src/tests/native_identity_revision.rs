@@ -5,6 +5,134 @@
 use super::*;
 
 #[test]
+fn n3_authenticated_source_correction_invalidates_same_analyzer_parser_artifacts() {
+    let registry = GrammarRegistry::audited().unwrap();
+    let descriptor = registry
+        .descriptors()
+        .iter()
+        .find(|descriptor| descriptor.language().as_str() == "n3")
+        .unwrap();
+    assert_eq!(descriptor.grammar_version(), "0.1.0");
+    assert_eq!(
+        descriptor.parser_sha256(),
+        "bc6ae706653aa9f154a6c719c37baf3406c59278be59cdc1c4ffefb75ad2a1d8"
+    );
+    assert_eq!(
+        descriptor.grammar_source_sha256(),
+        "1af5b38bcf68e39511130e3603b9c2eeae1f860af0ccd70375374912dd295ff1"
+    );
+    let previous = hash_static_components(&[
+        ANALYZER_BINARY_SEED,
+        b"n3",
+        b"0.1.0",
+        b"075bdfbb21658eccf03a1aa13447e7d5cbb1dfbefb1422626b9546ed9b077064",
+        descriptor.parser_sha256().as_bytes(),
+        b"no-scanner",
+    ])
+    .unwrap();
+    assert_ne!(grammar_binary_digest(descriptor).unwrap(), previous);
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/368"
+    );
+}
+
+#[test]
+fn sparql_empty_forms_invalidate_same_analyzer_grammar_and_provider_identity() {
+    let previous_source = "0de355eb91dc16a0bf83d698b718b7dd1cc4a5fc2fe389b0e4bd7acae8441645";
+    let previous_parser = "b639abc5bccc6f63cd0da98df97d46b6ee614529e27a09405d0a933d68259318";
+    let registry = GrammarRegistry::audited().unwrap();
+    let mut previous = blake3::Hasher::new();
+    hash_component(&mut previous, GRAMMAR_REVISION_SEED).unwrap();
+    hash_component(&mut previous, TREE_SITTER_RUNTIME_VERSION.as_bytes()).unwrap();
+    for descriptor in registry.descriptors() {
+        let sparql = descriptor.language().as_str() == "sparql";
+        for field in [
+            descriptor.language().as_str(),
+            descriptor.grammar_version(),
+            if sparql {
+                previous_source
+            } else {
+                descriptor.grammar_source_sha256()
+            },
+            if sparql {
+                previous_parser
+            } else {
+                descriptor.parser_sha256()
+            },
+        ] {
+            hash_component(&mut previous, field.as_bytes()).unwrap();
+        }
+        match descriptor.scanner_sha256() {
+            Some(scanner) => {
+                hash_component(&mut previous, b"scanner").unwrap();
+                hash_component(&mut previous, scanner.as_bytes()).unwrap();
+            }
+            None => hash_component(&mut previous, b"no-scanner").unwrap(),
+        }
+        hash_component(
+            &mut previous,
+            &u64::try_from(descriptor.abi_version())
+                .unwrap()
+                .to_be_bytes(),
+        )
+        .unwrap();
+        if sparql {
+            assert_ne!(descriptor.grammar_source_sha256(), previous_source);
+            assert_ne!(descriptor.parser_sha256(), previous_parser);
+            let preceding = hash_static_components(&[
+                ANALYZER_BINARY_SEED,
+                b"sparql",
+                b"0.1.0",
+                previous_source.as_bytes(),
+                previous_parser.as_bytes(),
+                b"no-scanner",
+            ])
+            .unwrap();
+            assert_ne!(grammar_binary_digest(descriptor).unwrap(), preceding);
+        }
+    }
+    let previous_grammar = ContentHash::from_bytes(*previous.finalize().as_bytes());
+    assert_ne!(
+        first_slice_grammar_revision_hash().unwrap(),
+        previous_grammar
+    );
+    let previous_provider = hash_static_components(&[
+        PARSER_PROVIDER_SET_SEED,
+        TREE_SITTER_ADAPTER_VERSION.as_bytes(),
+        TREE_SITTER_RUNTIME_VERSION.as_bytes(),
+        ANALYZER_BINARY_SEED,
+        previous_grammar.as_bytes(),
+    ])
+    .unwrap();
+    assert_ne!(
+        first_slice_parser_provider_hash().unwrap(),
+        previous_provider
+    );
+    let previous = hash_static_components(&[
+        PROVIDER_SET_SEED,
+        previous_provider.as_bytes(),
+        DISCOVERY_MANIFEST_VERSION.as_bytes(),
+        RESOLVER_PROVIDER_VERSION.as_bytes(),
+        RESOLVER_BINARY_SEED,
+        SEARCH_REVISION_SEED,
+        INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+        DERIVED_PLAN_REVISION_SEED,
+        LANGUAGE_DISPOSITION_PROVIDER_SEED,
+        SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+        container_sources::REVISION,
+    ])
+    .unwrap();
+    assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/368"
+    );
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/159");
+    assert_eq!(PROVIDER_SET_SEED, b"rootlight.first-slice.providers/12");
+}
+
+#[test]
 fn sparql_native_aliases_invalidate_previous_analyzer_resolver_and_discovery() {
     let grammar = first_slice_grammar_revision_hash().unwrap();
     let previous_parser = hash_static_components(&[

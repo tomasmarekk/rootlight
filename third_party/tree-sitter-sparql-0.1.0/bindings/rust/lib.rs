@@ -7,7 +7,7 @@ unsafe extern "C" {
     fn tree_sitter_sparql() -> *const ();
 }
 
-/// Provides the immutable upstream-generated ABI15 grammar table.
+/// Provides the immutable locally generated ABI15 grammar table.
 // SAFETY: the retained C factory returns a process-lifetime static language table
 // compiled by this crate's local build script, without an external scanner.
 pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_sparql) };

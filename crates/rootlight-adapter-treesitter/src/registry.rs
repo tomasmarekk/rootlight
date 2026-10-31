@@ -754,14 +754,14 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Sparql => GrammarIdentity {
             language_id: "sparql",
             grammar_version: "0.1.0",
-            source_package_sha256: "0de355eb91dc16a0bf83d698b718b7dd1cc4a5fc2fe389b0e4bd7acae8441645",
-            parser_sha256: "b639abc5bccc6f63cd0da98df97d46b6ee614529e27a09405d0a933d68259318",
+            source_package_sha256: "0c17d0beed92c348bdeba51499fbcdc2390c179621f00cd2e974b6e6e18d351d",
+            parser_sha256: "c5a21950820f3a167f32ac61d0b710da163fa30290a134770d4fc95904e7a18d",
             scanner_sha256: None,
         },
         GrammarFamily::N3 => GrammarIdentity {
             language_id: "n3",
             grammar_version: "0.1.0",
-            source_package_sha256: "075bdfbb21658eccf03a1aa13447e7d5cbb1dfbefb1422626b9546ed9b077064",
+            source_package_sha256: "1af5b38bcf68e39511130e3603b9c2eeae1f860af0ccd70375374912dd295ff1",
             parser_sha256: "bc6ae706653aa9f154a6c719c37baf3406c59278be59cdc1c4ffefb75ad2a1d8",
             scanner_sha256: None,
         },

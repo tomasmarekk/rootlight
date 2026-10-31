@@ -368,13 +368,13 @@
     },
     {
       "path": "bindings/rust/build.rs",
-      "bytes": 571,
-      "sha256": "e1b21c9b08b7a5f8d399bf591bc87ce8830ce6d8d73e254cdc0f58cb87ab037d"
+      "bytes": 578,
+      "sha256": "00d55894f2e7d1254ed61585073bbf108bb024a1408f868da61b8e61a3891fb5"
     },
     {
       "path": "bindings/rust/lib.rs",
-      "bytes": 576,
-      "sha256": "6f06d1e49eed82c246cbe385537e53fa41736b8fa68122eefa4abe986c075498"
+      "bytes": 575,
+      "sha256": "aee67cb8d1e90a655635e53eabc5c50ea8a4da2c65a74332a13f1e76def33be7"
     },
     {
       "path": "Cargo.lock",
@@ -388,8 +388,8 @@
     },
     {
       "path": "grammar.js",
-      "bytes": 27495,
-      "sha256": "528acef18e7b874a999a354d294011a7aed25f947b9890a6a248491ed29c8556"
+      "bytes": 27562,
+      "sha256": "a0a08f219bdeff4eaeae4ee9d3b7281526e8e6be557afc8f41a73e054b2f07c6"
     },
     {
       "path": "LICENSE",
@@ -398,28 +398,28 @@
     },
     {
       "path": "PATCHES.md",
-      "bytes": 1239,
-      "sha256": "1b3f8f48e82980992b3e5cfd0c74c2eb587383c72cb2ea6c1c8b04eaa01debb7"
+      "bytes": 2281,
+      "sha256": "1bbd639477305f0df62af8dafc453940dcc17e9c74c9287777433a21899b9ba6"
     },
     {
       "path": "SOURCE-PROVENANCE.json",
-      "bytes": 4002,
-      "sha256": "8f0d507f7f8c70915852267eefc5e7541815a12911a6ea291674180ead459914"
+      "bytes": 9123,
+      "sha256": "56e59a5cc301ea1626b2da8e1d6e692fa0523737bb51802ed0c1cda68b78d308"
     },
     {
       "path": "src/grammar.json",
-      "bytes": 184509,
-      "sha256": "1703b602843300cf986c7d551605fc1f8df703078897648401dbacc6adf9bd40"
+      "bytes": 185428,
+      "sha256": "7d5cdcd34c5a3dca0042cb8af0861c106d7b9b40675583851a69cfeaae8ff105"
     },
     {
       "path": "src/node-types.json",
-      "bytes": 48294,
-      "sha256": "937f88680f3e223795d88f4ac7a7fed796590489e32e345bc39ed9c96579defc"
+      "bytes": 48295,
+      "sha256": "34667d0b2caeefd6629b920d1fa153bab5ece27f9ec5648b860c7023cb4b6041"
     },
     {
       "path": "src/parser.c",
-      "bytes": 1983613,
-      "sha256": "b639abc5bccc6f63cd0da98df97d46b6ee614529e27a09405d0a933d68259318"
+      "bytes": 1984991,
+      "sha256": "c5a21950820f3a167f32ac61d0b710da163fa30290a134770d4fc95904e7a18d"
     },
     {
       "path": "src/tree_sitter/alloc.h",
@@ -428,19 +428,24 @@
     },
     {
       "path": "src/tree_sitter/array.h",
-      "bytes": 10431,
-      "sha256": "5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94"
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
     },
     {
       "path": "src/tree_sitter/parser.h",
-      "bytes": 7678,
-      "sha256": "11b654fbba7770b1c710cc14b169be2deb5d89c0f87233d4605037c26c1ff657"
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
     },
     {
       "path": "tests/sparql_syntax.rs",
-      "bytes": 6957,
-      "sha256": "15e7567dbe5a92e8bf605923d35329150a557066e21c65077c0179dae25bcd9b"
+      "bytes": 10467,
+      "sha256": "e71ad731ff9123e735ad3c5ab44bd2bab40f4d90856b93a9a308b0543c4be841"
+    },
+    {
+      "path": "tree-sitter.json",
+      "bytes": 499,
+      "sha256": "88447ead2d6faf9374dc0beb003d409913437081b8f75bf49f4ddd0f36b103ce"
     }
   ],
-  "inventory_scope": "All retained upstream Git blobs and archive; every active/local package file except this self-referential inventory"
+  "inventory_scope": "All retained upstream Git blobs and archive; every active/local/derived package file except this self-referential inventory"
 }

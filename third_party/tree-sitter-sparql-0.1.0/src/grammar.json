@@ -81,111 +81,131 @@
       ]
     },
     "_update": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "SYMBOL",
-              "name": "prologue"
-            },
-            {
-              "type": "BLANK"
-            }
-          ]
-        },
-        {
-          "type": "SEQ",
-          "members": [
-            {
-              "type": "CHOICE",
-              "members": [
-                {
-                  "type": "SYMBOL",
-                  "name": "load"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "clear"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "drop"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "add"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "move"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "copy"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "create"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "insert_data"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "delete_data"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "delete_where"
-                },
-                {
-                  "type": "SYMBOL",
-                  "name": "modify"
-                }
-              ]
-            },
-            {
-              "type": "CHOICE",
-              "members": [
-                {
-                  "type": "SEQ",
-                  "members": [
-                    {
-                      "type": "STRING",
-                      "value": ";"
-                    },
-                    {
-                      "type": "SYMBOL",
-                      "name": "_update"
-                    }
-                  ]
-                },
-                {
-                  "type": "BLANK"
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    "prologue": {
-      "type": "REPEAT1",
+      "type": "PREC_RIGHT",
+      "value": 0,
       "content": {
         "type": "CHOICE",
         "members": [
           {
             "type": "SYMBOL",
-            "name": "base_declaration"
+            "name": "prologue"
           },
           {
-            "type": "SYMBOL",
-            "name": "prefix_declaration"
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "prologue"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              },
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "load"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "clear"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "drop"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "add"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "move"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "copy"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "create"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "insert_data"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "delete_data"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "delete_where"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "modify"
+                  }
+                ]
+              },
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SEQ",
+                    "members": [
+                      {
+                        "type": "STRING",
+                        "value": ";"
+                      },
+                      {
+                        "type": "CHOICE",
+                        "members": [
+                          {
+                            "type": "SYMBOL",
+                            "name": "_update"
+                          },
+                          {
+                            "type": "BLANK"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              }
+            ]
           }
         ]
+      }
+    },
+    "prologue": {
+      "type": "PREC_RIGHT",
+      "value": 0,
+      "content": {
+        "type": "REPEAT1",
+        "content": {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "base_declaration"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "prefix_declaration"
+            }
+          ]
+        }
       }
     },
     "base_declaration": {
@@ -2762,8 +2782,16 @@
           "value": "{"
         },
         {
-          "type": "SYMBOL",
-          "name": "construct_triples"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "construct_triples"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "STRING",

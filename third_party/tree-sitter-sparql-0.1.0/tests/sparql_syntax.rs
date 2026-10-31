@@ -155,12 +155,75 @@ fn incremental_edit_matches_fresh_after_multibyte_crlf_source() {
 }
 
 #[test]
+fn empty_construct_and_update_forms_keep_nonempty_native_contexts() {
+    for source in [
+        "CONSTRUCT {} WHERE {}\n",
+        "CONSTRUCT {} {}\n",
+        "BASE <http://example/>\n# Otherwise empty\n",
+        "PREFIX : <http://example/>\n# Otherwise empty\n",
+        "# prefix comment\r\nBASE <urn:example:>\r\nPREFIX ex: <urn:example:>\r\n",
+        "PREFIX ex: <urn:example:> SELECT ?s WHERE { ?s ex:p ex:o }\n",
+        "INSERT DATA {};\n",
+        "INSERT DATA {}; BASE <urn:example:>\n# empty tail\n",
+        "PREFIX ex: <urn:example:> INSERT DATA {}; PREFIX other: <urn:other:> DELETE DATA {}\n",
+    ] {
+        let tree = parser().parse(source, None).unwrap();
+        clean(source.as_bytes(), &tree);
+        if source.starts_with("CONSTRUCT") {
+            exact_node(
+                &tree,
+                source.as_bytes(),
+                "construct_template",
+                10,
+                12,
+                b"{}",
+            );
+        }
+        if source.contains("SELECT") {
+            let nodes = shape(&tree);
+            assert_eq!(
+                nodes.iter().filter(|node| node.0 == "select_query").count(),
+                1
+            );
+            assert_eq!(
+                nodes
+                    .iter()
+                    .filter(|node| node.0 == "prefix_declaration")
+                    .count(),
+                1
+            );
+            assert!(
+                nodes
+                    .iter()
+                    .all(|node| node.0 != "insert_data" && node.0 != "delete_data")
+            );
+        }
+        if source.contains("BASE") && source.contains("PREFIX") {
+            assert_eq!(
+                shape(&tree)
+                    .iter()
+                    .filter(|node| node.0 == "prologue")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
 fn malformed_queries_and_updates_retain_native_recovery() {
     for source in [
         b"SELECT ?s WHERE { ?s <urn:p> . }\n".as_slice(),
         b"SELECT ?s WHERE { ?s <urn:p> <urn:o> .\n",
         b"INSERT DATA { <urn:s> <urn:p> }\n",
         b"DELETE DATA { <urn:s> <urn:p> <urn:o>\n",
+        b"CONSTRUCT {}\n",
+        b"CONSTRUCT {} WHERE {\n",
+        b"CONSTRUCT { WHERE {}\n",
+        b"BASE\n",
+        b"PREFIX :\n",
+        b"PREFIX : <http://example/> trailing_junk\n",
+        b"INSERT DATA {};;\n",
     ] {
         let tree = parser().parse(source, None).unwrap();
         assert!(
@@ -168,6 +231,46 @@ fn malformed_queries_and_updates_retain_native_recovery() {
             "{}",
             tree.root_node().to_sexp()
         );
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied original SPARQL corpus root"]
+fn original_approved_empty_construct_and_updates_are_native_clean() {
+    let corpus = std::env::var_os("ROOTLIGHT_DIAGNOSTIC_CORPUS_ROOT")
+        .expect("original corpus root is provided");
+    let root = std::path::Path::new(&corpus);
+    let witnesses = [
+        (
+            "sparql10/syntax-sparql2/syntax-form-construct06.rq",
+            "dawg-data-r2/syntax-sparql2/syntax-form-construct06.rq",
+            22,
+        ),
+        (
+            "sparql11/syntax-update-1/syntax-update-39.ru",
+            "sparql11/syntax-update-1/syntax-update-39.ru",
+            41,
+        ),
+        (
+            "sparql11/syntax-update-1/syntax-update-40.ru",
+            "sparql11/syntax-update-1/syntax-update-40.ru",
+            45,
+        ),
+    ];
+    for (jena, rdflib, expected_bytes) in witnesses {
+        let first =
+            std::fs::read(root.join("183_N3_rdflib/test/data/suites/w3c").join(rdflib)).unwrap();
+        let second = std::fs::read(
+            root.join("184_SPARQL_jena/jena-arq/testing/rdf-tests-cg/sparql")
+                .join(jena),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), expected_bytes);
+        for source in [&first, &second] {
+            let tree = parser().parse(source, None).unwrap();
+            clean(source, &tree);
+        }
     }
 }
 

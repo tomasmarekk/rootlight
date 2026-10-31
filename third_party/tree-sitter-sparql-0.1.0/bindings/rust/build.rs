@@ -1,4 +1,4 @@
-//! Compile only the retained upstream SPARQL parser and headers.
+//! Compile only the retained locally derived SPARQL parser and headers.
 //! Acquisition, generation and upstream lifecycle hooks never run during builds.
 
 fn main() {
