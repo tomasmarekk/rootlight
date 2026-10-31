@@ -127,6 +127,7 @@ mod scala_formals;
 mod scheme;
 mod sed;
 mod sml_wat;
+mod sparql;
 mod sql;
 mod sql_admission;
 mod thrift;
@@ -478,6 +479,14 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::Sparql {
+            expected.retain(|name| {
+                matches!(
+                    *name,
+                    "root" | "module" | "declaration" | "definition" | "scope"
+                )
+            });
+        }
         if family == GrammarFamily::N3 {
             expected.retain(|name| {
                 matches!(
@@ -3207,7 +3216,14 @@ impl QueryPack {
                     }
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::N3 {
+                let candidate = if input.family == GrammarFamily::Sparql {
+                    let Some(candidate) =
+                        sparql::candidate(capture.node, role, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
+                } else if input.family == GrammarFamily::N3 {
                     let Some(candidate) = n3::candidate(capture.node, role, input.cancellation)?
                     else {
                         continue;
@@ -4638,6 +4654,7 @@ fn candidate_for_capture(
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
             GrammarFamily::Wgsl => return Err(query_failure("query-wgsl-unproven-call")),
             GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
+            GrammarFamily::Sparql => return Err(query_failure("query-sparql-unproven-call")),
             GrammarFamily::N3 => return Err(query_failure("query-n3-unproven-call")),
             GrammarFamily::Turtle => return Err(query_failure("query-turtle-unproven-call")),
             GrammarFamily::TypeSpec => return Err(query_failure("query-typespec-unproven-call")),
@@ -5162,6 +5179,7 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::Sparql, "unit") => Some("sparql.file"),
         (GrammarFamily::N3, "n3_doc") => Some("n3.file"),
         (GrammarFamily::Turtle, "document") => Some("turtle.file"),
         (GrammarFamily::Idris, "idris") => Some("idris.file"),
@@ -5771,7 +5789,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(110);
+        let mut packs = Vec::with_capacity(111);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5860,6 +5878,7 @@ impl QueryPackRegistry {
                 GrammarFamily::TypeSpec,
                 include_str!("../queries/typespec.scm"),
             ),
+            (GrammarFamily::Sparql, include_str!("../queries/sparql.scm")),
             (GrammarFamily::N3, include_str!("../queries/n3.scm")),
             (GrammarFamily::Turtle, include_str!("../queries/turtle.scm")),
             (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
@@ -6077,6 +6096,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sparql_pack_loads_distinct_native_query_and_update_units() {
+        let registry = crate::GrammarRegistry::audited().expect("native registry");
+        let descriptor = registry
+            .get(GrammarFamily::Sparql)
+            .expect("SPARQL registered");
+        assert_eq!(descriptor.language().as_str(), "sparql");
+        assert_ne!(
+            descriptor.parser_sha256(),
+            registry.get(GrammarFamily::N3).unwrap().parser_sha256()
+        );
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Sparql))
+            .unwrap();
+        let source = b"PREFIX ex: <urn:example:>\nSELECT ?s WHERE { ?s ex:p ?o . }\nINSERT DATA { ex:s ex:p ex:o . }\n";
+        let tree = parser.parse(source, None).expect("native SPARQL parse");
+        assert!(!tree.root_node().has_error());
+        assert_eq!(tree.root_node().kind(), "unit");
+        assert_eq!(tree.root_node().end_byte(), source.len());
+        let pack = QueryPack::compile(GrammarFamily::Sparql, include_str!("../queries/sparql.scm"))
+            .unwrap();
+        assert!(pack.identity_query.capture_names().contains(&"module"));
+    }
+
+    #[test]
+    fn sparql_native_alias_owners_distinguish_projected_uses_and_subselects() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Sparql))
+            .unwrap();
+        let source = b"SELECT ?ordinary (1 AS # alias comment\r\n ?alias) WHERE { BIND(2 AS ?bound) { SELECT (3 AS ?alias) WHERE {} } }\r\nSELECT (4 AS ?alias) WHERE {}\r\n";
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let query = Query::new(
+            &language_for(GrammarFamily::Sparql),
+            "[(select_clause bound_variable: (var) @term) (bind bound_variable: (var) @term)]",
+        )
+        .unwrap();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_slice());
+        let mut aliases = Vec::new();
+        let mut projected_uses = 0;
+        while let Some(found) = matches.next() {
+            for capture in found.captures {
+                let node = capture.node;
+                let mut previous = node.prev_sibling();
+                while previous.is_some_and(|node| node.is_extra()) {
+                    previous = previous.and_then(|node| node.prev_sibling());
+                }
+                if previous.is_some_and(|node| node.kind() == "AS") {
+                    let mut owner = node.parent();
+                    while owner
+                        .is_some_and(|node| !matches!(node.kind(), "select_query" | "sub_select"))
+                    {
+                        owner = owner.and_then(|node| node.parent());
+                    }
+                    aliases.push((
+                        &source[node.start_byte()..node.end_byte()],
+                        node.parent().unwrap().kind(),
+                        owner.unwrap().kind(),
+                        owner.unwrap().start_byte(),
+                    ));
+                } else {
+                    projected_uses += 1;
+                }
+            }
+        }
+        assert_eq!(projected_uses, 1);
+        assert_eq!(aliases.len(), 4);
+        assert_eq!(aliases.iter().filter(|entry| entry.1 == "bind").count(), 1);
+        assert_eq!(
+            aliases
+                .iter()
+                .filter(|entry| entry.2 == "sub_select")
+                .count(),
+            1
+        );
+        assert_eq!(
+            aliases
+                .iter()
+                .filter(|entry| entry.0 == b"?alias")
+                .map(|entry| entry.3)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
     fn n3_pack_loads_distinct_native_formula_document() {
         let registry = crate::GrammarRegistry::audited().expect("native registry");
         let descriptor = registry.get(GrammarFamily::N3).expect("N3 registered");
@@ -6150,10 +6262,11 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 112);
+        assert_eq!(registry.len(), 113);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
+            GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Erb,
             GrammarFamily::Wesl,
@@ -6263,6 +6376,14 @@ mod tests {
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::Sparql {
+                expected.retain(|name| {
+                    matches!(
+                        *name,
+                        "root" | "module" | "declaration" | "definition" | "scope"
+                    )
+                });
+            }
             if family == GrammarFamily::N3 {
                 expected.retain(|name| {
                     matches!(
@@ -6813,7 +6934,7 @@ mod tests {
 
     #[test]
     fn rust_complete_proof_context_keeps_the_same_bom_extent_as_its_root() {
-        let source = "\u{feff}// λ 😀\nfn helper() {} fn run() { helper(); }\n".as_bytes();
+        let source = "\u{feff}// Î» ðŸ˜€\nfn helper() {} fn run() { helper(); }\n".as_bytes();
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&language_for(GrammarFamily::Rust))

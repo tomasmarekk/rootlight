@@ -789,6 +789,7 @@ fn complete_source_grammars_reject_included_ranges_before_native_work() {
         "typespec",
         "turtle",
         "n3",
+        "sparql",
     ] {
         for ranges in [vec![(0, 29)], vec![(0, 7), (30, 37)]] {
             let ranges = ranges

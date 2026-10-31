@@ -24,6 +24,9 @@ mod hlsl;
 #[path = "structural_n3.rs"]
 mod n3;
 
+#[path = "structural_sparql.rs"]
+mod sparql;
+
 #[path = "structural_ocaml.rs"]
 mod ocaml;
 
@@ -259,6 +262,9 @@ pub fn structural_preprocessor_context_gaps(
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("sparql.") {
+        return sparql::kind(fact);
+    }
     if label.starts_with("cuda.") {
         return match (fact.kind(), label) {
             (SyntaxFactKind::Declaration, "cuda.function.declaration") => {
@@ -1457,6 +1463,11 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "sparql" || label.starts_with("sparql.") {
+        return (language == "sparql")
+            .then(|| sparql::name(fact, text, maximum_bytes))
+            .flatten();
+    }
     if language == "n3" || label.starts_with("n3.") {
         return (language == "n3")
             .then(|| n3::name(fact, text, maximum_bytes))

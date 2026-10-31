@@ -13,6 +13,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// SPARQL written requests without query evaluation or external resource loading.
+    Sparql,
     /// Notation3 written source without logical inference or external IRI loading.
     N3,
     /// Turtle written RDF declarations without inference or external IRI loading.
@@ -329,8 +331,9 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(110);
+        let mut descriptors = Vec::with_capacity(111);
         for family in [
+            GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Turtle,
             GrammarFamily::TypeSpec,
@@ -542,6 +545,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::Sparql => tree_sitter_sparql::LANGUAGE.into(),
         GrammarFamily::N3 => tree_sitter_n3::LANGUAGE.into(),
         GrammarFamily::Turtle => tree_sitter_turtle::LANGUAGE.into(),
         GrammarFamily::TypeSpec => tree_sitter_typespec::LANGUAGE.into(),
@@ -746,6 +750,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             scanner_sha256: Some(
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
             ),
+        },
+        GrammarFamily::Sparql => GrammarIdentity {
+            language_id: "sparql",
+            grammar_version: "0.1.0",
+            source_package_sha256: "0de355eb91dc16a0bf83d698b718b7dd1cc4a5fc2fe389b0e4bd7acae8441645",
+            parser_sha256: "b639abc5bccc6f63cd0da98df97d46b6ee614529e27a09405d0a933d68259318",
+            scanner_sha256: None,
         },
         GrammarFamily::N3 => GrammarIdentity {
             language_id: "n3",
@@ -1624,8 +1635,9 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 110);
+        assert_eq!(registry.descriptors().len(), 111);
         for family in [
+            GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Turtle,
             GrammarFamily::TypeSpec,
@@ -1992,6 +2004,7 @@ mod tests {
 
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
         for (family, language, package) in [
+            (GrammarFamily::Sparql, "sparql", "tree-sitter-sparql"),
             (GrammarFamily::N3, "n3", "tree-sitter-n3"),
             (GrammarFamily::Turtle, "turtle", "tree-sitter-turtle"),
             (GrammarFamily::TypeSpec, "typespec", "tree-sitter-typespec"),
@@ -2175,7 +2188,8 @@ mod tests {
                     ) || family.is_cobol()
                         || matches!(
                             family,
-                            GrammarFamily::N3
+                            GrammarFamily::Sparql
+                                | GrammarFamily::N3
                                 | GrammarFamily::Turtle
                                 | GrammarFamily::TypeSpec
                                 | GrammarFamily::Ron

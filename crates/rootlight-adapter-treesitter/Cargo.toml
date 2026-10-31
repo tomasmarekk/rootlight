@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tree-sitter-sparql.workspace = true
 tree-sitter-n3.workspace = true
 tree-sitter-turtle.workspace = true
 tree-sitter-typespec.workspace = true

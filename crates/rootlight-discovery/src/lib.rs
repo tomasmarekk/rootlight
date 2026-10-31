@@ -62,6 +62,7 @@ mod rust_hint;
 mod rust_hint_contract_tests;
 mod scheme;
 mod shebang;
+mod sparql_update;
 mod streamed;
 #[cfg(test)]
 mod thinkscript_tests;
@@ -84,7 +85,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.94";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.95";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2155,6 +2156,18 @@ fn classify_with_text_evidence(
             evidence: LanguageEvidence::Content,
         });
     }
+    let sparql_update = validated_text
+        && normalized.ends_with(".ru")
+        && sparql_update::has_content_hint(
+            &content[..content.len().min(MAX_CLASSIFICATION_BYTES)],
+            prefix_truncated || content.len() > MAX_CLASSIFICATION_BYTES,
+        );
+    if sparql_update {
+        signals.insert(LanguageSignal {
+            language: "sparql".to_owned(),
+            evidence: LanguageEvidence::Content,
+        });
+    }
     if !json_schema_document
         && common_lisp::is_content_candidate(&normalized)
         && common_lisp::has_content_hint(
@@ -2169,7 +2182,9 @@ fn classify_with_text_evidence(
     }
     // A complete JSON object has no executable header outside its strings.
     // Generic code hints must not mine schema annotations or example payloads.
-    let content_hint = if let Some(roots) = xml_companion_roots(&normalized) {
+    let content_hint = if sparql_update {
+        None
+    } else if let Some(roots) = xml_companion_roots(&normalized) {
         text_evidence
             .is_some_and(|evidence| xml_companion_opening(content, roots, evidence))
             .then_some("xml")
@@ -3080,6 +3095,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".m"],
         aliases: &["objc"],
         detectors: &["content", "context", "extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "sparql",
+        suffixes: &[".rq", ".sparql"],
+        aliases: &[],
+        detectors: &["extension", "content"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -9944,6 +9967,113 @@ max_source_file_bytes = 2097152
         }
         assert_eq!(extension_language("main.tsp.ts"), Some("typescript"));
         assert_eq!(extension_language("main.tsp.json"), Some("json"));
+    }
+
+    #[test]
+    fn sparql_query_suffixes_have_their_distinct_native_language_identity() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "sparql")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".rq", ".sparql"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        for path in [
+            "query.rq",
+            "QUERY.RQ",
+            "queries/select.sparql",
+            "rules.SPARQL",
+        ] {
+            assert_eq!(extension_language(path), Some("sparql"));
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"SELECT ?s WHERE { ?s <urn:p> ?o . }\n",
+            );
+            assert!(signals.iter().any(|signal| signal.language == "sparql"
+                && signal.evidence == LanguageEvidence::Extension));
+        }
+        assert_eq!(extension_language("config.ru"), Some("ruby"));
+        for path in [
+            "data.ttl",
+            "rules.n3",
+            "data.trig",
+            "query.rq.bak",
+            "query.sparqlx",
+        ] {
+            assert_ne!(extension_language(path), Some("sparql"));
+        }
+    }
+
+    #[test]
+    fn sparql_update_content_requires_a_complete_leading_prologue() {
+        for source in [
+            "PREFIX ex: <urn:example:> INSERT DATA { ex:s ex:p ex:o . }\n",
+            "# request\r\nbase<https://example.test/#part>\r\nDELETE WHERE { ?s ?p ?o . }\r\n",
+            "PREFIX : <urn:default:>\nPREFIX 食: <urn:unicode:> SELECT ?x WHERE {}\n",
+            "PREFIX ex: <urn:example:>\n# empty update\n",
+            "PREFIX ex: <urn:\\u0058> CLEAR DEFAULT\n",
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new("update.RU")).unwrap(),
+                source.as_bytes(),
+            );
+            assert!(signals.iter().any(|signal| signal.language == "ruby"
+                && signal.evidence == LanguageEvidence::Extension));
+            assert!(
+                signals.iter().any(|signal| signal.language == "sparql"
+                    && signal.evidence == LanguageEvidence::Content),
+                "{source}"
+            );
+        }
+        for source in [
+            "# PREFIX ex: <urn:example:>\nrun Rails.application\n",
+            "\"PREFIX ex: <urn:example:> INSERT DATA {}\"\n",
+            "%q{PREFIX ex: <urn:example:> INSERT DATA {}}\n",
+            "query = <<~SPARQL\nPREFIX ex: <urn:example:> INSERT DATA {}\nSPARQL\n",
+            "=begin\nPREFIX ex: <urn:example:> INSERT DATA {}\n=end\n",
+            "PREFIX = '<urn:example:>'\n",
+            "PREFIXed ex: <urn:example:> INSERT DATA {}\n",
+            "PREFIXÉ ex: <urn:example:> INSERT DATA {}\n",
+            "PREFIX ex: <urn:incomplete\nINSERT DATA {}\n",
+            "PREFIX ex: <urn:invalid space> INSERT DATA {}\n",
+            "PREFIX ex: <urn:\\n> INSERT DATA {}\n",
+            "PREFIX ex: <urn:example:> run Rails.application\n",
+            "DROP DEFAULT\n",
+            "INSERT DATA {}\n",
+            "# Empty\n",
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new("config.ru")).unwrap(),
+                source.as_bytes(),
+            );
+            assert!(
+                !signals.iter().any(|signal| signal.language == "sparql"
+                    && signal.evidence == LanguageEvidence::Content),
+                "{source}"
+            );
+        }
+        let mut boundary =
+            vec![b' '; MAX_CLASSIFICATION_BYTES - b"PREFIX ex: <urn:example:>".len()];
+        boundary.extend_from_slice(b"PREFIX ex: <urn:example:>");
+        boundary.extend_from_slice(b" INSERT DATA {}\n");
+        let (_, signals) = classify(
+            &RelativePath::parse(Path::new("update.ru")).unwrap(),
+            &boundary,
+        );
+        assert!(!signals.iter().any(|signal| signal.language == "sparql"));
+        let (_, signals) = classify_validated_prefix(
+            &RelativePath::parse(Path::new("update.ru")).unwrap(),
+            b"PREFIX ex: <urn:example:>",
+            true,
+            false,
+            true,
+        );
+        assert!(!signals.iter().any(|signal| signal.language == "sparql"));
+        let (_, signals) = classify(
+            &RelativePath::parse(Path::new("notes.txt")).unwrap(),
+            b"PREFIX ex: <urn:example:> INSERT DATA {}\n",
+        );
+        assert!(!signals.iter().any(|signal| signal.language == "sparql"));
     }
 
     #[test]

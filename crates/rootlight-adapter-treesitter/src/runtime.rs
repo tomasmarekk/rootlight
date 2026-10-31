@@ -717,6 +717,7 @@ impl TreeSitterProvider {
                     | GrammarFamily::TypeSpec
                     | GrammarFamily::Turtle
                     | GrammarFamily::N3
+                    | GrammarFamily::Sparql
             ))
             && !request.included_ranges().is_empty()
         {

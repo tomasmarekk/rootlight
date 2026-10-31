@@ -159,6 +159,8 @@ mod scheme_direct_calls;
 mod scheme_native;
 #[path = "analyzer_e2e/solidity_native.rs"]
 mod solidity_native;
+#[path = "analyzer_e2e/sparql_native.rs"]
+mod sparql_native;
 #[path = "analyzer_e2e/sql_native.rs"]
 mod sql_native;
 #[path = "analyzer_e2e/turtle_native.rs"]

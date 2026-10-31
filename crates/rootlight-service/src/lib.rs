@@ -970,8 +970,8 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/366";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/158";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/367";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/159";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/15";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/6";
@@ -19634,6 +19634,10 @@ fn source_language_route<'a>(
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    if has_sparql_update_content_signal(input) {
+        let language = sparql_update_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     if rootlight_discovery::is_terminal_tt_source(&input.path) {
         let language = rootlight_discovery::terminal_tt_content_language(input)?;
         return analyzers.contains_key(language).then_some(language);
@@ -19892,6 +19896,9 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
         return (!configured.any(|other| other.language != language.language))
             .then_some(language.language.as_str());
     }
+    if has_sparql_update_content_signal(input) {
+        return sparql_update_content_language(input);
+    }
     if rootlight_discovery::is_terminal_tt_source(&input.path) {
         return rootlight_discovery::terminal_tt_content_language(input);
     }
@@ -19970,6 +19977,26 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
         }
     }
     None
+}
+
+fn has_sparql_update_content_signal(input: &ManifestInput) -> bool {
+    Path::new(&input.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ru"))
+        && input.language_signals.iter().any(|signal| {
+            signal.evidence == LanguageEvidence::Content && signal.language == "sparql"
+        })
+}
+
+fn sparql_update_content_language(input: &ManifestInput) -> Option<&str> {
+    (!input.language_signals.iter().any(|signal| {
+        matches!(
+            signal.evidence,
+            LanguageEvidence::Content | LanguageEvidence::Shebang
+        ) && signal.language != "sparql"
+    }))
+    .then_some("sparql")
 }
 
 fn has_racket_reader_signal(input: &ManifestInput) -> bool {
@@ -27126,6 +27153,7 @@ mod tests {
     mod schema_field_types;
     mod scss_source;
     mod source_snapshot_selection;
+    mod sparql_discovery;
     mod streamed_sources;
     mod tcl_parameters;
     mod thinkscript_written_inputs;
