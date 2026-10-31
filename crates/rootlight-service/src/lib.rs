@@ -30640,6 +30640,245 @@ mod tests {
         assert_eq!(repeated, receipt);
     }
 
+    fn assert_objc_protocol_header(
+        service: &FirstSliceService,
+        receipt: &FirstSliceIndexReceipt,
+        path: &str,
+        source: &[u8],
+        protocol: &str,
+        method: &str,
+    ) {
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let file = document
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap();
+        assert_eq!(file.language, "objective-c");
+        assert_eq!(file.content_hash, content_hash(source));
+        let provenance = document
+            .provenance
+            .iter()
+            .find(|entry| entry.id == file.provenance)
+            .unwrap();
+        assert_eq!(
+            provenance.frontend_version.as_deref(),
+            Some("tree-sitter-objective-c-3.0.2")
+        );
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![file.evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].bytes, source);
+        assert_eq!(read.data.chunks[0].language, "objective-c");
+        let text = std::str::from_utf8(source).unwrap();
+        let mut owner = None;
+        for (name, kind) in [
+            (protocol, EntityKind::Protocol),
+            (method, EntityKind::Method),
+        ] {
+            let start = u64::try_from(text.find(name).unwrap()).unwrap();
+            let end = start + u64::try_from(name.len()).unwrap();
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.source.span().file() == file.id
+                        && site.source.span().start_byte() == start
+                        && site.source.span().end_byte() == end
+                })
+                .unwrap();
+            assert_eq!(definition.source.generation(), receipt.generation);
+            assert_eq!(definition.source.content_hash(), file.content_hash);
+            let OccurrenceTarget::Resolved { symbol } = definition.target else {
+                panic!("written protocol member has an exact target")
+            };
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(
+                (
+                    entity.kind,
+                    entity.canonical_name.as_str(),
+                    entity.language.as_str()
+                ),
+                (kind, name, "objective-c")
+            );
+            if kind == EntityKind::Protocol {
+                owner = Some(rootlight_ir::ContainerRef::Entity(entity.id));
+            } else {
+                assert_eq!(entity.container, owner);
+            }
+        }
+    }
+
+    #[test]
+    fn objc_protocol_headers_survive_noop_incremental_and_durable_restore() {
+        let repository = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let original = b"@protocol Signal\r\n- (void)handle;\r\n@end\r\n";
+        let plain = b"int read_item(void);\n";
+        let input = repository.path().join("Signal.h");
+        fs::write(&input, original).unwrap();
+        fs::write(repository.path().join("plain.h"), plain).unwrap();
+        let policy = FirstSliceStoragePolicy::resolve_user_config(None, 3).unwrap();
+        let mut service = FirstSliceService::new_durable_with_policy(
+            policy.clone(),
+            paths.state_dir(),
+            &deadline(),
+        )
+        .unwrap();
+        let initial = service
+            .index_repository(repository.path(), &deadline())
+            .unwrap();
+        assert_eq!(initial.indexed_files, 2);
+        assert_objc_protocol_header(&service, &initial, "Signal.h", original, "Signal", "handle");
+        let snapshot = service
+            .loaded_generation_snapshot(initial.generation)
+            .unwrap();
+        let c_file = snapshot
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "plain.h")
+            .unwrap();
+        assert_eq!(c_file.language, "c");
+        let read = service
+            .source_read(
+                initial.generation,
+                vec![c_file.evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, plain);
+        assert_eq!(
+            service
+                .index_repository(repository.path(), &deadline())
+                .unwrap()
+                .generation,
+            initial.generation
+        );
+        let changed = b"@protocol Signal\r\n- (void)dispatch;\r\n@end\r\n";
+        fs::write(&input, changed).unwrap();
+        let update = service
+            .index_repository(repository.path(), &deadline())
+            .unwrap();
+        assert_ne!(update.generation, initial.generation);
+        assert_eq!(
+            service
+                .incremental_evidence(update.generation)
+                .unwrap()
+                .parsed_files(),
+            1
+        );
+        assert_objc_protocol_header(&service, &update, "Signal.h", changed, "Signal", "dispatch");
+        drop(service);
+        let mut reopened = FirstSliceService::new_durable_with_policy(
+            policy.clone(),
+            paths.state_dir(),
+            &deadline(),
+        )
+        .unwrap();
+        assert_objc_protocol_header(
+            &reopened, &update, "Signal.h", changed, "Signal", "dispatch",
+        );
+        assert_eq!(
+            reopened
+                .index_repository(repository.path(), &deadline())
+                .unwrap()
+                .generation,
+            update.generation
+        );
+        fs::write(&input, original).unwrap();
+        let restored = reopened
+            .index_repository(repository.path(), &deadline())
+            .unwrap();
+        assert_eq!(restored.logical_snapshot, initial.logical_snapshot);
+        assert_objc_protocol_header(
+            &reopened, &restored, "Signal.h", original, "Signal", "handle",
+        );
+        drop(reopened);
+        let mut final_open =
+            FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline())
+                .unwrap();
+        assert_objc_protocol_header(
+            &final_open,
+            &restored,
+            "Signal.h",
+            original,
+            "Signal",
+            "handle",
+        );
+        assert_eq!(
+            final_open
+                .index_repository(repository.path(), &deadline())
+                .unwrap()
+                .generation,
+            restored.generation
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied original corpus root"]
+    fn objc_original_protocol_header_keeps_native_definitions_and_plain_c_routing() {
+        let root = PathBuf::from(
+            std::env::var_os("ROOTLIGHT_DIAGNOSTIC_CORPUS_ROOT")
+                .expect("explicit original corpus parent"),
+        );
+        let source = fs::read(root.join("6_C++_react-native/packages/react-native/Libraries/AppDelegate/RCTJSRuntimeConfiguratorProtocol.h")).unwrap();
+        assert_eq!(source.len(), 552);
+        assert_eq!(&source[435..467], b"RCTJSRuntimeConfiguratorProtocol");
+        assert_eq!(&source[494..516], b"createJSRuntimeFactory");
+        let plain = fs::read(root.join("8_C_libuv/include/uv/errno.h")).unwrap();
+        assert_eq!(plain.len(), 11_699);
+        let fixture = durable_test_tempdir();
+        fs::write(fixture.path().join("Original.h"), &source).unwrap();
+        fs::write(fixture.path().join("errno.h"), &plain).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(fixture.path(), &deadline())
+            .unwrap();
+        assert_objc_protocol_header(
+            &service,
+            &receipt,
+            "Original.h",
+            &source,
+            "RCTJSRuntimeConfiguratorProtocol",
+            "createJSRuntimeFactory",
+        );
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let c_file = snapshot
+            .document()
+            .files
+            .iter()
+            .find(|file| file.path == "errno.h")
+            .unwrap();
+        assert_eq!(c_file.language, "c");
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![c_file.evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, plain);
+    }
+
     #[test]
     fn matlab_bindings_survive_noop_incremental_clean_rebuild_and_restart() {
         use rootlight_ir::{OccurrenceRole, OccurrenceTarget, RelationEndpoint, RelationPredicate};

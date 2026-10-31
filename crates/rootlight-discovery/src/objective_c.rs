@@ -26,16 +26,21 @@ pub(super) fn has_content_hint(mut source: &[u8]) -> bool {
         } else if matches!(first, b'\'' | b'"') {
             source = after_quoted(rest, first);
         } else {
-            if [b"@interface".as_slice(), b"@implementation".as_slice()]
-                .iter()
-                .any(|keyword| {
-                    source.strip_prefix(*keyword).is_some_and(|suffix| {
-                        suffix.first().is_none_or(|byte| {
+            if [
+                b"@interface".as_slice(),
+                b"@implementation".as_slice(),
+                b"@protocol".as_slice(),
+            ]
+            .iter()
+            .any(|keyword| {
+                source.strip_prefix(*keyword).is_some_and(|suffix| {
+                    // A bounded prefix ending at @protocol may continue an identifier.
+                    (!suffix.is_empty() || *keyword != b"@protocol")
+                        && suffix.first().is_none_or(|byte| {
                             !byte.is_ascii_alphanumeric() && *byte != b'_' && byte.is_ascii()
                         })
-                    })
                 })
-                || source.starts_with(b"#import <Foundation/")
+            }) || source.starts_with(b"#import <Foundation/")
                 || source.starts_with(b"#import \"")
             {
                 return true;

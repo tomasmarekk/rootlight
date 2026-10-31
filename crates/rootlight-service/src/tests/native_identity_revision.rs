@@ -5,6 +5,32 @@
 use super::*;
 
 #[test]
+fn objective_c_protocol_hints_invalidate_previous_discovery_identity() {
+    let parser = first_slice_parser_provider_hash().unwrap();
+    let previous = hash_static_components(&[
+        PROVIDER_SET_SEED,
+        parser.as_bytes(),
+        b"1.93",
+        RESOLVER_PROVIDER_VERSION.as_bytes(),
+        RESOLVER_BINARY_SEED,
+        SEARCH_REVISION_SEED,
+        INCREMENTAL_SCHEMA_VERSION.as_bytes(),
+        DERIVED_PLAN_REVISION_SEED,
+        LANGUAGE_DISPOSITION_PROVIDER_SEED,
+        SOURCE_FILE_FALLBACK_PROVIDER_SEED,
+        container_sources::REVISION,
+    ])
+    .unwrap();
+    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.94");
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/366"
+    );
+    assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/158");
+    assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
+}
+
+#[test]
 fn n3_native_declarations_invalidate_analyzer_resolver_and_discovery_identities() {
     let grammar = first_slice_grammar_revision_hash().unwrap();
     let previous_parser = hash_static_components(&[
@@ -44,7 +70,7 @@ fn n3_native_declarations_invalidate_analyzer_resolver_and_discovery_identities(
         .unwrap();
         assert_ne!(first_slice_provider_set_hash().unwrap(), previous);
     }
-    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.93");
+    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.94");
     assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/158");
 }
 
@@ -149,7 +175,7 @@ fn turtle_native_support_invalidates_previous_analyzer_and_discovery_identities(
         container_sources::REVISION,
     ])
     .unwrap();
-    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.93");
+    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.94");
     assert_ne!(first_slice_provider_set_hash().unwrap(), previous_discovery);
 }
 
@@ -226,7 +252,7 @@ fn xliff_companions_invalidate_previous_analyzer_and_discovery_identities() {
         container_sources::REVISION,
     ])
     .unwrap();
-    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.93");
+    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.94");
     assert_ne!(first_slice_provider_set_hash().unwrap(), previous_discovery);
 }
 

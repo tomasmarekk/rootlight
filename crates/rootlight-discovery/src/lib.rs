@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.93";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.94";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -5010,6 +5010,61 @@ max_source_file_bytes = 2097152
         let mut truncated = vec![b' '; MAX_CLASSIFICATION_BYTES - 1];
         truncated.extend_from_slice("É@interface Example".as_bytes());
         assert_eq!(content_language(&truncated), None);
+    }
+
+    #[test]
+    fn objective_c_protocol_hints_require_written_keywords_within_the_sample() {
+        for source in [
+            "@protocol Signal\n- (void)handle;\n@end\n",
+            "@protocol Signal;\n",
+            "Protocol *value = @protocol(Signal);\n",
+            "/* documentation */ @protocol Signal\n@end\n",
+            "R\"tag(@protocol Hidden)tag\"; @protocol Signal;\n",
+        ] {
+            let path = RelativePath::parse(Path::new("Signal.h")).unwrap();
+            let (_, signals) = classify(&path, source.as_bytes());
+            assert!(
+                signals.iter().any(|signal| signal.language == "objective-c"
+                    && signal.evidence == LanguageEvidence::Content),
+                "{source}"
+            );
+        }
+        for source in [
+            "/* @protocol Hidden @end */\nint read_item(void);\n",
+            "// @protocol Hidden\nint read_item(void);\n",
+            "// example \\\n@protocol Hidden\nint read_item(void);\n",
+            "// example \\\r\n@protocol Hidden\r\nint read_item(void);\r\n",
+            "const char *text = \"@protocol Hidden\";\n",
+            "const char *text = \"escaped \\\" @protocol Hidden\";\n",
+            "int marker = '@protocol';\n",
+            "const char *text = R\"tag(\" @protocol Hidden)tag\";\n",
+            "const char *text = u8R\"tag(\" @protocol Hidden)tag\";\n",
+            "const auto *text = uR\"tag(\" @protocol Hidden)tag\";\n",
+            "const auto *text = UR\"tag(\" @protocol Hidden)tag\";\n",
+            "const auto *text = LR\"tag(\" @protocol Hidden)tag\";\n",
+            "@protocolSuffix Signal;\n",
+            "@protocol_Signal;\n",
+            "@protocolÉxample;\n",
+            "@protocol",
+            "/* unfinished @protocol Hidden",
+            "\"unfinished @protocol Hidden",
+            "int protocol_signal(void);\n",
+        ] {
+            assert_ne!(
+                content_language(source.as_bytes()),
+                Some("objective-c"),
+                "{source}"
+            );
+        }
+        let mut outside = vec![b' '; MAX_CLASSIFICATION_BYTES];
+        outside.extend_from_slice(b"@protocol Signal;\n");
+        assert_eq!(content_language(&outside), None);
+        let mut incomplete = vec![b' '; MAX_CLASSIFICATION_BYTES - b"@protocol".len() + 1];
+        incomplete.extend_from_slice(b"@protocol Signal;\n");
+        assert_eq!(content_language(&incomplete), None);
+        let mut keyword_edge = vec![b' '; MAX_CLASSIFICATION_BYTES - b"@protocol".len()];
+        keyword_edge.extend_from_slice(b"@protocolSuffix Signal;\n");
+        assert_eq!(content_language(&keyword_edge), None);
     }
 
     #[test]
