@@ -1,8 +1,9 @@
 //! Written CMake owners and references stay bound to physical source bytes.
 //! These contracts distinguish callable headers, macro placeholders and variable
-//! namespaces without treating source order or spelling as evaluated bindings.
+//! namespaces and a closed top-level local-set proof without evaluating configuration.
 
 use super::*;
+use rootlight_adapter_sdk::{SyntaxFact, testkit::MockParseProvider};
 
 const CMAKE: LanguageCase = LanguageCase {
     name: "cmake",
@@ -1158,11 +1159,17 @@ fn assert_physical_language(result: &AnalysisOutput, source: &str, expected_lang
             occurrence.syntactic_text_hash,
             content_hash(text(source, &occurrence.source).as_bytes())
         );
-        if occurrence.role != OccurrenceRole::Definition {
-            assert!(matches!(
-                occurrence.target,
-                OccurrenceTarget::Unresolved { .. }
-            ));
+        if occurrence.role != OccurrenceRole::Definition
+            && let OccurrenceTarget::Resolved { symbol } = occurrence.target
+        {
+            assert_eq!(expected_language, "cmake");
+            assert_eq!(occurrence.syntax_kind, "cmake.normal_variable.reference");
+            assert!(document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(occurrence.id)
+                    && edge.object == RelationEndpoint::Entity(symbol)
+                    && edge.evidence.source.as_ref() == Some(&occurrence.source)
+            }));
         }
     }
     for coverage in &document.coverage_records {
@@ -1171,12 +1178,10 @@ fn assert_physical_language(result: &AnalysisOutput, source: &str, expected_lang
             coverage.indexed.checked_add(coverage.skipped).unwrap()
         );
     }
-    assert!(
-        document
-            .relations
-            .iter()
-            .all(|relation| relation.predicate == RelationPredicate::Contains)
-    );
+    assert!(document.relations.iter().all(|relation| matches!(
+        relation.predicate,
+        RelationPredicate::Contains | RelationPredicate::RefersTo
+    )));
     if expected_language == "cmake" {
         // CMake fixtures require explicit evaluation gaps; C fixtures assert
         // their own lexical gaps without assuming CMake coverage semantics.
@@ -1184,6 +1189,416 @@ fn assert_physical_language(result: &AnalysisOutput, source: &str, expected_lang
             result.report().coverage().status(),
             CoverageStatus::Complete
         );
+    }
+}
+
+fn local_reference(
+    result: &AnalysisOutput,
+    source: &str,
+    definition: usize,
+    read: usize,
+    name: &str,
+) {
+    let document = result.document();
+    let sites = |at, role| {
+        document
+            .occurrences
+            .iter()
+            .filter(move |site| {
+                site.role == role
+                    && site.source.span().start_byte() == u64::try_from(at).unwrap()
+                    && site.source.span().end_byte() == u64::try_from(at + name.len()).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let definitions = sites(definition, OccurrenceRole::Definition);
+    assert_eq!(definitions.len(), 1);
+    let OccurrenceTarget::Resolved { symbol } = definitions[0].target else {
+        panic!("physical definition");
+    };
+    let reads = sites(read, OccurrenceRole::Reference);
+    assert_eq!(reads.len(), 1);
+    assert_eq!(text(source, &reads[0].source), name);
+    assert_eq!(reads[0].target, OccurrenceTarget::Resolved { symbol });
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap()
+            .kind,
+        EntityKind::Variable
+    );
+    let edges = document
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.predicate == RelationPredicate::RefersTo
+                && edge.subject == RelationEndpoint::Occurrence(reads[0].id)
+                && edge.object == RelationEndpoint::Entity(symbol)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].evidence.source.as_ref(), Some(&reads[0].source));
+}
+
+#[test]
+fn cmake_local_sets_bind_exact_preceding_definitions_and_keep_external_names_open() {
+    let source = "set(WRITTEN local)\nmessage(\"${WRITTEN} ${EXTERNAL}\")\n";
+    let result = output(source);
+    local_reference(
+        &result,
+        source,
+        source.find("WRITTEN").unwrap(),
+        source.rfind("WRITTEN").unwrap(),
+        "WRITTEN",
+    );
+    assert!(result.document().occurrences.iter().any(|site| {
+        site.role == OccurrenceRole::Reference
+            && text(source, &site.source) == "EXTERNAL"
+            && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+    }));
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| gap.detail
+                == "cmake-variable-command-condition-macro-and-template-evaluation-unavailable")
+    );
+}
+
+#[test]
+fn cmake_local_sets_apply_after_initializer_and_choose_the_latest_written_definition() {
+    let source = concat!(
+        "message(\"${WRITTEN}\")\n",
+        "set(WRITTEN first)\n",
+        "#[=[ a complete inter-command comment ]=]\n",
+        "set(WRITTEN \"${WRITTEN}/next\")\n",
+        "message(\"${WRITTEN}\")\n",
+        "set(SELF \"${SELF}/suffix\")\n",
+    );
+    let result = output(source);
+    let positions = source
+        .match_indices("WRITTEN")
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    local_reference(&result, source, positions[1], positions[3], "WRITTEN");
+    local_reference(&result, source, positions[2], positions[4], "WRITTEN");
+    for at in [positions[0], source.rfind("SELF").unwrap()] {
+        assert!(result.document().occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == u64::try_from(at).unwrap()
+                && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+        }));
+    }
+}
+
+#[test]
+fn cmake_local_sets_keep_libuv_toolchain_shape_and_stop_after_possible_callback() {
+    // The native corpus replay checks the complete original toolchain file.
+    // These commands retain its conditional preamble and first compiler use.
+    let source = concat!(
+        "if(NOT HOST_ARCH)\n message(SEND_ERROR \"architecture required\")\nendif()\n",
+        "list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES HOST_ARCH)\n",
+        "SET(CMAKE_SYSTEM_NAME Windows)\n",
+        "set(COMPILER_PREFIX \"${HOST_ARCH}-w64-mingw32\")\n",
+        "find_program(CMAKE_RC_COMPILER NAMES ${COMPILER_PREFIX}-windres)\n",
+        "find_program(CMAKE_C_COMPILER NAMES ${COMPILER_PREFIX}-gcc)\n",
+    );
+    let result = output(source);
+    let positions = source
+        .match_indices("COMPILER_PREFIX")
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    local_reference(
+        &result,
+        source,
+        positions[0],
+        positions[1],
+        "COMPILER_PREFIX",
+    );
+    assert!(result.document().occurrences.iter().any(|site| {
+        site.role == OccurrenceRole::Reference
+            && site.source.span().start_byte() == u64::try_from(positions[2]).unwrap()
+            && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+    }));
+}
+
+#[test]
+fn cmake_local_sets_never_resume_builtin_authority_after_opaque_dispatch() {
+    for opaque in [
+        "include(shadow.cmake)",
+        "find_package(Written)",
+        "project(Written)",
+        "unknown_command()",
+        "cmake_language(EVAL CODE \"macro(set)\\nendmacro()\")",
+        "variable_watch(WRITTEN watcher)",
+        "find_program(RESULT NAMES written VALIDATOR callback)",
+        "find_program(RESULT ${DYNAMIC_ARGUMENTS})",
+        "list(FILTER VALUES PREDICATE callback)",
+        "list(TRANSFORM VALUES APPLY callback)",
+        "list(${DYNAMIC_MODE} VALUES)",
+        "if(CONDITION)\n unknown_command()\nendif()",
+        "function(Written)\nendfunction()",
+        "macro(Written)\nendmacro()",
+    ] {
+        let source = format!(
+            "set(WRITTEN first)\n{opaque}\nset(AFTER local)\nmessage(\"${{WRITTEN}} ${{AFTER}}\")\n"
+        );
+        let result = output(&source);
+        let last_command = source.rfind("message(").unwrap();
+        assert!(
+            result
+                .document()
+                .occurrences
+                .iter()
+                .filter(|site| {
+                    site.role == OccurrenceRole::Reference
+                        && site.source.span().start_byte() > u64::try_from(last_command).unwrap()
+                })
+                .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. })),
+            "{opaque}"
+        );
+        assert!(
+            !result
+                .document()
+                .relations
+                .iter()
+                .any(|edge| edge.predicate == RelationPredicate::RefersTo),
+            "{opaque}"
+        );
+    }
+}
+
+#[test]
+fn cmake_local_sets_reject_ambiguous_scope_and_arity_but_can_follow_plain_value_barriers() {
+    for barrier in [
+        "unset(WRITTEN)",
+        "set(WRITTEN)",
+        "set(WRITTEN value PARENT_SCOPE)",
+        "set(WRITTEN value CACHE STRING help)",
+        "set(CACHE{WRITTEN} TYPE STRING VALUE value)",
+        "set(ENV{WRITTEN} value)",
+        "option(WRITTEN help ON)",
+        "set(WRITTEN ${DYNAMIC_ARGUMENTS})",
+        "set(WRITTEN \"${DYNAMIC_ARGUMENT}\")",
+        "set(WRITTEN value;PARENT_SCOPE)",
+        "set(${DYNAMIC_NAME} value)",
+        "list(APPEND WRITTEN value)",
+        "if(CONDITION)\n set(WRITTEN conditional)\nendif()",
+        "foreach(WRITTEN IN ITEMS value)\n message(\"${WRITTEN}\")\nendforeach()",
+        "block()\n set(WRITTEN scoped)\nendblock()",
+    ] {
+        let source = format!(
+            "set(WRITTEN first)\n{barrier}\nset(AFTER local)\nmessage(\"${{WRITTEN}} ${{AFTER}}\")\n"
+        );
+        let result = output(&source);
+        local_reference(
+            &result,
+            &source,
+            source.find("AFTER").unwrap(),
+            source.rfind("AFTER").unwrap(),
+            "AFTER",
+        );
+        let read = source.rfind("WRITTEN").unwrap();
+        assert!(
+            result.document().occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::Reference
+                    && site.source.span().start_byte() == u64::try_from(read).unwrap()
+                    && matches!(site.target, OccurrenceTarget::Unresolved { .. })
+            }),
+            "{barrier}"
+        );
+    }
+    for name in ["set", "message", "LiSt", "unset", "option", "if"] {
+        let source =
+            format!("set(WRITTEN first)\nmessage(\"${{WRITTEN}}\")\nmacro({name})\nendmacro()\n");
+        assert!(
+            !output(&source).document().occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::Reference
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            }),
+            "written override of {name}"
+        );
+    }
+}
+
+#[test]
+fn cmake_local_sets_replay_real_artifacts_with_exact_required_accounting() {
+    let source = "set(WRITTEN local)\nmessage(\"${WRITTEN}\")\n";
+    let native = Arc::new(provider());
+    let frontend = analyzer(&native, CMAKE);
+    let fixture = Fixture::new(CMAKE, source.as_bytes());
+    let wide = limits();
+    let input = request(&fixture.snapshot, &fixture.source, CMAKE, &wide);
+    let required = native
+        .required_syntax_fact_count(&input.to_parse_request(), &deadline())
+        .unwrap();
+    let (result, artifact) = frontend
+        .analyze_and_capture(
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        required
+    );
+    local_reference(
+        &result,
+        source,
+        source.find("WRITTEN").unwrap(),
+        source.rfind("WRITTEN").unwrap(),
+        "WRITTEN",
+    );
+    let exact = limits_with_syntax_records(artifact.syntax_fact_count());
+    for current in [&fixture, &fixture.next_generation()] {
+        let current_input = request(&current.snapshot, &current.source, CMAKE, &wide);
+        let replay = frontend
+            .analyze_from_artifact(
+                &current_input,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(
+            replay.document(),
+            analyze(&frontend, &current_input, &ExtensionSupport::default()).document()
+        );
+        local_reference(
+            &replay,
+            source,
+            source.find("WRITTEN").unwrap(),
+            source.rfind("WRITTEN").unwrap(),
+            "WRITTEN",
+        );
+    }
+    // Captured artifacts bind the admission profile as well as source bytes.
+    let exact_input = request(&fixture.snapshot, &fixture.source, CMAKE, &exact);
+    let (exact_result, exact_artifact) = frontend
+        .analyze_and_capture(
+            &exact_input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(exact_result.document(), result.document());
+    let exact_replay = frontend
+        .analyze_from_artifact(
+            &exact_input,
+            &exact_artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(exact_replay.document(), exact_result.document());
+    let low = limits_with_syntax_records(required - 1);
+    assert!(
+        matches!(frontend.prepare_artifact(&request(&fixture.snapshot, &fixture.source, CMAKE, &low), &deadline()),
+        Err(AdapterError::Sink(SinkError::StreamLimit {resource: ResourceKind::RequiredSyntaxFacts, observed, limit}))
+        if observed == required && limit == required - 1)
+    );
+    let changed = fixture.rewrite(source.replace("local", "other").as_bytes());
+    assert!(
+        frontend
+            .analyze_from_artifact(
+                &request(&changed.snapshot, &changed.source, CMAKE, &wide),
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline(),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn cmake_local_sets_missing_or_duplicate_command_and_read_certificates_refuse_edges() {
+    let source = "set(WRITTEN first)\nunset(WRITTEN)\nset(AFTER local)\nmessage(\"${AFTER}\")\n";
+    let native = provider();
+    let fixture = Fixture::new(CMAKE, source.as_bytes());
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, CMAKE, &bounds);
+    let parsed = rootlight_adapter_sdk::execute_parse(
+        &native,
+        &input.to_parse_request(),
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    let run = |facts| {
+        let provider = MockParseProvider::new(
+            native.capabilities().clone(),
+            facts,
+            parsed.diagnostics().to_vec(),
+            parsed.report().coverage().clone(),
+        );
+        let frontend = TreeSitterAnalyzer::new(
+            Arc::new(provider),
+            producer_identity(),
+            language(CMAKE),
+            CMAKE.frontend,
+            content_hash(BINARY_SEED),
+        )
+        .unwrap();
+        execute_analysis(
+            &frontend,
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+    };
+    local_reference(
+        &run(parsed.facts().to_vec()).unwrap(),
+        source,
+        source.find("AFTER").unwrap(),
+        source.rfind("AFTER").unwrap(),
+        "AFTER",
+    );
+    for witness in parsed.facts().iter().filter(|fact| {
+        matches!(
+            fact.syntax_kind().as_str(),
+            "cmake.binding_context.expression"
+                | "cmake.binding_values_barrier.expression"
+                | "cmake.local_set.expression"
+                | "cmake.local_read.expression"
+                | "cmake.normal_variable.reference"
+        )
+    }) {
+        for duplicate in [false, true] {
+            let mut facts = parsed.facts().to_vec();
+            if duplicate {
+                facts.push(SyntaxFact::new(
+                    facts.iter().map(SyntaxFact::local_id).max().unwrap() + 1,
+                    witness.parent(),
+                    witness.kind(),
+                    witness.span(),
+                    witness.depth(),
+                    witness.syntax_kind().clone(),
+                ));
+            } else {
+                facts.retain(|fact| fact.local_id() != witness.local_id());
+            }
+            if let Ok(result) = run(facts) {
+                assert!(
+                    !result
+                        .document()
+                        .relations
+                        .iter()
+                        .any(|edge| edge.predicate == RelationPredicate::RefersTo),
+                    "{} duplicate={duplicate}",
+                    witness.syntax_kind().as_str()
+                );
+            }
+        }
     }
 }
 

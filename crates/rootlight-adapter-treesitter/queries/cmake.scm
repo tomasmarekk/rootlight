@@ -1,5 +1,8 @@
 ; Direct native owners are proved by the CMake admission helper.
 (source_file) @root @module
+(source_file) @expression
+[(normal_command) (function_def) (macro_def) (if_condition) (foreach_loop) (while_loop) (block_def)] @expression
+(variable_ref) @expression
 [(function_def) (macro_def) (normal_command)] @declaration @definition @signature
 (function_command (argument_list (argument) @declaration @definition @signature))
 (macro_command (argument_list (argument) @declaration @definition @signature))

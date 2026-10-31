@@ -104,6 +104,63 @@ fn clean(node: Node<'_>, source: &[u8]) -> bool {
     !node.is_missing() && !node.has_error() && source.get(node.byte_range()).is_some()
 }
 
+// Control bodies can invalidate values without changing builtin dispatch. Any
+// source-loading command or callback-capable command leaves that proof closed.
+fn preserves_dispatch(
+    node: Node<'_>,
+    source: &[u8],
+    cancellation: &Cancellation,
+    cache: &mut CaptureCache,
+) -> Result<bool, AdapterError> {
+    let mut cursor = node.walk();
+    loop {
+        if !cache.visit(cancellation)? {
+            return Ok(false);
+        }
+        let current = cursor.node();
+        match current.kind() {
+            "function_def" | "macro_def" | "configure_placeholder" => return Ok(false),
+            "normal_command" => {
+                let Some(name) = direct(current, "identifier", cancellation, cache)? else {
+                    return Ok(false);
+                };
+                let Some(name) = source.get(name.byte_range()) else {
+                    return Ok(false);
+                };
+                let builtin = super::cmake_bindings::builtin_without_dispatch(name);
+                // FILTER/PREDICATE and TRANSFORM/APPLY can call user functions.
+                // A literal APPEND subcommand cannot change through expansion
+                // of one of its later arguments.
+                let append = if name.eq_ignore_ascii_case(b"list") {
+                    direct(current, "argument_list", cancellation, cache)?
+                        .and_then(|list| list.named_child(0))
+                        .is_some_and(|arg| {
+                            arg.kind() == "argument"
+                                && source.get(arg.byte_range()) == Some(b"APPEND")
+                        })
+                } else {
+                    false
+                };
+                if !builtin && !append {
+                    return Ok(false);
+                }
+            }
+            _ => {}
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return Ok(true);
+            }
+        }
+    }
+}
+
 fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
     std::str::from_utf8(source.get(node.byte_range())?).ok()
 }
@@ -438,7 +495,81 @@ pub(super) fn candidate(
     if source.get(range.clone()).is_none() {
         return Err(query_failure("query-cmake-source-range"));
     }
-    let syntax = if node.kind() == "source_file" {
+    let syntax = if role == StructuralRole::Expression {
+        if node.kind() == "source_file" && clean(node, source) {
+            range = 0..source.len();
+            "cmake.binding_context"
+        } else if node.kind() == "variable_ref" && clean(node, source) {
+            let mut parent = node.parent();
+            let mut command = None;
+            while let Some(ancestor) = parent {
+                if !cache.visit(cancellation)? || ancestor.kind() == "variable_ref" {
+                    return Ok(None);
+                }
+                if ancestor.kind() == "normal_command" {
+                    command = Some(ancestor);
+                    break;
+                }
+                parent = ancestor.parent();
+            }
+            if !command.is_some_and(|command| {
+                clean(command, source)
+                    && command
+                        .parent()
+                        .is_some_and(|parent| parent.kind() == "source_file")
+            }) {
+                return Ok(None);
+            }
+            let Some(variable) = node
+                .named_child(0)
+                .filter(|_| node.named_child_count() == 1)
+                .filter(|variable| variable.kind() == "normal_var")
+            else {
+                return Ok(None);
+            };
+            let Some(name) = direct(variable, "variable", cancellation, cache)? else {
+                return Ok(None);
+            };
+            if name.named_child_count() != 0
+                || !source
+                    .get(name.byte_range())
+                    .is_some_and(super::cmake_bindings::variable_name)
+            {
+                return Ok(None);
+            }
+            "cmake.local_read"
+        } else if clean(node, source)
+            && node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "source_file")
+        {
+            if node.kind() == "normal_command" {
+                if super::cmake_bindings::ordinary_set_name(
+                    source.get(range.clone()).unwrap_or_default(),
+                    cancellation,
+                )?
+                .is_some()
+                {
+                    "cmake.local_set"
+                } else if super::cmake_bindings::preserves_bindings(
+                    source.get(range.clone()).unwrap_or_default(),
+                    cancellation,
+                )? {
+                    "cmake.binding_preserves"
+                } else if preserves_dispatch(node, source, cancellation, cache)? {
+                    "cmake.binding_values_barrier"
+                } else {
+                    "cmake.binding_barrier"
+                }
+            } else if preserves_dispatch(node, source, cancellation, cache)? {
+                "cmake.binding_values_barrier"
+            } else {
+                "cmake.binding_barrier"
+            }
+        } else {
+            return Ok(None);
+        }
+    } else if node.kind() == "source_file" {
         if !matches!(role, StructuralRole::Root | StructuralRole::Module) {
             return Ok(None);
         }
@@ -626,14 +757,16 @@ pub(super) fn candidate(
         end: range.end,
         role,
         syntax,
-        required: matches!(
-            role,
-            StructuralRole::Root
-                | StructuralRole::Module
-                | StructuralRole::Declaration
-                | StructuralRole::Definition
-                | StructuralRole::Signature
-        ),
+        required: role == StructuralRole::Expression
+            || syntax == "cmake.normal_variable"
+            || matches!(
+                role,
+                StructuralRole::Root
+                    | StructuralRole::Module
+                    | StructuralRole::Declaration
+                    | StructuralRole::Definition
+                    | StructuralRole::Signature
+            ),
         native_depth: native_depth(node, cancellation)?,
     }))
 }

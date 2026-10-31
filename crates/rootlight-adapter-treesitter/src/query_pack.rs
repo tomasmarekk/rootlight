@@ -35,6 +35,7 @@ mod capture_step_tests;
 mod chapel;
 mod clojure;
 mod cmake;
+pub(crate) mod cmake_bindings;
 mod cobol;
 mod common_lisp;
 mod coq;
@@ -704,6 +705,9 @@ impl QueryPack {
         ) {
             expected.retain(|name| !matches!(*name, "scope" | "documentation"));
         }
+        if family == GrammarFamily::CMake {
+            expected.push("expression");
+        }
         if family == GrammarFamily::Vhdl {
             expected.retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
         }
@@ -859,6 +863,7 @@ impl QueryPack {
             let has_source_certified_reference = matches!(
                 family,
                 GrammarFamily::JavaScript
+                    | GrammarFamily::CMake
                     | GrammarFamily::Nix
                     | GrammarFamily::Ruby
                     | GrammarFamily::Eiffel
@@ -892,6 +897,7 @@ impl QueryPack {
                 .any(|(quantifier, role)| {
                     *quantifier != CaptureQuantifier::Zero
                         && (role.belongs_to_identity_closure()
+                            || (family == GrammarFamily::CMake && *role == StructuralRole::Expression)
                             // Source-certified references remain mandatory even when
                             // their native pattern has no declaration capture.
                             || (matches!(family, GrammarFamily::Dockerfile | GrammarFamily::Sed | GrammarFamily::Idris)
@@ -1127,6 +1133,11 @@ impl QueryPack {
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "html.closing_tag")
                     || candidate.role.belongs_to_identity_closure()
+                    || (family == GrammarFamily::CMake
+                        && candidate.required
+                        && (candidate.role == StructuralRole::Expression
+                            || (candidate.role == StructuralRole::Reference
+                                && candidate.syntax == "cmake.normal_variable")))
                     || (family == GrammarFamily::Nix
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -6695,6 +6706,9 @@ mod tests {
                 GrammarFamily::CMake | GrammarFamily::Julia | GrammarFamily::V
             ) {
                 expected.retain(|name| !matches!(*name, "scope" | "documentation"));
+            }
+            if family == GrammarFamily::CMake {
+                expected.push("expression");
             }
             if family == GrammarFamily::Vhdl {
                 expected

@@ -962,6 +962,7 @@ fn required_syntax_fact_count_from_output(
             || chapel_formals::required(fact)
             || chapel_calls::required(fact)
             || meson_bindings::required(fact)
+            || cmake::required(fact)
             || dockerfile::required(fact)
             || java_local_receivers::required(fact)
             || cpp_const_formals::required(fact)
@@ -3444,6 +3445,24 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let cmake_reads = if self.request.language().as_str() == "cmake"
+            && self.source_view.is_identity()
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+            && self.full_source.span().start_byte() == 0
+            && u64::try_from(self.request.source().bytes().len()).ok()
+                == Some(self.full_source.span().end_byte())
+        {
+            Some(cmake::LocalTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_view.as_bytes(),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let python_module_reads = if self.request.language().as_str() == "python"
             && self.request.included_ranges().is_empty()
             // Required native witnesses survive bounded optional extraction.
@@ -5567,6 +5586,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let relation = lexical_reference_relation(&read, symbol)?;
                     relations.insert(relation.id, relation);
                     occurrences.insert(read.id, read);
+                }
+                if let Some(bindings) = &cmake_reads
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("cmake-local-reference-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &python_module_reads
                     && let Some(symbol) = bindings.resolve(
