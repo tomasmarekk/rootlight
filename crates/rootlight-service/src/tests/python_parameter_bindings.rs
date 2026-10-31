@@ -4,6 +4,69 @@
 use super::*;
 
 #[test]
+fn written_python_locals_do_not_escape_to_other_scopes() {
+    let raw = b"def owned():\n    value = 1\n    return value\n\nprint(value)\n\ndef other():\n    return value\n";
+    for mode in [FirstSliceIndexMode::Structural, FirstSliceIndexMode::Deep] {
+        let directory = TempDir::new().unwrap();
+        fs::write(directory.path().join("written.py"), raw).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository_with_mode(directory.path(), mode, &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let document = snapshot.document();
+        let local = document
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.language == "python"
+                    && entity.kind == EntityKind::Variable
+                    && entity.canonical_name == "value"
+            })
+            .expect("written local identity survives the service");
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "owned")
+            .unwrap();
+        assert_eq!(local.container, Some(ContainerRef::Entity(owner.id)));
+        assert_eq!(
+            document
+                .relations
+                .iter()
+                .filter(|edge| {
+                    edge.predicate == RelationPredicate::Contains
+                        && edge.subject == rootlight_ir::RelationEndpoint::Entity(owner.id)
+                        && edge.object == rootlight_ir::RelationEndpoint::Entity(local.id)
+                })
+                .count(),
+            1
+        );
+        let reads: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Reference
+                    && raw.get(
+                        usize::try_from(site.source.span().start_byte()).unwrap()
+                            ..usize::try_from(site.source.span().end_byte()).unwrap(),
+                    ) == Some(b"value".as_slice())
+            })
+            .collect();
+        assert_eq!(reads.len(), 3);
+        for site in reads {
+            assert!(matches!(site.target, OccurrenceTarget::Unresolved { .. }));
+            assert!(!document.relations.iter().any(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == rootlight_ir::RelationEndpoint::Occurrence(site.id)
+            }));
+        }
+    }
+}
+
+#[test]
 fn original_python_return_references_keep_formal_identity_and_source_reads() {
     let raw = include_bytes!(
         "../../../rootlight-adapter-treesitter/tests/fixtures/python_parameter_binding/test.py"

@@ -1,4 +1,4 @@
-//! Written module variables do not qualify runtime binding or reassignment.
+//! Written module and function variables do not qualify runtime binding.
 //! Unavailable assignment proofs remain explicit in all three semantic domains.
 
 use rootlight_adapter_sdk::{SyntaxFact, SyntaxFactKind};
@@ -13,11 +13,20 @@ pub(super) fn metadata(fact: &SyntaxFact) -> bool {
                 | "python.augmented_assignment_binding_unavailable.signature"
                 | "python.module_binding_context.signature"
                 | "python.module_target.signature"
+                | "python.local_assignment_context.signature"
         )
 }
 
 pub(super) fn gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'static str)> {
-    let detail = if fact.kind() == SyntaxFactKind::Signature
+    let local_semantics = matches!(
+        fact.syntax_kind().as_str(),
+        "python.local_assignment_context.signature"
+            | "python.local_binding_unavailable.reference"
+            | "python.local_call_unavailable.call"
+    );
+    let detail = if local_semantics {
+        Some("python-written-function-local-values-execution-and-reference-binding-unavailable")
+    } else if fact.kind() == SyntaxFactKind::Signature
         && fact.syntax_kind().as_str() == "python.assignment_binding_unavailable.signature"
     {
         Some(
@@ -59,5 +68,11 @@ pub(super) fn gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, &'sta
         FactDomain::Relations,
     ]
     .into_iter()
-    .filter_map(move |domain| detail.map(|detail| (domain, detail)))
+    .filter_map(move |domain| {
+        if local_semantics && domain == FactDomain::Entities {
+            None
+        } else {
+            detail.map(|detail| (domain, detail))
+        }
+    })
 }

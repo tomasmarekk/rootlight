@@ -278,6 +278,9 @@ impl ResolutionEngine {
                 // Source order, pattern namespaces and capture barriers are
                 // producer-owned; a same-file score cannot prove visibility.
                 Some(RejectionReason::MissingLexicalEvidence)
+            } else if index.python_local_symbols.contains(&entity.id) {
+                // Written local identity cannot donate a cross-scope name candidate.
+                Some(RejectionReason::MissingLexicalEvidence)
             } else if example.is_some_and(|example| {
                 example.is_none()
                     || entity_source_file(entity) != Some(occurrence.file)
@@ -913,6 +916,7 @@ pub(crate) struct CandidateIndex<'a> {
     pub(crate) files: BTreeMap<FileId, &'a FileRecord>,
     pub(crate) provenance: BTreeMap<FactId, &'a ProvenanceRecord>,
     rust_lexical_symbols: BTreeSet<SymbolId>,
+    python_local_symbols: BTreeSet<SymbolId>,
     syntax_kinds: BTreeMap<String, usize>,
 }
 
@@ -1043,10 +1047,20 @@ impl<'a> CandidateIndex<'a> {
             files,
             provenance,
             rust_lexical_symbols: BTreeSet::new(),
+            python_local_symbols: BTreeSet::new(),
             syntax_kinds: BTreeMap::new(),
         };
         for occurrence in occurrence_records {
             cancellation.check()?;
+            if occurrence.role == OccurrenceRole::Definition
+                && occurrence.syntax_kind == "python.local_variable_name.definition"
+                && let OccurrenceTarget::Resolved { symbol } = occurrence.target
+                && index.entities.get(&symbol).is_some_and(|entity| {
+                    entity.language == "python" && entity.kind == EntityKind::Variable
+                })
+            {
+                index.python_local_symbols.insert(symbol);
+            }
             if matches!(
                 occurrence.role,
                 OccurrenceRole::Definition | OccurrenceRole::Declaration
@@ -1586,6 +1600,8 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | "python.module_function.reference"
             | "python.module_binding_unavailable.reference"
             | "python.module_call_unavailable.call"
+            | "python.local_binding_unavailable.reference"
+            | "python.local_call_unavailable.call"
             | "typescript.const_value.reference"
             | "javascript.const_receiver.reference"
             | "typescript.const_value_read.read"
@@ -3153,6 +3169,14 @@ mod python_parameter_source_tests {
             ),
             (
                 "python.module_call_unavailable.call",
+                OccurrenceRole::CallSite,
+            ),
+            (
+                "python.local_binding_unavailable.reference",
+                OccurrenceRole::Reference,
+            ),
+            (
+                "python.local_call_unavailable.call",
                 OccurrenceRole::CallSite,
             ),
         ] {

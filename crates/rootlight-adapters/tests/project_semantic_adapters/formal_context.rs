@@ -5,6 +5,57 @@
 use super::*;
 
 #[test]
+fn python_written_locals_preserve_owners_without_cross_scope_name_fallback() {
+    let text = "def owned():\n    value = 1\n    return value\n\nprint(value)\n\ndef other():\n    return value\n";
+    let fixture = ProjectFixture::new(["written.py"], [text], SemanticProjectLanguage::Python);
+    let output = analyze_with_real_parser(&fixture);
+    let document = output.document();
+    let local = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "value")
+        .expect("project path keeps the written local");
+    let owner = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Function && entity.canonical_name == "owned")
+        .unwrap();
+    assert_eq!(
+        local.container,
+        Some(rootlight_ir::ContainerRef::Entity(owner.id))
+    );
+    assert_eq!(
+        document
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::Contains
+                    && edge.subject == rootlight_ir::RelationEndpoint::Entity(owner.id)
+                    && edge.object == rootlight_ir::RelationEndpoint::Entity(local.id)
+            })
+            .count(),
+        1
+    );
+    let reads: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && text.as_bytes().get(
+                    usize::try_from(site.source.span().start_byte()).unwrap()
+                        ..usize::try_from(site.source.span().end_byte()).unwrap(),
+                ) == Some(b"value".as_slice())
+        })
+        .collect();
+    assert_eq!(reads.len(), 3);
+    assert!(
+        reads
+            .iter()
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+}
+
+#[test]
 fn java_and_go_body_edits_keep_native_project_formal_identity_and_header_edits_change_it() {
     for (language, path, kind, sources, expected) in [
         (

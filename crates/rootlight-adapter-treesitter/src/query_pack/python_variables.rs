@@ -1,6 +1,6 @@
-//! Prove one direct module assignment without inventing a symbol per write.
-//! A whole-source census distinguishes module augmented writes from new binders.
-//! Initial assignment identity never certifies values, execution or general reads.
+//! Prove unique module and function-owned written assignment definitions.
+//! Separate bounded censuses preserve scope and refuse competing binders.
+//! Function-local identity does not certify values, execution or reads.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,6 +11,7 @@ use tree_sitter::Node;
 use super::{HARD_MAX_QUERY_CAPTURES, QueryCandidate, StructuralRole};
 
 type NameKey = [u8; 32];
+type LocalBindings = HashMap<NameKey, Option<(usize, usize)>>;
 
 pub(super) struct CaptureCache<'source> {
     source: &'source [u8],
@@ -29,6 +30,7 @@ pub(super) struct CaptureCache<'source> {
     iterable_headers: HashMap<usize, Option<usize>>,
     iterable_prefix_limit: Option<usize>,
     reads: HashMap<usize, Option<(usize, usize)>>,
+    local_functions: HashMap<usize, Option<LocalBindings>>,
 }
 
 impl<'source> CaptureCache<'source> {
@@ -50,6 +52,7 @@ impl<'source> CaptureCache<'source> {
             iterable_headers: HashMap::new(),
             iterable_prefix_limit: None,
             reads: HashMap::new(),
+            local_functions: HashMap::new(),
         }
     }
 
@@ -706,6 +709,302 @@ impl<'source> CaptureCache<'source> {
             .is_some_and(|root| root.kind() == "module")
     }
 
+    fn local_owner<'tree>(
+        &mut self,
+        mut node: Node<'tree>,
+        cancel: &Cancellation,
+    ) -> Result<Option<Node<'tree>>, AdapterError> {
+        while let Some(parent) = node.parent() {
+            if !self.step(cancel)? {
+                return Ok(None);
+            }
+            if parent.kind() == "function_definition" {
+                return Ok(parent
+                    .parent()
+                    .filter(|root| root.kind() == "module")
+                    .map(|_| parent));
+            }
+            if matches!(parent.kind(), "class_definition" | "lambda") {
+                return Ok(None);
+            }
+            node = parent;
+        }
+        Ok(None)
+    }
+
+    fn inspect_locals(
+        &mut self,
+        root: Node<'_>,
+        function: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<Option<LocalBindings>, AdapterError> {
+        if !self.complete
+            || root.kind() != "module"
+            || root.parent().is_some()
+            || (root.start_byte() != 0
+                && !(root.start_byte() == 3 && self.source.starts_with(b"\xef\xbb\xbf")))
+            || root.has_error()
+            || root.end_byte() != self.source.len()
+            || function.child_by_field_name("type_parameters").is_some()
+            || function.child(0).is_none_or(|token| token.kind() != "def")
+        {
+            return Ok(None);
+        }
+        let Some(parameters) = function.child_by_field_name("parameters") else {
+            return Ok(None);
+        };
+        let Some(body) = function.child_by_field_name("body") else {
+            return Ok(None);
+        };
+        let mut bindings = LocalBindings::new();
+        let mut seen = HashSet::new();
+        let mut walk = parameters.walk();
+        loop {
+            if !self.step(cancel)? {
+                return Ok(None);
+            }
+            let node = walk.node();
+            if node.kind() == "identifier" {
+                let Some(key) = self.key(node, cancel)? else {
+                    return Ok(None);
+                };
+                bindings
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                // Annotation/default names conservatively withhold a local too.
+                bindings.insert(key, None);
+            }
+            if walk.goto_first_child() {
+                continue;
+            }
+            loop {
+                if walk.goto_next_sibling() {
+                    break;
+                }
+                if !walk.goto_parent() || walk.node() == parameters {
+                    break;
+                }
+            }
+            if walk.node() == parameters {
+                break;
+            }
+        }
+        let mut walk = body.walk();
+        loop {
+            if !self.step(cancel)? {
+                return Ok(None);
+            }
+            let node = walk.node();
+            if node.is_error()
+                || node.is_missing()
+                || (node.is_named()
+                    && !matches!(
+                        node.kind(),
+                        "block"
+                            | "assignment"
+                            | "augmented_assignment"
+                            | "if_statement"
+                            | "elif_clause"
+                            | "else_clause"
+                            | "for_statement"
+                            | "while_statement"
+                            | "call"
+                            | "argument_list"
+                            | "keyword_argument"
+                            | "attribute"
+                            | "subscript"
+                            | "slice"
+                            | "return_statement"
+                            | "raise_statement"
+                            | "expression_statement"
+                            | "pass_statement"
+                            | "identifier"
+                            | "integer"
+                            | "float"
+                            | "true"
+                            | "false"
+                            | "none"
+                            | "binary_operator"
+                            | "unary_operator"
+                            | "boolean_operator"
+                            | "not_operator"
+                            | "comparison_operator"
+                            | "conditional_expression"
+                            | "parenthesized_expression"
+                            | "expression_list"
+                            | "tuple"
+                            | "list"
+                            | "set"
+                            | "dictionary"
+                            | "pair"
+                            | "string"
+                            | "string_start"
+                            | "string_content"
+                            | "string_end"
+                            | "escape_sequence"
+                            | "comment"
+                    ))
+            {
+                return Ok(None);
+            }
+            if matches!(
+                node.kind(),
+                "assignment" | "augmented_assignment" | "for_statement"
+            ) {
+                let Some(target) = node
+                    .child_by_field_name("left")
+                    .filter(|n| n.kind() == "identifier")
+                else {
+                    return Ok(None);
+                };
+                let Some(key) = self.key(target, cancel)? else {
+                    return Ok(None);
+                };
+                let direct = node.kind() == "assignment"
+                    && node
+                        .parent()
+                        .filter(|n| n.kind() == "expression_statement")
+                        .and_then(|n| n.parent())
+                        == Some(body)
+                    && node.child_by_field_name("type").is_none()
+                    && node
+                        .child_by_field_name("right")
+                        .is_some_and(|n| n.kind() != "assignment")
+                    && !seen.contains(&key);
+                bindings
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                bindings
+                    .entry(key)
+                    .and_modify(|old| *old = None)
+                    .or_insert(direct.then_some((node.id(), node.end_byte())));
+            }
+            if node.kind() == "identifier" {
+                let Some(key) = self.key(node, cancel)? else {
+                    return Ok(None);
+                };
+                if self.source.get(node.byte_range()).is_some_and(|raw| {
+                    [b"exec".as_slice(), b"eval", b"globals", b"locals", b"vars"].contains(&raw)
+                }) {
+                    return Ok(None);
+                }
+                let target = node.parent().is_some_and(|parent| {
+                    matches!(
+                        parent.kind(),
+                        "assignment" | "augmented_assignment" | "for_statement"
+                    ) && parent.child_by_field_name("left") == Some(node)
+                });
+                let label = node.parent().is_some_and(|parent| {
+                    (parent.kind() == "attribute"
+                        && parent.child_by_field_name("attribute") == Some(node))
+                        || (parent.kind() == "keyword_argument"
+                            && parent.child_by_field_name("name") == Some(node))
+                });
+                if !target && !label {
+                    seen.try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    seen.insert(key);
+                    if let Some(binding) = bindings.get_mut(&key)
+                        && binding.is_some_and(|(_, end)| node.start_byte() < end)
+                    {
+                        *binding = None;
+                    }
+                }
+            }
+            if walk.goto_first_child() {
+                continue;
+            }
+            loop {
+                if walk.goto_next_sibling() {
+                    break;
+                }
+                if !walk.goto_parent() || walk.node() == body {
+                    return Ok(Some(bindings));
+                }
+            }
+        }
+    }
+
+    fn refine_local(
+        &mut self,
+        root: Node<'_>,
+        node: Node<'_>,
+        role: StructuralRole,
+        candidate: &mut QueryCandidate,
+        cancel: &Cancellation,
+    ) -> Result<Option<bool>, AdapterError> {
+        let Some(function) = self.local_owner(node, cancel)? else {
+            return Ok(None);
+        };
+        if !self.local_functions.contains_key(&function.id()) {
+            let inspected = self.inspect_locals(root, function, cancel)?;
+            self.local_functions
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            self.local_functions.insert(function.id(), inspected);
+        }
+        let assignment = if node.kind() == "assignment" {
+            Some(node)
+        } else {
+            node.parent().filter(|parent| {
+                parent.kind() == "assignment" && parent.child_by_field_name("left") == Some(node)
+            })
+        };
+        let name = assignment
+            .and_then(|a| a.child_by_field_name("left"))
+            .filter(|n| n.kind() == "identifier")
+            .or_else(|| (node.kind() == "identifier").then_some(node));
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        let Some(key) = self.key(name, cancel)? else {
+            return Ok(None);
+        };
+        let admitted = self
+            .local_functions
+            .get(&function.id())
+            .and_then(Option::as_ref)
+            .and_then(|bindings| bindings.get(&key))
+            .copied()
+            .flatten();
+        if let Some(assignment) = assignment {
+            if role == StructuralRole::Reference {
+                return Ok(Some(false));
+            }
+            if admitted.is_some_and(|(id, _)| id == assignment.id()) {
+                candidate.syntax = match role {
+                    StructuralRole::Declaration => "python.local_variable",
+                    StructuralRole::Definition => "python.local_variable_name",
+                    StructuralRole::Signature => "python.local_assignment_context",
+                    _ => return Ok(None),
+                };
+                candidate.required = true;
+                return Ok(Some(true));
+            }
+            if matches!(
+                role,
+                StructuralRole::Declaration | StructuralRole::Definition
+            ) {
+                candidate.role = StructuralRole::Signature;
+                candidate.syntax = "python.assignment_binding_unavailable";
+                candidate.start = assignment.start_byte();
+                candidate.end = assignment.end_byte();
+                candidate.required = true;
+                return Ok(Some(true));
+            }
+        }
+        if admitted.is_some() && matches!(role, StructuralRole::Reference | StructuralRole::Call) {
+            candidate.syntax = if role == StructuralRole::Call {
+                "python.local_call_unavailable"
+            } else {
+                "python.local_binding_unavailable"
+            };
+            candidate.required = true;
+            return Ok(Some(true));
+        }
+        Ok(None)
+    }
+
     pub(super) fn refine(
         &mut self,
         root: Node<'_>,
@@ -715,6 +1014,9 @@ impl<'source> CaptureCache<'source> {
         cancel: &Cancellation,
     ) -> Result<bool, AdapterError> {
         cancel.check()?;
+        if let Some(keep) = self.refine_local(root, node, role, candidate, cancel)? {
+            return Ok(keep);
+        }
         if role == StructuralRole::Signature && node.kind() == "module" {
             self.inspect(root, cancel)?;
             if !self.available || self.ambiguous {
@@ -826,6 +1128,16 @@ impl<'source> CaptureCache<'source> {
             return Ok(true);
         };
         if !Self::direct_module_assignment(assignment) {
+            if matches!(
+                role,
+                StructuralRole::Declaration | StructuralRole::Definition
+            ) {
+                candidate.role = StructuralRole::Signature;
+                candidate.syntax = "python.assignment_binding_unavailable";
+                candidate.start = assignment.start_byte();
+                candidate.end = assignment.end_byte();
+                candidate.required = true;
+            }
             return Ok(true);
         }
         if role == StructuralRole::Reference {
@@ -885,6 +1197,41 @@ mod tests {
             required: true,
             native_depth: 0,
         }
+    }
+
+    #[test]
+    fn function_local_census_requires_complete_bounded_uncancelled_input() {
+        let source = b"def owned(seed):\n    value = seed + 1\n    return value\n";
+        let parsed = tree(source);
+        let root = parsed.root_node();
+        let function = root.named_child(0).unwrap();
+        let mut bounded = CaptureCache::new(source, 0, true);
+        assert!(
+            bounded
+                .inspect_locals(root, function, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(bounded.exhausted());
+        let mut partial = CaptureCache::new(source, 256, false);
+        assert!(
+            partial
+                .inspect_locals(root, function, &Cancellation::new())
+                .unwrap()
+                .is_none()
+        );
+        let cancel = Cancellation::new();
+        cancel.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        let mut complete = CaptureCache::new(source, 256, true);
+        assert!(matches!(
+            complete.inspect_locals(root, function, &cancel),
+            Err(AdapterError::Cancelled { .. })
+        ));
+        let bindings = complete
+            .inspect_locals(root, function, &Cancellation::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(bindings.values().flatten().count(), 1);
     }
 
     #[test]

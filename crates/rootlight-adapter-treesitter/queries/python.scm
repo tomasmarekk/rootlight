@@ -54,6 +54,10 @@
 ; a unique simple module binder and records all other binding gaps explicitly.
 (module (expression_statement (assignment) @declaration))
 (module (expression_statement (assignment left: (identifier) @definition)))
+; Local candidates require a complete, function-owned binder census.
+(function_definition body: (block (expression_statement (assignment) @declaration)))
+(function_definition body: (block
+  (expression_statement (assignment left: (identifier) @definition))))
 (assignment) @signature
 (augmented_assignment) @signature
 (module (for_statement) @signature)

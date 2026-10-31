@@ -1741,6 +1741,7 @@ struct DeclarationDraft {
     is_test: bool,
     synthetic: bool,
     rust_local: bool,
+    python_local: bool,
     source: SourceRef,
 }
 
@@ -1915,6 +1916,7 @@ struct ProjectFactsBuilder<'analyzer, 'request, 'source> {
     go_bindings: BTreeMap<SourceSpan, go::Proof>,
     php_bindings: BTreeMap<SourceSpan, php::Proof>,
     rust_local_symbols: BTreeSet<SymbolId>,
+    python_local_symbols: BTreeSet<SymbolId>,
     occurrences: Vec<OccurrenceDraft>,
     module_by_file: BTreeMap<FileId, SymbolId>,
     path_by_file: BTreeMap<FileId, String>,
@@ -1953,6 +1955,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             go_bindings: BTreeMap::new(),
             php_bindings: BTreeMap::new(),
             rust_local_symbols: BTreeSet::new(),
+            python_local_symbols: BTreeSet::new(),
             occurrences: Vec::new(),
             module_by_file: BTreeMap::new(),
             path_by_file: BTreeMap::new(),
@@ -2530,6 +2533,8 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                     declaration.syntax_kind().as_str(),
                     "rust.local_variable.declaration" | "rust.parameter.declaration"
                 );
+                let python_local =
+                    declaration.syntax_kind().as_str() == "python.local_variable.declaration";
                 let anonymous =
                     declaration.syntax_kind().as_str() == "rust.anonymous_function.declaration";
                 if (rust_local || anonymous)
@@ -2706,6 +2711,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                                 ),
                             synthetic: anonymous,
                             rust_local,
+                            python_local,
                             source: source_for_span(input, declaration.span()),
                         },
                     ));
@@ -3179,6 +3185,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             if draft.rust_local {
                 self.rust_local_symbols.insert(symbol);
             }
+            if draft.python_local {
+                self.python_local_symbols.insert(symbol);
+            }
             let state = self
                 .states
                 .get(&draft.file)
@@ -3306,7 +3315,11 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
                 EvidenceKind::Syntax,
                 draft.source.clone(),
             )?;
-            if draft.rust_local || draft.synthetic || draft.kind == EntityKind::Parameter {
+            if draft.rust_local
+                || draft.python_local
+                || draft.synthetic
+                || draft.kind == EntityKind::Parameter
+            {
                 self.push_relation(
                     draft.file,
                     subject,
@@ -4310,6 +4323,7 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
             // value behind it. Their definitions bind directly; references follow
             // the reviewed import-target path instead of adding the alias as a candidate.
             if !self.rust_local_symbols.contains(&entity.symbol)
+                && !self.python_local_symbols.contains(&entity.symbol)
                 && !matches!(
                     entity.kind,
                     EntityKind::Module | EntityKind::Namespace | EntityKind::Import
@@ -4627,7 +4641,9 @@ impl<'analyzer, 'request, 'source> ProjectFactsBuilder<'analyzer, 'request, 'sou
         let admits_namespace = |entity: &&SemanticEntity| {
             // Lexical Rust bindings require the source-position lookup above.
             // A name-only path cannot recover visibility or callable dispatch.
-            if self.rust_local_symbols.contains(&entity.symbol) {
+            if self.rust_local_symbols.contains(&entity.symbol)
+                || self.python_local_symbols.contains(&entity.symbol)
+            {
                 return false;
             }
             if self.analyzer.language == SemanticProjectLanguage::Rust {
@@ -6186,7 +6202,10 @@ fn select_unique_syntax_fact<'a>(facts: &[&'a SyntaxFact]) -> Option<&'a SyntaxF
 fn python_module_target_unavailable(label: &str) -> bool {
     matches!(
         label,
-        "python.module_binding_unavailable.reference" | "python.module_call_unavailable.call"
+        "python.module_binding_unavailable.reference"
+            | "python.module_call_unavailable.call"
+            | "python.local_binding_unavailable.reference"
+            | "python.local_call_unavailable.call"
     )
 }
 
@@ -7833,6 +7852,12 @@ mod python_module_assignment_metadata_tests {
         ));
         assert!(python_module_target_unavailable(
             "python.module_call_unavailable.call"
+        ));
+        assert!(python_module_target_unavailable(
+            "python.local_binding_unavailable.reference"
+        ));
+        assert!(python_module_target_unavailable(
+            "python.local_call_unavailable.call"
         ));
         assert!(!python_module_target_unavailable(
             "python.identifier.reference"

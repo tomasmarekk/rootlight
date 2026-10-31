@@ -37,6 +37,213 @@ fn output(bytes: &[u8]) -> AnalysisOutput {
     output
 }
 
+#[test]
+fn ordinary_function_locals_keep_distinct_function_owned_definitions() {
+    let source = b"def first(seed):\n    value = seed + 1\n    return value\n\ndef second(seed):\n    value = seed + 2\n    return value\n";
+    let result = output(source);
+    let document = result.document();
+    let variables: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Variable && entity.canonical_name == "value")
+        .collect();
+    assert_eq!(variables.len(), 2, "each function owns its own local slot");
+    assert_ne!(variables[0].id, variables[1].id);
+    let mut owners = BTreeSet::new();
+    for variable in variables {
+        let contains: Vec<_> = document
+            .relations
+            .iter()
+            .filter(|relation| {
+                relation.predicate == RelationPredicate::Contains
+                    && relation.object == RelationEndpoint::Entity(variable.id)
+            })
+            .collect();
+        assert_eq!(contains.len(), 1);
+        let RelationEndpoint::Entity(owner) = contains[0].subject else {
+            panic!("a local has a written entity owner")
+        };
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| { entity.id == owner && entity.kind == EntityKind::Function })
+        );
+        owners.insert(owner);
+        let definitions: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target
+                        == OccurrenceTarget::Resolved {
+                            symbol: variable.id,
+                        }
+            })
+            .collect();
+        assert_eq!(definitions.len(), 1);
+        let span = definitions[0].source.span();
+        assert_eq!(
+            &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()],
+            b"value"
+        );
+    }
+    assert_eq!(owners.len(), 2);
+    let reads: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.syntax_kind == "python.local_binding_unavailable.reference"
+        })
+        .collect();
+    assert_eq!(reads.len(), 2);
+    assert!(
+        reads
+            .iter()
+            .all(|site| matches!(site.target, OccurrenceTarget::Unresolved { .. }))
+    );
+    assert!(!document.skipped_regions.iter().any(|gap| {
+        gap.domain == rootlight_ir::FactDomain::Entities
+            && gap.detail == "python-assignment-general-binding-and-nonmodule-or-complex-target-identity-unavailable"
+    }));
+    for domain in [
+        rootlight_ir::FactDomain::Occurrences,
+        rootlight_ir::FactDomain::Relations,
+    ] {
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.domain == domain
+                && gap.detail == "python-written-function-local-values-execution-and-reference-binding-unavailable"
+        }));
+    }
+}
+
+#[test]
+fn function_local_proof_refuses_competing_binders_and_unmodeled_scopes() {
+    for source in [
+        "def owned():\n    value = 1\n    value = 2\n",
+        "def owned():\n    value = 1\n    value += 2\n",
+        "def owned():\n    print(value)\n    value = 1\n",
+        "def owned(value):\n    value = 1\n",
+        "def owned():\n    global value\n    value = 1\n",
+        "def owned():\n    nonlocal value\n    value = 1\n",
+        "def owned():\n    value, other = [1, 2]\n",
+        "def owned():\n    if True:\n        value = 1\n",
+        "def owned():\n    value = 1\n    for value in []:\n        pass\n",
+        "def owned():\n    value = 1\n    def inner():\n        return value\n",
+        "def outer():\n    def inner():\n        value = 1\n        return value\n",
+        "def owned():\n    value = 1\n    return lambda: value\n",
+        "def owned():\n    value = 1\n    return [value for item in []]\n",
+        "def owned():\n    value = 1\n    locals()\n",
+        "def owned():\n    value = 1\n    exec('value = 2')\n",
+        "class Owner:\n    def owned(self):\n        value = 1\n",
+        "async def owned():\n    value = 1\n",
+        "def owned():\n    value = (\n",
+    ] {
+        let result = output(source.as_bytes());
+        assert!(
+            !result.document().entities.iter().any(|entity| {
+                entity.kind == EntityKind::Variable && entity.canonical_name == "value"
+            }),
+            "unsupported local binder must remain unavailable: {source}"
+        );
+    }
+}
+
+#[test]
+fn function_local_call_targets_remain_unavailable() {
+    let result = output(
+        b"def value():\n    pass\n\ndef owned(seed):\n    value = seed\n    return value()\n",
+    );
+    let document = result.document();
+    assert_eq!(
+        document
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Variable && entity.canonical_name == "value"
+            })
+            .count(),
+        1
+    );
+    let calls: Vec<_> = document
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "python.local_call_unavailable.call")
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(
+        calls[0].target,
+        OccurrenceTarget::Unresolved { .. }
+    ));
+}
+
+#[test]
+#[ignore = "requires the original Python corpus checkout"]
+fn original_python_function_local_definitions_keep_physical_identity() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("ROOTLIGHT_DIAGNOSTIC_CORPUS_ROOT").expect("original corpus root"),
+    )
+    .join("2_Python_Python");
+    for (path, expected, witnesses) in [
+        (
+            "audio_filters/butterworth_filter.py",
+            85,
+            vec![
+                ("w0", 759, 761, "make_lowpass"),
+                ("alpha", 838, 843, "make_lowpass"),
+            ],
+        ),
+        (
+            "maths/area.py",
+            3,
+            vec![
+                ("semi_perimeter", 11807, 11821, "area_triangle_three_sides"),
+                ("area", 11857, 11861, "area_triangle_three_sides"),
+            ],
+        ),
+    ] {
+        let bytes = std::fs::read(root.join(path)).expect("original source");
+        let result = output(&bytes);
+        let document = result.document();
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == EntityKind::Variable)
+                .count(),
+            expected,
+            "{path}"
+        );
+        for (name, start, end, owner_name) in witnesses {
+            let symbol = definition(document, name, start, end);
+            assert!(document.entities.iter().any(|entity| entity.id == symbol
+                && entity.kind == EntityKind::Variable
+                && entity.canonical_name == name));
+            let owner = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Function && entity.canonical_name == owner_name
+                })
+                .expect("original written function owner");
+            assert_eq!(
+                document
+                    .relations
+                    .iter()
+                    .filter(|relation| {
+                        relation.predicate == RelationPredicate::Contains
+                            && relation.subject == RelationEndpoint::Entity(owner.id)
+                            && relation.object == RelationEndpoint::Entity(symbol)
+                    })
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
 fn definition(
     document: &rootlight_ir::NormalizedIrDocument,
     name: &str,
