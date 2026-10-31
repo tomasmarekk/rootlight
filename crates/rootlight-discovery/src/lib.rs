@@ -84,7 +84,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.92";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.93";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3080,6 +3080,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".m"],
         aliases: &["objc"],
         detectors: &["content", "context", "extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "n3",
+        suffixes: &[".n3"],
+        aliases: &[],
+        detectors: &["extension"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -9881,6 +9889,36 @@ max_source_file_bytes = 2097152
         }
         assert_eq!(extension_language("main.tsp.ts"), Some("typescript"));
         assert_eq!(extension_language("main.tsp.json"), Some("json"));
+    }
+
+    #[test]
+    fn notation3_suffix_has_its_distinct_native_language_identity() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "n3")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".n3"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        for path in ["rules.n3", "RULES.N3", "logic/rules.n3"] {
+            assert_eq!(extension_language(path), Some("n3"));
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"{ ?s <urn:p> true } => { ?s <urn:q> true } .\n",
+            );
+            assert_eq!(class, InputClass::Source);
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "n3".to_owned(),
+                    evidence: LanguageEvidence::Extension
+                }]
+            );
+        }
+        assert_eq!(extension_language("data.ttl"), Some("turtle"));
+        for path in ["data.trig", "query.rq", "rules.n3.bak", "rules.n3x"] {
+            assert_ne!(extension_language(path), Some("n3"));
+        }
     }
 
     #[test]

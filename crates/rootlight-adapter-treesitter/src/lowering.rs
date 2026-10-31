@@ -75,6 +75,7 @@ mod meson_bindings;
 mod modelica;
 mod mojo;
 mod mojo_members;
+mod n3;
 mod nim;
 mod nix_formal_reads;
 mod nix_paths;
@@ -8621,7 +8622,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 // contents or byte offsets; this is source identity, not dispatch.
                 let anonymous_scope_identity = if matches!(
                     fact.syntax_kind().as_str(),
-                    "c.block.scope"
+                    "n3.formula.scope"
+                        | "c.block.scope"
                         | "c.for.scope"
                         | "solidity.block.scope"
                         | "solidity.for.scope"
@@ -8660,7 +8662,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     let position = *next;
                     *next = next.checked_add(1).ok_or(SinkError::AccountingOverflow)?;
                     Some(source_occurrence_identity(
-                        if self.language_for_fact(fact) == "c" {
+                        if self.language_for_fact(fact) == "n3" {
+                            "rootlight.n3-formula-scope/1"
+                        } else if self.language_for_fact(fact) == "c" {
                             "rootlight.c-written-lexical-scope/1"
                         } else if self.language_for_fact(fact) == "dart" {
                             "rootlight.dart-lexical-scope/1"
@@ -11174,6 +11178,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
                 .chain(wesl::gaps(fact))
                 .chain(typespec::gaps(fact))
                 .chain(turtle::gaps(fact))
+                .chain(n3::gaps(fact))
                 .chain(ron_source_gaps(fact)),
         )
         .chain(hare::gaps(fact))
@@ -12125,6 +12130,9 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "n3" {
+        return n3::written(kind, label);
+    }
     if language == "turtle" {
         return turtle::written(kind, label);
     }
@@ -12486,7 +12494,9 @@ fn written_source_identity(
     kind: &str,
     position: u64,
 ) -> [u8; 32] {
-    let context = if language == "coq" {
+    let context = if language == "n3" {
+        "rootlight.n3-written-source-occurrence/1"
+    } else if language == "coq" {
         "rootlight.coq-source-occurrence/1"
     } else if language == "lean" {
         "rootlight.lean-written-source-occurrence/1"
@@ -13604,6 +13614,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "n3" || fact.syntax_kind().as_str().starts_with("n3.") {
+        return language == "n3"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "n3.file.module";
+    }
     if fact.syntax_kind().as_str().starts_with("typespec.") {
         return fact.kind() == SyntaxFactKind::Module
             && fact.syntax_kind().as_str() == "typespec.file.module"
@@ -14545,6 +14560,9 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("n3.") {
+        return n3::kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("turtle.") {
         return turtle::kind(fact);
     }
@@ -14598,6 +14616,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("n3.") {
+        return n3::kind(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("turtle.") {
         return turtle::kind(fact);
     }

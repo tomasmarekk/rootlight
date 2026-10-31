@@ -21,6 +21,9 @@ mod glsl;
 #[path = "structural_hlsl.rs"]
 mod hlsl;
 
+#[path = "structural_n3.rs"]
+mod n3;
+
 #[path = "structural_ocaml.rs"]
 mod ocaml;
 
@@ -1454,6 +1457,11 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "n3" || label.starts_with("n3.") {
+        return (language == "n3")
+            .then(|| n3::name(fact, text, maximum_bytes))
+            .flatten();
+    }
     if language == "turtle" || label.starts_with("turtle.") {
         if language != "turtle" || fact.kind() != SyntaxFactKind::Occurrence {
             return None;

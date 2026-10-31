@@ -99,6 +99,7 @@ mod matlab;
 mod meson;
 mod modelica;
 mod mojo;
+mod n3;
 mod nim;
 mod nix;
 mod nushell;
@@ -477,6 +478,14 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::N3 {
+            expected.retain(|name| {
+                matches!(
+                    *name,
+                    "root" | "module" | "declaration" | "definition" | "scope"
+                )
+            });
+        }
         if family == GrammarFamily::Turtle {
             expected.retain(|name| {
                 matches!(
@@ -3198,7 +3207,13 @@ impl QueryPack {
                     }
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::Turtle {
+                let candidate = if input.family == GrammarFamily::N3 {
+                    let Some(candidate) = n3::candidate(capture.node, role, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
+                } else if input.family == GrammarFamily::Turtle {
                     let Some(candidate) = turtle::candidate(
                         turtle_context
                             .as_ref()
@@ -4623,6 +4638,7 @@ fn candidate_for_capture(
             GrammarFamily::Hlsl => return Err(query_failure("query-hlsl-unproven-call")),
             GrammarFamily::Wgsl => return Err(query_failure("query-wgsl-unproven-call")),
             GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
+            GrammarFamily::N3 => return Err(query_failure("query-n3-unproven-call")),
             GrammarFamily::Turtle => return Err(query_failure("query-turtle-unproven-call")),
             GrammarFamily::TypeSpec => return Err(query_failure("query-typespec-unproven-call")),
             GrammarFamily::Xml | GrammarFamily::Dtd => {
@@ -5146,6 +5162,7 @@ const fn supports_test_attribute(family: GrammarFamily) -> bool {
 
 fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str> {
     match (family, native) {
+        (GrammarFamily::N3, "n3_doc") => Some("n3.file"),
         (GrammarFamily::Turtle, "document") => Some("turtle.file"),
         (GrammarFamily::Idris, "idris") => Some("idris.file"),
         (GrammarFamily::Idris, "comment") => Some("idris.comment"),
@@ -5754,7 +5771,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(109);
+        let mut packs = Vec::with_capacity(110);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5843,6 +5860,7 @@ impl QueryPackRegistry {
                 GrammarFamily::TypeSpec,
                 include_str!("../queries/typespec.scm"),
             ),
+            (GrammarFamily::N3, include_str!("../queries/n3.scm")),
             (GrammarFamily::Turtle, include_str!("../queries/turtle.scm")),
             (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
             (GrammarFamily::Xml, include_str!("../queries/xml.scm")),
@@ -6059,6 +6077,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn n3_pack_loads_distinct_native_formula_document() {
+        let registry = crate::GrammarRegistry::audited().expect("native registry");
+        let descriptor = registry.get(GrammarFamily::N3).expect("N3 registered");
+        assert_eq!(descriptor.language().as_str(), "n3");
+        assert_ne!(
+            descriptor.parser_sha256(),
+            registry.get(GrammarFamily::Turtle).unwrap().parser_sha256()
+        );
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::N3))
+            .unwrap();
+        let source = b"@prefix ex: <https://example.test/> .\n{ @forAll ex:x . ex:x ex:p true . } => { ex:x ex:q true . } .\n";
+        let tree = parser.parse(source, None).expect("native N3 parse");
+        assert!(!tree.root_node().has_error());
+        assert_eq!(tree.root_node().kind(), "n3_doc");
+        assert_eq!(tree.root_node().end_byte(), source.len());
+        let pack =
+            QueryPack::compile(GrammarFamily::N3, include_str!("../queries/n3.scm")).unwrap();
+        assert!(pack.identity_query.capture_names().contains(&"module"));
+    }
+
+    #[test]
     fn turtle_pack_loads_distinct_native_document() {
         let registry = crate::GrammarRegistry::audited().expect("native registry");
         let descriptor = registry
@@ -6109,10 +6150,11 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 110);
+        assert_eq!(registry.len(), 112);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
+            GrammarFamily::N3,
             GrammarFamily::Erb,
             GrammarFamily::Wesl,
             GrammarFamily::Ron,
@@ -6221,6 +6263,14 @@ mod tests {
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::N3 {
+                expected.retain(|name| {
+                    matches!(
+                        *name,
+                        "root" | "module" | "declaration" | "definition" | "scope"
+                    )
+                });
+            }
             if family == GrammarFamily::Erb {
                 expected = vec!["comment", "expression", "module", "root", "string"];
             }

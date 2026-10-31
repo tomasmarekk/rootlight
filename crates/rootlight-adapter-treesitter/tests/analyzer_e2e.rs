@@ -35,6 +35,9 @@ use rootlight_ir::{
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
 
+#[path = "../../rootlight-service/src/source_inventory_example/admission_profile.rs"]
+mod product_profile;
+
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_SYNTAX_NODES: usize = 16_384;
 const MAX_SYNTAX_DEPTH: usize = 128;
@@ -118,6 +121,8 @@ mod markdown_native;
 mod matlab_native;
 #[path = "analyzer_e2e/mojo_native.rs"]
 mod mojo_native;
+#[path = "analyzer_e2e/n3_native.rs"]
+mod n3_native;
 #[path = "analyzer_e2e/nix_native.rs"]
 mod nix_native;
 #[path = "analyzer_e2e/objective_c_native.rs"]

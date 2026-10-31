@@ -12,9 +12,6 @@ const TURTLE: LanguageCase = LanguageCase {
     body_after: "",
 };
 
-#[path = "../../../rootlight-service/src/source_inventory_example/admission_profile.rs"]
-mod product_profile;
-
 fn output(source: &[u8]) -> AnalysisOutput {
     output_with_profile(source, false)
 }

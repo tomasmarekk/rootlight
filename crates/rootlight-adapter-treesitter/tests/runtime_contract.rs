@@ -773,14 +773,23 @@ fn cobol_formats_invalidate_reuse_without_changing_source_identity() {
 }
 
 #[test]
-fn cobol_included_ranges_are_rejected_before_native_work() {
+fn complete_source_grammars_reject_included_ranges_before_native_work() {
     let fixture = Fixture::new(
         "ranges.cbl",
         b"       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SAMPLE.\n",
     );
     let limits = limits(MAX_SOURCE_BYTES, 1024, 64);
     let provider = provider(MAX_SOURCE_BYTES, 1024, 64, 2 * 1024 * 1024);
-    for language in ["cobol-fixed", "cobol-free"] {
+    for language in [
+        "cobol-fixed",
+        "cobol-free",
+        "sed",
+        "idris",
+        "cuda",
+        "typespec",
+        "turtle",
+        "n3",
+    ] {
         for ranges in [vec![(0, 29)], vec![(0, 7), (30, 37)]] {
             let ranges = ranges
                 .into_iter()
