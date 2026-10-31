@@ -1178,3 +1178,212 @@ fn cpp_namespace_names_keep_physical_source_and_body_edit_identity() {
     );
     assert_eq!(symbol_ids(first.document()), symbol_ids(second.document()));
 }
+
+#[test]
+fn cpp_namespace_body_recovery_cannot_supply_or_conflict_with_owner_names() {
+    for name in [Some("engine"), Some("engine::flags"), None] {
+        let header = name.map_or_else(
+            || "namespace".to_owned(),
+            |name| format!("namespace {name}"),
+        );
+        let text = format!(
+            "{header} {{\nnamespace child {{ void Child() {{}} }}\n\
+             enum class Bits : unsigned {{ Empty = 0 }};\n\
+             DECLARE_FLAGS(Bits)\n\n\
+             constexpr Bits Normalize(unsigned value) {{ return static_cast<Bits>(value); }}\n}}\n"
+        );
+        let result = output(CPP, text.as_bytes(), EncodingId::new("utf-8").unwrap());
+        let document = result.document();
+        let owner_name = name.unwrap_or("<anonymous>");
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Module && entity.canonical_name == owner_name)
+            .unwrap();
+        if name.is_none() {
+            assert!(owner.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+            assert!(!document.occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: owner.id }
+            }));
+        } else {
+            let start = u64::try_from("namespace ".len()).unwrap();
+            entity_at(
+                document,
+                owner_name,
+                EntityKind::Module,
+                start,
+                start + u64::try_from(owner_name.len()).unwrap(),
+            );
+        }
+        for name in ["Bits", "Normalize"] {
+            let member = document
+                .entities
+                .iter()
+                .find(|entity| entity.canonical_name == name)
+                .unwrap();
+            assert_eq!(member.qualified_name, format!("{owner_name}::{name}"));
+            let span = member.evidence.source.as_ref().unwrap().span();
+            contains(
+                document,
+                owner.id,
+                member.id,
+                span.start_byte(),
+                span.end_byte(),
+            );
+        }
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| { entity.qualified_name == format!("{owner_name}::child::Child") })
+        );
+        assert!(!document.entities.iter().any(|entity| {
+            entity.kind == EntityKind::Module && entity.canonical_name == "DECLARE_FLAGS"
+        }));
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.reason == rootlight_ir::SkippedRegionReason::ParseError })
+        );
+    }
+}
+
+#[test]
+fn cpp_anonymous_namespaces_reopen_under_file_and_enclosing_owner_identity() {
+    let text = concat!(
+        "namespace outer { namespace /* header */ { void First() {}\n",
+        "namespace nested { void Deep() {} }\n",
+        "namespace { void Inner() {} }\n} }\n",
+        "namespace outer { namespace { void Second() {} } }\n",
+        "namespace outer { namespace inner { namespace { void Alpha() {} } } }\n",
+        "namespace outer { namespace inner { namespace { void Beta() {} } } }\n",
+        "namespace other { namespace { void Third() {} } }\n",
+        "namespace { void Global() {} }\n",
+        "void Visible() {}\n",
+    );
+    clean(text.as_bytes());
+    let result = output(CPP, text.as_bytes(), EncodingId::new("utf-8").unwrap());
+    let document = result.document();
+    let anonymous: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Module && entity.canonical_name == "<anonymous>"
+        })
+        .collect();
+    assert_eq!(anonymous.len(), 5);
+    for owner in &anonymous {
+        assert!(owner.flags.contains(&rootlight_ir::EntityFlag::Synthetic));
+        let span = owner.evidence.source.as_ref().unwrap().span();
+        let authored = &text[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert!(authored.starts_with("namespace"));
+        assert!(authored.ends_with('}'));
+        assert!(!document.occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.target == OccurrenceTarget::Resolved { symbol: owner.id }
+        }));
+    }
+    for (name, qualified_owner) in [
+        ("First", "outer::<anonymous>"),
+        ("Second", "outer::<anonymous>"),
+        ("Alpha", "outer::inner::<anonymous>"),
+        ("Beta", "outer::inner::<anonymous>"),
+        ("Deep", "outer::<anonymous>::nested"),
+        ("Inner", "outer::<anonymous>::<anonymous>"),
+        ("Third", "other::<anonymous>"),
+        ("Global", "<anonymous>"),
+    ] {
+        let member = document
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        let owner = document
+            .entities
+            .iter()
+            .find(|entity| entity.qualified_name == qualified_owner)
+            .unwrap();
+        assert_eq!(member.qualified_name, format!("{qualified_owner}::{name}"));
+        let span = member.evidence.source.as_ref().unwrap().span();
+        contains(
+            document,
+            owner.id,
+            member.id,
+            span.start_byte(),
+            span.end_byte(),
+        );
+    }
+    let visible = document
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Visible")
+        .unwrap();
+    assert_eq!(visible.qualified_name, "Visible");
+    assert!(matches!(
+        visible.container,
+        Some(rootlight_ir::ContainerRef::File(_))
+    ));
+    let other_file = output(
+        LanguageCase {
+            path: "other.cpp",
+            ..CPP
+        },
+        text.as_bytes(),
+        EncodingId::new("utf-8").unwrap(),
+    );
+    let symbols: BTreeSet<_> = symbol_ids(document).into_values().collect();
+    let other_symbols: BTreeSet<_> = symbol_ids(other_file.document()).into_values().collect();
+    assert!(symbols.is_disjoint(&other_symbols));
+    let changed = text.replace("void First() {}", "void First() { External(); }");
+    let edited = output(CPP, changed.as_bytes(), EncodingId::new("utf-8").unwrap());
+    assert_eq!(symbol_ids(document), symbol_ids(edited.document()));
+}
+
+#[test]
+fn cpp_malformed_namespace_headers_cannot_be_certified_as_anonymous() {
+    for header in ["namespace broken::", "namespace @", "namespace [[broken(]]"] {
+        let text = format!("{header} {{ void Hidden() {{}} }}\nvoid Visible() {{}}\n");
+        let result = output(CPP, text.as_bytes(), EncodingId::new("utf-8").unwrap());
+        let document = result.document();
+        assert!(!document.entities.iter().any(|entity| {
+            entity.kind == EntityKind::Module
+                && (entity.flags.contains(&rootlight_ir::EntityFlag::Synthetic)
+                    || entity.canonical_name == "Hidden")
+        }));
+        assert!(
+            document
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.reason == rootlight_ir::SkippedRegionReason::ParseError })
+        );
+        if header == "namespace [[broken(]]" {
+            // The native ERROR for this unclosed attribute consumes the nominal
+            // sibling too; it is not a separately parsed file-scope declaration.
+            let end = u64::try_from(text.trim_end().len()).unwrap();
+            assert!(document.skipped_regions.iter().any(|gap| {
+                gap.detail == "syntax-error-recovery"
+                    && gap.source.span().start_byte() == 0
+                    && gap.source.span().end_byte() == end
+            }));
+            assert!(!document.entities.iter().any(|entity| {
+                entity.kind == EntityKind::Function && entity.canonical_name == "Visible"
+            }));
+        } else {
+            let sibling = document
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Function && entity.canonical_name == "Visible"
+                })
+                .unwrap();
+            assert_eq!(sibling.qualified_name, "Visible");
+            assert!(matches!(
+                sibling.container,
+                Some(rootlight_ir::ContainerRef::File(_))
+            ));
+        }
+    }
+}

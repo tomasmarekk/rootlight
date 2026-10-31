@@ -8934,7 +8934,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
             {
                 kind = structural_type_member_kind(fact, kind);
             }
-            let capture = captures.get(&fact.local_id()).cloned().unwrap_or_default();
+            let mut capture = captures.get(&fact.local_id()).cloned().unwrap_or_default();
+            if fact.syntax_kind().as_str() == "cpp.anonymous_namespace.module" {
+                // Native absence of a name cannot acquire a body declaration's name.
+                capture.definitions.clear();
+            } else if fact.syntax_kind().as_str() == "cpp.namespace.module" {
+                // Only the native name field can name this namespace; recovered
+                // body declarators cannot supply or conflict with that identity.
+                capture.definitions.retain(|definition| {
+                    definition.parent() == Some(fact.local_id())
+                        && matches!(
+                            definition.syntax_kind().as_str(),
+                            "cpp.namespace_identifier.definition" | "cpp.namespace_path.definition"
+                        )
+                });
+            }
             let definition = select_unique_capture(&capture.definitions);
             let (name, definition_local_id) = if let Some(definition) = definition {
                 let text = self.text_for_span(definition.span())?;
@@ -8986,7 +9000,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     }
                     if self.language_for_fact(fact) == "json-schema"
                         || fact.syntax_kind().as_str() == "cobol.program.declaration"
-                        || definition.syntax_kind().as_str() == "cpp.namespace_path.definition"
+                        || fact.syntax_kind().as_str() == "cpp.namespace.module"
                         || (matches!(self.language_for_fact(fact), "fsharp" | "fsharp-signature")
                             && fact.syntax_kind().as_str().starts_with("fsharp."))
                     {
@@ -9017,6 +9031,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else if matches!(
                 fact.syntax_kind().as_str(),
                 "r.anonymous_function.declaration"
+                    | "cpp.anonymous_namespace.module"
                     | "rust.anonymous_function.declaration"
                     | "julia.unnamed_parameter.declaration"
                     | "julia.callable_object.declaration"
@@ -9056,6 +9071,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else {
                 if self.language_for_fact(fact) == "json-schema"
                     || fact.syntax_kind().as_str() == "cobol.program.declaration"
+                    || fact.syntax_kind().as_str() == "cpp.namespace.module"
                     || (matches!(self.language_for_fact(fact), "fsharp" | "fsharp-signature")
                         && fact.syntax_kind().as_str().starts_with("fsharp."))
                 {
@@ -9449,13 +9465,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .is_none()
                         .then(|| parent_scope.as_ref().and_then(|scope| scope.lexical_module))
                         .flatten(),
-                    scope_identity: member_scope_identity,
+                    scope_identity: if matches!(
+                        fact.syntax_kind().as_str(),
+                        "cpp.namespace.module" | "cpp.anonymous_namespace.module"
+                    ) {
+                        None
+                    } else {
+                        member_scope_identity
+                    },
                     data_identity: None,
                     data_root_entity: None,
                     data_qualified_name: None,
-                    scope_collision_guard: parent_scope
-                        .as_ref()
-                        .and_then(|scope| scope.collision_guard),
+                    // Native namespaces reopen under the same file and owner,
+                    // including across separate enclosing namespace blocks.
+                    scope_collision_guard: if matches!(
+                        fact.syntax_kind().as_str(),
+                        "cpp.namespace.module" | "cpp.anonymous_namespace.module"
+                    ) {
+                        None
+                    } else {
+                        parent_scope
+                            .as_ref()
+                            .and_then(|scope| scope.collision_guard)
+                    },
                     qualified_prefix: qualified_prefix.map(str::to_owned),
                     synthetic: definition_local_id.is_none()
                         || fact.syntax_kind().as_str() == "markdown.code_block.module",

@@ -4181,6 +4181,51 @@ fn cpp_namespace_name_component(
     }
 }
 
+fn cpp_anonymous_namespace(
+    node: tree_sitter::Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if node.kind() != "namespace_definition"
+        || node.is_error()
+        || node.is_missing()
+        || node.child_by_field_name("name").is_some()
+    {
+        return Ok(false);
+    }
+    let Some(body) = node.child_by_field_name("body") else {
+        return Ok(false);
+    };
+    let Some(last_child) = body
+        .child_count()
+        .checked_sub(1)
+        .and_then(|index| u32::try_from(index).ok())
+    else {
+        return Ok(false);
+    };
+    if body.kind() != "declaration_list"
+        || body.is_missing()
+        || !body
+            .child(0)
+            .is_some_and(|open| open.kind() == "{" && !open.is_missing())
+        || !body
+            .child(last_child)
+            .is_some_and(|close| close.kind() == "}" && !close.is_missing())
+    {
+        return Ok(false);
+    }
+    // Body recovery does not invalidate a complete unnamed namespace header.
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancellation.check()?;
+        if child != body
+            && (child.end_byte() > body.start_byte() || child.is_missing() || child.has_error())
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn candidate_for_capture(
     family: GrammarFamily,
     capture: QueryCapture<'_>,
@@ -4273,6 +4318,12 @@ fn candidate_for_capture(
     // These roles identify reviewed grammar fields rather than the many
     // concrete node kinds accepted by a grammar's shared node rules.
     let syntax = match role {
+        StructuralRole::Module
+            if family == GrammarFamily::Cpp
+                && cpp_anonymous_namespace(capture.node, cancellation)? =>
+        {
+            "cpp.anonymous_namespace"
+        }
         StructuralRole::Signature
             if family == GrammarFamily::Bash && capture.node.kind() == "command" =>
         {
