@@ -16635,8 +16635,10 @@ impl FirstSliceService {
         let file = snapshot.find_file(file).ok_or(FirstSliceError::Query)?;
         let tier = document
             .provenance
-            .iter()
-            .find_map(|provenance| (provenance.id == file.provenance).then_some(provenance.tier))
+            .binary_search_by_key(&file.provenance, |record| record.id)
+            .ok()
+            .and_then(|index| document.provenance.get(index))
+            .map(|provenance| provenance.tier)
             .ok_or(FirstSliceError::CatalogCorrupt)?;
         let (status, reason) = if fallback_native::source_only(snapshot, file) {
             (

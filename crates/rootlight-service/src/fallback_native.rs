@@ -425,9 +425,12 @@ pub(super) fn source_only(
     snapshot: &rootlight_storage::GenerationSnapshot,
     file: &FileRecord,
 ) -> bool {
+    // Snapshot construction canonicalizes provenance by identity.
+    let provenance = &snapshot.document().provenance;
     snapshot.source_files().find(file.id).is_some()
-        || snapshot.document().provenance.iter().any(|provenance| {
-            provenance.id == file.provenance
-                && provenance.producer.name() == "rootlight-source-file-fallback"
-        })
+        || provenance
+            .binary_search_by_key(&file.provenance, |record| record.id)
+            .ok()
+            .and_then(|index| provenance.get(index))
+            .is_some_and(|record| record.producer.name() == "rootlight-source-file-fallback")
 }
