@@ -8986,6 +8986,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     }
                     if self.language_for_fact(fact) == "json-schema"
                         || fact.syntax_kind().as_str() == "cobol.program.declaration"
+                        || definition.syntax_kind().as_str() == "cpp.namespace_path.definition"
                         || (matches!(self.language_for_fact(fact), "fsharp" | "fsharp-signature")
                             && fact.syntax_kind().as_str().starts_with("fsharp."))
                     {

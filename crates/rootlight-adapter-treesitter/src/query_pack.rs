@@ -2856,6 +2856,12 @@ impl QueryPack {
                 {
                     continue;
                 }
+                if input.family == GrammarFamily::Cpp
+                    && role == StructuralRole::Reference
+                    && cpp_namespace_name_component(capture.node, input.cancellation)?
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Perl
                     && !perl::retain_capture(capture.node, role, input.source, input.cancellation)?
                 {
@@ -4150,6 +4156,28 @@ fn canonicalize_file_root_preamble(
     {
         // A known BOM belongs to the complete file envelope, not its declarations.
         candidate.start = 0;
+    }
+}
+
+fn cpp_namespace_name_component(
+    mut node: tree_sitter::Node<'_>,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if node.kind() != "namespace_identifier" {
+        return Ok(false);
+    }
+    loop {
+        cancellation.check()?;
+        let Some(parent) = node.parent() else {
+            return Ok(false);
+        };
+        match parent.kind() {
+            "nested_namespace_specifier" => node = parent,
+            "namespace_definition" => {
+                return Ok(parent.child_by_field_name("name") == Some(node));
+            }
+            _ => return Ok(false),
+        }
     }
 }
 
@@ -5675,6 +5703,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::Cpp, "field_identifier") => Some("cpp.field_identifier"),
         (GrammarFamily::Cpp, "type_identifier") => Some("cpp.type_identifier"),
         (GrammarFamily::Cpp, "namespace_identifier") => Some("cpp.namespace_identifier"),
+        (GrammarFamily::Cpp, "nested_namespace_specifier") => Some("cpp.namespace_path"),
         (GrammarFamily::Cpp, "comment") => Some("cpp.comment"),
         (GrammarFamily::Cpp, "string_literal") => Some("cpp.string"),
         (GrammarFamily::Cpp, "raw_string_literal") => Some("cpp.raw_string"),

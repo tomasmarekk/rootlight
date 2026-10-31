@@ -982,3 +982,199 @@ fn ordinary_written_formals_keep_physical_utf8_bom_and_utf16_sources() {
         );
     }
 }
+
+#[test]
+fn cpp_namespace_reopening_and_shadowing_preserve_written_owners_and_qualified_uses() {
+    let text = concat!(
+        "namespace outer {\n",
+        "namespace facebook::react { void Owned() {} }\n",
+        "namespace facebook::react { void Reopened() {} }\n",
+        "namespace other::react { void Owned() {} }\n",
+        "void Owned() { facebook::react::Reopened(); }\n",
+        "}\n",
+        "void Owned() {}\n",
+    );
+    clean(text.as_bytes());
+    let result = output(CPP, text.as_bytes(), EncodingId::new("utf-8").unwrap());
+    let document = result.document();
+    let namespaces: Vec<_> = text.match_indices("namespace facebook::react").collect();
+    let mut owners = Vec::new();
+    for (start, _) in namespaces {
+        let start = u64::try_from(start + "namespace ".len()).unwrap();
+        let end = start + 15;
+        owners.push(entity_at(
+            document,
+            "facebook::react",
+            EntityKind::Module,
+            start,
+            end,
+        ));
+        assert!(!document.occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() >= start
+                && site.source.span().end_byte() <= end
+        }));
+    }
+    assert_eq!(owners.len(), 2);
+    assert_eq!(owners[0], owners[1]);
+    let namespace = document
+        .entities
+        .iter()
+        .find(|e| e.id == owners[0])
+        .unwrap();
+    assert_eq!(namespace.qualified_name, "outer::facebook::react");
+    let outer = document
+        .entities
+        .iter()
+        .find(|e| e.kind == EntityKind::Module && e.canonical_name == "outer")
+        .unwrap();
+    assert_eq!(
+        namespace.container,
+        Some(rootlight_ir::ContainerRef::Entity(outer.id))
+    );
+    let owned: Vec<_> = document
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Function && e.canonical_name == "Owned")
+        .collect();
+    assert_eq!(owned.len(), 4);
+    assert_eq!(owned.iter().map(|e| e.id).collect::<BTreeSet<_>>().len(), 4);
+    assert_eq!(
+        owned
+            .iter()
+            .map(|e| e.qualified_name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "Owned",
+            "outer::Owned",
+            "outer::facebook::react::Owned",
+            "outer::other::react::Owned",
+        ])
+    );
+    for name in ["Owned", "Reopened"] {
+        let qualified = format!("outer::facebook::react::{name}");
+        let member = document
+            .entities
+            .iter()
+            .find(|e| e.qualified_name == qualified)
+            .unwrap();
+        let source = member.evidence.source.as_ref().unwrap();
+        contains(
+            document,
+            namespace.id,
+            member.id,
+            source.span().start_byte(),
+            source.span().end_byte(),
+        );
+    }
+    let use_start = u64::try_from(text.find("facebook::react::Reopened()").unwrap()).unwrap();
+    for (start, end) in [(use_start, use_start + 8), (use_start + 10, use_start + 15)] {
+        assert!(document.occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Reference
+                && site.source.span().start_byte() == start
+                && site.source.span().end_byte() == end
+        }));
+    }
+    assert!(
+        !document
+            .relations
+            .iter()
+            .any(|r| r.predicate == RelationPredicate::Calls)
+    );
+}
+
+#[test]
+fn cpp_namespace_name_trivia_refuses_ownership_without_donating_an_outer_owner() {
+    for name in [
+        "facebook :: react",
+        "facebook/**/::react",
+        "facebook:: /* name */ react",
+    ] {
+        let text = format!(
+            "namespace outer {{\nnamespace {name} {{ void Hidden() {{}} }}\nvoid Visible() {{}}\n}}\n"
+        );
+        clean(text.as_bytes());
+        let result = output(CPP, text.as_bytes(), EncodingId::new("utf-8").unwrap());
+        let document = result.document();
+        let namespace_start = u64::try_from(text.find("namespace facebook").unwrap()).unwrap();
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.domain == FactDomain::Entities
+                && gap.detail == "declaration-name-unavailable"
+                && gap.source.span().start_byte() == namespace_start
+        }));
+        assert!(document.skipped_regions.iter().any(|gap| {
+            gap.domain == FactDomain::Entities
+                && gap.source.span().start_byte()
+                    == u64::try_from(text.find("void Hidden").unwrap()).unwrap()
+        }));
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|e| e.canonical_name == "Hidden")
+        );
+        let visible = document
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == "Visible")
+            .unwrap();
+        assert_eq!(visible.qualified_name, "outer::Visible");
+    }
+}
+
+#[test]
+fn cpp_namespace_names_keep_physical_source_and_body_edit_identity() {
+    let text = "namespace facebook::react::detail { int Owned() { return 1; } }\r\n";
+    for encoding in ["utf-8", "utf-16le", "utf-16be"] {
+        let (raw, prefix, unit) = if encoding == "utf-8" {
+            ([b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat(), 3, 1)
+        } else {
+            let raw = std::iter::once(0xfeff_u16)
+                .chain(text.encode_utf16())
+                .flat_map(|unit| {
+                    if encoding == "utf-16le" {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            (raw, 2, 2)
+        };
+        let result = output(CPP, &raw, EncodingId::new(encoding).unwrap());
+        let namespace = entity_at(
+            result.document(),
+            "facebook::react::detail",
+            EntityKind::Module,
+            prefix + 10 * unit,
+            prefix + 33 * unit,
+        );
+        let owner = result
+            .document()
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == "Owned")
+            .unwrap();
+        assert_eq!(owner.qualified_name, "facebook::react::detail::Owned");
+        assert_eq!(
+            owner.container,
+            Some(rootlight_ir::ContainerRef::Entity(namespace))
+        );
+    }
+    let fixture = Fixture::new(CPP, text.as_bytes());
+    let provider = Arc::new(provider());
+    let analyzer = analyzer(&provider, CPP);
+    let budget = limits();
+    let first = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, CPP, &budget),
+        &ExtensionSupport::default(),
+    );
+    let changed = fixture.rewrite(text.replace("return 1", "return 2").as_bytes());
+    let second = analyze(
+        &analyzer,
+        &request(&changed.snapshot, &changed.source, CPP, &budget),
+        &ExtensionSupport::default(),
+    );
+    assert_eq!(symbol_ids(first.document()), symbol_ids(second.document()));
+}

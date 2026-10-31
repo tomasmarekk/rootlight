@@ -37,7 +37,8 @@
   (union_specifier name: (type_identifier) @definition)
   (enum_specifier name: (type_identifier) @definition)
   (type_definition declarator: (type_identifier) @definition)
-  (namespace_definition name: (namespace_identifier) @definition)
+  (namespace_definition
+    name: [(namespace_identifier) (nested_namespace_specifier)] @definition)
 ]
 
 (preproc_include) @import
