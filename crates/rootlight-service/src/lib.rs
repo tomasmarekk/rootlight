@@ -23517,6 +23517,8 @@ fn prepare_normalized_document_append(
         optional_extension_metadata::PlanningContext {
             cancellation,
             admission,
+            global_limits: reserved.is_none(),
+            profile_file,
         },
     )
     .map_err(|error| {
@@ -24327,6 +24329,11 @@ fn plan_optional_extensions(
     limits: &IrLimits,
     cancellation: &Cancellation,
 ) -> Result<OptionalExtensionPlan, FirstSliceError> {
+    let profile_file = if analysis_profile_enabled() && source.files.len() == 1 {
+        source.files.first().map(|file| file.id)
+    } else {
+        None
+    };
     plan_optional_extensions_with_metadata_admission(
         target,
         source,
@@ -24337,6 +24344,8 @@ fn plan_optional_extensions(
         optional_extension_metadata::PlanningContext {
             cancellation,
             admission: None,
+            global_limits: true,
+            profile_file,
         },
     )
 }
@@ -24353,6 +24362,8 @@ fn plan_optional_extensions_with_metadata_admission(
     let optional_extension_metadata::PlanningContext {
         cancellation,
         mut admission,
+        global_limits,
+        profile_file,
     } = context;
     check_cancellation(cancellation)?;
     let mut metadata = optional_extension_metadata::Workspace::new(
@@ -24382,6 +24393,20 @@ fn plan_optional_extensions_with_metadata_admission(
         .checked_add(required_count)
         .ok_or(FirstSliceError::Limits)?;
     if observed_required_count > limits.max_extensions {
+        if global_limits
+            && required_count <= limits.max_extensions
+            && retained_required_count <= limits.max_extensions
+        {
+            profile_aggregate_append_rejection(
+                &IrDocumentUsageError::Validation(IrDocumentValidationError::CollectionLimit {
+                    collection: "extensions",
+                    observed: observed_required_count,
+                    limit: limits.max_extensions,
+                }),
+                profile_file,
+                AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+            );
+        }
         return Err(resource_limit(
             FirstSliceResource::Extensions,
             observed_required_count,
@@ -24392,6 +24417,21 @@ fn plan_optional_extensions_with_metadata_admission(
         .checked_add(required_bytes)
         .ok_or(FirstSliceError::Limits)?;
     if observed_required_bytes > limits.max_total_extension_bytes {
+        if global_limits
+            && required_bytes <= limits.max_total_extension_bytes
+            && retained_required_bytes <= limits.max_total_extension_bytes
+        {
+            profile_aggregate_append_rejection(
+                &IrDocumentUsageError::Validation(
+                    IrDocumentValidationError::TotalExtensionBytesLimit {
+                        observed: observed_required_bytes,
+                        limit: limits.max_total_extension_bytes,
+                    },
+                ),
+                profile_file,
+                AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+            );
+        }
         #[cfg(test)]
         extension_admission_observation::observe(
             &target.extensions,
@@ -67728,6 +67768,17 @@ mod tests {
     fn required_extension_quotas_preserve_cached_and_invalidated_state() {
         let repository = derive_repository(b"required-extension-quota-atomicity").id();
         let generation = GenerationId::from_bytes([89; 20]);
+        let assert_unobserved = |profile: &FirstSliceAnalysisProfile| {
+            let observations = &profile.aggregate_append_rejections;
+            assert!(observations.first.is_none());
+            assert_eq!(
+                (
+                    observations.rejected_checks.extensions,
+                    observations.rejected_checks.extension_bytes
+                ),
+                (0, 0)
+            );
+        };
         let required = |id: u8| ExtensionEnvelope {
             id: FactId::from_bytes([id; 20]),
             repository,
@@ -67758,9 +67809,28 @@ mod tests {
                     state.invalidate_usage();
                     state.extension_payload_bytes = usize::MAX;
                 }
+                state.aggregate_recovery = true;
                 assert_eq!(state.required_extension_usage.is_none(), invalidated);
                 let mut source = NormalizedIrDocument::empty(repository, generation);
                 source.extensions = vec![required(93), required(94)];
+                let file = FileId::from_bytes([95; 20]);
+                source.files.push(FileRecord {
+                    id: file,
+                    repository,
+                    generation,
+                    path: "src/required.rs".to_owned(),
+                    path_locator: None,
+                    content_hash: content_hash(b"source"),
+                    byte_length: 6,
+                    language: "rust".to_owned(),
+                    encoding: "utf-8".to_owned(),
+                    generated: false,
+                    provenance: FactId::from_bytes([90; 20]),
+                    evidence: FactEvidence {
+                        source: None,
+                        derivation: Vec::new(),
+                    },
+                });
                 let observed_count = target.extensions.len() + source.extensions.len();
                 let observed_bytes = target
                     .extensions
@@ -67770,22 +67840,88 @@ mod tests {
                     .sum::<usize>();
                 let mut limits = IrLimits::default();
                 limits.max_total_extension_bytes = observed_bytes - 1;
-                let observed = match resource {
+                let (observed, expected_resource) = match resource {
                     FirstSliceResource::Extensions => {
                         limits.max_extensions = observed_count - 1;
-                        observed_count
+                        (
+                            observed_count,
+                            rootlight_ir::AggregateCapacityResource::Extensions,
+                        )
                     }
-                    FirstSliceResource::ExtensionBytes => observed_bytes,
+                    FirstSliceResource::ExtensionBytes => (
+                        observed_bytes,
+                        rootlight_ir::AggregateCapacityResource::ExtensionBytes,
+                    ),
                     _ => unreachable!("fixture exercises only required extension quotas"),
                 };
                 let before = target.clone();
                 let state_before = state.clone();
+                let (result, profile) = capture_first_slice_analysis_profile(|| {
+                    append_normalized_document(&mut target, source.clone(), &limits, &mut state)
+                });
                 assert_eq!(
-                    append_normalized_document(&mut target, source.clone(), &limits, &mut state),
+                    result,
                     Err(resource_limit(resource, observed, observed - 1))
+                );
+                assert_eq!(
+                    profile.aggregate_append_rejections.first,
+                    Some(AnalysisProfileAggregateAppendRejection {
+                        file: Some(file),
+                        boundary: AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                        stage: rootlight_ir::AggregateCapacityStage::StructuralAppend,
+                        resource: expected_resource,
+                        observed: u64::try_from(observed).unwrap(),
+                        limit: u64::try_from(observed - 1).unwrap(),
+                    })
+                );
+                let counts = &profile.aggregate_append_rejections.rejected_checks;
+                assert_eq!(
+                    counts.extensions,
+                    u64::from(resource == FirstSliceResource::Extensions)
+                );
+                assert_eq!(
+                    counts.extension_bytes,
+                    u64::from(resource == FirstSliceResource::ExtensionBytes)
                 );
                 assert_eq!(target, before);
                 assert_eq!(state, state_before);
+
+                let mut incoming_only = source.clone();
+                incoming_only.extensions = [93, 94, 96, 97].map(required).to_vec();
+                let (result, profile) = capture_first_slice_analysis_profile(|| {
+                    append_normalized_document(&mut target, incoming_only, &limits, &mut state)
+                });
+                assert!(matches!(result, Err(FirstSliceError::ResourceLimit { .. })));
+                assert_unobserved(&profile);
+                assert_eq!(target, before);
+                assert_eq!(state, state_before);
+
+                let mut global_limits = IrLimits::default();
+                match resource {
+                    FirstSliceResource::Extensions => global_limits.max_extensions = observed_count,
+                    FirstSliceResource::ExtensionBytes => {
+                        global_limits.max_total_extension_bytes = observed_bytes;
+                    }
+                    _ => unreachable!("fixture exercises only required extension quotas"),
+                }
+                let reserved =
+                    IrDocumentUsage::measure_extension(&required(98), &global_limits).unwrap();
+                let (result, profile) = capture_first_slice_analysis_profile(|| {
+                    prepare_normalized_document_append(
+                        &target,
+                        source.clone(),
+                        &global_limits,
+                        &state,
+                        &Cancellation::new(),
+                        None,
+                        Some(&reserved),
+                    )
+                });
+                assert!(result.is_err());
+                assert_unobserved(&profile);
+                assert_eq!(target, before);
+                assert_eq!(state, state_before);
+
                 let cancelled = Cancellation::new();
                 assert!(cancelled.cancel(CancellationReason::ClientRequest));
                 assert_eq!(

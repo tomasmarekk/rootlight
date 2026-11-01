@@ -19,6 +19,8 @@ pub(super) type Admission<'a> = Option<&'a mut dyn FnMut(u64) -> Result<(), Firs
 pub(super) struct PlanningContext<'cancel, 'admission> {
     pub(super) cancellation: &'cancel Cancellation,
     pub(super) admission: Admission<'admission>,
+    pub(super) global_limits: bool,
+    pub(super) profile_file: Option<rootlight_ids::FileId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
