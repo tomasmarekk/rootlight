@@ -263,11 +263,11 @@ impl FirstSliceSourceReadOperation<'_> {
             self.work
                 .deadline
                 .set(duration.map(|duration| started.checked_add(duration).unwrap_or(started)));
-            self.authorize()?;
+            profile_analysis_phase!(SourceReadInitialAuthority, None, self.authorize())?;
             let response = self.execute(references, options, budget)?;
-            self.authorize()?;
-            visitor(&response)?;
-            self.authorize()?;
+            profile_analysis_phase!(SourceReadFinalAuthority, None, self.authorize())?;
+            profile_analysis_phase!(SourceReadCallback, None, visitor(&response))?;
+            profile_analysis_phase!(SourceReadCallbackAuthority, None, self.authorize())?;
             drop(response);
             let owner = self.owner.as_mut().ok_or(FirstSliceError::Retention)?;
             owner.reservation.resize(owner.held_bytes, true)?;
@@ -423,11 +423,15 @@ impl FirstSliceSourceReadOperation<'_> {
                     Err(error) => return Err(error),
                 };
                 if let Some(mut reservation) = admitted {
-                    match PreparedUtf8Source::new(
-                        snapshot,
-                        generation,
-                        self.cancellation,
-                        self.work.deadline.get(),
+                    match profile_analysis_phase!(
+                        SourceReadPreparedUtf8,
+                        Some(file.id),
+                        PreparedUtf8Source::new(
+                            snapshot,
+                            generation,
+                            self.cancellation,
+                            self.work.deadline.get(),
+                        )
                     ) {
                         Ok(view) => {
                             let bytes = view
@@ -467,19 +471,23 @@ impl FirstSliceSourceReadOperation<'_> {
                             .is_some_and(|sources| sources.contains(file.id))
                 })
         });
-        let query = owner
-            .lease
-            .query()
+        let query = profile_analysis_phase!(SourceReadQueryOpen, None, owner.lease.query())
             .map_err(|error| map_query_error(error, self.cancellation))?;
         if let Some(prepared) = &owner.prepared {
             let source = SourceService::from_prepared_utf8(&prepared.view, generation)
                 .map_err(|error| map_source_error(error, self.cancellation))?;
-            let plan = query
-                .plan_source_read(references, options, budget.source(), budget.query())
-                .map_err(|error| map_query_error(error, self.cancellation))?;
-            return query
-                .execute_source_read(&plan, &source, self.cancellation)
-                .map_err(|error| map_query_error(error, self.cancellation));
+            let plan = profile_analysis_phase!(
+                SourceReadQueryPlan,
+                None,
+                query.plan_source_read(references, options, budget.source(), budget.query())
+            )
+            .map_err(|error| map_query_error(error, self.cancellation))?;
+            return profile_analysis_phase!(
+                SourceReadQueryExecute,
+                None,
+                query.execute_source_read(&plan, &source, self.cancellation)
+            )
+            .map_err(|error| map_query_error(error, self.cancellation));
         }
         if streamed {
             let backing = OperationBacking {
@@ -490,12 +498,18 @@ impl FirstSliceSourceReadOperation<'_> {
             };
             let source = SourceService::from_verified_backing(&backing, generation)
                 .map_err(|error| map_source_error(error, self.cancellation))?;
-            let plan = query
-                .plan_source_read(references, options, budget.source(), budget.query())
-                .map_err(|error| map_query_error(error, self.cancellation))?;
-            return query
-                .execute_source_read(&plan, &source, self.cancellation)
-                .map_err(|error| map_query_error(error, self.cancellation));
+            let plan = profile_analysis_phase!(
+                SourceReadQueryPlan,
+                None,
+                query.plan_source_read(references, options, budget.source(), budget.query())
+            )
+            .map_err(|error| map_query_error(error, self.cancellation))?;
+            return profile_analysis_phase!(
+                SourceReadQueryExecute,
+                None,
+                query.execute_source_read(&plan, &source, self.cancellation)
+            )
+            .map_err(|error| map_query_error(error, self.cancellation));
         }
         let retained = self
             .service
@@ -531,12 +545,18 @@ impl FirstSliceSourceReadOperation<'_> {
         }
         let source = SourceService::from_snapshots(&selected, generation)
             .map_err(|error| map_source_error(error, self.cancellation))?;
-        let plan = query
-            .plan_source_read(references, options, budget.source(), budget.query())
-            .map_err(|error| map_query_error(error, self.cancellation))?;
-        query
-            .execute_source_read(&plan, &source, self.cancellation)
-            .map_err(|error| map_query_error(error, self.cancellation))
+        let plan = profile_analysis_phase!(
+            SourceReadQueryPlan,
+            None,
+            query.plan_source_read(references, options, budget.source(), budget.query())
+        )
+        .map_err(|error| map_query_error(error, self.cancellation))?;
+        profile_analysis_phase!(
+            SourceReadQueryExecute,
+            None,
+            query.execute_source_read(&plan, &source, self.cancellation)
+        )
+        .map_err(|error| map_query_error(error, self.cancellation))
     }
 }
 
@@ -553,6 +573,10 @@ fn operation_snapshot(
         .get(&file.generation)
         .is_some_and(|sources| sources.contains(file.id))
     {
+        let profile = AnalysisProfileGuard::begin(
+            AnalysisProfilePhase::SourceReadStreamedSnapshot,
+            Some(file.id),
+        );
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(
@@ -593,7 +617,7 @@ fn operation_snapshot(
                 .ok_or(FirstSliceError::CatalogCorrupt)?,
         )
         .map_err(|_| FirstSliceError::CatalogCorrupt)?;
-        return rootlight_vfs::SourceSnapshot::from_persisted(
+        let result = rootlight_vfs::SourceSnapshot::from_persisted(
             file.repository,
             path,
             file.id,
@@ -602,16 +626,27 @@ fn operation_snapshot(
         )
         .map(Arc::new)
         .map_err(|_| FirstSliceError::CatalogCorrupt);
+        profile.finish();
+        return result;
     }
     if let Some(sources) = service.source_snapshots.snapshots(file.generation)
         && let Ok(index) = sources.binary_search_by_key(&file.id, |source| source.file())
     {
-        return sources
-            .get(index)
-            .map(Arc::clone)
-            .ok_or(FirstSliceError::Query);
+        return profile_analysis_phase!(
+            SourceReadRetainedSnapshot,
+            Some(file.id),
+            sources
+                .get(index)
+                .map(Arc::clone)
+                .ok_or(FirstSliceError::Query)
+        );
     }
-    reader.read(file, work, cancellation).map(Arc::new)
+    profile_analysis_phase!(
+        SourceReadPackedSnapshot,
+        Some(file.id),
+        reader.read(file, work, cancellation)
+    )
+    .map(Arc::new)
 }
 
 fn streamed_request(

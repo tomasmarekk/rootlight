@@ -456,6 +456,19 @@ enum AnalysisProfilePhase {
     FinalProjectionAdmission,
     FinalVerification,
     GenerationNeutralProjection,
+    SourceReadInitialAuthority,
+    SourceReadFinalAuthority,
+    SourceReadCallback,
+    SourceReadCallbackAuthority,
+    SourceReadRetainedSnapshot,
+    SourceReadStreamedSnapshot,
+    SourceReadPackedSnapshot,
+    SourceReadPackedLoad,
+    SourceReadPackedVerification,
+    SourceReadPreparedUtf8,
+    SourceReadQueryOpen,
+    SourceReadQueryPlan,
+    SourceReadQueryExecute,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -927,12 +940,15 @@ impl Drop for AnalysisProfileGuard {
 
 macro_rules! profile_analysis_phase {
     ($phase:ident, $file:expr, $operation:expr) => {{
-        let profile = AnalysisProfileGuard::begin(AnalysisProfilePhase::$phase, $file);
+        let phase = $crate::AnalysisProfilePhase::$phase;
+        let profile = $crate::AnalysisProfileGuard::begin(phase, $file);
         let result = $operation;
         profile.finish();
         result
     }};
 }
+
+pub(crate) use profile_analysis_phase;
 
 #[cfg(test)]
 mod analysis_profile_tests;

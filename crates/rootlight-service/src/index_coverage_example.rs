@@ -10,7 +10,7 @@
 //! normalized binding witnesses or treating absent details as semantic proof.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     error::Error,
     ffi::OsString,
@@ -201,6 +201,8 @@ struct DiagnosticFailureContext {
     index_timing: Option<serde_json::Value>,
     no_op_timing: Option<serde_json::Value>,
     failed_analysis_profile: Option<serde_json::Value>,
+    first_source_read_pending: Cell<bool>,
+    first_source_read_profile: RefCell<Option<serde_json::Value>>,
 }
 
 impl DiagnosticFailureContext {
@@ -215,6 +217,8 @@ impl DiagnosticFailureContext {
             index_timing: None,
             no_op_timing: None,
             failed_analysis_profile: None,
+            first_source_read_pending: Cell::new(false),
+            first_source_read_profile: RefCell::new(None),
         }
     }
 
@@ -235,6 +239,24 @@ impl DiagnosticFailureContext {
         self.file.set(Some(request.file));
         self.request.set(Some(request));
     }
+
+    fn profile_first_source_read(
+        &self,
+        request: SourceReadAttempt,
+        read: impl FnOnce() -> Result<(), FirstSliceError>,
+    ) -> Result<(), FirstSliceError> {
+        if !self.first_source_read_pending.replace(false) {
+            return read();
+        }
+        let (outcome, profile) = capture_first_slice_analysis_profile(read);
+        *self.first_source_read_profile.borrow_mut() = Some(json!({
+            "scope":"first_actual_accounting_operation_read_only",
+            "request":request,
+            "service_outcome":if outcome.is_ok() { "ok" } else { "error" },
+            "analysis_profile":analysis_profile_value(profile),
+        }));
+        outcome
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -252,6 +274,8 @@ struct DiagnosticFailureRecord<'a> {
     completed_index_timing: Option<&'a serde_json::Value>,
     completed_no_op_timing: Option<&'a serde_json::Value>,
     analysis_profile: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_source_read_profile: Option<&'a serde_json::Value>,
 }
 
 fn finish_diagnostic_with_writer<T, Writer: Write>(
@@ -282,6 +306,7 @@ fn finish_diagnostic_with_writer<T, Writer: Write>(
             }
         };
         let finished = Instant::now();
+        let first_source_read_profile = context.first_source_read_profile.borrow();
         let record = DiagnosticFailureRecord {
             schema: "rootlight-index-analysis-profile-failure/1",
             diagnostic_result: "error",
@@ -301,6 +326,7 @@ fn finish_diagnostic_with_writer<T, Writer: Write>(
             completed_index_timing: context.index_timing.as_ref(),
             completed_no_op_timing: context.no_op_timing.as_ref(),
             analysis_profile: context.failed_analysis_profile.as_ref(),
+            first_source_read_profile: first_source_read_profile.as_ref(),
         };
         let mut errors = errors();
         // An unavailable diagnostic sink must not replace the operation's error.
@@ -517,6 +543,7 @@ impl DiagnosticSession {
             report_mode,
             analysis_profile,
         } = self;
+        context.first_source_read_pending.set(*analysis_profile);
         if *report_mode == ReportMode::SourceAccounting && matches!(lifetime, ServiceLifetime::Warm)
         {
             return Err("source-accounting does not support warm sequences".into());
@@ -687,6 +714,9 @@ impl DiagnosticSession {
             "update_timing"
         };
         report[timing_key] = context.index_timing.take().ok_or("index timing missing")?;
+        if let Some(profile) = context.first_source_read_profile.borrow_mut().take() {
+            report["first_source_read_profile"] = profile;
+        }
         *lifetime = ServiceLifetime::Warm;
         Ok(report)
     }
@@ -714,15 +744,21 @@ fn index_with_optional_analysis_profile(
     }
     let (result, profile) =
         capture_first_slice_analysis_profile(|| index_with_timing(service, repository));
-    let profile = serde_json::to_value(profile).unwrap_or_else(|_| {
+    let profile = analysis_profile_value(profile);
+    finish_profiled_index(result, profile, failed_profile)
+}
+
+fn analysis_profile_value(
+    profile: rootlight_service::FirstSliceAnalysisProfile,
+) -> serde_json::Value {
+    serde_json::to_value(profile).unwrap_or_else(|_| {
         json!({
             "events_complete":false,
             "counts_complete":false,
             "serialization_complete":false,
             "error_code":"profile_serialization_failed"
         })
-    });
-    finish_profiled_index(result, profile, failed_profile)
+    })
 }
 
 fn finish_profiled_index(
@@ -1113,20 +1149,26 @@ impl<'a> FileSourceVerifier<'a> {
             }
             if let Some(operation) = active {
                 let mut callback_error = None;
-                let outcome = operation.read(
-                    vec![part.clone()],
-                    SourceReadOptions::new()
-                        .with_context_lines_before(0)
-                        .with_context_lines_after(0)
-                        .with_encoding(encoding),
-                    budget,
-                    |read| {
-                        consume(read).map_err(|error| {
-                            callback_error = Some(error);
-                            FirstSliceError::Source
-                        })
-                    },
-                );
+                let mut read = || {
+                    operation.read(
+                        vec![part.clone()],
+                        SourceReadOptions::new()
+                            .with_context_lines_before(0)
+                            .with_context_lines_after(0)
+                            .with_encoding(encoding),
+                        budget,
+                        |read| {
+                            consume(read).map_err(|error| {
+                                callback_error = Some(error);
+                                FirstSliceError::Source
+                            })
+                        },
+                    )
+                };
+                let outcome = match self.failure_context {
+                    Some(context) => context.profile_first_source_read(request, read),
+                    None => read(),
+                };
                 // The original diagnostic error precedes its typed service bridge.
                 if let Some(error) = callback_error {
                     return Err(error);
@@ -1537,6 +1579,97 @@ fn chunk_end(text: &str, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a private copy of an explicitly retained original product state"]
+    fn retained_state_first_source_read_reports_existing_profile_phases() {
+        let request_path = std::env::var_os("ROOTLIGHT_SOURCE_READ_REPLAY")
+            .expect("retained source read request is required");
+        let request: serde_json::Value =
+            serde_json::from_slice(&fs::read(request_path).unwrap()).unwrap();
+        let reference: SourceRef = serde_json::from_value(request["reference"].clone()).unwrap();
+        let expected = fs::read(request["source_path"].as_str().unwrap()).unwrap();
+        let selected = expected
+            .get(
+                usize::try_from(reference.span().start_byte()).unwrap()
+                    ..usize::try_from(reference.span().end_byte()).unwrap(),
+            )
+            .unwrap();
+        let cancellation = Cancellation::new();
+        let policy = FirstSliceStoragePolicy::resolve_user_config(None, 2).unwrap();
+        let started = Instant::now();
+        let service = FirstSliceService::new_durable_with_policy(
+            policy,
+            Path::new(request["state_root"].as_str().unwrap()),
+            &cancellation,
+        )
+        .unwrap();
+        let open_wall_micros = started.elapsed().as_micros();
+        let inspection_started = Instant::now();
+        service
+            .inspect_generation(
+                reference.repository(),
+                Some(reference.generation()),
+                &cancellation,
+                |snapshot| {
+                    let inspection_setup_wall_micros = inspection_started.elapsed().as_micros();
+                    let file = snapshot.find_file(reference.span().file()).unwrap();
+                    assert_eq!(file.path, request["expected_path"].as_str().unwrap());
+                    assert_eq!(file.byte_length, u64::try_from(expected.len()).unwrap());
+                    let limits = accounting_read_limits(
+                        snapshot
+                            .document()
+                            .files
+                            .iter()
+                            .map(|file| file.byte_length)
+                            .chain(
+                                snapshot
+                                    .source_files()
+                                    .entries()
+                                    .iter()
+                                    .map(|entry| entry.file().byte_length),
+                            ),
+                    )
+                    .unwrap();
+                    let operation_started = Instant::now();
+                    let mut operation = service
+                        .source_read_operation(reference.generation(), limits, &cancellation)
+                        .unwrap()
+                        .expect("retained generation has packed source storage");
+                    let operation_open_wall_micros = operation_started.elapsed().as_micros();
+                    let mut exact = false;
+                    let (result, profile) = capture_first_slice_analysis_profile(|| {
+                        operation.read(
+                            vec![reference.clone()],
+                            SourceReadOptions::new()
+                                .with_context_lines_before(0)
+                                .with_context_lines_after(0),
+                            FirstSliceBudget::default(),
+                            |response| {
+                                exact = response.data.chunks.len() == 1
+                                    && response.data.chunks[0].bytes == selected;
+                                Ok(())
+                            },
+                        )
+                    });
+                    println!(
+                        "source_read_replay={}",
+                        json!({
+                            "service_lifetime": "reopened_private_retained_state",
+                            "open_wall_micros": open_wall_micros,
+                            "inspection_setup_wall_micros": inspection_setup_wall_micros,
+                            "operation_open_wall_micros": operation_open_wall_micros,
+                            "result": format!("{result:?}"),
+                            "source_exact": exact,
+                            "profile": profile,
+                        })
+                    );
+                    result.unwrap();
+                    assert!(exact);
+                },
+            )
+            .unwrap();
+    }
 
     type ProofKey = (String, String);
 
@@ -3771,6 +3904,70 @@ mod tests {
     }
 
     #[test]
+    fn source_accounting_profiles_only_first_actual_read_when_opted_in() {
+        let directory = tempdir();
+        for files in [1, 16] {
+            let repository = directory.path().join(format!("repository-{files}"));
+            fs::create_dir(&repository).unwrap();
+            for index in 0..files {
+                fs::write(
+                    repository.join(format!("source-{index:02}.txt")),
+                    vec![b'x'; 64 * 1024 + 8],
+                )
+                .unwrap();
+            }
+            for enabled in [false, true] {
+                let state = directory.path().join(format!("state-{files}-{enabled}"));
+                let mut session =
+                    DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
+                session.report_mode = ReportMode::SourceAccounting;
+                session.analysis_profile = enabled;
+                let report = session.inspect().unwrap();
+                assert_eq!(report["source_accounting"]["source_read_chunks"], files * 2);
+                if enabled && files == 16 {
+                    let observed = &report["first_source_read_profile"];
+                    assert_eq!(
+                        observed["scope"],
+                        "first_actual_accounting_operation_read_only"
+                    );
+                    assert_eq!(observed["service_outcome"], "ok");
+                    assert_eq!(
+                        observed["request"]["file"],
+                        report["files"][0]["file"]["id"]
+                    );
+                    assert_eq!(observed["request"]["start_byte"], 0);
+                    assert_eq!(observed["request"]["end_byte"], 64 * 1024);
+                    assert_eq!(observed["request"]["duration_origin"], "default");
+                    assert_eq!(
+                        observed["request"]["requested_query_duration_micros"],
+                        2_000_000
+                    );
+                    let phases = observed["analysis_profile"]["phases"].as_array().unwrap();
+                    for phase in [
+                        "source_read_initial_authority",
+                        "source_read_callback_authority",
+                    ] {
+                        assert_eq!(
+                            phases
+                                .iter()
+                                .filter(|event| event["phase"] == phase)
+                                .count(),
+                            1
+                        );
+                    }
+                    assert!(
+                        observed["analysis_profile"]["events_complete"]
+                            .as_bool()
+                            .unwrap()
+                    );
+                } else {
+                    assert!(report.get("first_source_read_profile").is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn full_report_keeps_its_default_schema_and_field_contract() {
         let directory = tempdir();
         let repository = directory.path().join("repository");
@@ -4495,6 +4692,7 @@ mod tests {
         let mut context = DiagnosticFailureContext::new(DiagnosticStage::GenerationInspection);
         context.index_timing = Some(index_timing);
         context.no_op_timing = Some(no_op_timing);
+        context.first_source_read_pending.set(true);
         session
             .service
             .inspect_generation(
@@ -4571,6 +4769,20 @@ mod tests {
                     assert_eq!(record["source_read"]["start_byte"], 0);
                     assert_eq!(record["source_read"]["end_byte"], valid.byte_length);
                     assert_eq!(record["source_read"]["duration_origin"], "default");
+                    let first = record["first_source_read_profile"].clone();
+                    assert_eq!(first["service_outcome"], "error");
+                    assert_eq!(first["request"], record["source_read"]);
+                    let phases = first["analysis_profile"]["phases"].as_array().unwrap();
+                    assert!(
+                        phases
+                            .iter()
+                            .any(|event| event["phase"] == "source_read_callback")
+                    );
+                    assert!(
+                        !phases
+                            .iter()
+                            .any(|event| event["phase"] == "source_read_callback_authority")
+                    );
                     assert!(record["completed_index_timing"]["wall_micros"].is_number());
                     assert!(record["completed_no_op_timing"]["wall_micros"].is_number());
                     let output = String::from_utf8(failure_output).unwrap();
@@ -4615,6 +4827,10 @@ mod tests {
                     assert!(
                         accounting.verify(valid, None, None).is_err(),
                         "callback failure cannot trigger ordinary fallback"
+                    );
+                    assert_eq!(
+                        context.first_source_read_profile.borrow().as_ref(),
+                        Some(&first)
                     );
                 },
             )

@@ -3,8 +3,10 @@
 //! rechecks current publication separately before and after each response.
 
 use super::*;
-use crate::current_cancellation;
 use crate::source_read_operation::OperationWork;
+use crate::{
+    AnalysisProfileGuard, AnalysisProfilePhase, current_cancellation, profile_analysis_phase,
+};
 use rootlight_vfs::platform::PlatformFileIdentity;
 #[cfg(test)]
 use std::cell::Cell;
@@ -271,13 +273,21 @@ impl PackedReadOperation {
         if cached.as_ref().map(|pack| pack.ordinal) != Some(entry.pack) {
             #[cfg(test)]
             self.pack_reads.set(self.pack_reads.get() + 1);
-            let bytes = collect_exact(
-                &self.reader.sources,
-                OsStr::new(&source_pack_name(entry.pack)),
-                pack_bytes,
-                work,
-                cancellation,
+            let bytes = profile_analysis_phase!(
+                SourceReadPackedLoad,
+                Some(file.id),
+                collect_exact(
+                    &self.reader.sources,
+                    OsStr::new(&source_pack_name(entry.pack)),
+                    pack_bytes,
+                    work,
+                    cancellation,
+                )
             )?;
+            let profile = AnalysisProfileGuard::begin(
+                AnalysisProfilePhase::SourceReadPackedVerification,
+                Some(file.id),
+            );
             work.charge(
                 u64::try_from(index.entries.len()).map_err(|_| FirstSliceError::Limits)?,
                 cancellation,
@@ -308,6 +318,7 @@ impl PackedReadOperation {
                 ordinal: entry.pack,
                 bytes,
             });
+            profile.finish();
         }
         let start = usize::try_from(entry.offset).map_err(|_| FirstSliceError::Limits)?;
         let end = entry
