@@ -1,5 +1,6 @@
 //! Reads selected normalized facts directly from a sealed generation oracle.
 //! Stable-ID graph reads and bounded typed RDF file reads preserve source evidence.
+//! `--rdf-page-size N [--rdf-after FACT_ID]` selects one RDF page without graph reads.
 //! This diagnostic bypasses lexical projection; it does not index sources or
 //! prove whole-language completeness.
 
@@ -41,6 +42,13 @@ const MAX_PROVENANCE: usize = 32_768;
 const MAX_RDF_STATEMENTS: usize = 16_384;
 const MAX_RDF_EXTENSIONS: usize = 32_768;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RDF_PAGE_SIZE: u32 = 256;
+
+#[derive(Clone, Copy)]
+struct RdfPageSelection {
+    limit: GenerationReadLimit,
+    after: Option<FactId>,
+}
 
 struct Arguments {
     directory: PathBuf,
@@ -48,6 +56,7 @@ struct Arguments {
     generation: GenerationId,
     files: BTreeSet<FileId>,
     entities: BTreeSet<SymbolId>,
+    rdf_page: Option<RdfPageSelection>,
 }
 
 impl Arguments {
@@ -67,6 +76,8 @@ impl Arguments {
             .parse()?;
         let mut files = BTreeSet::new();
         let mut entities = BTreeSet::new();
+        let mut rdf_page_limit = None;
+        let mut rdf_after = None;
         while let Some(flag) = args.next() {
             let id = args.next().ok_or("selection flag has no id")?;
             let id = id.to_str().ok_or("selection id is not utf-8")?;
@@ -81,11 +92,34 @@ impl Arguments {
                         return Err("duplicate entity id or selected entity bound exceeded".into());
                     }
                 }
+                Some("--rdf-page-size") => {
+                    let size: u32 = id.parse()?;
+                    if rdf_page_limit.is_some()
+                        || !id.bytes().all(|byte| byte.is_ascii_digit())
+                        || size == 0
+                        || size > MAX_RDF_PAGE_SIZE
+                    {
+                        return Err("duplicate or invalid RDF page size".into());
+                    }
+                    rdf_page_limit = Some(GenerationReadLimit::new(size)?);
+                }
+                Some("--rdf-after") => {
+                    if rdf_after.is_some() {
+                        return Err("duplicate RDF continuation cursor".into());
+                    }
+                    rdf_after = Some(id.parse()?);
+                }
                 _ => return Err("unknown selection flag".into()),
             }
         }
         if files.is_empty() {
             return Err("at least one native file id is required".into());
+        }
+        if rdf_page_limit.is_some() && (files.len() != 1 || !entities.is_empty()) {
+            return Err("RDF page mode requires exactly one file and no entities".into());
+        }
+        if rdf_after.is_some() && rdf_page_limit.is_none() {
+            return Err("RDF continuation requires page mode".into());
         }
         Ok(Self {
             directory,
@@ -93,6 +127,10 @@ impl Arguments {
             generation,
             files,
             entities,
+            rdf_page: rdf_page_limit.map(|limit| RdfPageSelection {
+                limit,
+                after: rdf_after,
+            }),
         })
     }
 }
@@ -409,18 +447,26 @@ impl Inspection<'_, '_> {
         map_values(records)
     }
 
-    fn rdf_statements(&mut self, file: FileId) -> DiagnosticResult<Option<RdfStatementRead>> {
-        let limit = GenerationReadLimit::default();
+    fn rdf_statements(
+        &mut self,
+        file: FileId,
+        selection: Option<RdfPageSelection>,
+    ) -> DiagnosticResult<Option<RdfStatementRead>> {
+        let limit = selection.map_or_else(GenerationReadLimit::default, |page| page.limit);
         let mut request = RdfStatementReadRequest::new(
             self.metadata.repository(),
             self.metadata.generation(),
             file,
             limit,
         );
+        let initial_after = selection.and_then(|page| page.after);
+        if let Some(after) = initial_after {
+            request = request.with_after(after);
+        }
         let mut total = None;
         let mut scanned = 0u64;
         let mut returned = 0u64;
-        let mut after = None;
+        let mut after = initial_after;
         let mut pages = Vec::new();
         loop {
             self.context.check()?;
@@ -467,7 +513,9 @@ impl Inspection<'_, '_> {
             let complete = page.range_complete();
             let cursor = page.next_cursor();
             if complete {
-                if cursor.is_some() || scanned != page.total_extensions() {
+                if cursor.is_some()
+                    || (initial_after.is_none() && scanned != page.total_extensions())
+                {
                     return Err("RDF complete pages did not conserve the file total".into());
                 }
             } else if page.scanned_extensions() == 0
@@ -480,7 +528,7 @@ impl Inspection<'_, '_> {
             self.charge(&page)?;
             pages.try_reserve(1)?;
             pages.push(page);
-            if complete {
+            if complete || selection.is_some() {
                 return Ok(Some(RdfStatementRead {
                     file,
                     page_size: limit.get(),
@@ -488,7 +536,8 @@ impl Inspection<'_, '_> {
                     scanned_file_extensions: scanned,
                     returned_statements: returned,
                     pages,
-                    complete: true,
+                    // A terminal suffix exhausts its range without covering the file prefix.
+                    complete: complete && initial_after.is_none(),
                 }));
             }
             after = cursor;
@@ -524,16 +573,26 @@ fn inspect(
     let mut rdf_statement_omissions = Vec::new();
     for &file in &arguments.files {
         inspection.require_file(file)?;
-        let receipt = inspection.occurrences(file)?;
-        inspection.charge(&receipt)?;
-        occurrence_reads.try_reserve(1)?;
-        occurrence_reads.push(receipt);
+        if arguments.rdf_page.is_some()
+            && !inspection
+                .files
+                .get(&file)
+                .is_some_and(|file| file.language == "ntriples")
+        {
+            return Err("RDF page mode requires a native ntriples file".into());
+        }
+        if arguments.rdf_page.is_none() {
+            let receipt = inspection.occurrences(file)?;
+            inspection.charge(&receipt)?;
+            occurrence_reads.try_reserve(1)?;
+            occurrence_reads.push(receipt);
+        }
         if inspection
             .files
             .get(&file)
             .is_some_and(|file| file.language == "ntriples")
         {
-            if let Some(read) = inspection.rdf_statements(file)? {
+            if let Some(read) = inspection.rdf_statements(file, arguments.rdf_page)? {
                 rdf_statement_reads.try_reserve(1)?;
                 rdf_statement_reads.push(read);
             } else {
@@ -657,6 +716,8 @@ fn inspect(
         }),
         qualification: json!({
             "selected_reads_complete":rdf_complete,"metadata_unchanged":true,
+            "selected_read_scope":if arguments.rdf_page.is_some() { "single_rdf_file_extension_page" } else { "selected_files_and_entities" },
+            "graph_reads_executed":arguments.rdf_page.is_none(),
             "stable_id_cursor_and_count_conservation_checked":true,
             "source_refs_checked_against_native_files":true,
             "source_bytes_read":false,"provenance_scope":"direct_selected_records_not_recursive_derivation_closure",
@@ -772,6 +833,9 @@ fn main() -> DiagnosticResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rootlight_catalog::OracleWriter;
+    use rootlight_service::FirstSliceService;
+    use rootlight_storage::IdentityVerifiedGeneration;
 
     fn fact(byte: u8) -> FactId {
         FactId::from_bytes([byte; 20])
@@ -854,5 +918,203 @@ mod tests {
         let mut unknown = prefix();
         unknown.extend([OsString::from("--path"), OsString::from("source.fs")]);
         assert!(Arguments::parse(unknown.into_iter()).is_err());
+    }
+
+    fn page_arguments(flags: &[&str]) -> DiagnosticResult<Arguments> {
+        let mut args = vec![
+            OsString::from("generation"),
+            RepositoryId::from_bytes([1; 16]).to_string().into(),
+            GenerationId::from_bytes([2; 20]).to_string().into(),
+            OsString::from("--file"),
+            FileId::from_bytes([3; 20]).to_string().into(),
+        ];
+        args.extend(flags.iter().map(OsString::from));
+        Arguments::parse(args.into_iter())
+    }
+
+    #[test]
+    fn rdf_page_arguments_accept_first_and_resumed_bounded_reads() {
+        for size in ["1", "256"] {
+            let first = page_arguments(&["--rdf-page-size", size]).unwrap();
+            assert_eq!(first.rdf_page.unwrap().limit.get().to_string(), size);
+            assert!(first.rdf_page.unwrap().after.is_none());
+        }
+        let cursor = fact(9).to_string();
+        let resumed = page_arguments(&["--rdf-after", &cursor, "--rdf-page-size", "2"]).unwrap();
+        assert_eq!(resumed.rdf_page.unwrap().after, Some(fact(9)));
+    }
+
+    #[test]
+    fn rdf_page_arguments_reject_invalid_limits_cursors_and_selections() {
+        for size in ["0", "257", "4096", "-1", "+1", "1.5", "", "4294967296"] {
+            assert!(page_arguments(&["--rdf-page-size", size]).is_err());
+        }
+        let cursor = fact(9).to_string();
+        let second_file = FileId::from_bytes([4; 20]).to_string();
+        let entity = SymbolId::from_bytes([5; 20]).to_string();
+        for flags in [
+            vec!["--rdf-page-size"],
+            vec!["--rdf-after", &cursor],
+            vec!["--rdf-page-size", "1", "--rdf-after"],
+            vec!["--rdf-page-size", "1", "--rdf-after", "malformed"],
+            vec!["--rdf-page-size", "1", "--rdf-page-size", "2"],
+            vec![
+                "--rdf-page-size",
+                "1",
+                "--rdf-after",
+                &cursor,
+                "--rdf-after",
+                &cursor,
+            ],
+            vec!["--rdf-page-size", "1", "--file", &second_file],
+            vec!["--rdf-page-size", "1", "--entity", &entity],
+        ] {
+            assert!(page_arguments(&flags).is_err(), "accepted {flags:?}");
+        }
+    }
+
+    fn sealed_rdf_fixture() -> (tempfile::TempDir, PathBuf, OracleReader, FileId) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let source_root = root.join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(
+            source_root.join("statements.nt"),
+            "<s:one> <p:value> _:blank .\n<s:two> <p:value> \"literal\"@en .\n_:blank <p:value> <o:three> .\n",
+        )
+        .unwrap();
+        let cancellation = Cancellation::new();
+        let mut service = FirstSliceService::new(1).unwrap();
+        let receipt = service
+            .index_repository(&source_root, &cancellation)
+            .unwrap();
+        let snapshot = service
+            .inspect_generation(
+                receipt.repository,
+                Some(receipt.generation),
+                &cancellation,
+                Clone::clone,
+            )
+            .unwrap();
+        let file = snapshot.document().files[0].id;
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = IdentityVerifiedGeneration::verify_snapshot(snapshot, &context).unwrap();
+        let oracle = root.join("oracle");
+        std::fs::create_dir(&oracle).unwrap();
+        let reader = OracleWriter::create_in(&oracle)
+            .unwrap()
+            .seal(verified, &context)
+            .unwrap();
+        (directory, oracle, reader, file)
+    }
+
+    fn inspect_rdf_fixture(
+        reader: &OracleReader,
+        directory: &std::path::Path,
+        file: FileId,
+        rdf_page: Option<RdfPageSelection>,
+    ) -> Report {
+        let cancellation = Cancellation::new();
+        inspect(
+            reader,
+            Arguments {
+                directory: directory.to_owned(),
+                repository: reader.metadata().repository(),
+                generation: reader.metadata().generation(),
+                files: BTreeSet::from([file]),
+                entities: BTreeSet::new(),
+                rdf_page,
+            },
+            GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rdf_pages_conserve_sealed_statements_and_keep_suffix_scope_incomplete() {
+        let (_directory, oracle, reader, file) = sealed_rdf_fixture();
+        let bulk = inspect_rdf_fixture(&reader, &oracle, file, None);
+        let bulk_read = &bulk.rdf_statement_reads[0];
+        assert!(bulk_read.complete);
+        assert_eq!(bulk.occurrence_reads.len(), 1);
+        assert_eq!(bulk.qualification["graph_reads_executed"], true);
+        let expected: Vec<_> = bulk_read
+            .pages
+            .iter()
+            .flat_map(|page| page.statements().iter().cloned())
+            .collect();
+        assert_eq!(expected.len(), 3);
+        let mut actual = Vec::new();
+        let mut after = None;
+        let mut scanned = 0;
+        let mut empty_continuations = 0;
+        loop {
+            let report = inspect_rdf_fixture(
+                &reader,
+                &oracle,
+                file,
+                Some(RdfPageSelection {
+                    limit: GenerationReadLimit::new(1).unwrap(),
+                    after,
+                }),
+            );
+            let read = &report.rdf_statement_reads[0];
+            assert!(report.occurrence_reads.is_empty());
+            assert!(report.relation_reads.is_empty());
+            assert!(report.occurrences.is_empty());
+            assert!(report.relations.is_empty());
+            assert_eq!(report.qualification["graph_reads_executed"], false);
+            assert_eq!(read.pages.len(), 1);
+            let page = &read.pages[0];
+            assert_eq!(
+                serde_json::to_value(page).unwrap()["requested_after"],
+                json!(after)
+            );
+            assert_eq!(page.total_extensions(), bulk_read.total_file_extensions);
+            assert_eq!(page.total_matching_statements(), None);
+            assert!(!read.complete);
+            assert_eq!(report.qualification["rdf_statement_reads_complete"], false);
+            assert_eq!(report.qualification["selected_reads_complete"], false);
+            scanned += page.scanned_extensions();
+            actual.extend_from_slice(page.statements());
+            if page.range_complete() {
+                assert!(after.is_some());
+                assert!(page.next_cursor().is_none());
+                assert!(read.scanned_file_extensions < read.total_file_extensions);
+                break;
+            }
+            let cursor = page.next_cursor().unwrap();
+            assert!(after.is_none_or(|previous| previous < cursor));
+            if page.statements().is_empty() {
+                empty_continuations += 1;
+            }
+            after = Some(cursor);
+        }
+        assert!(empty_continuations > 0);
+        assert_eq!(scanned, bulk_read.total_file_extensions);
+        assert_eq!(actual, expected);
+        assert_eq!(bulk.qualification["selected_reads_complete"], true);
+    }
+
+    #[test]
+    fn first_rdf_page_covering_entire_file_is_complete() {
+        let (_directory, oracle, reader, file) = sealed_rdf_fixture();
+        let report = inspect_rdf_fixture(
+            &reader,
+            &oracle,
+            file,
+            Some(RdfPageSelection {
+                limit: GenerationReadLimit::new(MAX_RDF_PAGE_SIZE).unwrap(),
+                after: None,
+            }),
+        );
+        let read = &report.rdf_statement_reads[0];
+        assert!(read.complete);
+        assert_eq!(read.pages.len(), 1);
+        assert!(read.pages[0].range_complete());
+        assert_eq!(read.pages[0].total_matching_statements(), Some(3));
+        assert_eq!(read.scanned_file_extensions, read.total_file_extensions);
+        assert_eq!(report.qualification["rdf_statement_reads_complete"], true);
+        assert_eq!(report.qualification["selected_reads_complete"], true);
     }
 }
