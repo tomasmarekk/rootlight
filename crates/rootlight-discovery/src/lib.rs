@@ -85,7 +85,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.96";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.97";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3359,6 +3359,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "toml",
         suffixes: &[".toml"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "ntriples",
+        suffixes: &[".nt"],
         aliases: &[],
         detectors: &["extension"],
         maximum_tier: "tier_d",
@@ -10112,6 +10120,48 @@ max_source_file_bytes = 2097152
         for path in ["data.trig", "query.rq", "rules.n3.bak", "rules.n3x"] {
             assert_ne!(extension_language(path), Some("n3"));
         }
+    }
+
+    #[test]
+    fn ntriples_suffix_has_distinct_native_identity_and_outer_extension_authority() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "ntriples")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".nt"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.detectors, ["extension"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(canonical_language("ntriples"), Some("ntriples"));
+        let source = b"_:s <https://example.test/p> \"v\" .\n";
+        for path in ["data.nt", "DATA.NT", "data/schema.nt", "schema.ttl.nt"] {
+            let (class, signals) = classify(&RelativePath::parse(Path::new(path)).unwrap(), source);
+            assert_eq!(class, InputClass::Source, "{path}");
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "ntriples".to_owned(),
+                    evidence: LanguageEvidence::Extension,
+                }],
+                "{path}"
+            );
+        }
+        for path in [
+            "data.nq",
+            "data.ttl",
+            "data.n3",
+            "data.trig",
+            "data.nt.bak",
+            "data.ntx",
+            "data.nt/fragment",
+        ] {
+            assert_ne!(extension_language(path), Some("ntriples"), "{path}");
+            let (_, signals) = classify(&RelativePath::parse(Path::new(path)).unwrap(), source);
+            assert!(signals.iter().all(|signal| signal.language != "ntriples"));
+        }
+        assert_eq!(extension_language("data.nt.json"), Some("json"));
+        assert_eq!(extension_language("data.nt.py"), Some("python"));
     }
 
     #[test]

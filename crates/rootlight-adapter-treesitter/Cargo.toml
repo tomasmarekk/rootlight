@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rootlight-tree-sitter-ntriples.workspace = true
 tree-sitter-sparql.workspace = true
 tree-sitter-n3.workspace = true
 tree-sitter-turtle.workspace = true
@@ -28,6 +29,7 @@ rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }
 rootlight-unicode = { path = "../rootlight-unicode" }
 rootlight-vba = { path = "../rootlight-vba" }
+serde_json.workspace = true
 thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-elixir.workspace = true
@@ -127,7 +129,6 @@ tree-sitter-typescript.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 rootlight-vfs = { path = "../rootlight-vfs" }
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

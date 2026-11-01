@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "09a94ef4fcdf961237f2017e5ad68d8eeb662b5da3d77a73727befdb9af792b5";
+    "1ec318a6d0bcac40c3b5bc7177496cfe8388880b0562fa0eedd9e9dde481b3c0";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 68] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 69] = [
+    (
+        "rootlight-tree-sitter-ntriples",
+        "0.1.0",
+        "native-grammars/ntriples",
+        "58f0eb18638475ef695648c7450345b79124fb082bdb10dd9d797a03a36d80b6",
+    ),
     (
         "tree-sitter-turtle",
         "0.2.0",
@@ -923,7 +929,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 109 {
+    if manifest.grammars.len() != 110 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -948,6 +954,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "ntriples",
         "trig",
         "turtle",
         "typespec",
@@ -1320,6 +1327,7 @@ fn validate_tree_sitter_dependencies(
 
 fn is_tree_sitter_package(name: &str) -> bool {
     name == "tree-sitter"
+        || name == "rootlight-tree-sitter-ntriples"
         || name == "dekobon-tree-sitter-groovy"
         || name.starts_with("tree-sitter-")
         || name.starts_with("ts-parser-")
@@ -1898,7 +1906,7 @@ mod tests {
 
     #[test]
     fn native_manifest_rejects_missing_or_extra_languages() {
-        for language in ["trig", "turtle", "typespec", "n3", "sparql"] {
+        for language in ["ntriples", "trig", "turtle", "typespec", "n3", "sparql"] {
             let mut manifest: GrammarLock =
                 toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
             manifest
@@ -1906,7 +1914,7 @@ mod tests {
                 .retain(|grammar| grammar.language != language);
             assert!(matches!(
                 validate_manifest(&manifest),
-                Err(GrammarLockError::GrammarCount(108))
+                Err(GrammarLockError::GrammarCount(109))
             ));
         }
         let mut manifest: GrammarLock =
@@ -1919,8 +1927,64 @@ mod tests {
     }
 
     #[test]
+    fn ntriples_first_party_grammar_retains_complete_sources_and_origin_notices() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("native-grammars/ntriples");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "ntriples")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(grammar.crate_name, "rootlight-tree-sitter-ntriples");
+        assert_eq!(grammar.license, "AGPL-3.0-only");
+        assert!(grammar.crates_io_checksum.is_none());
+        assert_eq!(sources.manifest_path, "native-grammars/ntriples/Cargo.toml");
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        for path in [
+            "LICENSE-MIT",
+            "LICENSE.tree-sitter",
+            "grammar.js",
+            "src/scanner.c",
+        ] {
+            let mut incomplete: GrammarLock =
+                toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+            let grammar = incomplete
+                .grammars
+                .iter_mut()
+                .find(|grammar| grammar.language == "ntriples")
+                .unwrap();
+            assert!(
+                grammar
+                    .vendored
+                    .as_mut()
+                    .unwrap()
+                    .files
+                    .remove(path)
+                    .is_some()
+            );
+            assert!(matches!(
+                validate_vendored_tree(&directory, grammar, grammar.vendored.as_ref().unwrap()),
+                Err(GrammarLockError::DigestMismatch {
+                    label: "vendored source manifest",
+                    ..
+                })
+            ));
+            grammar.vendored_source_sha256 =
+                Some(vendored_source_digest(&grammar.vendored.as_ref().unwrap().files).unwrap());
+            assert!(matches!(
+                validate_vendored_tree(&directory, grammar, grammar.vendored.as_ref().unwrap()),
+                Err(GrammarLockError::PackageEvidence { package }) if package == grammar.crate_name
+            ));
+        }
+    }
+
+    #[test]
     fn native_dependency_roster_requires_each_declared_local_package() {
         for package in [
+            "rootlight-tree-sitter-ntriples",
             "tree-sitter-turtle",
             "tree-sitter-typespec",
             "tree-sitter-n3",

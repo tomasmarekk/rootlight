@@ -103,6 +103,7 @@ mod mojo;
 mod n3;
 mod nim;
 mod nix;
+mod ntriples;
 mod nushell;
 mod objective_c;
 mod ocaml;
@@ -481,6 +482,9 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
+        if family == GrammarFamily::NTriples {
+            expected = vec!["comment", "expression", "module", "root", "string"];
+        }
         if family == GrammarFamily::Sparql {
             expected.retain(|name| {
                 matches!(
@@ -897,7 +901,8 @@ impl QueryPack {
                 .any(|(quantifier, role)| {
                     *quantifier != CaptureQuantifier::Zero
                         && (role.belongs_to_identity_closure()
-                            || (family == GrammarFamily::CMake && *role == StructuralRole::Expression)
+                            || (matches!(family, GrammarFamily::CMake | GrammarFamily::NTriples)
+                                && *role == StructuralRole::Expression)
                             // Source-certified references remain mandatory even when
                             // their native pattern has no declaration capture.
                             || (matches!(family, GrammarFamily::Dockerfile | GrammarFamily::Sed | GrammarFamily::Idris)
@@ -1138,6 +1143,9 @@ impl QueryPack {
                         && (candidate.role == StructuralRole::Expression
                             || (candidate.role == StructuralRole::Reference
                                 && candidate.syntax == "cmake.normal_variable")))
+                    || (family == GrammarFamily::NTriples
+                        && candidate.required
+                        && candidate.role == StructuralRole::Expression)
                     || (family == GrammarFamily::Nix
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -3252,7 +3260,14 @@ impl QueryPack {
                     }
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::Sparql {
+                let candidate = if input.family == GrammarFamily::NTriples {
+                    let Some(candidate) =
+                        ntriples::candidate(capture.node, role, input.source, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
+                } else if input.family == GrammarFamily::Sparql {
                     let Some(candidate) =
                         sparql::candidate(capture.node, role, input.cancellation)?
                     else {
@@ -4779,6 +4794,7 @@ fn candidate_for_capture(
             GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
             GrammarFamily::Sparql => return Err(query_failure("query-sparql-unproven-call")),
             GrammarFamily::N3 => return Err(query_failure("query-n3-unproven-call")),
+            GrammarFamily::NTriples => return Err(query_failure("query-ntriples-unproven-call")),
             GrammarFamily::Trig => return Err(query_failure("query-trig-unproven-call")),
             GrammarFamily::Turtle => return Err(query_failure("query-turtle-unproven-call")),
             GrammarFamily::TypeSpec => return Err(query_failure("query-typespec-unproven-call")),
@@ -5305,6 +5321,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
     match (family, native) {
         (GrammarFamily::Sparql, "unit") => Some("sparql.file"),
         (GrammarFamily::N3, "n3_doc") => Some("n3.file"),
+        (GrammarFamily::NTriples, "document") => Some("ntriples.file"),
         (GrammarFamily::Trig, "document") => Some("trig.file"),
         (GrammarFamily::Turtle, "document") => Some("turtle.file"),
         (GrammarFamily::Idris, "idris") => Some("idris.file"),
@@ -6006,6 +6023,10 @@ impl QueryPackRegistry {
             ),
             (GrammarFamily::Sparql, include_str!("../queries/sparql.scm")),
             (GrammarFamily::N3, include_str!("../queries/n3.scm")),
+            (
+                GrammarFamily::NTriples,
+                include_str!("../queries/ntriples.scm"),
+            ),
             (GrammarFamily::Trig, include_str!("../queries/trig.scm")),
             (GrammarFamily::Turtle, include_str!("../queries/turtle.scm")),
             (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
@@ -6389,10 +6410,11 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 114);
+        assert_eq!(registry.len(), 115);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
+            GrammarFamily::NTriples,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -6505,6 +6527,9 @@ mod tests {
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if family == GrammarFamily::NTriples {
+                expected = vec!["comment", "expression", "module", "root", "string"];
+            }
             if family == GrammarFamily::Sparql {
                 expected.retain(|name| {
                     matches!(

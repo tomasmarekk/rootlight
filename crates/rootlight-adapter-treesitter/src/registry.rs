@@ -13,6 +13,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// Native N-Triples statements; RDF graph evaluation remains separate.
+    NTriples,
     /// SPARQL written requests without query evaluation or external resource loading.
     Sparql,
     /// Notation3 written source without logical inference or external IRI loading.
@@ -333,8 +335,9 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(112);
+        let mut descriptors = Vec::with_capacity(113);
         for family in [
+            GrammarFamily::NTriples,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -548,6 +551,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::NTriples => rootlight_tree_sitter_ntriples::LANGUAGE.into(),
         GrammarFamily::Sparql => tree_sitter_sparql::LANGUAGE.into(),
         GrammarFamily::N3 => tree_sitter_n3::LANGUAGE.into(),
         GrammarFamily::Trig | GrammarFamily::Turtle => tree_sitter_turtle::LANGUAGE.into(),
@@ -752,6 +756,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "b098bfe029a7db00d24909f6222324873294e77e5ee1c35da2c7326a105b7268",
             scanner_sha256: Some(
                 "0357585e49a558e1c390441919e11ba3170e78d4622cdefba10b881168bc5c70",
+            ),
+        },
+        GrammarFamily::NTriples => GrammarIdentity {
+            language_id: "ntriples",
+            grammar_version: "0.1.0",
+            source_package_sha256: "58f0eb18638475ef695648c7450345b79124fb082bdb10dd9d797a03a36d80b6",
+            parser_sha256: "e0e1564bd634125332170c9f4dde1d186f7becfe4ac458baa23429e08e7e5981",
+            scanner_sha256: Some(
+                "e2a23b0c6e64929cf5243eb2846f64f30a6f0c3f5458061c08fdcf5324fc9789",
             ),
         },
         GrammarFamily::Sparql => GrammarIdentity {
@@ -1645,8 +1658,9 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 112);
+        assert_eq!(registry.descriptors().len(), 113);
         for family in [
+            GrammarFamily::NTriples,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -2015,6 +2029,11 @@ mod tests {
 
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
         for (family, language, package) in [
+            (
+                GrammarFamily::NTriples,
+                "ntriples",
+                "rootlight-tree-sitter-ntriples",
+            ),
             (GrammarFamily::Sparql, "sparql", "tree-sitter-sparql"),
             (GrammarFamily::N3, "n3", "tree-sitter-n3"),
             (GrammarFamily::Trig, "trig", "tree-sitter-turtle"),
@@ -2188,7 +2207,14 @@ mod tests {
             } else {
                 // Both registry-derived overrides and unpublished bindings
                 // require xtask to verify every checked-in source byte.
-                assert!(quoted_field(grammar, "manifest_path").starts_with("third_party/"));
+                if family == GrammarFamily::NTriples {
+                    assert_eq!(
+                        quoted_field(grammar, "manifest_path"),
+                        "native-grammars/ntriples/Cargo.toml"
+                    );
+                } else {
+                    assert!(quoted_field(grammar, "manifest_path").starts_with("third_party/"));
+                }
             }
             assert_eq!(quoted_field(grammar, "crate_version"), version);
             assert_eq!(
@@ -2200,7 +2226,8 @@ mod tests {
                     ) || family.is_cobol()
                         || matches!(
                             family,
-                            GrammarFamily::Sparql
+                            GrammarFamily::NTriples
+                                | GrammarFamily::Sparql
                                 | GrammarFamily::N3
                                 | GrammarFamily::Trig
                                 | GrammarFamily::Turtle

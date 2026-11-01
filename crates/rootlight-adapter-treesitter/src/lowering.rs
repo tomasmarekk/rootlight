@@ -79,6 +79,7 @@ mod n3;
 mod nim;
 mod nix_formal_reads;
 mod nix_paths;
+mod ntriples;
 mod nushell;
 mod ocaml_bindings;
 mod perl;
@@ -730,9 +731,11 @@ impl TreeSitterAnalyzer {
             usage.records(),
             parse_resources.syntax_nodes(),
             parse_resources.max_syntax_depth(),
-            parse_resources
-                .reported_memory_bytes()
-                .map(|parsed_peak| parsed_peak.max(lowered.rust_owner_modeled_peak)),
+            parse_resources.reported_memory_bytes().map(|parsed_peak| {
+                parsed_peak
+                    .max(lowered.rust_owner_modeled_peak)
+                    .max(lowered.rdf_modeled_peak)
+            }),
             usage,
         );
         rootlight_adapter_sdk::WorkReport::new(
@@ -963,6 +966,7 @@ fn required_syntax_fact_count_from_output(
             || chapel_calls::required(fact)
             || meson_bindings::required(fact)
             || cmake::required(fact)
+            || ntriples::required(fact)
             || dockerfile::required(fact)
             || java_local_receivers::required(fact)
             || cpp_const_formals::required(fact)
@@ -1362,6 +1366,7 @@ struct LoweringBudget {
     string_bytes: usize,
     records: usize,
     nested_items: usize,
+    ntriples: ntriples::Plan,
 }
 
 fn preflight_lowering_limits(
@@ -1431,6 +1436,7 @@ fn preflight_lowering_limits(
             request.source().source_ref(),
             cancellation,
         )?;
+    let ntriples = ntriples::Plan::new(request, parse_output, cancellation)?;
     let mut entity_candidates = 0_usize;
     let mut occurrence_candidates = 0_usize;
     let mut lexical_relation_candidates = 0_usize;
@@ -1442,6 +1448,11 @@ fn preflight_lowering_limits(
         request.included_ranges(),
     )?;
     let mut string_bytes = 0_usize;
+    ntriples.account_strings(&mut string_bytes, limits)?;
+    skipped_candidates = checked_add(skipped_candidates, ntriples.gaps.len())?;
+    for gap in &ntriples.gaps {
+        account_string(&mut string_bytes, gap.detail.len(), limits)?;
+    }
     if request.language().as_str() == "thinkscript" {
         skipped_candidates = checked_add(skipped_candidates, 3)?;
         for _ in 0..3 {
@@ -2279,7 +2290,7 @@ fn preflight_lowering_limits(
     }
     let required_extension_candidates = checked_add(
         checked_add(1, entity_candidates)?,
-        vba_compilation_candidates,
+        checked_add(vba_compilation_candidates, ntriples.statements.len())?,
     )?;
     require_resource_limit(
         ResourceKind::Records,
@@ -2339,7 +2350,7 @@ fn preflight_lowering_limits(
     let nested_items = checked_add(
         checked_add(
             checked_add(2, diagnostic_derivations)?,
-            vba_compilation_candidates,
+            checked_add(vba_compilation_candidates, ntriples.statements.len())?,
         )?,
         field_relation_derivations,
     )?;
@@ -2352,6 +2363,7 @@ fn preflight_lowering_limits(
         string_bytes,
         records: total_records,
         nested_items,
+        ntriples,
     })
 }
 
@@ -2449,6 +2461,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             cancellation,
         )?;
         let mut total_string_bytes = budget.string_bytes;
+        let mut ntriples = std::mem::take(&mut budget.ntriples);
         if self.request.language().as_str() == "markdown" {
             self.classic_fences = classic_fence_spans(self.coordinates.facts(), cancellation)?;
         }
@@ -4537,6 +4550,20 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 self.request.limits().ir(),
             )?;
             extensions.insert(envelope.id, envelope);
+        }
+
+        for proof in std::mem::take(&mut ntriples.statements) {
+            cancellation.check()?;
+            let envelope = ntriples.envelope(proof, self.request, provenance_id)?;
+            ensure_extension_budget(
+                &envelope,
+                extensions.len(),
+                &mut extension_bytes,
+                self.request.limits().ir(),
+            )?;
+            if extensions.insert(envelope.id, envelope).is_some() {
+                return Err(provider_failure("ntriples-statement-identity-collision"));
+            }
         }
 
         if let Some(bindings) = &vba_bindings {
@@ -7741,6 +7768,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
             }
         }
+        for gap in &ntriples.gaps {
+            cancellation.check()?;
+            let region = skipped_region(
+                self.full_source,
+                gap.span,
+                FactDomain::Extensions,
+                SkippedRegionReason::UnsupportedConstruct,
+                gap.detail,
+                provenance_id,
+            )?;
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+        }
         if self.request.language().as_str() == "sed" {
             cancellation.check()?;
             let gap = skipped_region(
@@ -7831,6 +7870,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
         Ok(LoweredOutput {
             rust_owner_modeled_peak,
+            rdf_modeled_peak: ntriples.modeled_peak,
             records,
             coverage_status,
             skipped_regions: stats.skipped_regions,
@@ -10355,6 +10395,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
 
 struct LoweredOutput {
     rust_owner_modeled_peak: usize,
+    rdf_modeled_peak: usize,
     records: Vec<IrRecord>,
     coverage_status: CoverageStatus,
     skipped_regions: usize,
@@ -14030,6 +14071,9 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("ntriples.") {
+        return false;
+    }
     if fact.syntax_kind().as_str().starts_with("thinkscript.") {
         return fact.kind() == SyntaxFactKind::Signature
             && fact.syntax_kind().as_str() == "thinkscript.script.signature";
@@ -14672,6 +14716,9 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("ntriples.") {
+        return None;
+    }
     if fact.syntax_kind().as_str().starts_with("sparql.") {
         return sparql::kind(fact);
     }
@@ -14734,6 +14781,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
+    if fact.syntax_kind().as_str().starts_with("ntriples.") {
+        return None;
+    }
     if fact.syntax_kind().as_str().starts_with("sparql.") {
         return sparql::kind(fact);
     }
