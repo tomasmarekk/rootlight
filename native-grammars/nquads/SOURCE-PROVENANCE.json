@@ -1,0 +1,120 @@
+{
+  "schema": "rootlight.native-grammar-source-provenance/1",
+  "authorship": "locally maintained N-Quads grammar derived from the retained native N-Triples lexical contract; no upstream N-Quads release or archive is claimed",
+  "specification": "https://www.w3.org/TR/2014/REC-n-quads-20140225/",
+  "lexical_origin": {
+    "preferred_inputs": [
+      {
+        "path": "native-grammars/ntriples/grammar.js",
+        "bytes": 2594,
+        "sha256": "095f8ebdc4bfcf8d3cc42ed5bc8dcc003aeb48482cc99884374b6415d603cd9f"
+      },
+      {
+        "path": "native-grammars/ntriples/src/scanner.c",
+        "bytes": 2890,
+        "sha256": "e2a23b0c6e64929cf5243eb2846f64f30a6f0c3f5458061c08fdcf5324fc9789"
+      }
+    ],
+    "mit_lexical_origin": {
+      "repository": "https://github.com/GordianDziwis/tree-sitter-turtle",
+      "revision": "7f789ea7ef765080f71a298fc96b7c957fa24422",
+      "notice": "LICENSE-MIT"
+    },
+    "retained_contract": "absolute IRI schemes and escaped ASCII scheme characters, Unicode blank-node ranges, Unicode scalar escapes, physical-line structure, EOF-aware stateless strings and comments"
+  },
+  "native_statement": {
+    "kind": "quad",
+    "required_fields": [
+      "subject",
+      "predicate",
+      "object"
+    ],
+    "optional_field": "graph",
+    "graph_kinds": [
+      "iri_reference",
+      "blank_node_label"
+    ],
+    "default_graph": "absent physical graph field; no synthesized term",
+    "relative_iri_dialect": "not admitted by this strict grammar; Dgraph relative-identifier/UID support remains a separate native implementation requirement"
+  },
+  "generator": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "abi": 14,
+    "command": [
+      "tree-sitter",
+      "generate",
+      "--abi",
+      "14",
+      "--js-runtime",
+      "native"
+    ],
+    "invoked_during_compilation": false
+  },
+  "preferred_inputs": [
+    {
+      "path": "grammar.js",
+      "bytes": 2659,
+      "sha256": "e42c1f3da87e241c744beda54c2d918ca31035876b62198b9b7b302ef74d4a1e"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 2878,
+      "sha256": "c19fbdb075f255928cb105291e1fe1ad9bee896bd2c0d0d9c634ab7914a349cb"
+    }
+  ],
+  "generated_outputs": [
+    {
+      "path": "src/grammar.json",
+      "bytes": 86220,
+      "sha256": "d7eb0098e0735c4917896249f9f8e61fad362915540c6bd4a43e495752f1695b"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 2506,
+      "sha256": "6f581f4e9112543e75d7ae916285b46a1c996635c0e9a5570dcb779fde3f337c"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 28507,
+      "sha256": "ac05831209cb07be7cf3e21c349f3a585b5502cc978de4c0458fb2cbde37da87"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ],
+  "license_scope": {
+    "local_authored_code": "AGPL-3.0-only",
+    "local_license": "LICENSE",
+    "retained_lexical_origin_license": "MIT",
+    "retained_lexical_origin_notice": "LICENSE-MIT",
+    "generated_tree_sitter_headers_notice": "LICENSE.tree-sitter",
+    "upstream_material_not_relicensed": true
+  },
+  "binding": {
+    "external_scanner": true,
+    "scanner_state": "none",
+    "compilation_generates_or_downloads": false,
+    "native_build_inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ]
+  },
+  "scope": "Native syntax and physical source spans only; dataset semantics, Dgraph dialect support, native quad IR, routing, capture, queries, registration and corpus qualification remain subsequent integration."
+}
