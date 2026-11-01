@@ -126,6 +126,7 @@ mod vhdl;
 mod wesl;
 mod wolfram;
 mod wolfram_formals;
+mod xml_closing_tags;
 mod yaml;
 mod zig;
 
@@ -1930,6 +1931,9 @@ fn preflight_lowering_limits(
                     || (request.language().as_str() == "html"
                         && request.included_ranges().is_empty()
                         && html_closing_tags::required(fact))
+                    || (request.language().as_str() == "xml"
+                        && request.included_ranges().is_empty()
+                        && xml_closing_tags::required(fact))
                     || (request.language().as_str() == "python"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() == CoverageStatus::Bounded
@@ -4302,6 +4306,30 @@ impl<'context, 'source> Lowering<'context, 'source> {
         } else {
             None
         };
+        let xml_closing_tags = if self.request.language().as_str() == "xml"
+            && self.request.included_ranges().is_empty()
+        {
+            Some(xml_closing_tags::Targets::new(
+                self.coordinates.facts(),
+                &materialized,
+                xml_closing_tags::CurrentSource {
+                    reference: self.full_source,
+                    logical: self.source_view.as_bytes(),
+                    original: self.request.source().bytes(),
+                    maximum: self
+                        .request
+                        .limits()
+                        .max_syntax_nodes()
+                        .saturating_mul(128)
+                        .min(crate::query_pack::HARD_MAX_QUERY_FACTS),
+                },
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
         let bash_reads = if self.request.language().as_str() == "bash"
             && self.request.included_ranges().is_empty()
             && self.parse_output.report().coverage().status() == CoverageStatus::Complete
@@ -5288,7 +5316,10 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     provenance_id,
                     syntax_confidence,
                     source.clone(),
-                    if self.language_for_fact(fact) == "rust" || html_closing_tags::required(fact) {
+                    if self.language_for_fact(fact) == "rust"
+                        || html_closing_tags::required(fact)
+                        || xml_closing_tags::required(fact)
+                    {
                         text
                     } else {
                         resolution_text.as_deref().unwrap_or(text)
@@ -5309,6 +5340,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     && fact.syntax_kind().as_str() != bash_calls::CALL
                     && !bash_module_references::required(fact)
                     && fact.syntax_kind().as_str() != html_closing_tags::REFERENCE
+                    && !xml_closing_tags::required(fact)
                     && !liquid::reference(fact)
                     && !handlebars::reference(fact)
                     && !nushell::reference(fact)
@@ -6056,6 +6088,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("php-written-call-occurrence-identity"))?;
                     let relation =
                         php_this_calls::relation(&occurrence, owner, symbol, cancellation)?;
+                    relations.insert(relation.id, relation);
+                }
+                if let Some(bindings) = &xml_closing_tags
+                    && let Some(symbol) = bindings.resolve(
+                        fact,
+                        &occurrence,
+                        self.coordinates.physical(fact.span())?,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("xml-closing-reference-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
                 }
                 if let Some(bindings) = &html_closing_tags

@@ -101,11 +101,19 @@ pub(super) fn assert_sources(result: &AnalysisOutput, language: &str, source: &s
             occurrence.role,
             OccurrenceRole::CallSite | OccurrenceRole::ImportUse
         ));
-        if occurrence.role == OccurrenceRole::Reference {
-            assert!(matches!(
-                occurrence.target,
-                OccurrenceTarget::Unresolved { .. }
-            ));
+        if occurrence.role == OccurrenceRole::Reference
+            && let OccurrenceTarget::Resolved { symbol } = occurrence.target
+        {
+            assert_eq!(language, "xml");
+            assert_eq!(occurrence.syntax_kind, "xml.end_name.reference");
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            assert_eq!(entity.kind, EntityKind::MarkupElement);
+            assert_eq!(occurrence.enclosing, Some(symbol));
+            assert_eq!(text(source, &occurrence.source), entity.canonical_name);
         }
     }
     for coverage in &document.coverage_records {
@@ -114,12 +122,26 @@ pub(super) fn assert_sources(result: &AnalysisOutput, language: &str, source: &s
             coverage.indexed.checked_add(coverage.skipped).unwrap()
         );
     }
-    assert!(
-        document
-            .relations
+    for relation in &document.relations {
+        if relation.predicate == RelationPredicate::Contains {
+            continue;
+        }
+        assert_eq!(relation.predicate, RelationPredicate::RefersTo);
+        let RelationEndpoint::Occurrence(id) = relation.subject else {
+            panic!("closing source occurrence")
+        };
+        let occurrence = document
+            .occurrences
             .iter()
-            .all(|relation| relation.predicate == RelationPredicate::Contains)
-    );
+            .find(|occurrence| occurrence.id == id)
+            .unwrap();
+        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+            panic!("proved closing target")
+        };
+        assert_eq!(occurrence.syntax_kind, "xml.end_name.reference");
+        assert_eq!(relation.object, RelationEndpoint::Entity(symbol));
+        assert_eq!(relation.evidence.source.as_ref(), Some(&occurrence.source));
+    }
     assert_ne!(
         result.report().coverage().status(),
         CoverageStatus::Complete
@@ -431,4 +453,146 @@ fn xml_body_value_changes_preserve_physical_ids_and_required_fact_groups() {
     {
         assert_eq!(signature(&retained, before, entity.id).len(), 1);
     }
+}
+
+#[test]
+fn xml_closing_names_resolve_to_their_exact_written_element() {
+    for source in [
+        "<svg><path/></svg>",
+        "<root><item><item></item></item><item></item></root>",
+        "<p:root xmlns:p=\"urn:outer\"><p:item xmlns:p=\"urn:inner\"></p:item><p:item></p:item></p:root>",
+        "<À><𐀀́></𐀀́></À>",
+    ] {
+        let result = output(XML, source);
+        let document = result.document();
+        let expected = source.matches("</").count();
+        let resolved = document
+            .occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.syntax_kind == "xml.end_name.reference"
+                    && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(resolved.len(), expected, "{source}");
+        for occurrence in resolved {
+            let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+                unreachable!()
+            };
+            let entity = document
+                .entities
+                .iter()
+                .find(|entity| entity.id == symbol)
+                .unwrap();
+            let extent = entity.evidence.source.as_ref().unwrap().span();
+            assert!(extent.start_byte() <= occurrence.source.span().start_byte());
+            assert_eq!(extent.end_byte(), occurrence.source.span().end_byte() + 1);
+            let definition = document
+                .occurrences
+                .iter()
+                .find(|candidate| {
+                    candidate.role == OccurrenceRole::Definition
+                        && candidate.target == OccurrenceTarget::Resolved { symbol }
+                })
+                .unwrap();
+            assert_eq!(
+                definition.source.span().start_byte(),
+                extent.start_byte() + 1
+            );
+            assert_eq!(
+                text(source, &definition.source),
+                text(source, &occurrence.source)
+            );
+            assert!(document.relations.iter().any(|relation| {
+                relation.predicate == RelationPredicate::RefersTo
+                    && relation.subject == RelationEndpoint::Occurrence(occurrence.id)
+                    && relation.object == RelationEndpoint::Entity(symbol)
+            }));
+        }
+        assert!(
+            !document
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.detail == "xml-dtd-namespace-and-entity-target-unavailable" })
+        );
+        assert!(
+            document.skipped_regions.iter().any(|gap| {
+                gap.detail == "xml-namespace-entity-and-validity-analysis-unavailable"
+            })
+        );
+    }
+}
+
+#[test]
+fn xml_closing_binding_never_guesses_case_namespace_or_malformed_targets() {
+    for source in [
+        "<Upper></upper>",
+        "<À></À>",
+        "<p:item xmlns:p=\"urn:x\" xmlns:q=\"urn:x\"></q:item>",
+        "<root><item></root></item>",
+        "<root><item/></item></root>",
+        "<root><item></item",
+    ] {
+        let result = output(XML, source);
+        assert!(
+            !result.document().occurrences.iter().any(|occurrence| {
+                occurrence.syntax_kind == "xml.end_name.reference"
+                    && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+            }),
+            "{source}"
+        );
+    }
+    let source = "<!DOCTYPE root [<!ENTITY named \"value\">]><?go data?><root>&named;</root>";
+    let result = output(XML, source);
+    let mut native = tree_sitter::Parser::new();
+    native
+        .set_language(&tree_sitter_xml::LANGUAGE_XML.into())
+        .unwrap();
+    let native_tree = native.parse(source, None).unwrap();
+    let element = native_tree.root_node().child_by_field_name("root").unwrap();
+    assert!(!element.is_missing() && !element.has_error());
+    assert!(result.document().skipped_regions.iter()
+        .filter(|gap| gap.detail == "syntax-error-recovery")
+        .all(|gap| gap.source.span().end_byte() <= u64::try_from(element.start_byte()).unwrap()));
+    assert!(
+        result.document().occurrences.iter().any(|occurrence| {
+            occurrence.syntax_kind == "xml.end_name.reference"
+                && matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+        }),
+        "native_has_error: {}; native_tree: {}; recovery_spans: {:?}; references: {:?}; gaps: {:?}",
+        native_tree.root_node().has_error(),
+        native_tree.root_node().to_sexp(),
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "syntax-error-recovery")
+            .map(|gap| (gap.source.span(), text(source, &gap.source)))
+            .collect::<Vec<_>>(),
+        result
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Reference)
+            .map(|site| (&site.syntax_kind, site.source.span(), &site.target))
+            .collect::<Vec<_>>(),
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .map(|gap| &gap.detail)
+            .collect::<Vec<_>>()
+    );
+    assert!(result.document().occurrences.iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::Reference
+            && occurrence.syntax_kind != "xml.end_name.reference"
+            && matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+    }));
+    assert!(
+        result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.detail == "xml-dtd-namespace-and-entity-target-unavailable" })
+    );
 }
