@@ -555,27 +555,91 @@ impl RdfPartitionReader {
         limit: GenerationReadLimit,
         context: &GenerationContext<'_>,
     ) -> Result<ReadPage<ExtensionEnvelope>, CatalogError> {
+        let ids = self.select_ids(after, usize::from(limit.get()) + 1, context)?;
+        let records = self.read_selected(&ids, context)?;
+        ReadPage::from_limit_plus_one(records, self.descriptor.record_count(), limit, |record| {
+            record.id
+        })
+        .map_err(|_| corrupt())
+    }
+
+    pub(super) fn select_ids(
+        &self,
+        after: Option<FactId>,
+        maximum: usize,
+        context: &GenerationContext<'_>,
+    ) -> Result<Vec<FactId>, CatalogError> {
         context.check().map_err(CatalogError::control)?;
+        require_selection_bound(maximum)?;
         let connection = self.connection.lock().map_err(|_| corrupt())?;
         schema::install_generation_cancellation(&connection, context)?;
-        let columns = "SELECT record_id, provenance_id, source, payload FROM rdf_statements";
+        let columns = "SELECT record_id FROM rdf_statements";
         let sql = if after.is_some() {
             format!("{columns} WHERE record_id > ?1 ORDER BY record_id LIMIT ?2")
         } else {
             format!("{columns} ORDER BY record_id LIMIT ?1")
         };
         let mut statement = connection.prepare(&sql).map_err(CatalogError::sqlite)?;
-        let probe_limit = i64::from(limit.get()) + 1;
+        let probe_limit = i64::try_from(maximum).map_err(|_| corrupt())?;
         let mut rows = if let Some(cursor) = after {
             statement.query(params![cursor.as_bytes().as_slice(), probe_limit])
         } else {
             statement.query([probe_limit])
         }
         .map_err(CatalogError::sqlite)?;
-        let mut records = Vec::new();
-        let mut usage = IrDocumentUsage::default();
+        let mut ids = Vec::new();
         while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
             context.check().map_err(CatalogError::control)?;
+            let id = codec::fact_id(row.get(0).map_err(CatalogError::sqlite)?)?;
+            if after.is_some_and(|cursor| id <= cursor)
+                || ids.last().is_some_and(|previous| *previous >= id)
+                || ids.len() >= maximum
+            {
+                return Err(corrupt());
+            }
+            context
+                .require(
+                    GenerationResource::Rows,
+                    u64::try_from(ids.len()).map_err(|_| corrupt())? + 1,
+                )
+                .map_err(CatalogError::control)?;
+            ids.try_reserve(1)
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+            ids.push(id);
+        }
+        context.check().map_err(CatalogError::control)?;
+        Ok(ids)
+    }
+
+    pub(super) fn read_selected(
+        &self,
+        ids: &[FactId],
+        context: &GenerationContext<'_>,
+    ) -> Result<Vec<ExtensionEnvelope>, CatalogError> {
+        context.check().map_err(CatalogError::control)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        require_selection_bound(ids.len())?;
+        if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(corrupt());
+        }
+        let connection = self.connection.lock().map_err(|_| corrupt())?;
+        schema::install_generation_cancellation(&connection, context)?;
+        let mut statement = connection.prepare(
+            "SELECT record_id, provenance_id, source, payload FROM rdf_statements WHERE record_id = ?1 LIMIT 2"
+        ).map_err(CatalogError::sqlite)?;
+        let mut records = Vec::new();
+        let mut usage = IrDocumentUsage::default();
+        for id in ids {
+            context.check().map_err(CatalogError::control)?;
+            let mut rows = statement
+                .query([id.as_bytes().as_slice()])
+                .map_err(CatalogError::sqlite)?;
+            let row = rows
+                .next()
+                .map_err(CatalogError::sqlite)?
+                .ok_or_else(corrupt)?;
             let record = decode_record(
                 row,
                 self.descriptor.metadata(),
@@ -584,7 +648,7 @@ impl RdfPartitionReader {
                 self.descriptor.source_bytes(),
                 &self.limits,
             )?;
-            if after.is_some_and(|id| record.id <= id) {
+            if record.id != *id || rows.next().map_err(CatalogError::sqlite)?.is_some() {
                 return Err(corrupt());
             }
             usage = usage
@@ -620,11 +684,16 @@ impl RdfPartitionReader {
             records.push(record);
         }
         context.check().map_err(CatalogError::control)?;
-        ReadPage::from_limit_plus_one(records, self.descriptor.record_count(), limit, |record| {
-            record.id
-        })
-        .map_err(|_| corrupt())
+        Ok(records)
     }
+}
+
+fn require_selection_bound(maximum: usize) -> Result<(), CatalogError> {
+    if maximum == 0 || maximum > usize::from(rootlight_storage::HARD_MAX_GENERATION_READ_ITEMS) + 1
+    {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
 fn partition_path(

@@ -248,9 +248,6 @@ fn rdf_partition_parent_document(
     statement_count: usize,
     configuration: &[u8],
 ) -> (GenerationMetadata, rootlight_ir::NormalizedIrDocument) {
-    let repository = derive_repository(b"catalog-rdf-partition").id();
-    let configuration_hash = content_hash(configuration);
-    let provider_set_hash = content_hash(b"catalog-rdf-partition-producer");
     let mut source_digest = blake3::Hasher::new();
     for _ in 0..statement_count {
         source_digest.update(text.as_bytes());
@@ -258,6 +255,18 @@ fn rdf_partition_parent_document(
     }
     let source_hash = rootlight_ids::ContentHash::from_bytes(*source_digest.finalize().as_bytes());
     let byte_length = u64::try_from((text.len() + 1) * statement_count).unwrap();
+    rdf_partition_parent_document_for_source(file_count, source_hash, byte_length, configuration)
+}
+
+fn rdf_partition_parent_document_for_source(
+    file_count: usize,
+    source_hash: rootlight_ids::ContentHash,
+    byte_length: u64,
+    configuration: &[u8],
+) -> (GenerationMetadata, rootlight_ir::NormalizedIrDocument) {
+    let repository = derive_repository(b"catalog-rdf-partition").id();
+    let configuration_hash = content_hash(configuration);
+    let provider_set_hash = content_hash(b"catalog-rdf-partition-producer");
     let claims: Vec<_> = (0..file_count)
         .map(|index| {
             let path = RelativePath::parse(Path::new(&format!("data/{index}.nt"))).unwrap();
@@ -493,6 +502,175 @@ fn rdf_partition_cold_pages_preserve_typed_records_and_source_hints() {
     assert!(exhausted.items().is_empty());
     assert_eq!(exhausted.total_available(), 5);
     assert_eq!(exhausted.completeness(), ReadPageCompleteness::Complete);
+}
+
+#[test]
+fn rdf_partition_id_selection_leaves_unselected_payload_out_of_query_budget() {
+    use crate::RdfPartitionWriter;
+    use rootlight_ir::IrDocumentUsage;
+    use rootlight_storage::VerifiedRdfPartition;
+    let texts = [
+        "_:a <urn:p> \"one\" .".to_owned(),
+        format!("_:a <urn:p> \"{}\" .", "x".repeat(64 * 1024)),
+        "_:a <urn:p> \"two\" .".to_owned(),
+        "_:a <urn:p> \"three\" .".to_owned(),
+    ];
+    let source = texts.join("\n") + "\n";
+    let (metadata, document) = rdf_partition_parent_document_for_source(
+        1,
+        content_hash(source.as_bytes()),
+        u64::try_from(source.len()).unwrap(),
+        b"rdf-id-selection",
+    );
+    let file = document.files[0].clone();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let limits = IrLimits::default();
+    let parent = IdentityVerifiedGeneration::verify(
+        metadata,
+        document,
+        &limits,
+        &ExtensionSupport::default(),
+        &context,
+    )
+    .unwrap();
+    let mut offset = 0u64;
+    let mut records: Vec<_> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let predicate_start = text.find('<').unwrap();
+            let predicate_end = text.find('>').unwrap() + 1;
+            let span = |start, end| {
+                SourceSpan::new(
+                    file.id,
+                    offset + u64::try_from(start).unwrap(),
+                    offset + u64::try_from(end).unwrap(),
+                )
+                .unwrap()
+            };
+            let source = SourceRef::new(
+                metadata.repository(),
+                metadata.generation(),
+                span(0, text.len()),
+                file.content_hash,
+                Some(
+                    rootlight_ir::LineRange::new(
+                        u64::try_from(index + 1).unwrap(),
+                        u64::try_from(index + 1).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+            );
+            let statement = rootlight_ir::RdfStatement::from_ntriples(
+                source,
+                text,
+                [
+                    span(0, predicate_start - 1),
+                    span(predicate_start, predicate_end),
+                    span(predicate_end + 1, text.len() - 2),
+                ],
+            )
+            .unwrap();
+            offset += u64::try_from(text.len() + 1).unwrap();
+            rootlight_ir::new_rdf_statement_envelope(file.provenance, &statement).unwrap()
+        })
+        .collect();
+    assert_eq!(offset, file.byte_length);
+    records.sort_by_key(|record| record.id);
+    let large = records
+        .iter()
+        .max_by_key(|record| record.payload.len())
+        .unwrap();
+    let large_id = large.id;
+    let large_bytes = large.payload.len();
+    let large_index = records
+        .iter()
+        .position(|record| record.id == large_id)
+        .unwrap();
+    // Three small rows guarantee two adjacent small selections on one side of
+    // the large row, without relying on the hash order of fixture identities.
+    let after = if large_index >= 2 {
+        None
+    } else {
+        Some(large_id)
+    };
+    let selected: Vec<_> = records
+        .iter()
+        .filter(|record| after.is_none_or(|cursor| record.id > cursor))
+        .take(2)
+        .cloned()
+        .collect();
+    assert_eq!(selected.len(), 2);
+    let selected_ids: Vec<_> = selected.iter().map(|record| record.id).collect();
+    let all_ids: Vec<_> = records.iter().map(|record| record.id).collect();
+    let usage = selected
+        .iter()
+        .fold(IrDocumentUsage::default(), |usage, record| {
+            usage
+                .checked_add(
+                    IrDocumentUsage::measure_extension(record, &limits).unwrap(),
+                    &limits,
+                )
+                .unwrap()
+        });
+    let text_bytes =
+        u64::try_from(usage.total_string_bytes() + usage.total_extension_bytes()).unwrap();
+    assert!(u64::try_from(large_bytes).unwrap() > text_bytes);
+    let directory = TempDir::new().unwrap();
+    let partition =
+        VerifiedRdfPartition::verify(&parent, file.id, records, &limits, &context).unwrap();
+    let reader = RdfPartitionWriter::create_in(directory.path(), partition.descriptor(), &context)
+        .unwrap()
+        .seal(partition, &limits, &context)
+        .unwrap();
+    drop(parent);
+    let metadata_only =
+        GenerationContext::new(&cancellation, GenerationBudget::new(100, 1, 1).unwrap());
+    assert_eq!(reader.select_ids(None, 4, &metadata_only).unwrap(), all_ids);
+    let tight = GenerationContext::new(
+        &cancellation,
+        GenerationBudget::new(2, 2, text_bytes).unwrap(),
+    );
+    assert_eq!(reader.select_ids(after, 2, &tight).unwrap(), selected_ids);
+    assert_eq!(
+        reader.read_selected(&selected_ids, &tight).unwrap(),
+        selected
+    );
+    let page = reader
+        .extensions(after, GenerationReadLimit::new(1).unwrap(), &tight)
+        .unwrap();
+    assert_eq!(page.items(), &selected[..1]);
+    assert_eq!(page.total_available(), 4);
+    assert_eq!(page.next_cursor(), Some(selected[0].id));
+    assert!(matches!(
+        reader
+            .read_selected(&[large_id], &tight)
+            .unwrap_err()
+            .kind(),
+        CatalogErrorKind::BudgetExceeded {
+            resource: GenerationResource::TextBytes,
+            ..
+        }
+    ));
+    assert!(reader.select_ids(None, 0, &context).is_err());
+    assert!(
+        reader
+            .read_selected(&[selected_ids[0], selected_ids[0]], &context)
+            .is_err()
+    );
+    cancellation.cancel(CancellationReason::ClientRequest);
+    assert_eq!(
+        reader.select_ids(None, 1, &context).unwrap_err().kind(),
+        CatalogErrorKind::Cancelled
+    );
+    assert_eq!(
+        reader
+            .read_selected(&selected_ids, &context)
+            .unwrap_err()
+            .kind(),
+        CatalogErrorKind::Cancelled
+    );
 }
 
 #[test]
