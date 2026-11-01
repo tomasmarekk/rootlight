@@ -8,6 +8,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
+rootlight-tree-sitter-ntriples.workspace = true
+tree-sitter.workspace = true
 rootlight-thinkscript = { path = "../rootlight-thinkscript" }
 ignore.workspace = true
 rootlight-cancel = { path = "../rootlight-cancel" }

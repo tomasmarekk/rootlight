@@ -157,6 +157,7 @@ impl StreamedSourceReceiver for Receiver {
             capture,
             encoding: sink.validator.finish(),
             contains_nul,
+            ntriples_nul_proof: None,
             prefix: sink.prefix,
         })
     }

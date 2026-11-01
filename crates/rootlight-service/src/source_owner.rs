@@ -13,7 +13,8 @@ use std::{
 
 use cap_std::fs::Dir;
 use rootlight_discovery::{
-    DiscoveryError, ManifestInput, StreamedDiscoverySource, StreamedSourceReceiver,
+    DiscoveryError, ManifestInput, NTriplesNulProbe, NTriplesNulProof, StreamedDiscoverySource,
+    StreamedSourceReceiver,
 };
 use rootlight_ids::{FileId, GenerationId, RepositoryId};
 use rootlight_ir::FileRecord;
@@ -442,6 +443,7 @@ pub(super) struct CapturedSourceFile {
     pub(super) capture: StreamedSourceCapture,
     pub(super) encoding: Option<TextEncoding>,
     pub(super) contains_nul: bool,
+    pub(super) ntriples_nul_proof: Option<NTriplesNulProof>,
     pub(super) private_name: OsString,
 }
 
@@ -511,6 +513,17 @@ impl StreamedSourceReceiver for SourceCaptureReceiver<'_> {
         observed: SnapshotMetadata,
         cancellation: &Cancellation,
     ) -> Result<StreamedDiscoverySource, DiscoveryError> {
+        self.capture_with_native_nul(root, path, observed, false, cancellation)
+    }
+
+    fn capture_with_native_nul(
+        &mut self,
+        root: &RepositoryRoot,
+        path: &RelativePath,
+        observed: SnapshotMetadata,
+        requested: bool,
+        cancellation: &Cancellation,
+    ) -> Result<StreamedDiscoverySource, DiscoveryError> {
         let session = match self {
             Self::Explicit(session) => session,
             Self::Durable {
@@ -531,7 +544,14 @@ impl StreamedSourceReceiver for SourceCaptureReceiver<'_> {
                     .ok_or(DiscoveryError::StreamedCaptureUnavailable)?
             }
         };
-        StreamedSourceReceiver::capture(session, root, path, observed, cancellation)
+        StreamedSourceReceiver::capture_with_native_nul(
+            session,
+            root,
+            path,
+            observed,
+            requested,
+            cancellation,
+        )
     }
 }
 
@@ -652,6 +672,7 @@ impl SourceCaptureSession {
             capture: captured,
             encoding,
             contains_nul,
+            ntriples_nul_proof: None,
             private_name,
         };
         self.files.insert(source.capture.file(), source.clone());
@@ -700,6 +721,17 @@ impl StreamedSourceReceiver for SourceCaptureSession {
         observed: SnapshotMetadata,
         cancellation: &Cancellation,
     ) -> Result<StreamedDiscoverySource, DiscoveryError> {
+        self.capture_with_native_nul(root, path, observed, false, cancellation)
+    }
+
+    fn capture_with_native_nul(
+        &mut self,
+        root: &RepositoryRoot,
+        path: &RelativePath,
+        observed: SnapshotMetadata,
+        requested: bool,
+        cancellation: &Cancellation,
+    ) -> Result<StreamedDiscoverySource, DiscoveryError> {
         let (source, prefix) =
             SourceCaptureSession::capture(self, root, path, observed, cancellation).map_err(
                 |_| {
@@ -709,10 +741,42 @@ impl StreamedSourceReceiver for SourceCaptureSession {
                     )
                 },
             )?;
+        let ntriples_nul_proof =
+            if requested && source.encoding == Some(TextEncoding::Utf8) && source.contains_nul {
+                if let Some(proof) = source.ntriples_nul_proof.as_ref() {
+                    if !proof.matches_source(source.capture.content_hash(), observed.length) {
+                        return Err(DiscoveryError::IncrementalDrift);
+                    }
+                    Some(proof.clone())
+                } else {
+                    let proof = captured_ntriples_nul_proof(
+                        self.directory
+                            .as_ref()
+                            .ok_or(DiscoveryError::StreamedCaptureUnavailable)?,
+                        &source.private_name,
+                        &source.capture,
+                        cancellation,
+                    )
+                    .map_err(|_| {
+                        cancellation.check().err().map_or(
+                            DiscoveryError::StreamedCaptureUnavailable,
+                            DiscoveryError::Cancelled,
+                        )
+                    })?;
+                    self.files
+                        .get_mut(&source.capture.file())
+                        .ok_or(DiscoveryError::IncrementalDrift)?
+                        .ntriples_nul_proof = Some(proof.clone());
+                    Some(proof)
+                }
+            } else {
+                None
+            };
         Ok(StreamedDiscoverySource {
             capture: source.capture,
             encoding: source.encoding,
             contains_nul: source.contains_nul,
+            ntriples_nul_proof,
             prefix,
         })
     }
@@ -824,6 +888,48 @@ impl Drop for SourceCaptureSession {
     }
 }
 
+fn captured_ntriples_nul_proof(
+    directory: &PrivateDirectory<'_>,
+    name: &OsStr,
+    captured: &StreamedSourceCapture,
+    cancellation: &Cancellation,
+) -> Result<NTriplesNulProof, FirstSliceError> {
+    // Only NUL-bearing UTF-8 captures need this extra pass over private bytes.
+    let mut probe = NTriplesNulProbe::new();
+    let mut probe_error = None;
+    let read = visit_verified_source_bytes_cancellable(
+        directory,
+        name,
+        StreamedSourceBytesIdentity {
+            byte_length: captured.metadata().length,
+            content_hash: captured.content_hash(),
+        },
+        captured.metadata().length,
+        cancellation,
+        |_, bytes| {
+            probe.push(bytes, cancellation).map_err(|error| {
+                probe_error = Some(error);
+                rootlight_vfs::platform::PlatformError::ResourceLimit
+            })
+        },
+    );
+    if let Some(error) = probe_error {
+        return Err(super::map_discovery_error(error, cancellation));
+    }
+    read.map_err(|_| {
+        check_cancellation(cancellation)
+            .err()
+            .unwrap_or(FirstSliceError::CatalogCorrupt)
+    })?;
+    let proof = probe
+        .finish(cancellation)
+        .map_err(|error| super::map_discovery_error(error, cancellation))?;
+    if !proof.matches_source(captured.content_hash(), captured.metadata().length) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(proof)
+}
+
 struct CaptureSink<'a, W> {
     output: &'a mut W,
     validator: StreamingSourceTextValidator,
@@ -871,6 +977,127 @@ mod tests {
         let directory =
             Dir::open_ambient_dir(paths.state_dir(), cap_std::ambient_authority()).unwrap();
         (temporary, directory)
+    }
+
+    #[test]
+    fn native_nul_proof_covers_private_bytes_beyond_prefix_and_survives_cache() {
+        let (_temporary, parent) = parent();
+        let source = tempfile::tempdir().unwrap();
+        let mut bytes = b"# padding\n".repeat(CLASSIFICATION_PREFIX_BYTES / 10 + 8);
+        bytes.extend_from_slice(b"<s:><p:>\"a\0b\".\n");
+        std::fs::write(source.path().join("source.nt"), &bytes).unwrap();
+        std::fs::write(source.path().join("plain.nt"), b"<s:><p:>\"plain\".\n").unwrap();
+        let maximum = u64::try_from(bytes.len()).unwrap() + 64;
+        let owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(maximum, maximum * 2, 2).unwrap(),
+        )
+        .unwrap();
+        let repository = derive_repository(b"source-owner-native-nul-proof").id();
+        let root = RepositoryRoot::open(repository, source.path()).unwrap();
+        let cancellation = Cancellation::new();
+        let observed = root.read_directory(None, 10, &cancellation).unwrap();
+        let path = RelativePath::parse(std::path::Path::new("source.nt")).unwrap();
+        let metadata = observed
+            .iter()
+            .find(|entry| entry.name == "source.nt")
+            .unwrap()
+            .metadata;
+        let mut session = owner.begin(repository);
+        let generic =
+            StreamedSourceReceiver::capture(&mut session, &root, &path, metadata, &cancellation)
+                .unwrap();
+        assert!(generic.ntriples_nul_proof.is_none());
+        for _ in 0..2 {
+            let captured = StreamedSourceReceiver::capture_with_native_nul(
+                &mut session,
+                &root,
+                &path,
+                metadata,
+                true,
+                &cancellation,
+            )
+            .unwrap();
+            assert_eq!(captured.encoding, Some(TextEncoding::Utf8));
+            assert!(captured.contains_nul);
+            assert_eq!(captured.prefix.len(), CLASSIFICATION_PREFIX_BYTES);
+            assert!(!captured.prefix.contains(&0));
+            let proof = captured.ntriples_nul_proof.as_ref().unwrap();
+            assert!(proof.permits_nul());
+            assert!(!proof.was_refused());
+            assert!(
+                proof.matches_source(content_hash(&bytes), u64::try_from(bytes.len()).unwrap())
+            );
+            assert!(!proof.matches_source(
+                content_hash(b"other bytes"),
+                u64::try_from(bytes.len()).unwrap()
+            ));
+            assert!(!proof.matches_source(
+                content_hash(&bytes),
+                u64::try_from(bytes.len()).unwrap() + 1
+            ));
+        }
+        let generic =
+            StreamedSourceReceiver::capture(&mut session, &root, &path, metadata, &cancellation)
+                .unwrap();
+        assert!(generic.ntriples_nul_proof.is_none());
+        let plain_path = RelativePath::parse(std::path::Path::new("plain.nt")).unwrap();
+        let plain = StreamedSourceReceiver::capture(
+            &mut session,
+            &root,
+            &plain_path,
+            observed
+                .iter()
+                .find(|entry| entry.name == "plain.nt")
+                .unwrap()
+                .metadata,
+            &cancellation,
+        )
+        .unwrap();
+        assert!(!plain.contains_nul);
+        assert!(plain.ntriples_nul_proof.is_none());
+    }
+
+    #[test]
+    fn non_native_capture_never_mints_a_nul_proof() {
+        let (_temporary, parent) = parent();
+        let source = tempfile::tempdir().unwrap();
+        let mut bytes = vec![b'a'; CLASSIFICATION_PREFIX_BYTES * 2];
+        bytes.push(0);
+        std::fs::write(source.path().join("payload.data"), &bytes).unwrap();
+        let maximum = u64::try_from(bytes.len()).unwrap();
+        let owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(maximum, maximum, 1).unwrap(),
+        )
+        .unwrap();
+        let repository = derive_repository(b"source-owner-non-native-nul").id();
+        let root = RepositoryRoot::open(repository, source.path()).unwrap();
+        let cancellation = Cancellation::new();
+        let observed = root.read_directory(None, 10, &cancellation).unwrap()[0].metadata;
+        let path = RelativePath::parse(std::path::Path::new("payload.data")).unwrap();
+        let mut session = owner.begin(repository);
+        let captured = StreamedSourceReceiver::capture_with_native_nul(
+            &mut session,
+            &root,
+            &path,
+            observed,
+            false,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(captured.encoding, Some(TextEncoding::Utf8));
+        assert!(captured.contains_nul);
+        assert!(!captured.prefix.contains(&0));
+        assert!(captured.ntriples_nul_proof.is_none());
+        assert!(
+            session
+                .files
+                .values()
+                .all(|source| source.ntriples_nul_proof.is_none())
+        );
     }
 
     #[test]

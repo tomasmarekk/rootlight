@@ -18,24 +18,43 @@ pub(super) fn classify(
     content: &[u8],
     cancellation: &Cancellation,
 ) -> Result<Option<SourceClassification>, DiscoveryError> {
+    classify_with_native_nul(content, false, cancellation)
+}
+
+pub(super) fn classify_with_native_nul(
+    content: &[u8],
+    native_nul: bool,
+    cancellation: &Cancellation,
+) -> Result<Option<SourceClassification>, DiscoveryError> {
     cancellation.check()?;
     if !matches!(content, [0xff, 0xfe, ..] | [0xfe, 0xff, ..]) {
         // Binary containers can have a NUL-free prefix; suffixes do not prove text.
-        let binary_signature = content.starts_with(b"%PDF-")
-            || content.starts_with(b"\x89PNG\r\n\x1a\n")
-            || content.starts_with(b"PK\x03\x04")
-            || content.starts_with(b"PK\x05\x06")
-            || content.starts_with(b"PK\x07\x08");
-        let sample = content.get(..content.len().min(MAX_CLASSIFICATION_BYTES));
-        if binary_signature || sample.is_some_and(|sample| sample.contains(&0)) {
+        let signature_bytes = if native_nul {
+            content.strip_prefix(b"\xef\xbb\xbf").unwrap_or(content)
+        } else {
+            content
+        };
+        let binary_signature = signature_bytes.starts_with(b"%PDF-")
+            || signature_bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+            || signature_bytes.starts_with(b"PK\x03\x04")
+            || signature_bytes.starts_with(b"PK\x05\x06")
+            || signature_bytes.starts_with(b"PK\x07\x08");
+        if binary_signature {
             return Ok(None);
         }
         let mut validator = rootlight_vfs::StreamingSourceTextValidator::new();
-        validator.push(content, cancellation)?;
+        let mut contains_nul = false;
+        for chunk in content.chunks(4096) {
+            cancellation.check()?;
+            contains_nul |= chunk.contains(&0);
+            validator.push(chunk, cancellation)?;
+        }
+        let encoding = validator.finish();
+        if contains_nul && (!native_nul || encoding != Some(rootlight_vfs::TextEncoding::Utf8)) {
+            return Ok(None);
+        }
         return Ok(Some(SourceClassification {
-            encoding: validator
-                .finish()
-                .map_or("bytes", |encoding| encoding.as_str()),
+            encoding: encoding.map_or("bytes", |encoding| encoding.as_str()),
             decoded_prefix: None,
             prefix_truncated: content.len() > MAX_CLASSIFICATION_BYTES,
         }));
@@ -71,6 +90,7 @@ pub(super) fn classify(
     }))
 }
 
+#[cfg(test)]
 pub(super) fn classify_streamed(
     prefix: &[u8],
     full_length: u64,
@@ -78,8 +98,27 @@ pub(super) fn classify_streamed(
     contains_nul: bool,
     cancellation: &Cancellation,
 ) -> Result<Option<SourceClassification>, DiscoveryError> {
+    classify_streamed_with_native_nul(
+        prefix,
+        full_length,
+        encoding,
+        contains_nul,
+        false,
+        cancellation,
+    )
+}
+
+pub(super) fn classify_streamed_with_native_nul(
+    prefix: &[u8],
+    full_length: u64,
+    encoding: Option<rootlight_vfs::TextEncoding>,
+    contains_nul: bool,
+    native_nul: bool,
+    cancellation: &Cancellation,
+) -> Result<Option<SourceClassification>, DiscoveryError> {
     cancellation.check()?;
-    if contains_nul {
+    let native_nul = native_nul && encoding == Some(rootlight_vfs::TextEncoding::Utf8);
+    if contains_nul && !native_nul {
         return Ok(None);
     }
     let Some(encoding) = encoding else {
@@ -101,7 +140,7 @@ pub(super) fn classify_streamed(
         if text.encoding() != encoding {
             continue;
         }
-        let Some(mut result) = classify(bounded, cancellation)? else {
+        let Some(mut result) = classify_with_native_nul(bounded, native_nul, cancellation)? else {
             return Ok(None);
         };
         result.prefix_truncated |= u64::try_from(bounded.len()).unwrap_or(u64::MAX) < full_length;

@@ -48,6 +48,9 @@ mod matlab;
 mod modelica;
 #[cfg(test)]
 mod modelica_tests;
+mod ntriples_nul;
+#[cfg(test)]
+mod ntriples_nul_tests;
 mod objective_c;
 mod office;
 mod opaque_unicode;
@@ -72,6 +75,8 @@ mod wolfram;
 #[cfg(test)]
 mod wolfram_tests;
 
+pub use ntriples_nul::{NTriplesNulProbe, NTriplesNulProof};
+
 pub use fsproj::{OrderedFSharpCompileMembers, ordered_fsharp_compile_members};
 pub use streamed::{
     MAX_STREAMED_CLASSIFICATION_BYTES, StreamedDiscoveryOptions, StreamedDiscoverySource,
@@ -85,7 +90,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.97";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.98";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1489,11 +1494,18 @@ impl<'a> DiscoveryState<'a> {
         observed: rootlight_vfs::SnapshotMetadata,
         decisive_rule: Option<DecisiveRule>,
     ) -> Result<(), DiscoveryError> {
+        let native_route = ntriples_nul_route(&path, self.config);
         let receiver = self
             .streamed_receiver
             .as_mut()
             .ok_or(DiscoveryError::StreamedCaptureUnavailable)?;
-        let source = receiver.capture(self.root, &path, observed, self.cancellation)?;
+        let source = receiver.capture_with_native_nul(
+            self.root,
+            &path,
+            observed,
+            native_route,
+            self.cancellation,
+        )?;
         if source.capture.file() != self.root.file_id(&path)
             || source.capture.path() != &path
             || source.capture.metadata() != observed
@@ -1516,11 +1528,30 @@ impl<'a> DiscoveryState<'a> {
                 bytes_examined: self.bytes_examined,
             });
         }
-        let classification = encoding::classify_streamed(
+        if source.ntriples_nul_proof.as_ref().is_some_and(|proof| {
+            !proof.matches_source(source.capture.content_hash(), observed.length)
+        }) {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+        let native_nul = native_route
+            && source
+                .ntriples_nul_proof
+                .as_ref()
+                .is_some_and(NTriplesNulProof::permits_nul);
+        if native_route
+            && source
+                .ntriples_nul_proof
+                .as_ref()
+                .is_some_and(NTriplesNulProof::was_refused)
+        {
+            self.diagnostic(Some(&path), "DISCOVERY_NTRIPLES_NUL_PROOF_LIMIT");
+        }
+        let classification = encoding::classify_streamed_with_native_nul(
             &source.prefix,
             observed.length,
             source.encoding,
             source.contains_nul,
+            native_nul,
             self.cancellation,
         )?
         .or_else(|| {
@@ -1623,6 +1654,24 @@ impl<'a> DiscoveryState<'a> {
             });
         }
         let container_format = office::container_format(path.as_str(), snapshot.content());
+        let native_proof = if container_format.is_none()
+            && ntriples_nul_route(&path, self.config)
+            && snapshot.content().contains(&0)
+            && std::str::from_utf8(snapshot.content()).is_ok()
+        {
+            let mut probe = NTriplesNulProbe::new();
+            probe.push(snapshot.content(), self.cancellation)?;
+            let proof = probe.finish(self.cancellation)?;
+            if !proof.matches_source(snapshot.content_hash(), snapshot.metadata().length) {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+            if proof.was_refused() {
+                self.diagnostic(Some(&path), "DISCOVERY_NTRIPLES_NUL_PROOF_LIMIT");
+            }
+            Some(proof)
+        } else {
+            None
+        };
         let classification = if container_format.is_some() {
             Some(encoding::SourceClassification {
                 encoding: "binary",
@@ -1630,7 +1679,14 @@ impl<'a> DiscoveryState<'a> {
                 prefix_truncated: false,
             })
         } else {
-            encoding::classify(snapshot.content(), self.cancellation)?.or_else(|| {
+            encoding::classify_with_native_nul(
+                snapshot.content(),
+                native_proof
+                    .as_ref()
+                    .is_some_and(NTriplesNulProof::permits_nul),
+                self.cancellation,
+            )?
+            .or_else(|| {
                 opaque_unicode::preserve(
                     &path,
                     snapshot.content(),
@@ -3614,6 +3670,13 @@ fn xml_hint_space(character: char) -> bool {
 struct ValidatedTextEvidence {
     physical: rootlight_encoding::xml::PhysicalEncoding,
     complete_ascii: rootlight_encoding::xml::CompleteAscii,
+}
+
+fn ntriples_nul_route(path: &RelativePath, config: &ConfigSnapshot) -> bool {
+    config
+        .source_language_for_path(path.as_str())
+        .map_or_else(|| extension_language(path.as_str()), canonical_language)
+        == Some("ntriples")
 }
 
 fn validated_text_evidence(
@@ -9447,6 +9510,7 @@ max_source_file_bytes = 2097152
                 Ok(StreamedDiscoverySource {
                     capture,
                     contains_nul: sink.validator.contains_nul(),
+                    ntriples_nul_proof: None,
                     encoding: sink.validator.finish(),
                     prefix: sink.prefix,
                 })

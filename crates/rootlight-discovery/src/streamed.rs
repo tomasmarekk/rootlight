@@ -28,6 +28,8 @@ pub struct StreamedDiscoverySource {
     pub encoding: Option<TextEncoding>,
     /// Whether the strict decoder observed a NUL scalar.
     pub contains_nul: bool,
+    /// Complete native lexical proof bound to the authenticated capture, if available.
+    pub ntriples_nul_proof: Option<crate::NTriplesNulProof>,
     /// Physical prefix, bounded to [`MAX_STREAMED_CLASSIFICATION_BYTES`].
     pub prefix: Vec<u8>,
 }
@@ -51,6 +53,23 @@ pub trait StreamedSourceReceiver {
         observed: SnapshotMetadata,
         cancellation: &Cancellation,
     ) -> Result<StreamedDiscoverySource, DiscoveryError>;
+
+    /// Captures source with an optional request for native N-Triples NUL proof.
+    /// A request is routing context, never permission to admit unproven bytes.
+    /// Receivers without native proof support preserve normal capture behavior.
+    ///
+    /// # Errors
+    /// Returns the same capture errors as [`Self::capture`], plus native proof errors.
+    fn capture_with_native_nul(
+        &mut self,
+        root: &RepositoryRoot,
+        path: &RelativePath,
+        observed: SnapshotMetadata,
+        _requested: bool,
+        cancellation: &Cancellation,
+    ) -> Result<StreamedDiscoverySource, DiscoveryError> {
+        self.capture(root, path, observed, cancellation)
+    }
 }
 
 /// Separate physical availability admission from resident snapshot admission.
@@ -228,6 +247,7 @@ mod tests {
                 capture,
                 encoding: sink.validator.finish(),
                 contains_nul,
+                ntriples_nul_proof: None,
                 prefix: sink.prefix,
             })
         }

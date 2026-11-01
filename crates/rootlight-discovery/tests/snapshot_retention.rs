@@ -201,6 +201,7 @@ impl StreamedSourceReceiver for Receiver {
             capture,
             encoding,
             contains_nul,
+            ntriples_nul_proof: None,
             prefix,
         })
     }
