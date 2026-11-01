@@ -447,7 +447,8 @@ impl UnpublishedRdfPartition {
         let mut usage = IrDocumentUsage::default();
         for record in &records {
             context.check()?;
-            // Packed v1 reconstructs the original triple envelope and cannot carry v2 roles.
+            // Packed v1 reconstructs the original triple envelope, so newer native
+            // roles and value meanings cannot enter this representation.
             if record.version != "1" {
                 return Err(RdfPartitionError::InvalidRecord);
             }
@@ -824,6 +825,62 @@ mod tests {
                     .is_ok()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn packed_v1_admission_refuses_native_dgraph_v3_default_namespace_statements() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let hash = content_hash(b"metadata");
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent: None,
+            manifest_hash: hash,
+            config_hash: hash,
+            provider_set_hash: hash,
+            format_version: (u32::from(GENERATION_CONTRACT_VERSION.major()) << 16)
+                | u32::from(GENERATION_CONTRACT_VERSION.minor()),
+        })
+        .id();
+        let metadata =
+            GenerationMetadata::new(repository, generation, None, hash, hash, hash).unwrap();
+        let file = FileId::from_bytes([2; 20]);
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        for object in ["<bob>", "\"value\\xFF\""] {
+            let text = format!("<alice><follows>{object}.");
+            let source_bytes = u64::try_from(text.len()).unwrap();
+            let source_hash = content_hash(text.as_bytes());
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, source_bytes).unwrap(),
+                source_hash,
+                None,
+            );
+            let spans = [
+                (0, 7),
+                (7, 16),
+                (16, 16 + u64::try_from(object.len()).unwrap()),
+            ]
+            .map(|(start, end)| SourceSpan::new(file, start, end).unwrap());
+            let statement = RdfStatement::from_nquads_dgraph(source, &text, spans).unwrap();
+            let envelope =
+                new_rdf_statement_envelope(FactId::from_bytes([3; 20]), &statement).unwrap();
+            assert_eq!(envelope.version, "3");
+            assert_eq!(decode_rdf_statement_envelope(&envelope).unwrap(), statement);
+            assert_eq!(
+                UnpublishedRdfPartition::admit(
+                    metadata,
+                    file,
+                    source_hash,
+                    source_bytes,
+                    vec![envelope],
+                    &IrLimits::default(),
+                    &context
+                ),
+                Err(RdfPartitionError::InvalidRecord)
+            );
         }
     }
 }

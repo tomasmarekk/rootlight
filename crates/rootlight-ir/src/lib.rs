@@ -133,8 +133,8 @@ pub use perl_binding::{
     new_perl_binding_envelope,
 };
 pub use rdf_statement::{
-    MAX_RDF_STATEMENT_PAYLOAD_BYTES, RDF_STATEMENT_NAMESPACE, RdfStatement, RdfStatementError,
-    RdfStatementFormat, RdfTerm, RdfTermKind, decode_rdf_statement_envelope,
+    DgraphStatementError, MAX_RDF_STATEMENT_PAYLOAD_BYTES, RDF_STATEMENT_NAMESPACE, RdfStatement,
+    RdfStatementError, RdfStatementFormat, RdfTerm, RdfTermKind, decode_rdf_statement_envelope,
     new_rdf_statement_envelope,
 };
 pub use rebind::{

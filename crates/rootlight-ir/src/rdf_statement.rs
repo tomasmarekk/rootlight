@@ -1,6 +1,6 @@
-//! Typed RDF statements over exact physical N-Triples or N-Quads source.
+//! Typed RDF-family statements over exact physical source.
 //! Canonical envelopes retain decoded term roles without inventing software
-//! declarations; generation rebinding preserves document-scoped blank nodes.
+//! declarations; native Dgraph values remain distinct from standard RDF terms.
 
 use std::io::Write;
 
@@ -18,7 +18,7 @@ pub const MAX_RDF_STATEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 
-/// The standard source format authenticated by an RDF statement envelope.
+/// The native source format authenticated by a statement envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RdfStatementFormat {
@@ -26,6 +26,8 @@ pub enum RdfStatementFormat {
     NTriples,
     /// An N-Quads statement in the default graph or a written named graph.
     NQuads,
+    /// Dgraph angle identifiers and default values, without namespace or facets.
+    NQuadsDgraph,
 }
 
 impl RdfStatementFormat {
@@ -34,7 +36,7 @@ impl RdfStatementFormat {
     }
 }
 
-/// The RDF category of a validated source term.
+/// The category of a validated source term, including explicit native values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RdfTermKind {
     /// An absolute internationalized resource identifier.
@@ -43,6 +45,10 @@ pub enum RdfTermKind {
     BlankNode,
     /// A lexical value with an effective datatype and optional language tag.
     Literal,
+    /// A verbatim Dgraph identifier, without asserted absolute-IRI or UID identity.
+    DgraphIdentifier,
+    /// Native Dgraph default-value bytes, without an asserted RDF datatype.
+    DgraphDefaultValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,9 +65,15 @@ enum TermValue {
         language: Option<String>,
         datatype: Option<String>,
     },
+    DgraphIdentifier {
+        value: String,
+    },
+    DgraphDefaultValue {
+        value: Vec<u8>,
+    },
 }
 
-/// One decoded RDF term and its exact generation-bound physical spelling.
+/// One validated native term and its exact generation-bound physical spelling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RdfTerm {
     source: SourceRef,
@@ -75,13 +87,15 @@ impl RdfTerm {
         &self.source
     }
 
-    /// Returns the RDF term category, independently of its statement role.
+    /// Returns the native term category, independently of its statement role.
     #[must_use]
     pub const fn kind(&self) -> RdfTermKind {
         match self.value {
             TermValue::Iri { .. } => RdfTermKind::Iri,
             TermValue::BlankNode { .. } => RdfTermKind::BlankNode,
             TermValue::Literal { .. } => RdfTermKind::Literal,
+            TermValue::DgraphIdentifier { .. } => RdfTermKind::DgraphIdentifier,
+            TermValue::DgraphDefaultValue { .. } => RdfTermKind::DgraphDefaultValue,
         }
     }
 
@@ -92,6 +106,32 @@ impl RdfTerm {
             TermValue::Iri { value } => Some(value),
             _ => None,
         }
+    }
+
+    /// Returns a Dgraph identifier's verbatim interior, retaining written escapes.
+    ///
+    /// This does not resolve an identifier to a database UID or an absolute IRI.
+    #[must_use]
+    pub fn dgraph_identifier(&self) -> Option<&str> {
+        match &self.value {
+            TermValue::DgraphIdentifier { value } => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns native default-value bytes, including byte escapes without coercion.
+    #[must_use]
+    pub fn dgraph_default_value(&self) -> Option<&[u8]> {
+        match &self.value {
+            TermValue::DgraphDefaultValue { value } => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns a UTF-8 view only when all native default-value bytes form UTF-8.
+    #[must_use]
+    pub fn dgraph_default_text(&self) -> Option<&str> {
+        std::str::from_utf8(self.dgraph_default_value()?).ok()
     }
 
     /// Returns the written blank-node label without the `_:` introducer.
@@ -164,6 +204,20 @@ pub struct RdfStatement {
 #[error("invalid rdf statement evidence")]
 pub struct RdfStatementError;
 
+/// Refusal to authenticate a statement in the bounded native Dgraph format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DgraphStatementError {
+    /// Source ownership, lexical syntax, term roles or statement layout is invalid.
+    #[error("invalid dgraph statement evidence")]
+    InvalidEvidence,
+    /// Exact native letter/digit membership is unavailable for a Unicode-only ID.
+    #[error("unsupported dgraph identifier category")]
+    UnsupportedIdentifierCategory,
+    /// A namespace, facet, blank label, language, typed value or function is unmodeled.
+    #[error("unsupported dgraph statement construct")]
+    UnsupportedConstruct,
+}
+
 impl RdfStatement {
     /// Decodes exact native N-Triples spans and their complete statement spelling.
     ///
@@ -195,6 +249,54 @@ impl RdfStatement {
         graph: Option<SourceSpan>,
     ) -> Result<Self, RdfStatementError> {
         Self::from_spans(RdfStatementFormat::NQuads, source, text, spans, graph)
+    }
+
+    /// Authenticates native Dgraph identifiers and untyped default-value bytes.
+    ///
+    /// Angle identifiers retain their interior spelling; they are neither absolute
+    /// IRIs nor resolved database UIDs. No RDF graph or datatype is synthesized.
+    /// The caller must bind `text` to the immutable source identified by `source`.
+    ///
+    /// # Errors
+    /// Rejects invalid source spans, lexical syntax and roles. Namespace terms,
+    /// facets, blank labels, functions, language predicates and typed/language
+    /// values remain explicitly unsupported. Identifiers without an ASCII letter
+    /// or digit report unavailable Unicode-category evidence rather than being
+    /// classified as malformed when a non-ASCII category may be meaningful.
+    pub fn from_nquads_dgraph(
+        source: SourceRef,
+        text: &str,
+        spans: [SourceSpan; 3],
+    ) -> Result<Self, DgraphStatementError> {
+        if text.len() > MAX_RDF_STATEMENT_PAYLOAD_BYTES {
+            return Err(DgraphStatementError::InvalidEvidence);
+        }
+        for (index, span) in spans.iter().enumerate() {
+            let raw = source_slice(&source, text, span.start_byte(), span.end_byte())
+                .map_err(|_| DgraphStatementError::InvalidEvidence)?;
+            if raw.starts_with('<') {
+                let identifier = dgraph_identifier(raw)?;
+                if index == 1 && identifier.contains('@') {
+                    return Err(DgraphStatementError::UnsupportedConstruct);
+                }
+            } else if raw.starts_with("_:")
+                || raw.starts_with("uid(")
+                || raw.starts_with("val(")
+                || (index == 2
+                    && raw.starts_with('"')
+                    && dgraph_literal_tail(raw).is_some_and(|tail| !tail.is_empty()))
+            {
+                return Err(DgraphStatementError::UnsupportedConstruct);
+            }
+        }
+        let tail = source_slice(&source, text, spans[2].end_byte(), source.span().end_byte())
+            .map_err(|_| DgraphStatementError::InvalidEvidence)?
+            .trim_start_matches([' ', '\t']);
+        if tail.starts_with(['<', '(']) || tail.starts_with("_:") {
+            return Err(DgraphStatementError::UnsupportedConstruct);
+        }
+        Self::from_spans(RdfStatementFormat::NQuadsDgraph, source, text, spans, None)
+            .map_err(|_| DgraphStatementError::InvalidEvidence)
     }
 
     fn from_spans(
@@ -245,7 +347,11 @@ impl RdfStatement {
                     source.content_hash(),
                     None,
                 ),
-                value: parse_term(raw)?,
+                value: if format == RdfStatementFormat::NQuadsDgraph {
+                    parse_dgraph_term(raw)?
+                } else {
+                    parse_term(raw)?
+                },
             });
             previous = span.end_byte();
         }
@@ -258,12 +364,25 @@ impl RdfStatement {
         let predicate = terms.next().ok_or(RdfStatementError)?;
         let object = terms.next().ok_or(RdfStatementError)?;
         let graph = terms.next();
-        if subject.kind() == RdfTermKind::Literal
-            || predicate.kind() != RdfTermKind::Iri
-            || graph
-                .as_ref()
-                .is_some_and(|term| term.kind() == RdfTermKind::Literal)
-        {
+        let valid_roles = if format == RdfStatementFormat::NQuadsDgraph {
+            subject.kind() == RdfTermKind::DgraphIdentifier
+                && predicate.kind() == RdfTermKind::DgraphIdentifier
+                && !predicate
+                    .dgraph_identifier()
+                    .is_some_and(|id| id.contains('@'))
+                && matches!(
+                    object.kind(),
+                    RdfTermKind::DgraphIdentifier | RdfTermKind::DgraphDefaultValue
+                )
+                && graph.is_none()
+        } else {
+            subject.kind() != RdfTermKind::Literal
+                && predicate.kind() == RdfTermKind::Iri
+                && !graph
+                    .as_ref()
+                    .is_some_and(|term| term.kind() == RdfTermKind::Literal)
+        };
+        if !valid_roles {
             return Err(RdfStatementError);
         }
         Ok(Self {
@@ -292,18 +411,18 @@ impl RdfStatement {
     pub const fn subject(&self) -> &RdfTerm {
         &self.subject
     }
-    /// Returns the absolute IRI in predicate position.
+    /// Returns the predicate: a standard absolute IRI or native Dgraph identifier.
     #[must_use]
     pub const fn predicate(&self) -> &RdfTerm {
         &self.predicate
     }
-    /// Returns the resource or literal in object position.
+    /// Returns the standard RDF term or native Dgraph value in object position.
     #[must_use]
     pub const fn object(&self) -> &RdfTerm {
         &self.object
     }
 
-    /// Returns the standard source format authenticated by this statement.
+    /// Returns the native source format authenticated by this statement.
     #[must_use]
     pub const fn format(&self) -> RdfStatementFormat {
         self.format
@@ -311,7 +430,8 @@ impl RdfStatement {
 
     /// Returns the written named graph, or `None` for an N-Quads default graph.
     ///
-    /// N-Triples also has no graph term; [`Self::format`] distinguishes the formats.
+    /// N-Triples and the supported Dgraph default namespace also have no RDF graph;
+    /// [`Self::format`] distinguishes these meanings.
     #[must_use]
     pub const fn graph(&self) -> Option<&RdfTerm> {
         self.graph.as_ref()
@@ -351,7 +471,7 @@ impl RdfStatement {
     }
 }
 
-/// Encodes a typed statement using unchanged N-Triples v1 or explicit N-Quads v2.
+/// Encodes a typed statement using standard v1/v2 or native Dgraph v3 semantics.
 ///
 /// # Errors
 /// Rejects payloads exceeding the RDF/IR bound or allocation/encoding failures.
@@ -367,6 +487,7 @@ pub fn new_rdf_statement_envelope(
     let (version, identity_domain) = match statement.format {
         RdfStatementFormat::NTriples => ("1", "rootlight.rdf_statement/v1"),
         RdfStatementFormat::NQuads => ("2", "rootlight.rdf_statement/v2"),
+        RdfStatementFormat::NQuadsDgraph => ("3", "rootlight.rdf_statement/v3"),
     };
     let identity = serde_json::to_vec(&(
         RDF_STATEMENT_NAMESPACE,
@@ -430,6 +551,9 @@ pub fn decode_rdf_statement_envelope(
     let format = match (envelope.version.as_str(), wire.format) {
         ("1", None) if wire.graph.is_none() => RdfStatementFormat::NTriples,
         ("2", Some(RdfStatementFormat::NQuads)) => RdfStatementFormat::NQuads,
+        ("3", Some(RdfStatementFormat::NQuadsDgraph)) if wire.graph.is_none() => {
+            RdfStatementFormat::NQuadsDgraph
+        }
         _ => return Err(RdfStatementError),
     };
     let statement = RdfStatement::from_spans(
@@ -498,6 +622,115 @@ fn source_slice<'a>(
         .and_then(|n| usize::try_from(n).ok())
         .ok_or(RdfStatementError)?;
     text.get(start..end).ok_or(RdfStatementError)
+}
+
+fn dgraph_identifier(raw: &str) -> Result<&str, DgraphStatementError> {
+    let invalid = DgraphStatementError::InvalidEvidence;
+    let body = raw
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .ok_or(invalid)?;
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let digits = match chars.next() {
+                Some('u') => 4,
+                Some('U') => 8,
+                _ => return Err(invalid),
+            };
+            for _ in 0..digits {
+                if !chars.next().is_some_and(|c| c.is_ascii_hexdigit()) {
+                    return Err(invalid);
+                }
+            }
+        } else if c <= ' ' || "<>\"{}|^`".contains(c) {
+            return Err(invalid);
+        }
+    }
+    // Native sanity checks inspect verbatim spelling. Escaped Unicode is not
+    // decoded here, and uncertain Unicode-only category evidence stays refused.
+    if !body.bytes().any(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(if body.is_ascii() {
+            invalid
+        } else {
+            DgraphStatementError::UnsupportedIdentifierCategory
+        });
+    }
+    Ok(body)
+}
+
+fn dgraph_literal_tail(raw: &str) -> Option<&str> {
+    let mut escaped = false;
+    for (index, c) in raw.strip_prefix('"')?.char_indices() {
+        if c == '"' && !escaped {
+            return raw.get(index + 2..);
+        }
+        escaped = c == '\\' && !escaped;
+    }
+    None
+}
+
+fn parse_dgraph_term(raw: &str) -> Result<TermValue, RdfStatementError> {
+    if raw.starts_with('<') {
+        return Ok(TermValue::DgraphIdentifier {
+            value: dgraph_identifier(raw)
+                .map_err(|_| RdfStatementError)?
+                .to_owned(),
+        });
+    }
+    let body = raw.strip_prefix('"').ok_or(RdfStatementError)?;
+    let mut chars = body.char_indices();
+    let mut value = Vec::with_capacity(body.len());
+    loop {
+        let (index, c) = chars.next().ok_or(RdfStatementError)?;
+        match c {
+            '"' if index + 1 == body.len() => break,
+            '"' | '\r' | '\n' => return Err(RdfStatementError),
+            '\\' => {
+                let (_, kind) = chars.next().ok_or(RdfStatementError)?;
+                let digits = match kind {
+                    'x' => 2,
+                    'u' => 4,
+                    'U' => 8,
+                    _ => 0,
+                };
+                if digits != 0 {
+                    let mut decoded = 0u32;
+                    for _ in 0..digits {
+                        decoded = decoded
+                            .checked_mul(16)
+                            .and_then(|value| {
+                                chars
+                                    .next()
+                                    .and_then(|(_, c)| c.to_digit(16))
+                                    .and_then(|digit| value.checked_add(digit))
+                            })
+                            .ok_or(RdfStatementError)?;
+                    }
+                    if kind == 'x' {
+                        value.push(u8::try_from(decoded).map_err(|_| RdfStatementError)?);
+                    } else {
+                        let c = char::from_u32(decoded).ok_or(RdfStatementError)?;
+                        value.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+                    }
+                } else {
+                    value.push(match kind {
+                        't' => b'\t',
+                        'b' => 8,
+                        'n' => b'\n',
+                        'r' => b'\r',
+                        'f' => 12,
+                        'v' => 11,
+                        '"' => b'"',
+                        '\\' => b'\\',
+                        _ => return Err(RdfStatementError),
+                    });
+                }
+            }
+            c => value.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+        }
+    }
+    Ok(TermValue::DgraphDefaultValue { value })
 }
 
 fn parse_term(raw: &str) -> Result<TermValue, RdfStatementError> {
@@ -1294,5 +1527,487 @@ mod tests {
         assert!(writer.write_all(b"x").is_err());
         assert_eq!(writer.0.len(), MAX_RDF_STATEMENT_PAYLOAD_BYTES);
         assert!(writer.0.capacity() <= MAX_RDF_STATEMENT_PAYLOAD_BYTES);
+    }
+
+    fn dgraph(text: &str, raw: [&str; 3]) -> Result<RdfStatement, DgraphStatementError> {
+        let (source, spans) = source_spans(text, raw);
+        RdfStatement::from_nquads_dgraph(source, text, spans)
+    }
+
+    #[test]
+    fn dgraph_original_statements_preserve_native_identifier_edges_and_default_values() {
+        // Apache-2.0 fixture from dgraph-io/dgraph, revision
+        // c587cba75f60445125459b46b4d81757a73384aa, dgraph/cmd/alpha/testdata.nq.
+        // Upstream license: https://github.com/dgraph-io/dgraph/blob/c587cba75f60445125459b46b4d81757a73384aa/LICENSE.txt
+        const ORIGINAL: &str = r#"<alice> <follows> <bob> .
+<bob> <follows> <fred> .
+<bob> <status> "I'm your Uncle Bob!" .
+<charlie> <follows> <bob> .
+<charlie> <follows> <dani> .
+<dani> <follows> <bob> .
+<dani> <follows> <greg> .
+<dani> <status> "Smart Dani" .
+<emily> <follows> <fred> .
+<fred> <follows> <greg> .
+<greg> <status> "Mr. Cool greg" .
+"#;
+        let expected = [
+            ("alice", "follows", "<bob>", Some("bob")),
+            ("bob", "follows", "<fred>", Some("fred")),
+            ("bob", "status", "\"I'm your Uncle Bob!\"", None),
+            ("charlie", "follows", "<bob>", Some("bob")),
+            ("charlie", "follows", "<dani>", Some("dani")),
+            ("dani", "follows", "<bob>", Some("bob")),
+            ("dani", "follows", "<greg>", Some("greg")),
+            ("dani", "status", "\"Smart Dani\"", None),
+            ("emily", "follows", "<fred>", Some("fred")),
+            ("fred", "follows", "<greg>", Some("greg")),
+            ("greg", "status", "\"Mr. Cool greg\"", None),
+        ];
+        assert_eq!(ORIGINAL.len(), 316);
+        assert_eq!(ORIGINAL.lines().count(), expected.len());
+        let mut offset = 0;
+        let mut edges = 0;
+        let mut values = 0;
+        for (line, (subject, predicate, raw_object, object)) in
+            ORIGINAL.split_inclusive('\n').zip(expected)
+        {
+            let text = line.strip_suffix('\n').unwrap();
+            let raw_subject = format!("<{subject}>");
+            let raw_predicate = format!("<{predicate}>");
+            let (source, spans) = source_spans(text, [&raw_subject, &raw_predicate, raw_object]);
+            let spans = spans.map(|span| {
+                SourceSpan::new(
+                    span.file(),
+                    span.start_byte() + offset,
+                    span.end_byte() + offset,
+                )
+                .unwrap()
+            });
+            let source = SourceRef::new(
+                source.repository(),
+                source.generation(),
+                SourceSpan::new(
+                    source.span().file(),
+                    offset,
+                    offset + u64::try_from(text.len()).unwrap(),
+                )
+                .unwrap(),
+                content_hash(ORIGINAL.as_bytes()),
+                None,
+            );
+            let statement = RdfStatement::from_nquads_dgraph(source, text, spans).unwrap();
+            assert_eq!(statement.format(), RdfStatementFormat::NQuadsDgraph);
+            assert!(statement.graph().is_none());
+            assert_eq!(statement.subject().dgraph_identifier(), Some(subject));
+            assert_eq!(statement.predicate().dgraph_identifier(), Some(predicate));
+            for term in [
+                statement.subject(),
+                statement.predicate(),
+                statement.object(),
+            ] {
+                let span = term.source().span();
+                assert_eq!(
+                    term.source().content_hash(),
+                    content_hash(ORIGINAL.as_bytes())
+                );
+                assert!(span.start_byte() >= offset);
+                assert_eq!(
+                    ORIGINAL
+                        .get(
+                            usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap()
+                        )
+                        .unwrap(),
+                    source_slice(statement.source(), text, span.start_byte(), span.end_byte())
+                        .unwrap()
+                );
+                assert!(term.iri().is_none());
+                assert!(term.datatype().is_none());
+                assert!(term.blank_node_label().is_none());
+            }
+            if let Some(object) = object {
+                edges += 1;
+                assert_eq!(statement.object().dgraph_identifier(), Some(object));
+            } else {
+                values += 1;
+                let value = raw_object
+                    .strip_prefix('"')
+                    .unwrap()
+                    .strip_suffix('"')
+                    .unwrap();
+                assert_eq!(
+                    statement.object().dgraph_default_value(),
+                    Some(value.as_bytes())
+                );
+                assert_eq!(statement.object().dgraph_default_text(), Some(value));
+                assert!(statement.object().literal_value().is_none());
+            }
+            let envelope =
+                new_rdf_statement_envelope(FactId::from_bytes([4; 20]), &statement).unwrap();
+            assert_eq!(envelope.version, "3");
+            assert_eq!(decode_rdf_statement_envelope(&envelope).unwrap(), statement);
+            offset += u64::try_from(line.len()).unwrap();
+        }
+        assert_eq!((edges, values), (8, 3));
+        assert_eq!(offset, u64::try_from(ORIGINAL.len()).unwrap());
+    }
+
+    #[test]
+    fn dgraph_identifiers_retain_angle_spelling_without_iri_or_uid_resolution() {
+        for identifier in [
+            "alice",
+            "0x01",
+            "http://example.org/alice",
+            "_:label",
+            "λ0",
+            r"a\u0020b",
+            r"a\UFFFFFFFF",
+        ] {
+            let raw = format!("<{identifier}>");
+            let text = format!("{raw}<follows>{raw}.");
+            let statement = dgraph(&text, [&raw, "<follows>", &raw]).unwrap();
+            assert_eq!(statement.subject().dgraph_identifier(), Some(identifier));
+            assert_eq!(statement.object().dgraph_identifier(), Some(identifier));
+            assert_eq!(statement.subject().kind(), RdfTermKind::DgraphIdentifier);
+            assert!(statement.subject().iri().is_none());
+            assert!(!statement.subject().same_blank_node(statement.object()));
+        }
+        for raw in [
+            "<>",
+            "<:>",
+            "<a b>",
+            "<a\0b>",
+            "<a<b>",
+            r"<a\u00XX>",
+            r"<a\n>",
+        ] {
+            let text = format!("{raw}<follows><bob>.");
+            assert_eq!(
+                dgraph(&text, [raw, "<follows>", "<bob>"]),
+                Err(DgraphStatementError::InvalidEvidence),
+                "{raw:?}"
+            );
+        }
+        for raw in ["<λ>", "<一>", "<\u{0301}>"] {
+            let text = format!("{raw}<follows><bob>.");
+            assert_eq!(
+                dgraph(&text, [raw, "<follows>", "<bob>"]),
+                Err(DgraphStatementError::UnsupportedIdentifierCategory)
+            );
+        }
+        let text = "<alice><follows><bob>.";
+        let (source, spans) = source_spans(text, ["<alice>", "<follows>", "<bob>"]);
+        assert!(RdfStatement::from_ntriples(source.clone(), text, spans).is_err());
+        assert!(RdfStatement::from_nquads(source, text, spans, None).is_err());
+    }
+
+    #[test]
+    fn dgraph_default_values_preserve_native_byte_and_unicode_escapes() {
+        for (literal, bytes, text) in [
+            (r#""""#, b"".as_slice(), Some("")),
+            (
+                r#""\x02\v\t\b\n\r\f\"\\""#,
+                b"\x02\x0b\t\x08\n\r\x0c\"\\",
+                Some("\x02\u{b}\t\u{8}\n\r\u{c}\"\\"),
+            ),
+            (r#""\xFF""#, b"\xff", None),
+            (r#""\xC3\xA9""#, "é".as_bytes(), Some("é")),
+            (r#""\u03BB\U0001F600""#, "λ😀".as_bytes(), Some("λ😀")),
+            ("\"raw\0value\t\"", b"raw\0value\t", Some("raw\0value\t")),
+        ] {
+            let source = format!("<alice><status>{literal}.");
+            let statement = dgraph(&source, ["<alice>", "<status>", literal]).unwrap();
+            assert_eq!(statement.object().kind(), RdfTermKind::DgraphDefaultValue);
+            assert_eq!(statement.object().dgraph_default_value(), Some(bytes));
+            assert_eq!(statement.object().dgraph_default_text(), text);
+            assert!(statement.object().datatype().is_none());
+            assert!(statement.object().language().is_none());
+            assert!(statement.object().literal_value().is_none());
+        }
+        for literal in [
+            r#""\a""#,
+            r#""\'""#,
+            r#""\01""#,
+            r#""\xG0""#,
+            r#""\uD800""#,
+            r#""\U00110000""#,
+            "\"unterminated",
+            "\"raw\nline\"",
+        ] {
+            let source = format!("<alice><status>{literal}.");
+            assert_eq!(
+                dgraph(&source, ["<alice>", "<status>", literal]),
+                Err(DgraphStatementError::InvalidEvidence),
+                "{literal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dgraph_unmodeled_constructs_stay_explicitly_unsupported() {
+        for (text, raw) in [
+            ("_:alice<follows><bob>.", ["_:alice", "<follows>", "<bob>"]),
+            ("<alice><follows>_:bob.", ["<alice>", "<follows>", "_:bob"]),
+            (
+                "<alice><status@en>\"value\".",
+                ["<alice>", "<status@en>", "\"value\""],
+            ),
+            (
+                "<alice><status>\"value\"@en.",
+                ["<alice>", "<status>", "\"value\"@en"],
+            ),
+            (
+                "<alice><status>\"value\"^^<xs:string>.",
+                ["<alice>", "<status>", "\"value\"^^<xs:string>"],
+            ),
+            (
+                "<alice><follows><bob><0x10>.",
+                ["<alice>", "<follows>", "<bob>"],
+            ),
+            (
+                "<alice><follows><bob>_:namespace.",
+                ["<alice>", "<follows>", "<bob>"],
+            ),
+            (
+                "<alice><follows><bob>(friend=true).",
+                ["<alice>", "<follows>", "<bob>"],
+            ),
+            ("uid(a)<follows><bob>.", ["uid(a)", "<follows>", "<bob>"]),
+            (
+                "<alice><follows>val(a).",
+                ["<alice>", "<follows>", "val(a)"],
+            ),
+        ] {
+            assert_eq!(
+                dgraph(text, raw),
+                Err(DgraphStatementError::UnsupportedConstruct),
+                "{text}"
+            );
+        }
+        for (text, raw) in [
+            ("0x01<follows><bob>.", ["0x01", "<follows>", "<bob>"]),
+            ("<alice><follows>0x01.", ["<alice>", "<follows>", "0x01"]),
+            (
+                "\"alice\"<follows><bob>.",
+                ["\"alice\"", "<follows>", "<bob>"],
+            ),
+            (
+                "<alice>\"follows\"<bob>.",
+                ["<alice>", "\"follows\"", "<bob>"],
+            ),
+        ] {
+            assert_eq!(
+                dgraph(text, raw),
+                Err(DgraphStatementError::InvalidEvidence),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn dgraph_v3_decoder_authenticates_native_values_sources_and_format() {
+        let statement = dgraph(
+            "<alice><status>\"value\".",
+            ["<alice>", "<status>", "\"value\""],
+        )
+        .unwrap();
+        let original = new_rdf_statement_envelope(FactId::from_bytes([4; 20]), &statement).unwrap();
+        assert_eq!(decode_rdf_statement_envelope(&original).unwrap(), statement);
+        for field in ["value", "format", "graph", "owner", "source"] {
+            let mut payload: serde_json::Value = serde_json::from_str(&original.payload).unwrap();
+            match field {
+                "value" => payload["object"]["value"]["value"] = serde_json::json!([0, 1, 2]),
+                "format" => payload["format"] = serde_json::json!("n_quads"),
+                "graph" => payload["graph"] = payload["subject"].clone(),
+                "owner" => {
+                    payload["object"]["source"]["generation"] =
+                        serde_json::to_value(GenerationId::from_bytes([9; 20])).unwrap()
+                }
+                "source" => payload["subject"]["source"]["span"]["end_byte"] = serde_json::json!(3),
+                _ => unreachable!(),
+            }
+            let mut altered = original.clone();
+            altered.payload = serde_json::to_string(&payload).unwrap();
+            let identity = serde_json::to_vec(&(
+                RDF_STATEMENT_NAMESPACE,
+                "3",
+                altered.repository,
+                altered.generation,
+                altered.provenance,
+                &altered.evidence.source,
+                &altered.payload,
+                &altered.evidence.derivation,
+            ))
+            .unwrap();
+            altered.id = derive_fact("rootlight.rdf_statement/v3", &identity).id();
+            assert!(decode_rdf_statement_envelope(&altered).is_err(), "{field}");
+        }
+        for version in ["1", "2", "4"] {
+            let mut altered = original.clone();
+            altered.version = version.to_owned();
+            assert!(decode_rdf_statement_envelope(&altered).is_err());
+        }
+        let standard = triple(
+            "<urn:alice><urn:status>\"value\".",
+            ["<urn:alice>", "<urn:status>", "\"value\""],
+        )
+        .unwrap();
+        let native = dgraph(
+            standard.source_text(),
+            ["<urn:alice>", "<urn:status>", "\"value\""],
+        )
+        .unwrap();
+        let native_envelope = new_rdf_statement_envelope(original.provenance, &native).unwrap();
+        let standard_envelope = new_rdf_statement_envelope(original.provenance, &standard).unwrap();
+        assert_ne!(native_envelope.id, standard_envelope.id);
+        assert_ne!(native_envelope.payload, standard_envelope.payload);
+    }
+
+    #[test]
+    fn dgraph_addition_preserves_legacy_nquads_v2_payload_bytes_and_ids() {
+        #[derive(Serialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum LegacyValue<'a> {
+            Iri {
+                value: &'a str,
+            },
+            BlankNode {
+                label: &'a str,
+            },
+            Literal {
+                value: &'a str,
+                language: Option<&'a str>,
+                datatype: Option<&'a str>,
+            },
+        }
+        #[derive(Serialize)]
+        struct LegacyTerm<'a> {
+            source: &'a SourceRef,
+            value: LegacyValue<'a>,
+        }
+        #[derive(Serialize)]
+        struct LegacyV2<'a> {
+            source: &'a SourceRef,
+            text: &'a str,
+            subject: LegacyTerm<'a>,
+            predicate: LegacyTerm<'a>,
+            object: LegacyTerm<'a>,
+            format: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            graph: Option<LegacyTerm<'a>>,
+        }
+        for graph in [None, Some("<urn:graph>"), Some("_:graph")] {
+            let text = format!("<urn:alice><urn:status>\"λ\"@EN{}.", graph.unwrap_or(""));
+            let statement =
+                quad(&text, ["<urn:alice>", "<urn:status>", "\"λ\"@EN"], graph).unwrap();
+            let payload = serde_json::to_string(&LegacyV2 {
+                source: statement.source(),
+                text: &text,
+                subject: LegacyTerm {
+                    source: statement.subject().source(),
+                    value: LegacyValue::Iri { value: "urn:alice" },
+                },
+                predicate: LegacyTerm {
+                    source: statement.predicate().source(),
+                    value: LegacyValue::Iri {
+                        value: "urn:status",
+                    },
+                },
+                object: LegacyTerm {
+                    source: statement.object().source(),
+                    value: LegacyValue::Literal {
+                        value: "λ",
+                        language: Some("en"),
+                        datatype: None,
+                    },
+                },
+                format: "n_quads",
+                graph: statement.graph().map(|term| LegacyTerm {
+                    source: term.source(),
+                    value: if graph == Some("_:graph") {
+                        LegacyValue::BlankNode { label: "graph" }
+                    } else {
+                        LegacyValue::Iri { value: "urn:graph" }
+                    },
+                }),
+            })
+            .unwrap();
+            let provenance = FactId::from_bytes([4; 20]);
+            let derivation = vec![FactRef::File(statement.source().span().file())];
+            let identity = serde_json::to_vec(&(
+                RDF_STATEMENT_NAMESPACE,
+                "2",
+                statement.source().repository(),
+                statement.source().generation(),
+                provenance,
+                statement.source(),
+                &payload,
+                &derivation,
+            ))
+            .unwrap();
+            let envelope = new_rdf_statement_envelope(provenance, &statement).unwrap();
+            assert_eq!(envelope.version, "2");
+            assert_eq!(envelope.payload.as_bytes(), payload.as_bytes());
+            assert_eq!(
+                envelope.id,
+                derive_fact("rootlight.rdf_statement/v2", &identity).id()
+            );
+        }
+    }
+
+    #[test]
+    fn dgraph_source_ownership_bounds_and_payload_limit_stay_authenticated() {
+        let text = "<alice><status>\"λ\".";
+        let (source, spans) = source_spans(text, ["<alice>", "<status>", "\"λ\""]);
+        for invalid in [
+            SourceSpan::new(
+                FileId::from_bytes([8; 20]),
+                spans[2].start_byte(),
+                spans[2].end_byte(),
+            )
+            .unwrap(),
+            SourceSpan::new(
+                spans[2].file(),
+                spans[2].start_byte(),
+                spans[2].start_byte(),
+            )
+            .unwrap(),
+            spans[1],
+            SourceSpan::new(
+                spans[2].file(),
+                spans[2].start_byte(),
+                spans[2].end_byte() + 3,
+            )
+            .unwrap(),
+            SourceSpan::new(
+                spans[2].file(),
+                spans[2].start_byte(),
+                spans[2].start_byte() + 2,
+            )
+            .unwrap(),
+        ] {
+            assert!(
+                RdfStatement::from_nquads_dgraph(
+                    source.clone(),
+                    text,
+                    [spans[0], spans[1], invalid]
+                )
+                .is_err()
+            );
+        }
+        for suffix in ["", ".\n", ". #comment", ". ."] {
+            let text = format!("<alice><status>\"value\"{suffix}");
+            assert!(dgraph(&text, ["<alice>", "<status>", "\"value\""]).is_err());
+        }
+        let literal = format!("\"{}\"", "x".repeat(MAX_RDF_STATEMENT_PAYLOAD_BYTES / 3));
+        let text = format!("<alice><status>{literal}.");
+        let statement = dgraph(&text, ["<alice>", "<status>", &literal]).unwrap();
+        assert!(new_rdf_statement_envelope(FactId::from_bytes([4; 20]), &statement).is_err());
+        let huge = "x".repeat(MAX_RDF_STATEMENT_PAYLOAD_BYTES + 1);
+        assert_eq!(
+            RdfStatement::from_nquads_dgraph(source, &huge, spans),
+            Err(DgraphStatementError::InvalidEvidence)
+        );
     }
 }

@@ -2955,6 +2955,72 @@ mod tests {
     }
 
     #[test]
+    fn dgraph_rebind_preserves_native_bytes_spelling_and_neutral_identity() {
+        for object in ["<0x01>", "\"v\\xFF\""] {
+            let mut document = fixture_with_lexical_extension();
+            document.extensions.clear();
+            let file = &document.files[0];
+            let text = format!("<alice><status>{object}.");
+            let source = SourceRef::new(
+                document.repository,
+                document.generation,
+                crate::SourceSpan::new(file.id, 0, u64::try_from(text.len()).unwrap()).unwrap(),
+                file.content_hash,
+                None,
+            );
+            let spans = [
+                (0, 7),
+                (7, 15),
+                (15, 15 + u64::try_from(object.len()).unwrap()),
+            ]
+            .map(|(start, end)| crate::SourceSpan::new(file.id, start, end).unwrap());
+            let original = crate::RdfStatement::from_nquads_dgraph(source, &text, spans).unwrap();
+            document
+                .extensions
+                .push(new_rdf_statement_envelope(file.provenance, &original).unwrap());
+            let limits = IrLimits::default();
+            let support = ExtensionSupport::default();
+            let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+            let generation = GenerationId::from_bytes([89; 20]);
+            let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+            let envelope = &rebound.extensions[0];
+            let decoded = decode_rdf_statement_envelope(envelope).unwrap();
+            assert_eq!(envelope.version, "3");
+            assert_ne!(envelope.id, document.extensions[0].id);
+            assert_eq!(decoded.format(), crate::RdfStatementFormat::NQuadsDgraph);
+            assert_eq!(decoded.source_text(), text);
+            assert_eq!(decoded.subject().dgraph_identifier(), Some("alice"));
+            assert_eq!(decoded.predicate().dgraph_identifier(), Some("status"));
+            assert_eq!(
+                decoded.object().dgraph_identifier(),
+                original.object().dgraph_identifier()
+            );
+            assert_eq!(
+                decoded.object().dgraph_default_value(),
+                original.object().dgraph_default_value()
+            );
+            assert!(decoded.graph().is_none());
+            for term in [decoded.subject(), decoded.predicate(), decoded.object()] {
+                assert_eq!(term.source().generation(), generation);
+                assert_eq!(term.source().repository(), document.repository);
+                assert_eq!(term.source().content_hash(), file.content_hash);
+                assert!(term.iri().is_none());
+                assert!(term.datatype().is_none());
+            }
+            assert_eq!(
+                chunk.digest(),
+                CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                    .unwrap()
+                    .digest()
+            );
+            assert_eq!(
+                chunk.rebind(generation, &limits, &support).unwrap(),
+                rebound
+            );
+        }
+    }
+
+    #[test]
     fn rdf_statement_rebinds_all_term_sources_and_preserves_physical_duplicates() {
         let mut document = fixture_with_lexical_extension();
         document.extensions.clear();
