@@ -30,10 +30,11 @@
     "package_version_basis": "The pinned Node grammar manifest declares 0.2.0; the original Rust manifest remains unchanged under upstream/files.",
     "generated_abi": 14,
     "parser_unchanged": false,
-    "external_scanner": false,
+    "external_scanner": true,
     "network_or_generator_in_build": false,
     "build_inputs": [
       "src/parser.c",
+      "src/scanner.c",
       "src/tree_sitter/parser.h",
       "src/tree_sitter/alloc.h",
       "src/tree_sitter/array.h"
@@ -56,6 +57,23 @@
       "upstream_original": "upstream/files/grammar.js",
       "before": "optional('GRAPH')",
       "after": "optional('GRAPH'.toCaseInsensitive())"
+    },
+    {
+      "rules": [
+        "_string_literal_quote",
+        "_string_literal_single_quote",
+        "_string_literal_long_quote",
+        "_string_literal_long_single_quote",
+        "echar",
+        "comment",
+        "iri_reference"
+      ],
+      "purpose": "Preserve raw NUL as string/comment data through a stateless EOF-aware scanner, keep hashes within quoted bodies and fragment IRIs, and forbid skipped extras between string tokens",
+      "specification": "https://www.w3.org/TR/turtle/#sec-grammar-grammar",
+      "upstream_original": "upstream/files/grammar.js",
+      "scanner": "src/scanner.c",
+      "named_nodes_unchanged": true,
+      "comment_line_termination_unchanged": "The retained comment terminal stops at LF or physical EOF; CR remains comment data."
     }
   ],
   "generation": {
@@ -75,20 +93,25 @@
     "preferred_inputs": [
       {
         "path": "grammar.js",
-        "bytes": 7872,
-        "sha256": "55983c245d52b2f58e12abb0440c55b2c1d4a0b86c9c6343524ed92eb77d42bc"
+        "bytes": 8342,
+        "sha256": "68409c7193102cbb3ce7ff67ea8832e50faf47451b990ac71413b3813f235172"
+      },
+      {
+        "path": "src/scanner.c",
+        "bytes": 1987,
+        "sha256": "4c5b4edeb9cc9bb40ff49b4285b256ca04e1d32553daff49efe79b9e0655dc9e"
       }
     ],
     "outputs": [
       {
         "path": "src/parser.c",
-        "bytes": 135839,
-        "sha256": "22c25990cf8f2ff30f9832b22d8fb4ec5abb7015a52f161cc63bdb39770d6bbb"
+        "bytes": 134042,
+        "sha256": "f7b89111c15b46cacfb8335706b11085efd0d5b0eb9f4a895c285b4464b06af7"
       },
       {
         "path": "src/grammar.json",
-        "bytes": 63210,
-        "sha256": "f206837d1c559dee8e156535dfe21cf34d266eb427e539e260f77cf4ad86c59f"
+        "bytes": 65613,
+        "sha256": "2fcd7fc9fb347367d7cd18a13da65165eba4ccdce1d8bf83383aa356e4c42190"
       },
       {
         "path": "src/node-types.json",

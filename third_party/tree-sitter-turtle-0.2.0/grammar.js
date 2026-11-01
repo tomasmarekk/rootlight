@@ -102,6 +102,8 @@ module.exports = grammar({
 
   word: $ => $.pn_prefix,
 
+  externals: $ => [$._nul_character, $.comment, $._iri_anchor, $._iri_close],
+
   rules: {
 
     // [1g] trigDoc ::= (directive | block)*
@@ -121,8 +123,6 @@ module.exports = grammar({
 
     // [7g] labelOrSubject ::= iri | BlankNode
     _label: $ => seq(optional('GRAPH'.toCaseInsensitive()), choice($._iri, $._blank_node)),
-
-    comment: _ => token(prec(-1, /#.*/)),
 
     // [2]
     // Triple Statement vs Graph Statement:
@@ -266,16 +266,16 @@ module.exports = grammar({
     ),
 
     // [18]
-    iri_reference: _ =>
+    iri_reference: $ =>
       seq(
         '<',
         // expose <#leading> anchor for syntax highlighting
-        optional(token(prec(1, '#'))),
-        token.immediate(
-          repeat(choice(/([^<>"{}|^`\\\x00-\x20])/, UCHAR)),
-        ),
+        optional(alias($._iri_anchor, '#')),
+        optional(token.immediate(
+          repeat1(choice(/([^<>"{}|^`\\\x00-\x20])/, UCHAR)),
+        )),
 
-        token.immediate('>'),
+        alias($._iri_close, '>'),
       ),
 
     // [19]
@@ -298,22 +298,24 @@ module.exports = grammar({
     _string_literal_quote: $ => seq(
       '"',
       repeat(choice(
-        /[^\x22\x5C\x0A\x0D]/,
+        token.immediate(/[^\x00\x22\x5C\x0A\x0D]/),
+        $._nul_character,
         $.echar,
-        UCHAR
+        token.immediate(UCHAR)
       )),
-      '"',
+      token.immediate('"'),
     ),
 
     // [23]
     _string_literal_single_quote: $ => seq(
       "'",
       repeat(choice(
-        /[^\x27\x5C\x0A\x0D]/,
+        token.immediate(/[^\x00\x27\x5C\x0A\x0D]/),
+        $._nul_character,
         $.echar,
-        UCHAR
+        token.immediate(UCHAR)
       )),
-      "'"
+      token.immediate("'")
     ),
 
     // [24]
@@ -321,16 +323,17 @@ module.exports = grammar({
       "'''",
       repeat(seq(
         optional(choice(
-          "'",
-          "''",
+          token.immediate("'"),
+          token.immediate("''"),
         )),
         choice(
-          /[^'\\]/,
+          token.immediate(/[^\x00'\\]/),
+          $._nul_character,
           $.echar,
-          UCHAR
+          token.immediate(UCHAR)
         )
       )),
-      "'''",
+      token.immediate("'''"),
     ),
 
     // [25]
@@ -338,16 +341,17 @@ module.exports = grammar({
       '"""',
       repeat(seq(
         optional(choice(
-          '"',
-          '""',
+          token.immediate('"'),
+          token.immediate('""'),
         )),
         choice(
-          /[^"\\]/,
+          token.immediate(/[^\x00"\\]/),
+          $._nul_character,
           $.echar,
-          UCHAR
+          token.immediate(UCHAR)
         )
       )),
-      '"""',
+      token.immediate('"""'),
     ),
 
     // [128s]
@@ -415,7 +419,7 @@ module.exports = grammar({
     )),
 
     // [159s]
-    echar: _ => /\\[tbnrf\\"']/,
+    echar: _ => token.immediate(/\\[tbnrf\\"']/),
 
     // [162s]
     anon: _ => token(seq(

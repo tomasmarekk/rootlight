@@ -13,7 +13,8 @@ use std::{
 
 use cap_std::fs::Dir;
 use rootlight_discovery::{
-    DiscoveryError, ManifestInput, NTriplesNulProbe, NTriplesNulProof, StreamedDiscoverySource,
+    DiscoveryError, ManifestInput, NTriplesNulProbe, NTriplesNulProof, NativeNulCapture,
+    NativeNulGrammar, NativeNulProbe, NativeNulProof, StreamedDiscoverySource,
     StreamedSourceReceiver,
 };
 use rootlight_ids::{FileId, GenerationId, RepositoryId};
@@ -444,6 +445,7 @@ pub(super) struct CapturedSourceFile {
     pub(super) encoding: Option<TextEncoding>,
     pub(super) contains_nul: bool,
     pub(super) ntriples_nul_proof: Option<NTriplesNulProof>,
+    native_nul_proof: Option<NativeNulProof>,
     pub(super) private_name: OsString,
 }
 
@@ -552,6 +554,37 @@ impl StreamedSourceReceiver for SourceCaptureReceiver<'_> {
             requested,
             cancellation,
         )
+    }
+
+    fn capture_with_nul_grammar(
+        &mut self,
+        root: &RepositoryRoot,
+        path: &RelativePath,
+        observed: SnapshotMetadata,
+        requested: Option<NativeNulGrammar>,
+        cancellation: &Cancellation,
+    ) -> Result<NativeNulCapture, DiscoveryError> {
+        let session = match self {
+            Self::Explicit(session) => session,
+            Self::Durable {
+                catalog,
+                repository,
+                session,
+            } => {
+                if session.is_none() {
+                    *session = Some(
+                        catalog
+                            .create_source_owner()
+                            .map_err(|_| DiscoveryError::StreamedCaptureUnavailable)?
+                            .begin(*repository),
+                    );
+                }
+                session
+                    .as_mut()
+                    .ok_or(DiscoveryError::StreamedCaptureUnavailable)?
+            }
+        };
+        session.capture_with_nul_grammar(root, path, observed, requested, cancellation)
     }
 }
 
@@ -673,6 +706,7 @@ impl SourceCaptureSession {
             encoding,
             contains_nul,
             ntriples_nul_proof: None,
+            native_nul_proof: None,
             private_name,
         };
         self.files.insert(source.capture.file(), source.clone());
@@ -778,6 +812,83 @@ impl StreamedSourceReceiver for SourceCaptureSession {
             contains_nul: source.contains_nul,
             ntriples_nul_proof,
             prefix,
+        })
+    }
+
+    fn capture_with_nul_grammar(
+        &mut self,
+        root: &RepositoryRoot,
+        path: &RelativePath,
+        observed: SnapshotMetadata,
+        requested: Option<NativeNulGrammar>,
+        cancellation: &Cancellation,
+    ) -> Result<NativeNulCapture, DiscoveryError> {
+        let Some(grammar @ (NativeNulGrammar::Turtle | NativeNulGrammar::Trig)) = requested else {
+            let source = self.capture_with_native_nul(
+                root,
+                path,
+                observed,
+                requested == Some(NativeNulGrammar::NTriples),
+                cancellation,
+            )?;
+            let proof = source.ntriples_nul_proof.clone().map(Into::into);
+            return Ok(NativeNulCapture { source, proof });
+        };
+        let (source, prefix) =
+            SourceCaptureSession::capture(self, root, path, observed, cancellation).map_err(
+                |_| {
+                    cancellation.check().err().map_or(
+                        DiscoveryError::StreamedCaptureUnavailable,
+                        DiscoveryError::Cancelled,
+                    )
+                },
+            )?;
+        let proof = if source.encoding == Some(TextEncoding::Utf8) && source.contains_nul {
+            if source.native_nul_proof.as_ref().is_some_and(|proof| {
+                !proof.matches_source(source.capture.content_hash(), observed.length)
+            }) {
+                return Err(DiscoveryError::IncrementalDrift);
+            }
+            if let Some(proof) = source
+                .native_nul_proof
+                .as_ref()
+                .filter(|proof| proof.grammar() == grammar)
+            {
+                Some(proof.clone())
+            } else {
+                let proof = captured_native_nul_proof(
+                    self.directory
+                        .as_ref()
+                        .ok_or(DiscoveryError::StreamedCaptureUnavailable)?,
+                    &source.private_name,
+                    &source.capture,
+                    grammar,
+                    cancellation,
+                )
+                .map_err(|_| {
+                    cancellation.check().err().map_or(
+                        DiscoveryError::StreamedCaptureUnavailable,
+                        DiscoveryError::Cancelled,
+                    )
+                })?;
+                self.files
+                    .get_mut(&source.capture.file())
+                    .ok_or(DiscoveryError::IncrementalDrift)?
+                    .native_nul_proof = Some(proof.clone());
+                Some(proof)
+            }
+        } else {
+            None
+        };
+        Ok(NativeNulCapture {
+            source: StreamedDiscoverySource {
+                capture: source.capture,
+                encoding: source.encoding,
+                contains_nul: source.contains_nul,
+                ntriples_nul_proof: None,
+                prefix,
+            },
+            proof,
         })
     }
 }
@@ -896,6 +1007,45 @@ fn captured_ntriples_nul_proof(
 ) -> Result<NTriplesNulProof, FirstSliceError> {
     // Only NUL-bearing UTF-8 captures need this extra pass over private bytes.
     let mut probe = NTriplesNulProbe::new();
+    visit_captured_nul_bytes(directory, name, captured, cancellation, |bytes| {
+        probe.push(bytes, cancellation)
+    })?;
+    let proof = probe
+        .finish(cancellation)
+        .map_err(|error| super::map_discovery_error(error, cancellation))?;
+    if !proof.matches_source(captured.content_hash(), captured.metadata().length) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(proof)
+}
+
+fn captured_native_nul_proof(
+    directory: &PrivateDirectory<'_>,
+    name: &OsStr,
+    captured: &StreamedSourceCapture,
+    grammar: NativeNulGrammar,
+    cancellation: &Cancellation,
+) -> Result<NativeNulProof, FirstSliceError> {
+    let mut probe = NativeNulProbe::new(grammar);
+    visit_captured_nul_bytes(directory, name, captured, cancellation, |bytes| {
+        probe.push(bytes, cancellation)
+    })?;
+    let proof = probe
+        .finish(cancellation)
+        .map_err(|error| super::map_discovery_error(error, cancellation))?;
+    if !proof.matches_request(grammar, captured.content_hash(), captured.metadata().length) {
+        return Err(FirstSliceError::CatalogCorrupt);
+    }
+    Ok(proof)
+}
+
+fn visit_captured_nul_bytes(
+    directory: &PrivateDirectory<'_>,
+    name: &OsStr,
+    captured: &StreamedSourceCapture,
+    cancellation: &Cancellation,
+    mut consume: impl FnMut(&[u8]) -> Result<(), DiscoveryError>,
+) -> Result<(), FirstSliceError> {
     let mut probe_error = None;
     let read = visit_verified_source_bytes_cancellable(
         directory,
@@ -907,7 +1057,7 @@ fn captured_ntriples_nul_proof(
         captured.metadata().length,
         cancellation,
         |_, bytes| {
-            probe.push(bytes, cancellation).map_err(|error| {
+            consume(bytes).map_err(|error| {
                 probe_error = Some(error);
                 rootlight_vfs::platform::PlatformError::ResourceLimit
             })
@@ -921,13 +1071,7 @@ fn captured_ntriples_nul_proof(
             .err()
             .unwrap_or(FirstSliceError::CatalogCorrupt)
     })?;
-    let proof = probe
-        .finish(cancellation)
-        .map_err(|error| super::map_discovery_error(error, cancellation))?;
-    if !proof.matches_source(captured.content_hash(), captured.metadata().length) {
-        return Err(FirstSliceError::CatalogCorrupt);
-    }
-    Ok(proof)
+    Ok(())
 }
 
 struct CaptureSink<'a, W> {
@@ -1057,6 +1201,118 @@ mod tests {
         .unwrap();
         assert!(!plain.contains_nul);
         assert!(plain.ntriples_nul_proof.is_none());
+    }
+
+    #[test]
+    fn contextual_nul_proofs_cover_private_tails_and_cache_the_selected_grammar() {
+        let (_temporary, parent) = parent();
+        let source = tempfile::tempdir().unwrap();
+        let mut bytes = b"# padding\n".repeat(CLASSIFICATION_PREFIX_BYTES / 10 + 8);
+        bytes.extend_from_slice(b"<s> <p> '''first\n#\0last''' .\n<tail> <p> <o> .\n");
+        std::fs::write(source.path().join("source.ttl"), &bytes).unwrap();
+        let maximum = u64::try_from(bytes.len()).unwrap();
+        let owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(maximum, maximum, 1).unwrap(),
+        )
+        .unwrap();
+        let repository = derive_repository(b"source-owner-contextual-nul").id();
+        let root = RepositoryRoot::open(repository, source.path()).unwrap();
+        let cancellation = Cancellation::new();
+        let metadata = root.read_directory(None, 10, &cancellation).unwrap()[0].metadata;
+        let path = RelativePath::parse(std::path::Path::new("source.ttl")).unwrap();
+        let mut session = owner.begin(repository);
+        for grammar in [
+            NativeNulGrammar::Turtle,
+            NativeNulGrammar::Turtle,
+            NativeNulGrammar::Trig,
+            NativeNulGrammar::Trig,
+            NativeNulGrammar::Turtle,
+        ] {
+            let captured = session
+                .capture_with_nul_grammar(&root, &path, metadata, Some(grammar), &cancellation)
+                .unwrap();
+            assert_eq!(captured.source.encoding, Some(TextEncoding::Utf8));
+            assert!(captured.source.contains_nul);
+            assert!(!captured.source.prefix.contains(&0));
+            assert!(captured.source.ntriples_nul_proof.is_none());
+            let proof = captured.proof.unwrap();
+            assert!(proof.permits_nul());
+            assert!(proof.matches_request(grammar, content_hash(&bytes), maximum));
+            assert_eq!(
+                session.files[&captured.source.capture.file()]
+                    .native_nul_proof
+                    .as_ref()
+                    .unwrap()
+                    .grammar(),
+                grammar
+            );
+        }
+        let generic = session
+            .capture_with_nul_grammar(&root, &path, metadata, None, &cancellation)
+            .unwrap();
+        assert!(generic.proof.is_none());
+        assert!(generic.source.ntriples_nul_proof.is_none());
+        let mut receiver = SourceCaptureReceiver::Explicit(session);
+        let captured = receiver
+            .capture_with_nul_grammar(
+                &root,
+                &path,
+                metadata,
+                Some(NativeNulGrammar::Turtle),
+                &cancellation,
+            )
+            .unwrap();
+        assert!(captured.proof.unwrap().permits_nul());
+    }
+
+    #[test]
+    fn contextual_nul_cached_proofs_cannot_authenticate_other_private_bytes() {
+        let (_temporary, parent) = parent();
+        let source = tempfile::tempdir().unwrap();
+        let bytes = b"GRAPH <g> { <s> <p> '\0' . }\n<tail> <p> <o> .\n";
+        std::fs::write(source.path().join("source.trig"), bytes).unwrap();
+        let maximum = u64::try_from(bytes.len()).unwrap();
+        let owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(maximum, maximum, 1).unwrap(),
+        )
+        .unwrap();
+        let repository = derive_repository(b"source-owner-contextual-stale").id();
+        let root = RepositoryRoot::open(repository, source.path()).unwrap();
+        let cancellation = Cancellation::new();
+        let metadata = root.read_directory(None, 10, &cancellation).unwrap()[0].metadata;
+        let path = RelativePath::parse(std::path::Path::new("source.trig")).unwrap();
+        let mut session = owner.begin(repository);
+        let captured = session
+            .capture_with_nul_grammar(
+                &root,
+                &path,
+                metadata,
+                Some(NativeNulGrammar::Trig),
+                &cancellation,
+            )
+            .unwrap();
+        assert!(captured.proof.unwrap().permits_nul());
+        let mut stale = NativeNulProbe::new(NativeNulGrammar::Trig);
+        stale.push(b"<other> <p> '\0' .", &cancellation).unwrap();
+        session
+            .files
+            .get_mut(&captured.source.capture.file())
+            .unwrap()
+            .native_nul_proof = Some(stale.finish(&cancellation).unwrap());
+        assert!(matches!(
+            session.capture_with_nul_grammar(
+                &root,
+                &path,
+                metadata,
+                Some(NativeNulGrammar::Trig),
+                &cancellation
+            ),
+            Err(DiscoveryError::IncrementalDrift)
+        ));
     }
 
     #[test]

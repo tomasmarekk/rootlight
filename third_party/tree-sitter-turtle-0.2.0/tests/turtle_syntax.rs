@@ -166,3 +166,215 @@ fn trig_graph_keyword_requires_a_label_and_does_not_accept_longer_keywords() {
         );
     }
 }
+
+#[test]
+fn fragment_iris_keep_leading_hashes_separate_from_nul_comments() {
+    let source = b"@base <#base> .\n@prefix ex: <##namespace> .\n<#subject> <##predicate> <###object> .\n<#tail> <#p> \"a\0b\"^^<#type> . # comment\0\n<#> <> <##> .\n<x#anchor> <#p> <#> .";
+    let tree = parser().parse(source, None).unwrap();
+    clean(source, &tree);
+    let nodes = shape(&tree);
+    assert_eq!(nodes.iter().filter(|node| node.0 == "triple").count(), 4);
+    let comments: Vec<_> = nodes.iter().filter(|node| node.0 == "comment").collect();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(&source[comments[0].1..comments[0].2], b"# comment\0");
+    for expected in [
+        b"<#base>".as_slice(),
+        b"<##namespace>",
+        b"<#subject>",
+        b"<##predicate>",
+        b"<###object>",
+        b"<#tail>",
+        b"<#p>",
+        b"<#type>",
+        b"<#>",
+        b"<>",
+        b"<##>",
+        b"<x#anchor>",
+    ] {
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.0 == "iri_reference" && &source[node.1..node.2] == expected)
+        );
+    }
+}
+
+#[test]
+fn raw_nul_preserves_all_quoted_forms_escapes_and_following_statements() {
+    for quote in ["'", "\"", "'''", "\"\"\""] {
+        for body in [
+            "\0",
+            "#before\0#after",
+            "\0\x01\x02\x03\x04\x05\x06\x07\x08\t\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f",
+            "\\t\\'\\\"\\\\\\u0000\\U00000000\0",
+        ] {
+            let literal = format!("{quote}{body}{quote}");
+            let source = format!("<s> <p> {literal} .\n<tail> <p> <o> .\n");
+            let tree = parser().parse(&source, None).unwrap();
+            clean(source.as_bytes(), &tree);
+            let nodes = shape(&tree);
+            assert_eq!(nodes.iter().filter(|node| node.0 == "triple").count(), 2);
+            assert_eq!(nodes.iter().filter(|node| node.0 == "comment").count(), 0);
+            let string = nodes.iter().find(|node| node.0 == "string").unwrap();
+            assert_eq!(&source.as_bytes()[string.1..string.2], literal.as_bytes());
+            assert_eq!(
+                nodes.iter().filter(|node| node.0 == "echar").count(),
+                if body.starts_with('\\') { 4 } else { 0 },
+            );
+        }
+    }
+}
+
+#[test]
+fn quote_boundaries_keep_hashes_inside_strings_and_nul_comments_outside() {
+    for (quote, body) in [
+        ("'", ""),
+        ("\"", ""),
+        ("'", "#\0#"),
+        ("\"", "#\0#"),
+        ("'''", "'#\0''#\nend"),
+        ("\"\"\"", "\"#\0\"\"#\nend"),
+    ] {
+        let literal = format!("{quote}{body}{quote}");
+        for newline in ["\n", "\r\n"] {
+            let source = format!("<s> <p> {literal} .# before\0after{newline}<tail> <p> <o> .");
+            let tree = parser().parse(&source, None).unwrap();
+            clean(source.as_bytes(), &tree);
+            let nodes = shape(&tree);
+            assert_eq!(nodes.iter().filter(|node| node.0 == "triple").count(), 2);
+            let comments: Vec<_> = nodes.iter().filter(|node| node.0 == "comment").collect();
+            assert_eq!(comments.len(), 1);
+            let expected = if newline == "\r\n" {
+                "# before\0after\r"
+            } else {
+                "# before\0after"
+            };
+            assert_eq!(
+                &source.as_bytes()[comments[0].1..comments[0].2],
+                expected.as_bytes()
+            );
+            let string = nodes.iter().find(|node| node.0 == "string").unwrap();
+            assert_eq!(&source.as_bytes()[string.1..string.2], literal.as_bytes());
+        }
+    }
+    let source = b"# before\0after\r";
+    let tree = parser().parse(source, None).unwrap();
+    clean(source, &tree);
+    let nodes = shape(&tree);
+    let comment = nodes.iter().find(|node| node.0 == "comment").unwrap();
+    assert_eq!((comment.1, comment.2), (0, source.len()));
+}
+
+#[test]
+fn trig_graphs_keep_raw_nul_and_multiline_strings_in_the_complete_document() {
+    for (quote, body) in [
+        ("'", "#before\0#after"),
+        ("\"", "#before\0#after"),
+        ("'''", "first\n#before\0#after\r\nlast"),
+        ("\"\"\"", "first\n#before\0#after\r\nlast"),
+    ] {
+        let literal = format!("{quote}{body}{quote}");
+        let source = format!(
+            "GRAPH <g> {{ <s> <p> {literal} .\n# graph\0comment\n<second> <p> <o> . }}\n<tail> <p> <o> ."
+        );
+        let tree = parser().parse(&source, None).unwrap();
+        clean(source.as_bytes(), &tree);
+        let nodes = shape(&tree);
+        assert_eq!(nodes.iter().filter(|node| node.0 == "graph").count(), 1);
+        assert_eq!(nodes.iter().filter(|node| node.0 == "triple").count(), 3);
+        assert_eq!(nodes.iter().filter(|node| node.0 == "comment").count(), 1);
+        let string = nodes.iter().find(|node| node.0 == "string").unwrap();
+        assert_eq!(&source.as_bytes()[string.1..string.2], literal.as_bytes());
+    }
+}
+
+#[test]
+fn native_nul_lexing_refuses_invalid_positions_escapes_and_unterminated_strings() {
+    for invalid in [
+        "\0<s> <p> <o> .",
+        "<s> <p> <o> .\0<tail> <p> <o> .",
+        "<s\0> <p> <o> .",
+        "<s> <p> <o\0> .",
+        "<s> <p> <#\0> .",
+        "<s> <p> <# #invalid> .",
+        "<s> <p> <#\ninvalid> .",
+        "@prefix ex: <https://example.test/> . ex:s\0 ex:p ex:o .",
+        "<s> <p> \"\0\\q\" .",
+        "<s> <p> '\0\\u000x' .",
+        "<s> <p> \"\0\\U0000000x\" .",
+        "<s> <p> '\0\n' .",
+        "<s> <p> \"\0\r\" .",
+        "<s> <p> '\n\0x' .",
+        "<s> <p> \"\r\0x\" .",
+        "<s> <p> '\0\nx' .",
+        "<s> <p> \"\0\rx\" .",
+        "<s> <p> '\0\n\\t' .",
+        "<s> <p> \"\0\r\\t\" .",
+        "<s> <p> '\0\n\\u0041' .",
+        "<s> <p> \"\0\r\\U00000041\" .",
+        "<s> <p> 'line\nbreak' .",
+        "<s> <p> \"line\rbreak\" .",
+        "<s> <p> '\0",
+        "<s> <p> \"\0",
+        "<s> <p> '''first\n\0second",
+        "<s> <p> \"\"\"first\n\0second",
+        "GRAPH <g> { <s> <p> '''first\n\0second''' .",
+    ] {
+        let tree = parser().parse(invalid, None).unwrap();
+        assert_eq!(tree.root_node().end_byte(), invalid.len());
+        assert!(
+            tree.root_node().has_error(),
+            "{invalid:?}: {}",
+            tree.root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
+fn nul_edits_in_quoted_bodies_and_comments_match_fresh_native_parses() {
+    for (quote, body) in [
+        ("'", "#bodyx#"),
+        ("\"", "#bodyx#"),
+        ("'''", "'#bodyx''#\nlast"),
+        ("\"\"\"", "\"#bodyx\"\"#\nlast"),
+    ] {
+        let source = format!("<s> <p> {quote}{body}{quote} .# commentx\r\n<tail> <p> <o> .");
+        for marker in [b"bodyx".as_slice(), b"commentx".as_slice()] {
+            let mut tree = parser().parse(&source, None).unwrap();
+            clean(source.as_bytes(), &tree);
+            let mut changed = source.as_bytes().to_vec();
+            let start = changed
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap()
+                + marker.len()
+                - 1;
+            let row = changed[..start]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count();
+            let column = start
+                - changed[..start]
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(0, |at| at + 1);
+            for replacement in [0, b'x'] {
+                changed[start] = replacement;
+                tree.edit(&InputEdit {
+                    start_byte: start,
+                    old_end_byte: start + 1,
+                    new_end_byte: start + 1,
+                    start_position: Point::new(row, column),
+                    old_end_position: Point::new(row, column + 1),
+                    new_end_position: Point::new(row, column + 1),
+                });
+                let incremental = parser().parse(&changed, Some(&tree)).unwrap();
+                let fresh = parser().parse(&changed, None).unwrap();
+                clean(&changed, &incremental);
+                clean(&changed, &fresh);
+                assert_eq!(shape(&incremental), shape(&fresh));
+                tree = incremental;
+            }
+        }
+    }
+}

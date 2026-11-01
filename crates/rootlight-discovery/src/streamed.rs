@@ -34,6 +34,15 @@ pub struct StreamedDiscoverySource {
     pub prefix: Vec<u8>,
 }
 
+/// Physical capture with optional evidence for the explicitly requested grammar.
+#[derive(Debug)]
+pub struct NativeNulCapture {
+    /// Existing physical capture, including compatibility N-Triples evidence.
+    pub source: StreamedDiscoverySource,
+    /// Complete source proof bound to the selected native grammar.
+    pub proof: Option<crate::NativeNulProof>,
+}
+
 /// Maximum resident physical prefix retained by a streamed discovery receiver.
 pub const MAX_STREAMED_CLASSIFICATION_BYTES: usize = 64 * 1024;
 
@@ -69,6 +78,27 @@ pub trait StreamedSourceReceiver {
         cancellation: &Cancellation,
     ) -> Result<StreamedDiscoverySource, DiscoveryError> {
         self.capture(root, path, observed, cancellation)
+    }
+
+    /// Captures source with a grammar-specific request for complete NUL evidence.
+    /// Legacy receivers preserve N-Triples support and refuse contextual evidence.
+    ///
+    /// # Errors
+    /// Returns capture, cancellation, source drift, or native proof errors.
+    fn capture_with_nul_grammar(
+        &mut self,
+        root: &RepositoryRoot,
+        path: &RelativePath,
+        observed: SnapshotMetadata,
+        requested: Option<crate::NativeNulGrammar>,
+        cancellation: &Cancellation,
+    ) -> Result<NativeNulCapture, DiscoveryError> {
+        let ntriples = requested == Some(crate::NativeNulGrammar::NTriples);
+        let source = self.capture_with_native_nul(root, path, observed, ntriples, cancellation)?;
+        let proof = ntriples
+            .then(|| source.ntriples_nul_proof.clone().map(Into::into))
+            .flatten();
+        Ok(NativeNulCapture { source, proof })
     }
 }
 

@@ -4,7 +4,44 @@
 use super::*;
 use rootlight_ir::{OccurrenceRole, OccurrenceTarget};
 
-const SOURCE: &[u8] = b"@prefix ex: <https://example.test/> .\r\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\r\ngraph ex:g { ex:Item a rdfs:Class }\r\n";
+const SOURCE: &[u8] = b"@prefix ex: <https://example.test/> .\r\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\r\ngraph ex:g { ex:s ex:p \"\"\"first\n#\0last\"\"\" . # comment\0\r\nex:Item a rdfs:Class }\r\n";
+
+#[test]
+fn turtle_native_nul_literal_keeps_following_written_class_and_exact_source() {
+    let repository = durable_test_tempdir();
+    let source = b"@prefix ex: <https://example.test/> .\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\nex:s ex:p '''first\n#\0last''' .\nex:AfterNul a rdfs:Class .\n";
+    fs::write(repository.path().join("data.ttl"), source).unwrap();
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let document = snapshot.document();
+    let file = document
+        .files
+        .iter()
+        .find(|file| file.path == "data.ttl")
+        .unwrap();
+    assert_eq!(file.language, "turtle");
+    assert_eq!(file.content_hash, content_hash(source));
+    let class = document
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Class && entity.canonical_name == "ex:AfterNul")
+        .unwrap();
+    assert_eq!(class.qualified_name, "https://example.test/AfterNul");
+    let read = service
+        .source_read(
+            receipt.generation,
+            vec![file.evidence.source.clone().unwrap()],
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks[0].bytes, source);
+    assert_eq!(read.data.chunks[0].language, "turtle");
+}
 
 fn assert_trig(
     service: &FirstSliceService,

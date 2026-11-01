@@ -784,16 +784,20 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Trig => GrammarIdentity {
             language_id: "trig",
             grammar_version: "0.2.0",
-            source_package_sha256: "e5b900ed1aca6b20f4f7c508d2fcba54757aa661f993843cf5eaa292dcde817e",
-            parser_sha256: "22c25990cf8f2ff30f9832b22d8fb4ec5abb7015a52f161cc63bdb39770d6bbb",
-            scanner_sha256: None,
+            source_package_sha256: "788e4915876fc1541928aaecbc40de8c678fe819e04f1f8619c296f24da687a0",
+            parser_sha256: "f7b89111c15b46cacfb8335706b11085efd0d5b0eb9f4a895c285b4464b06af7",
+            scanner_sha256: Some(
+                "4c5b4edeb9cc9bb40ff49b4285b256ca04e1d32553daff49efe79b9e0655dc9e",
+            ),
         },
         GrammarFamily::Turtle => GrammarIdentity {
             language_id: "turtle",
             grammar_version: "0.2.0",
-            source_package_sha256: "e5b900ed1aca6b20f4f7c508d2fcba54757aa661f993843cf5eaa292dcde817e",
-            parser_sha256: "22c25990cf8f2ff30f9832b22d8fb4ec5abb7015a52f161cc63bdb39770d6bbb",
-            scanner_sha256: None,
+            source_package_sha256: "788e4915876fc1541928aaecbc40de8c678fe819e04f1f8619c296f24da687a0",
+            parser_sha256: "f7b89111c15b46cacfb8335706b11085efd0d5b0eb9f4a895c285b4464b06af7",
+            scanner_sha256: Some(
+                "4c5b4edeb9cc9bb40ff49b4285b256ca04e1d32553daff49efe79b9e0655dc9e",
+            ),
         },
         GrammarFamily::TypeSpec => GrammarIdentity {
             language_id: "typespec",

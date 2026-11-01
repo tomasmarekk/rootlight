@@ -60,6 +60,9 @@ mod prolog;
 #[cfg(test)]
 mod qml_tests;
 mod racket_reader;
+mod rdf_nul;
+#[cfg(test)]
+mod rdf_nul_tests;
 mod rust_hint;
 #[cfg(test)]
 mod rust_hint_contract_tests;
@@ -76,11 +79,13 @@ mod wolfram;
 mod wolfram_tests;
 
 pub use ntriples_nul::{NTriplesNulProbe, NTriplesNulProof};
+pub use rdf_nul::{NativeNulGrammar, NativeNulProbe, NativeNulProof};
 
 pub use fsproj::{OrderedFSharpCompileMembers, ordered_fsharp_compile_members};
 pub use streamed::{
-    MAX_STREAMED_CLASSIFICATION_BYTES, StreamedDiscoveryOptions, StreamedDiscoverySource,
-    StreamedSourceReceiver, discover_streamed_and_reconcile, discover_with_streamed_sources,
+    MAX_STREAMED_CLASSIFICATION_BYTES, NativeNulCapture, StreamedDiscoveryOptions,
+    StreamedDiscoverySource, StreamedSourceReceiver, discover_streamed_and_reconcile,
+    discover_with_streamed_sources,
 };
 
 pub use incremental::{
@@ -90,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.98";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.99";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -1494,12 +1499,12 @@ impl<'a> DiscoveryState<'a> {
         observed: rootlight_vfs::SnapshotMetadata,
         decisive_rule: Option<DecisiveRule>,
     ) -> Result<(), DiscoveryError> {
-        let native_route = ntriples_nul_route(&path, self.config);
+        let native_route = native_nul_route(&path, self.config);
         let receiver = self
             .streamed_receiver
             .as_mut()
             .ok_or(DiscoveryError::StreamedCaptureUnavailable)?;
-        let source = receiver.capture_with_native_nul(
+        let NativeNulCapture { source, proof } = receiver.capture_with_nul_grammar(
             self.root,
             &path,
             observed,
@@ -1533,18 +1538,16 @@ impl<'a> DiscoveryState<'a> {
         }) {
             return Err(DiscoveryError::IncrementalDrift);
         }
-        let native_nul = native_route
-            && source
-                .ntriples_nul_proof
-                .as_ref()
-                .is_some_and(NTriplesNulProof::permits_nul);
-        if native_route
-            && source
-                .ntriples_nul_proof
-                .as_ref()
-                .is_some_and(NTriplesNulProof::was_refused)
-        {
-            self.diagnostic(Some(&path), "DISCOVERY_NTRIPLES_NUL_PROOF_LIMIT");
+        if proof.as_ref().is_some_and(|proof| {
+            native_route != Some(proof.grammar())
+                || !proof.matches_source(source.capture.content_hash(), observed.length)
+        }) {
+            return Err(DiscoveryError::IncrementalDrift);
+        }
+        let native_nul =
+            native_route.is_some() && proof.as_ref().is_some_and(NativeNulProof::permits_nul);
+        if native_route.is_some() && proof.as_ref().is_some_and(NativeNulProof::was_refused) {
+            self.diagnostic(Some(&path), native_nul_limit_code(native_route));
         }
         let classification = encoding::classify_streamed_with_native_nul(
             &source.prefix,
@@ -1655,18 +1658,19 @@ impl<'a> DiscoveryState<'a> {
         }
         let container_format = office::container_format(path.as_str(), snapshot.content());
         let native_proof = if container_format.is_none()
-            && ntriples_nul_route(&path, self.config)
+            && let Some(grammar) = native_nul_route(&path, self.config)
             && snapshot.content().contains(&0)
             && std::str::from_utf8(snapshot.content()).is_ok()
         {
-            let mut probe = NTriplesNulProbe::new();
+            let mut probe = NativeNulProbe::new(grammar);
             probe.push(snapshot.content(), self.cancellation)?;
             let proof = probe.finish(self.cancellation)?;
-            if !proof.matches_source(snapshot.content_hash(), snapshot.metadata().length) {
+            if !proof.matches_request(grammar, snapshot.content_hash(), snapshot.metadata().length)
+            {
                 return Err(DiscoveryError::IncrementalDrift);
             }
             if proof.was_refused() {
-                self.diagnostic(Some(&path), "DISCOVERY_NTRIPLES_NUL_PROOF_LIMIT");
+                self.diagnostic(Some(&path), native_nul_limit_code(Some(grammar)));
             }
             Some(proof)
         } else {
@@ -1683,7 +1687,7 @@ impl<'a> DiscoveryState<'a> {
                 snapshot.content(),
                 native_proof
                     .as_ref()
-                    .is_some_and(NTriplesNulProof::permits_nul),
+                    .is_some_and(NativeNulProof::permits_nul),
                 self.cancellation,
             )?
             .or_else(|| {
@@ -3672,11 +3676,24 @@ struct ValidatedTextEvidence {
     complete_ascii: rootlight_encoding::xml::CompleteAscii,
 }
 
-fn ntriples_nul_route(path: &RelativePath, config: &ConfigSnapshot) -> bool {
-    config
+fn native_nul_route(path: &RelativePath, config: &ConfigSnapshot) -> Option<NativeNulGrammar> {
+    match config
         .source_language_for_path(path.as_str())
         .map_or_else(|| extension_language(path.as_str()), canonical_language)
-        == Some("ntriples")
+    {
+        Some("ntriples") => Some(NativeNulGrammar::NTriples),
+        Some("turtle") => Some(NativeNulGrammar::Turtle),
+        Some("trig") => Some(NativeNulGrammar::Trig),
+        _ => None,
+    }
+}
+
+fn native_nul_limit_code(grammar: Option<NativeNulGrammar>) -> &'static str {
+    if grammar == Some(NativeNulGrammar::NTriples) {
+        "DISCOVERY_NTRIPLES_NUL_PROOF_LIMIT"
+    } else {
+        "DISCOVERY_RDF_NUL_PROOF_LIMIT"
+    }
 }
 
 fn validated_text_evidence(

@@ -356,52 +356,79 @@
     {
       "path": "grammar.js",
       "upstream_path": "grammar.js",
-      "bytes": 7872,
-      "sha256": "55983c245d52b2f58e12abb0440c55b2c1d4a0b86c9c6343524ed92eb77d42bc",
-      "derivation": "maintained GRAPH keyword grammar correction and authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
+      "bytes": 8342,
+      "sha256": "68409c7193102cbb3ce7ff67ea8832e50faf47451b990ac71413b3813f235172",
+      "derivation": "maintained GRAPH and string/comment lexical corrections with authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
     },
     {
       "path": "src/grammar.json",
       "upstream_path": "src/grammar.json",
-      "bytes": 63210,
-      "sha256": "f206837d1c559dee8e156535dfe21cf34d266eb427e539e260f77cf4ad86c59f",
-      "derivation": "maintained GRAPH keyword grammar correction and authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
+      "bytes": 65613,
+      "sha256": "2fcd7fc9fb347367d7cd18a13da65165eba4ccdce1d8bf83383aa356e4c42190",
+      "derivation": "maintained GRAPH and string/comment lexical corrections with authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
     },
     {
       "path": "src/node-types.json",
       "upstream_path": "src/node-types.json",
       "bytes": 11140,
       "sha256": "8fcddb272a71436e69ca13b9f36bdeb7996eb5a45aa4713eaf6faffdb269d04b",
-      "derivation": "maintained GRAPH keyword grammar correction and authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
+      "derivation": "maintained GRAPH and string/comment lexical corrections with authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
     },
     {
       "path": "src/parser.c",
       "upstream_path": "src/parser.c",
-      "bytes": 135839,
-      "sha256": "22c25990cf8f2ff30f9832b22d8fb4ec5abb7015a52f161cc63bdb39770d6bbb",
-      "derivation": "maintained GRAPH keyword grammar correction and authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
+      "bytes": 134042,
+      "sha256": "f7b89111c15b46cacfb8335706b11085efd0d5b0eb9f4a895c285b4464b06af7",
+      "derivation": "maintained GRAPH and string/comment lexical corrections with authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
     },
     {
       "path": "src/tree_sitter/parser.h",
       "upstream_path": "src/tree_sitter/parser.h",
       "bytes": 7624,
       "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2",
-      "derivation": "maintained GRAPH keyword grammar correction and authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
+      "derivation": "maintained GRAPH and string/comment lexical corrections with authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
     },
     {
       "path": "src/tree_sitter/alloc.h",
       "upstream_path": "src/tree_sitter/alloc.h",
       "bytes": 985,
       "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
-      "derivation": "maintained GRAPH keyword grammar correction and authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
+      "derivation": "maintained GRAPH and string/comment lexical corrections with authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
     },
     {
       "path": "src/tree_sitter/array.h",
       "upstream_path": "src/tree_sitter/array.h",
       "bytes": 13269,
       "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c",
-      "derivation": "maintained GRAPH keyword grammar correction and authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
+      "derivation": "maintained GRAPH and string/comment lexical corrections with authenticated Tree-sitter 0.26.8 ABI14 generation; see SOURCE-PROVENANCE.json"
     }
   ],
-  "active_copy_scope": "Active inputs include local maintained derivations; upstream_files retain exact independently authenticated originals."
+  "active_copy_scope": "Active inputs include local maintained derivations; upstream_files retain exact independently authenticated originals.",
+  "local_and_derived_files": [
+    {
+      "path": "src/scanner.c",
+      "bytes": 1987,
+      "sha256": "4c5b4edeb9cc9bb40ff49b4285b256ca04e1d32553daff49efe79b9e0655dc9e"
+    },
+    {
+      "path": "bindings/rust/build.rs",
+      "bytes": 659,
+      "sha256": "807d974bf6925f592494790058ea4e9d374ec13315b394570f32d3d8d0f6fc36"
+    },
+    {
+      "path": "bindings/rust/lib.rs",
+      "bytes": 549,
+      "sha256": "9c55ae089d379b474e604ccdefa25ec7897065871a7f0f3d9c3f4914aadee65f"
+    },
+    {
+      "path": "tests/turtle_syntax.rs",
+      "bytes": 13955,
+      "sha256": "80c552957623bdc350dbca69d941c2d55d126c928629f387af1f716e3412df6c"
+    },
+    {
+      "path": "SOURCE-PROVENANCE.json",
+      "bytes": 5215,
+      "sha256": "bf634f7979aa3f9e10c5c1e5640e7020fa82dd4f01478cbc598f0b1c9bd357be"
+    }
+  ]
 }
