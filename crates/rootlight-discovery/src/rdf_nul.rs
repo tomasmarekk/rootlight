@@ -1,5 +1,5 @@
 //! Bind raw NUL admission to complete source bytes and the selected native grammar.
-//! N-Triples retains its line proof; contextual Turtle/TriG use a bounded document.
+//! N-Triples/N-Quads use bounded physical lines; Turtle/TriG use a bounded document.
 
 use std::{cell::Cell, ops::ControlFlow};
 
@@ -16,6 +16,8 @@ const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 pub enum NativeNulGrammar {
     /// Physical-line N-Triples syntax.
     NTriples,
+    /// Physical-line standard N-Quads syntax.
+    NQuads,
     /// Complete Turtle document syntax.
     Turtle,
     /// Complete TriG document syntax, including graph blocks.
@@ -31,7 +33,7 @@ pub struct NativeNulProof {
 
 #[derive(Debug, Clone)]
 enum Evidence {
-    NTriples(NTriplesNulProof),
+    Line(NTriplesNulProof),
     Document {
         hash: ContentHash,
         bytes: u64,
@@ -44,7 +46,7 @@ impl NativeNulProof {
     pub(crate) fn from_ntriples(proof: NTriplesNulProof) -> Self {
         Self {
             grammar: NativeNulGrammar::NTriples,
-            evidence: Evidence::NTriples(proof),
+            evidence: Evidence::Line(proof),
         }
     }
 
@@ -58,7 +60,7 @@ impl NativeNulProof {
     #[must_use]
     pub fn matches_source(&self, hash: ContentHash, bytes: u64) -> bool {
         match &self.evidence {
-            Evidence::NTriples(proof) => proof.matches_source(hash, bytes),
+            Evidence::Line(proof) => proof.matches_source(hash, bytes),
             Evidence::Document {
                 hash: observed_hash,
                 bytes: observed_bytes,
@@ -82,7 +84,7 @@ impl NativeNulProof {
     #[must_use]
     pub const fn permits_nul(&self) -> bool {
         match &self.evidence {
-            Evidence::NTriples(proof) => proof.permits_nul(),
+            Evidence::Line(proof) => proof.permits_nul(),
             Evidence::Document { permits_nul, .. } => *permits_nul,
         }
     }
@@ -91,7 +93,7 @@ impl NativeNulProof {
     #[must_use]
     pub const fn was_refused(&self) -> bool {
         match &self.evidence {
-            Evidence::NTriples(proof) => proof.was_refused(),
+            Evidence::Line(proof) => proof.was_refused(),
             Evidence::Document { refused, .. } => *refused,
         }
     }
@@ -107,7 +109,10 @@ impl From<NTriplesNulProof> for NativeNulProof {
 pub struct NativeNulProbe(Probe);
 
 enum Probe {
-    NTriples(NTriplesNulProbe),
+    Line {
+        grammar: NativeNulGrammar,
+        probe: NTriplesNulProbe,
+    },
     Document(DocumentProbe),
 }
 
@@ -116,7 +121,14 @@ impl NativeNulProbe {
     #[must_use]
     pub fn new(grammar: NativeNulGrammar) -> Self {
         Self(match grammar {
-            NativeNulGrammar::NTriples => Probe::NTriples(NTriplesNulProbe::new()),
+            NativeNulGrammar::NTriples => Probe::Line {
+                grammar,
+                probe: NTriplesNulProbe::new(),
+            },
+            NativeNulGrammar::NQuads => Probe::Line {
+                grammar,
+                probe: NTriplesNulProbe::for_nquads(),
+            },
             NativeNulGrammar::Turtle | NativeNulGrammar::Trig => {
                 Probe::Document(DocumentProbe::new(grammar))
             }
@@ -134,7 +146,7 @@ impl NativeNulProbe {
         cancellation: &Cancellation,
     ) -> Result<(), DiscoveryError> {
         match &mut self.0 {
-            Probe::NTriples(probe) => probe.push(bytes, cancellation),
+            Probe::Line { probe, .. } => probe.push(bytes, cancellation),
             Probe::Document(probe) => {
                 let result = probe.push(bytes, cancellation);
                 if result.is_err() {
@@ -151,9 +163,10 @@ impl NativeNulProbe {
     /// Returns cancellation or native parser setup failure.
     pub fn finish(self, cancellation: &Cancellation) -> Result<NativeNulProof, DiscoveryError> {
         match self.0 {
-            Probe::NTriples(probe) => {
-                Ok(NativeNulProof::from_ntriples(probe.finish(cancellation)?))
-            }
+            Probe::Line { grammar, probe } => Ok(NativeNulProof {
+                grammar,
+                evidence: Evidence::Line(probe.finish(cancellation)?),
+            }),
             Probe::Document(probe) => probe.finish(cancellation),
         }
     }
@@ -407,6 +420,66 @@ fn native_document(
 mod tests {
     use super::*;
     use rootlight_ids::content_hash;
+
+    #[test]
+    fn nquads_line_nul_proof_is_complete_chunk_independent_and_grammar_bound() {
+        for source in [
+            b"<s:><p:>\"a\0b\"<g:>.\r\n# c\0\n".as_slice(),
+            b"_:s <p:> \"a\0b\" _:g .\n",
+            b"<s:><p:>\"a\0b\".\n",
+            "\u{feff}<s:><p:>\"λ\0😀\"<g:>.\r\n".as_bytes(),
+        ] {
+            for split in 0..=source.len() {
+                let cancellation = Cancellation::new();
+                let mut probe = NativeNulProbe::new(NativeNulGrammar::NQuads);
+                probe.push(&source[..split], &cancellation).unwrap();
+                probe.push(&source[split..], &cancellation).unwrap();
+                let proof = probe.finish(&cancellation).unwrap();
+                let bytes = u64::try_from(source.len()).unwrap();
+                assert!(proof.permits_nul(), "{source:?}");
+                assert!(!proof.was_refused());
+                assert!(proof.matches_request(
+                    NativeNulGrammar::NQuads,
+                    content_hash(source),
+                    bytes
+                ));
+                assert!(!proof.matches_request(
+                    NativeNulGrammar::NTriples,
+                    content_hash(source),
+                    bytes
+                ));
+                assert!(!proof.matches_request(
+                    NativeNulGrammar::Turtle,
+                    content_hash(source),
+                    bytes
+                ));
+                assert!(!proof.matches_source(content_hash(b"stale"), bytes));
+            }
+        }
+    }
+
+    #[test]
+    fn nquads_line_nul_proof_rejects_relative_ids_invalid_graphs_and_full_bad_tails() {
+        for source in [
+            b"<s><p:>\"a\0b\"<g:>.".as_slice(),
+            b"<s:><p:>\"a\0b\"<g>.".as_slice(),
+            b"<s:><p:>\"a\0b\"\"graph\".",
+            b"<s:><p:>\"a\0b\"<g:>\0.",
+            b"<s:><p:>\"a\0b\"<g:>.\n\xff",
+            b"<s:><p:>\"a\0b\"<g:> <extra:>.",
+        ] {
+            let cancellation = Cancellation::new();
+            let mut probe = NativeNulProbe::new(NativeNulGrammar::NQuads);
+            for chunk in source.chunks(3) {
+                probe.push(chunk, &cancellation).unwrap();
+            }
+            let proof = probe.finish(&cancellation).unwrap();
+            assert!(!proof.permits_nul(), "{source:?}");
+            assert!(
+                proof.matches_source(content_hash(source), u64::try_from(source.len()).unwrap())
+            );
+        }
+    }
 
     #[test]
     fn contextual_nul_proof_is_complete_chunk_independent_and_grammar_bound() {

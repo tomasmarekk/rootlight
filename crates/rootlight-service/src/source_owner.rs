@@ -823,7 +823,11 @@ impl StreamedSourceReceiver for SourceCaptureSession {
         requested: Option<NativeNulGrammar>,
         cancellation: &Cancellation,
     ) -> Result<NativeNulCapture, DiscoveryError> {
-        let Some(grammar @ (NativeNulGrammar::Turtle | NativeNulGrammar::Trig)) = requested else {
+        let Some(
+            grammar
+            @ (NativeNulGrammar::NQuads | NativeNulGrammar::Turtle | NativeNulGrammar::Trig),
+        ) = requested
+        else {
             let source = self.capture_with_native_nul(
                 root,
                 path,
@@ -1265,6 +1269,51 @@ mod tests {
             )
             .unwrap();
         assert!(captured.proof.unwrap().permits_nul());
+    }
+
+    #[test]
+    fn nquads_native_nul_cache_recomputes_when_selected_grammar_changes() {
+        let (_temporary, parent) = parent();
+        let source = tempfile::tempdir().unwrap();
+        let mut bytes = b"# padding\n".repeat(CLASSIFICATION_PREFIX_BYTES / 10 + 8);
+        bytes.extend_from_slice(b"_:s <urn:p> \"value\0tail\" <urn:g> .\n");
+        std::fs::write(source.path().join("source.nq"), &bytes).unwrap();
+        let maximum = u64::try_from(bytes.len()).unwrap();
+        let owner = FirstSliceEphemeralSources::create(
+            &parent,
+            OsStr::new("owned"),
+            FirstSliceStreamedStorageLimits::new(maximum, maximum, 1).unwrap(),
+        )
+        .unwrap();
+        let repository = derive_repository(b"source-owner-nquads-nul").id();
+        let root = RepositoryRoot::open(repository, source.path()).unwrap();
+        let cancellation = Cancellation::new();
+        let metadata = root.read_directory(None, 10, &cancellation).unwrap()[0].metadata;
+        let path = RelativePath::parse(std::path::Path::new("source.nq")).unwrap();
+        let mut session = owner.begin(repository);
+        for (grammar, permits) in [
+            (NativeNulGrammar::NQuads, true),
+            (NativeNulGrammar::NQuads, true),
+            (NativeNulGrammar::Turtle, false),
+            (NativeNulGrammar::NQuads, true),
+            (NativeNulGrammar::NTriples, false),
+            (NativeNulGrammar::NQuads, true),
+        ] {
+            let captured = session
+                .capture_with_nul_grammar(&root, &path, metadata, Some(grammar), &cancellation)
+                .unwrap();
+            assert!(captured.source.contains_nul);
+            assert!(!captured.source.prefix.contains(&0));
+            let proof = captured.proof.unwrap();
+            assert_eq!(proof.permits_nul(), permits, "{grammar:?}");
+            assert!(proof.matches_request(grammar, content_hash(&bytes), maximum));
+            let other = if grammar == NativeNulGrammar::NQuads {
+                NativeNulGrammar::NTriples
+            } else {
+                NativeNulGrammar::NQuads
+            };
+            assert!(!proof.matches_request(other, content_hash(&bytes), maximum));
+        }
     }
 
     #[test]

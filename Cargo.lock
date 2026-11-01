@@ -2039,6 +2039,7 @@ dependencies = [
  "rootlight-incremental",
  "rootlight-thinkscript",
  "rootlight-tree-sitter-ntriples",
+ "rootlight-tree-sitter-nquads",
  "rootlight-vfs",
  "serde",
  "serde_json",

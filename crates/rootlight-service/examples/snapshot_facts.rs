@@ -505,7 +505,10 @@ impl Inspection<'_, '_> {
                     statement.subject(),
                     statement.predicate(),
                     statement.object(),
-                ] {
+                ]
+                .into_iter()
+                .chain(statement.graph())
+                {
                     self.source(term.source())?;
                 }
                 self.provenance_ids.insert(record.provenance());
@@ -577,9 +580,9 @@ fn inspect(
             && !inspection
                 .files
                 .get(&file)
-                .is_some_and(|file| file.language == "ntriples")
+                .is_some_and(|file| matches!(file.language.as_str(), "ntriples" | "nquads"))
         {
-            return Err("RDF page mode requires a native ntriples file".into());
+            return Err("RDF page mode requires a native ntriples or nquads file".into());
         }
         if arguments.rdf_page.is_none() {
             let receipt = inspection.occurrences(file)?;
@@ -590,7 +593,7 @@ fn inspect(
         if inspection
             .files
             .get(&file)
-            .is_some_and(|file| file.language == "ntriples")
+            .is_some_and(|file| matches!(file.language.as_str(), "ntriples" | "nquads"))
         {
             if let Some(read) = inspection.rdf_statements(file, arguments.rdf_page)? {
                 rdf_statement_reads.try_reserve(1)?;
@@ -724,7 +727,7 @@ fn inspect(
             "full_generation_identity_rederived":false,"database_bytes_pinned":false,
             "query_projection_executed":false,"sources_indexed":false,
             "typed_rdf_query_executed":rdf_executed,"rdf_statement_reads_complete":rdf_complete,
-            "rdf_statement_scope":"selected_native_ntriples_files_only",
+            "rdf_statement_scope":"selected_native_ntriples_or_nquads_files_only",
             "source_code_executed":false,"public_queries_qualified":false,
             "installed_mcp_qualified":false,"full_semantic_completeness_proven":false
         }),
@@ -1004,15 +1007,21 @@ mod tests {
     }
 
     fn sealed_rdf_fixture() -> (tempfile::TempDir, PathBuf, OracleReader, FileId) {
+        sealed_rdf_fixture_with_source(
+            "statements.nt",
+            "<s:one> <p:value> _:blank .\n<s:two> <p:value> \"literal\"@en .\n_:blank <p:value> <o:three> .\n",
+        )
+    }
+
+    fn sealed_rdf_fixture_with_source(
+        name: &str,
+        text: &str,
+    ) -> (tempfile::TempDir, PathBuf, OracleReader, FileId) {
         let directory = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let source_root = root.join("source");
         std::fs::create_dir(&source_root).unwrap();
-        std::fs::write(
-            source_root.join("statements.nt"),
-            "<s:one> <p:value> _:blank .\n<s:two> <p:value> \"literal\"@en .\n_:blank <p:value> <o:three> .\n",
-        )
-        .unwrap();
+        std::fs::write(source_root.join(name), text).unwrap();
         let cancellation = Cancellation::new();
         let mut service = FirstSliceService::new(1).unwrap();
         let receipt = service
@@ -1146,5 +1155,76 @@ mod tests {
         assert_eq!(read.scanned_file_extensions, read.total_file_extensions);
         assert_eq!(report.qualification["rdf_statement_reads_complete"], true);
         assert_eq!(report.qualification["selected_reads_complete"], true);
+    }
+
+    #[test]
+    fn cold_nquads_page_conserves_named_and_default_graphs_in_serialized_report() {
+        let text = "<s:one> <p:> \"typed\"^^<urn:type> <urn:graph> .\n_:same <p:> _:same _:same .\n<s:default> <p:> <o:> .\n";
+        let (_directory, oracle, reader, file) =
+            sealed_rdf_fixture_with_source("statements.nq", text);
+        let metadata = reader.metadata();
+        drop(reader);
+        let cancellation = Cancellation::new();
+        let reader = OracleReader::open_in(
+            &oracle,
+            &GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .unwrap();
+        assert_eq!(reader.metadata(), metadata);
+        let report = inspect_rdf_fixture(
+            &reader,
+            &oracle,
+            file,
+            Some(RdfPageSelection {
+                limit: GenerationReadLimit::new(MAX_RDF_PAGE_SIZE).unwrap(),
+                after: None,
+            }),
+        );
+        let read = &report.rdf_statement_reads[0];
+        assert!(read.complete);
+        let mut statements: Vec<_> = read
+            .pages
+            .iter()
+            .flat_map(|page| page.statements())
+            .map(|record| record.statement())
+            .collect();
+        statements.sort_by_key(|statement| statement.source().span().start_byte());
+        assert_eq!(statements.len(), 3);
+        assert!(
+            statements
+                .iter()
+                .all(|statement| statement.format() == rootlight_ir::RdfStatementFormat::NQuads)
+        );
+        assert_eq!(statements[0].graph().unwrap().iri(), Some("urn:graph"));
+        assert!(
+            statements[1]
+                .subject()
+                .same_blank_node(statements[1].graph().unwrap())
+        );
+        assert!(statements[2].graph().is_none());
+        assert!(report.occurrence_reads.is_empty());
+        assert_eq!(report.qualification["typed_rdf_query_executed"], true);
+        assert_eq!(report.qualification["rdf_statement_reads_complete"], true);
+        assert_eq!(
+            report.qualification["rdf_statement_scope"],
+            "selected_native_ntriples_or_nquads_files_only"
+        );
+        let serialized = serde_json::to_value(&report).unwrap();
+        let records = serialized["rdf_statement_reads"][0]["pages"][0]["statements"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(
+            records
+                .iter()
+                .all(|record| record["statement"]["format"] == "n_quads")
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["statement"].get("graph").is_some())
+                .count(),
+            2
+        );
     }
 }

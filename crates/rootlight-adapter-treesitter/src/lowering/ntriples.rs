@@ -1,4 +1,4 @@
-//! Reconcile native N-Triples evidence with every current physical source line.
+//! Reconcile native line-based RDF evidence with every current physical source line.
 //! Required typed statements are admitted together, independently of optional text.
 
 use std::{io, mem::size_of};
@@ -6,13 +6,77 @@ use std::{io, mem::size_of};
 use super::*;
 use rootlight_ir::{MAX_RDF_STATEMENT_PAYLOAD_BYTES, RdfStatement, new_rdf_statement_envelope};
 
-pub(super) const GAP: &str = "ntriples-native-statement-evidence-unavailable";
-pub(super) const PROJECTION_GAP: &str = "ntriples-whole-physical-utf8-source-required";
+#[derive(Clone, Copy, Default)]
+enum Format {
+    #[default]
+    NTriples,
+    NQuads,
+}
+
+impl Format {
+    fn for_language(language: &str) -> Option<Self> {
+        match language {
+            "ntriples" => Some(Self::NTriples),
+            "nquads" => Some(Self::NQuads),
+            _ => None,
+        }
+    }
+
+    const fn gap(self) -> &'static str {
+        match self {
+            Self::NTriples => "ntriples-native-statement-evidence-unavailable",
+            Self::NQuads => "nquads-native-statement-evidence-unavailable",
+        }
+    }
+
+    const fn projection_gap(self) -> &'static str {
+        match self {
+            Self::NTriples => "ntriples-whole-physical-utf8-source-required",
+            Self::NQuads => "nquads-whole-physical-utf8-source-required",
+        }
+    }
+
+    fn role(self, kind: &str) -> Option<usize> {
+        match (self, kind) {
+            (Self::NTriples, "ntriples.statement.expression")
+            | (Self::NQuads, "nquads.statement.expression") => Some(0),
+            (Self::NTriples, "ntriples.subject.expression")
+            | (Self::NQuads, "nquads.subject.expression") => Some(1),
+            (Self::NTriples, "ntriples.predicate.expression")
+            | (Self::NQuads, "nquads.predicate.expression") => Some(2),
+            (Self::NTriples, "ntriples.object.expression")
+            | (Self::NQuads, "nquads.object.expression") => Some(3),
+            (Self::NQuads, "nquads.graph.expression") => Some(4),
+            _ => None,
+        }
+    }
+
+    fn metadata(self, fact: &SyntaxFact) -> bool {
+        fact.kind() == SyntaxFactKind::Signature
+            && fact.syntax_kind().as_str().starts_with(match self {
+                Self::NTriples => "ntriples.",
+                Self::NQuads => "nquads.",
+            })
+    }
+
+    fn decode(
+        self,
+        source: SourceRef,
+        text: &str,
+        proof: Statement,
+    ) -> Result<RdfStatement, rootlight_ir::RdfStatementError> {
+        match self {
+            Self::NTriples => RdfStatement::from_ntriples(source, text, proof.terms),
+            Self::NQuads => RdfStatement::from_nquads(source, text, proof.terms, proof.graph),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Statement {
     span: SourceSpan,
     terms: [SourceSpan; 3],
+    graph: Option<SourceSpan>,
     payload_bytes: usize,
 }
 
@@ -23,6 +87,7 @@ pub(super) struct Gap {
 
 #[derive(Default)]
 pub(super) struct Plan {
+    format: Format,
     pub(super) statements: Vec<Statement>,
     pub(super) gaps: Vec<Gap>,
     pub(super) modeled_peak: usize,
@@ -81,10 +146,11 @@ impl Plan {
         output: &ParseOutput,
         cancellation: &Cancellation,
     ) -> Result<Self, AdapterError> {
-        if request.language().as_str() != "ntriples" {
+        let Some(format) = Format::for_language(request.language().as_str()) else {
             return Ok(Self::default());
-        }
+        };
         let mut plan = Self {
+            format,
             base_bytes: output
                 .report()
                 .resources()
@@ -102,13 +168,13 @@ impl Plan {
                 != u64::try_from(bytes.len()).map_err(|_| SinkError::AccountingOverflow)?
             || std::str::from_utf8(bytes).is_err()
         {
-            plan.gap(source.span(), PROJECTION_GAP, 0)?;
+            plan.gap(source.span(), format.projection_gap(), 0)?;
             return Ok(plan);
         }
         let mut count = 0usize;
         for (index, fact) in output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
-            if metadata(fact) {
+            if format.metadata(fact) {
                 count = checked_add(count, 1)?;
             }
         }
@@ -129,7 +195,7 @@ impl Plan {
             .map_err(|_| SinkError::AllocationFailed)?;
         for (index, fact) in output.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
-            if metadata(fact) {
+            if format.metadata(fact) {
                 facts.push(fact);
             }
         }
@@ -193,9 +259,11 @@ impl Plan {
                 u64::try_from(end).map_err(|_| SinkError::AccountingOverflow)?,
             )
             .map_err(|_| provider_failure("ntriples-line-span"))?;
-            let Some(mut statement) = (!empty).then(|| prove(group, bytes, start, end)).flatten()
+            let Some(mut statement) = (!empty)
+                .then(|| prove(format, group, bytes, start, end))
+                .flatten()
             else {
-                plan.gap(line_span, GAP, metadata_bytes)?;
+                plan.gap(line_span, format.gap(), metadata_bytes)?;
                 offset = full_end;
                 continue;
             };
@@ -210,12 +278,10 @@ impl Plan {
                 )?,
             )?;
             plan.peak(temporary)?;
-            let Ok(decoded) = RdfStatement::from_ntriples(
-                source_for_span(source, statement.span),
-                text,
-                statement.terms,
-            ) else {
-                plan.gap(line_span, GAP, metadata_bytes)?;
+            let Ok(decoded) =
+                format.decode(source_for_span(source, statement.span), text, statement)
+            else {
+                plan.gap(line_span, format.gap(), metadata_bytes)?;
                 offset = full_end;
                 continue;
             };
@@ -242,7 +308,7 @@ impl Plan {
             offset = full_end;
         }
         if next != facts.len() {
-            plan.gap(source.span(), GAP, metadata_bytes)?;
+            plan.gap(source.span(), format.gap(), metadata_bytes)?;
         }
         cancellation.check()?;
         Ok(plan)
@@ -268,12 +334,14 @@ impl Plan {
             )?,
         )?;
         self.peak(temporary)?;
-        let statement = RdfStatement::from_ntriples(
-            source_for_span(request.source().source_ref(), proof.span),
-            text,
-            proof.terms,
-        )
-        .map_err(|_| provider_failure("ntriples-current-statement"))?;
+        let statement = self
+            .format
+            .decode(
+                source_for_span(request.source().source_ref(), proof.span),
+                text,
+                proof,
+            )
+            .map_err(|_| provider_failure("ntriples-current-statement"))?;
         let envelope = new_rdf_statement_envelope(provenance, &statement)
             .map_err(|_| provider_failure("ntriples-statement-envelope"))?;
         if envelope.payload.len() != proof.payload_bytes {
@@ -330,28 +398,27 @@ fn physical_text(bytes: &[u8], span: SourceSpan) -> Result<&str, AdapterError> {
     .map_err(|_| provider_failure("ntriples-source-utf8"))
 }
 
-fn metadata(fact: &SyntaxFact) -> bool {
-    fact.kind() == SyntaxFactKind::Signature && fact.syntax_kind().as_str().starts_with("ntriples.")
-}
-
-fn prove(facts: &[&SyntaxFact], bytes: &[u8], start: usize, end: usize) -> Option<Statement> {
-    if facts.len() != 4 {
+fn prove(
+    format: Format,
+    facts: &[&SyntaxFact],
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+) -> Option<Statement> {
+    if !matches!(
+        (format, facts.len()),
+        (Format::NTriples, 4) | (Format::NQuads, 4 | 5)
+    ) {
         return None;
     }
-    let mut statement = None;
-    let mut roles = [None; 3];
+    let mut roles = [None; 5];
     for fact in facts {
-        let slot = match fact.syntax_kind().as_str() {
-            "ntriples.statement.expression" => &mut statement,
-            "ntriples.subject.expression" => &mut roles[0],
-            "ntriples.predicate.expression" => &mut roles[1],
-            "ntriples.object.expression" => &mut roles[2],
-            _ => return None,
-        };
+        let slot = roles.get_mut(format.role(fact.syntax_kind().as_str())?)?;
         if slot.replace(fact.span()).is_some() {
             return None;
         }
     }
+    let statement = roles[0];
     let span = statement?;
     if span.start_byte() != u64::try_from(start).ok()?
         || span.end_byte() > u64::try_from(end).ok()?
@@ -365,7 +432,8 @@ fn prove(facts: &[&SyntaxFact], bytes: &[u8], start: usize, end: usize) -> Optio
     }
     Some(Statement {
         span,
-        terms: [roles[0]?, roles[1]?, roles[2]?],
+        terms: [roles[1]?, roles[2]?, roles[3]?],
+        graph: roles[4],
         payload_bytes: 0,
     })
 }
@@ -378,5 +446,10 @@ pub(super) fn required(fact: &SyntaxFact) -> bool {
                 | "ntriples.subject.expression"
                 | "ntriples.predicate.expression"
                 | "ntriples.object.expression"
+                | "nquads.statement.expression"
+                | "nquads.subject.expression"
+                | "nquads.predicate.expression"
+                | "nquads.object.expression"
+                | "nquads.graph.expression"
         )
 }

@@ -1,4 +1,4 @@
-//! Authenticate UTF-8 NUL contexts using the retained native N-Triples grammar.
+//! Authenticate UTF-8 NUL contexts using the selected native RDF line grammar.
 //! A proof covers complete captured bytes; only NUL-bearing physical lines are parsed.
 
 use std::ops::ControlFlow;
@@ -46,6 +46,7 @@ impl NTriplesNulProof {
 /// Incremental, bounded proof over the exact ordered bytes of one capture.
 /// Invalid or over-budget native evidence never becomes a positive proof.
 pub struct NTriplesNulProbe {
+    language: tree_sitter::Language,
     hash: blake3::Hasher,
     text: StreamingSourceTextValidator,
     bytes: u64,
@@ -70,7 +71,17 @@ impl NTriplesNulProbe {
     /// Starts a proof with at most 1 MiB of resident physical line bytes.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_language(rootlight_tree_sitter_ntriples::LANGUAGE.into())
+    }
+
+    // Legacy public proof conversion always means N-Triples; other grammars stay internal.
+    pub(crate) fn for_nquads() -> Self {
+        Self::with_language(rootlight_tree_sitter_nquads::LANGUAGE.into())
+    }
+
+    fn with_language(language: tree_sitter::Language) -> Self {
         Self {
+            language,
             hash: blake3::Hasher::new(),
             text: StreamingSourceTextValidator::new(),
             bytes: 0,
@@ -178,7 +189,7 @@ impl NTriplesNulProbe {
                 } else {
                     &self.line
                 };
-                self.valid = native_line(line, cancellation)?;
+                self.valid = native_line(line, &self.language, cancellation)?;
             }
         }
         self.line.clear();
@@ -189,11 +200,15 @@ impl NTriplesNulProbe {
     }
 }
 
-fn native_line(bytes: &[u8], cancellation: &Cancellation) -> Result<bool, DiscoveryError> {
+fn native_line(
+    bytes: &[u8],
+    language: &tree_sitter::Language,
+    cancellation: &Cancellation,
+) -> Result<bool, DiscoveryError> {
     cancellation.check()?;
     let mut parser = tree_sitter::Parser::new();
     parser
-        .set_language(&rootlight_tree_sitter_ntriples::LANGUAGE.into())
+        .set_language(language)
         .map_err(|_| DiscoveryError::StreamedCaptureUnavailable)?;
     let mut progress = |_: &tree_sitter::ParseState| {
         if cancellation.check().is_ok() {

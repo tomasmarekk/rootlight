@@ -14120,7 +14120,9 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
-    if fact.syntax_kind().as_str().starts_with("ntriples.") {
+    if fact.syntax_kind().as_str().starts_with("ntriples.")
+        || fact.syntax_kind().as_str().starts_with("nquads.")
+    {
         return false;
     }
     if fact.syntax_kind().as_str().starts_with("thinkscript.") {
@@ -14768,13 +14770,17 @@ fn is_native_rdf_file_transport(fact: &SyntaxFact, language: &str) -> bool {
     fact.kind() == SyntaxFactKind::Module
         && matches!(
             (language, fact.syntax_kind().as_str()),
-            ("ntriples", "ntriples.file.module") | ("turtle", "turtle.file.module")
+            ("ntriples", "ntriples.file.module")
+                | ("nquads", "nquads.file.module")
+                | ("turtle", "turtle.file.module")
         )
 }
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
-    if fact.syntax_kind().as_str().starts_with("ntriples.") {
+    if fact.syntax_kind().as_str().starts_with("ntriples.")
+        || fact.syntax_kind().as_str().starts_with("nquads.")
+    {
         return None;
     }
     if fact.syntax_kind().as_str().starts_with("sparql.") {
@@ -14839,7 +14845,9 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 }
 
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
-    if fact.syntax_kind().as_str().starts_with("ntriples.") {
+    if fact.syntax_kind().as_str().starts_with("ntriples.")
+        || fact.syntax_kind().as_str().starts_with("nquads.")
+    {
         return None;
     }
     if fact.syntax_kind().as_str().starts_with("sparql.") {
@@ -16257,7 +16265,28 @@ mod tests {
             &fact(SyntaxFactKind::Module, "turtle.file.module"),
             "turtle"
         ));
+        assert!(is_native_rdf_file_transport(
+            &fact(SyntaxFactKind::Module, "nquads.file.module"),
+            "nquads"
+        ));
         for (candidate, language) in [
+            (
+                fact(SyntaxFactKind::Module, "nquads.file.module"),
+                "ntriples",
+            ),
+            (
+                fact(SyntaxFactKind::Module, "ntriples.file.module"),
+                "nquads",
+            ),
+            (fact(SyntaxFactKind::Root, "nquads.file.module"), "nquads"),
+            (
+                fact(SyntaxFactKind::Declaration, "nquads.file.module"),
+                "nquads",
+            ),
+            (
+                fact(SyntaxFactKind::Module, "nquads.other.module"),
+                "nquads",
+            ),
             (native, "turtle"),
             (
                 fact(SyntaxFactKind::Declaration, "ntriples.file.module"),

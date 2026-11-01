@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.99";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.100";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3425,6 +3425,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "nquads",
+        suffixes: &[".nq"],
+        aliases: &[],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "ntriples",
         suffixes: &[".nt"],
         aliases: &[],
@@ -3682,6 +3690,7 @@ fn native_nul_route(path: &RelativePath, config: &ConfigSnapshot) -> Option<Nati
         .map_or_else(|| extension_language(path.as_str()), canonical_language)
     {
         Some("ntriples") => Some(NativeNulGrammar::NTriples),
+        Some("nquads") => Some(NativeNulGrammar::NQuads),
         Some("turtle") => Some(NativeNulGrammar::Turtle),
         Some("trig") => Some(NativeNulGrammar::Trig),
         _ => None,
@@ -10201,6 +10210,44 @@ max_source_file_bytes = 2097152
         for path in ["data.trig", "query.rq", "rules.n3.bak", "rules.n3x"] {
             assert_ne!(extension_language(path), Some("n3"));
         }
+    }
+
+    #[test]
+    fn nquads_suffix_has_distinct_native_identity_and_outer_extension_authority() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "nquads")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".nq"]);
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("nquads"), Some("nquads"));
+        for path in ["data.nq", "DATA.NQ", "data/schema.nq", "schema.nt.nq"] {
+            let (class, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"<s:><p:><o:><g:>.\n",
+            );
+            assert_eq!(class, InputClass::Source, "{path}");
+            assert_eq!(
+                signals,
+                [LanguageSignal {
+                    language: "nquads".to_owned(),
+                    evidence: LanguageEvidence::Extension
+                }]
+            );
+        }
+        for path in [
+            "data.nt",
+            "data.ttl",
+            "data.trig",
+            "data.nq.bak",
+            "data.nqx",
+            "data.nq/fragment",
+        ] {
+            assert_ne!(extension_language(path), Some("nquads"), "{path}");
+        }
+        assert_eq!(extension_language("data.nq.json"), Some("json"));
+        assert_eq!(extension_language("data.nq.py"), Some("python"));
     }
 
     #[test]

@@ -125,6 +125,8 @@ mod mojo_native;
 mod n3_native;
 #[path = "analyzer_e2e/nix_native.rs"]
 mod nix_native;
+#[path = "analyzer_e2e/nquads_native.rs"]
+mod nquads_native;
 #[path = "analyzer_e2e/ntriples_native.rs"]
 mod ntriples_native;
 #[path = "analyzer_e2e/objective_c_native.rs"]

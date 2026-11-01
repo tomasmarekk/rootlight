@@ -236,3 +236,85 @@ fn contextual_native_nul_stream_rejects_stale_and_other_grammar_proofs() {
         ));
     }
 }
+
+#[test]
+fn nquads_native_nul_snapshot_and_stream_agree_on_routes_and_grammar_authority() {
+    let temporary = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let source = b"_:s <urn:p> \"value\0tail\" <urn:g> .\r\n# comment\0\n";
+    let cases: [(&str, &[u8]); 8] = [
+        ("data.nq", source),
+        ("configured.data", source),
+        ("overridden.nq", source),
+        ("foreign.nt", source),
+        ("foreign.bin", source),
+        ("relative.nq", b"<s><urn:p>\"value\0tail\"<urn:g>."),
+        ("outside.nq", b"<s:><p:>\"value\0tail\"<g:>\0."),
+        ("pdf.nq", b"%PDF-1.7\n# \0\n"),
+    ];
+    for (path, bytes) in cases {
+        std::fs::write(temporary.path().join(path), bytes).unwrap();
+    }
+    let root = RepositoryRoot::open(
+        derive_repository(b"nquads-native-nul-routes").id(),
+        temporary.path(),
+    )
+    .unwrap();
+    let config = ConfigSnapshot::resolve(&[ConfigLayer { source: ConfigSource::User,
+        contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'configured.data'='nquads'\n'overridden.nq'='ntriples'\n" }]).unwrap();
+    let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+    let limits = DiscoveryLimits::new(20, 10, 4096, 20).unwrap();
+    let cancellation = Cancellation::new();
+    let buffered = discover(&root, &config, &policy, limits, &cancellation).unwrap();
+    let streamed = discover_with_streamed_sources(
+        &root,
+        &config,
+        &policy,
+        limits,
+        StreamedDiscoveryOptions::manifest(4096, 1, &mut Receiver::default()).unwrap(),
+        &cancellation,
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    assert_eq!(buffered.inputs, streamed.inputs);
+    assert_eq!(buffered.exclusions, streamed.exclusions);
+    assert_eq!(buffered.inputs.len(), 2);
+    for input in &buffered.inputs {
+        assert!(matches!(input.path.as_str(), "data.nq" | "configured.data"));
+        assert_eq!(input.content_hash, content_hash(source));
+        assert_eq!(input.bytes, u64::try_from(source.len()).unwrap());
+        assert!(
+            input
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "nquads")
+        );
+    }
+    assert_eq!(buffered.exclusions.len(), cases.len() - 2);
+    for mut receiver in [
+        Receiver {
+            stale: true,
+            grammar: None,
+        },
+        Receiver {
+            stale: false,
+            grammar: Some(NativeNulGrammar::NTriples),
+        },
+        Receiver {
+            stale: false,
+            grammar: Some(NativeNulGrammar::Turtle),
+        },
+    ] {
+        assert!(matches!(
+            discover_with_streamed_sources(
+                &root,
+                &config,
+                &policy,
+                limits,
+                StreamedDiscoveryOptions::manifest(4096, 1, &mut receiver).unwrap(),
+                &cancellation
+            ),
+            Err(DiscoveryError::IncrementalDrift)
+        ));
+    }
+}
