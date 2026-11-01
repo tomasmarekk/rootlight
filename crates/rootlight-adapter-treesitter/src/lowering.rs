@@ -14344,7 +14344,8 @@ fn supports_declaration_signature(
     definition: Option<&SyntaxFact>,
 ) -> bool {
     if language == "trig" && trig::is_graph(declaration) {
-        return true;
+        return kind == EntityKind::Module
+            && declaration.syntax_kind().as_str() == "trig.named_graph.module";
     }
     if is_c_macro_signature_owner(kind, language, declaration) {
         return true;
@@ -16129,6 +16130,50 @@ mod tests {
     use rootlight_ir::{Confidence, SourceRef, SourceSpan};
 
     use super::*;
+
+    #[test]
+    fn trig_signature_capability_requires_a_named_native_module() {
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let named = fact(SyntaxFactKind::Module, "trig.named_graph.module");
+        assert!(supports_declaration_signature(
+            EntityKind::Module,
+            "trig",
+            &named,
+            None
+        ));
+        for (kind, language, owner) in [
+            (
+                EntityKind::Module,
+                "trig",
+                fact(SyntaxFactKind::Module, "trig.default_graph.module"),
+            ),
+            (
+                EntityKind::Module,
+                "trig",
+                fact(SyntaxFactKind::Module, "trig.file.module"),
+            ),
+            (
+                EntityKind::Module,
+                "trig",
+                fact(SyntaxFactKind::Declaration, "trig.named_graph.module"),
+            ),
+            (EntityKind::Class, "trig", named.clone()),
+            (EntityKind::Module, "turtle", named),
+        ] {
+            assert!(!supports_declaration_signature(
+                kind, language, &owner, None
+            ));
+        }
+    }
 
     fn declaration(label: &str) -> SyntaxFact {
         let file = FileId::from_bytes([3; 20]);

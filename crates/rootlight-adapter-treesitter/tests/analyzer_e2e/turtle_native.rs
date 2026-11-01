@@ -399,6 +399,109 @@ fn trig_recovered_graph_does_not_invent_a_clean_owner() {
 }
 
 #[test]
+fn trig_graph_signatures_require_written_labels() {
+    let source = b"@prefix ex: <https://example.test/> .\n{ }\n{ ex:s ex:p ex:o }\nGRAPH <https://example.test/graph> { }\nex:g { }\n_:blank { }\n[] { }\n";
+    let result = trig_output(source);
+    assert_trig_graph_signatures(source, result.document(), 2, 4);
+}
+
+fn assert_trig_graph_signatures(
+    source: &[u8],
+    doc: &rootlight_ir::NormalizedIrDocument,
+    default_count: usize,
+    named_count: usize,
+) {
+    assert!(
+        !doc.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-error-recovery"),
+        "{:?}",
+        doc.diagnostics
+    );
+    assert!(
+        !doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "signature-capture-unavailable"),
+        "{:?}",
+        doc.skipped_regions
+    );
+    let graphs: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.kind == EntityKind::Module && entity.canonical_name != "src/written.trig"
+        })
+        .collect();
+    assert_eq!(graphs.len(), default_count + named_count);
+    assert_eq!(
+        graphs
+            .iter()
+            .filter(|entity| entity.canonical_name == "<default-graph>")
+            .count(),
+        default_count
+    );
+    for graph in graphs {
+        let signatures: Vec<_> = doc
+            .extensions
+            .iter()
+            .filter(|extension| extension.namespace == rootlight_ir::LEXICAL_EXTENSION_NAMESPACE)
+            .filter_map(|extension| {
+                let signature = rootlight_ir::decode_lexical_evidence_envelope(extension).unwrap();
+                (signature.subject() == rootlight_ir::FactRef::Entity(graph.id)
+                    && signature.kind() == rootlight_ir::LexicalEvidenceKind::Signature)
+                    .then_some((extension, signature))
+            })
+            .collect();
+        if graph.canonical_name == "<default-graph>" {
+            assert!(signatures.is_empty());
+        } else {
+            assert_eq!(signatures.len(), 1, "{}", graph.canonical_name);
+            let (extension, signature) = &signatures[0];
+            assert_eq!(signature.text(), graph.canonical_name);
+            let span = extension.evidence.source.as_ref().unwrap().span();
+            let written = &source[usize::try_from(span.start_byte()).unwrap()
+                ..usize::try_from(span.end_byte()).unwrap()];
+            assert_eq!(written, graph.canonical_name.as_bytes());
+            signature
+                .verify_source_text(std::str::from_utf8(written).unwrap())
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        doc.skipped_regions
+            .iter()
+            .filter(|gap| gap.detail.starts_with("trig-rdf-assertions-"))
+            .map(|gap| gap.domain)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            FactDomain::Entities,
+            FactDomain::Occurrences,
+            FactDomain::Relations,
+        ])
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly supplied pinned original TriG corpus root"]
+fn trig_original_default_graphs_do_not_require_unwritten_signatures() {
+    let root =
+        Path::new(&std::env::var_os("ROOTLIGHT_TRIG_CORPUS").expect("explicit corpus parent"))
+            .join("183_N3_rdflib/test/data/suites/w3c/trig");
+    for (path, bytes, defaults, named) in [
+        ("alternating_iri_graphs.trig", 84, 2, 2),
+        ("trig-subm-27.trig", 430, 5, 0),
+        ("anonymous_blank_node_graph.trig", 70, 0, 1),
+        ("labeled_blank_node_graph.trig", 71, 0, 1),
+        ("trig-syntax-minimal-whitespace-01.trig", 817, 10, 7),
+    ] {
+        let source = fs::read(root.join(path)).unwrap();
+        assert_eq!(source.len(), bytes, "{path}");
+        let result = trig_output(&source);
+        assert_trig_graph_signatures(&source, result.document(), defaults, named);
+    }
+}
+
+#[test]
 fn trig_nested_typed_resources_use_declared_metatype_iris_and_undotted_spans() {
     let source = br#"@prefix ex: <https://example.test/> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
