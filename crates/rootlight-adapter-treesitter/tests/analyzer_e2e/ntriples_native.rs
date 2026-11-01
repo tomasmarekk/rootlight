@@ -86,17 +86,13 @@ fn native_ntriples_emits_source_backed_roles_without_software_definitions() {
             .iter()
             .all(|occurrence| occurrence.role != OccurrenceRole::Definition)
     );
-    assert!(
-        document
-            .entities
-            .iter()
-            .all(|entity| entity.kind == EntityKind::Module)
-    );
+    assert!(document.entities.is_empty(), "{:?}", document.entities);
     assert!(
         !document
             .skipped_regions
             .iter()
-            .any(|gap| gap.detail.starts_with("ntriples-")),
+            .any(|gap| gap.detail.starts_with("ntriples-")
+                || gap.detail == "declaration-name-unavailable"),
         "{:?}",
         document.skipped_regions
     );
@@ -316,7 +312,10 @@ fn physical_line_census_rejects_uncovered_tails_and_preserves_neighbors() {
             .document()
             .skipped_regions
             .iter()
-            .any(|gap| gap.detail.starts_with("ntriples-"))
+            .any(|gap| gap.detail.starts_with("ntriples-")
+                || gap.detail == "declaration-name-unavailable"),
+        "{:?}",
+        result.document().skipped_regions
     );
 }
 
@@ -516,6 +515,9 @@ fn original_schemaorg_statements_keep_typed_physical_source_evidence() {
             .document()
             .skipped_regions
             .iter()
-            .any(|gap| gap.detail.starts_with("ntriples-"))
+            .any(|gap| gap.detail.starts_with("ntriples-")
+                || gap.detail == "declaration-name-unavailable"),
+        "{:?}",
+        result.document().skipped_regions
     );
 }

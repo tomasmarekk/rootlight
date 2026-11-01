@@ -1607,7 +1607,8 @@ fn preflight_lowering_limits(
         } else if matches!(
             fact.kind(),
             SyntaxFactKind::Module | SyntaxFactKind::Declaration
-        ) {
+        ) && !is_native_ntriples_file_transport(fact, request.language().as_str())
+        {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
                 &mut string_bytes,
@@ -7326,6 +7327,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else if matches!(
                 fact.kind(),
                 SyntaxFactKind::Declaration | SyntaxFactKind::Module
+            ) && !is_native_ntriples_file_transport(
+                fact,
+                self.request.language().as_str(),
             ) {
                 if let Some(gap) = structural_entity_classification_gap(fact) {
                     let region = self.skipped_region(
@@ -14714,6 +14718,13 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
     .then_some("vba-automatic-instantiation-semantics-unavailable")
 }
 
+fn is_native_ntriples_file_transport(fact: &SyntaxFact, language: &str) -> bool {
+    // Native RDF requires this file carrier without promising a software declaration.
+    language == "ntriples"
+        && fact.kind() == SyntaxFactKind::Module
+        && fact.syntax_kind().as_str() == "ntriples.file.module"
+}
+
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     if fact.syntax_kind().as_str().starts_with("ntriples.") {
@@ -16180,6 +16191,43 @@ mod tests {
     use rootlight_ir::{Confidence, SourceRef, SourceSpan};
 
     use super::*;
+
+    #[test]
+    fn ntriples_file_transport_requires_its_native_role_and_language() {
+        let fact = |kind, label| {
+            SyntaxFact::new(
+                1,
+                None,
+                kind,
+                SourceSpan::new(FileId::from_bytes([3; 20]), 0, 1).unwrap(),
+                0,
+                SyntaxKindLabel::new(label).unwrap(),
+            )
+        };
+        let native = fact(SyntaxFactKind::Module, "ntriples.file.module");
+        assert!(is_native_ntriples_file_transport(&native, "ntriples"));
+        for (candidate, language) in [
+            (native, "turtle"),
+            (
+                fact(SyntaxFactKind::Declaration, "ntriples.file.module"),
+                "ntriples",
+            ),
+            (
+                fact(SyntaxFactKind::Root, "ntriples.file.module"),
+                "ntriples",
+            ),
+            (
+                fact(SyntaxFactKind::Module, "ntriples.other.module"),
+                "ntriples",
+            ),
+            (
+                fact(SyntaxFactKind::Module, "turtle.file.module"),
+                "ntriples",
+            ),
+        ] {
+            assert!(!is_native_ntriples_file_transport(&candidate, language));
+        }
+    }
 
     #[test]
     fn trig_signature_capability_requires_a_named_native_module() {
