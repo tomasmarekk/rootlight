@@ -74,7 +74,7 @@ const GENERATED_RUST_FILES: [&str; 4] = [
 const SCHEMA_ROOT: &str = "schemas/generated";
 const PROTOCOL_GENERATED_ROOT: &str = "crates/rootlight-protocol/src/generated";
 const COMPATIBILITY_ROOT: &str = "tests/fixtures/compatibility";
-const STORAGE_COMPATIBILITY_BASELINES: [&str; 8] = [
+const STORAGE_COMPATIBILITY_BASELINES: [&str; 9] = [
     "storage/1.0/schema-fingerprints.json",
     "storage/1.1/schema-fingerprints.json",
     "storage/1.2/schema-fingerprints.json",
@@ -83,6 +83,7 @@ const STORAGE_COMPATIBILITY_BASELINES: [&str; 8] = [
     "storage/1.2/oracle-6-schema-fingerprints.json",
     "storage/1.2/oracle-7-schema-fingerprints.json",
     "storage/1.2/oracle-8-schema-fingerprints.json",
+    "storage/1.2/oracle-9-schema-fingerprints.json",
 ];
 const STORAGE_GENERATOR_INPUTS: [&str; 2] = [
     "crates/rootlight-catalog/src/schema.rs",
@@ -95,7 +96,7 @@ const COMPATIBILITY_FILES: [&str; 4] = [
     "contract-2.0-rejected.json",
 ];
 const LEXICAL_EXTENSION_BASELINE: &str = "extensions/rootlight.lexical/1/envelope.json";
-const COMPATIBILITY_BASELINES: [&str; 13] = [
+const COMPATIBILITY_BASELINES: [&str; 15] = [
     LEXICAL_EXTENSION_BASELINE,
     "ir/1.0/document.json",
     "ir/1.1/document.json",
@@ -109,6 +110,8 @@ const COMPATIBILITY_BASELINES: [&str; 13] = [
     STORAGE_COMPATIBILITY_BASELINES[4],
     STORAGE_COMPATIBILITY_BASELINES[5],
     STORAGE_COMPATIBILITY_BASELINES[6],
+    STORAGE_COMPATIBILITY_BASELINES[7],
+    STORAGE_COMPATIBILITY_BASELINES[8],
 ];
 const DAEMON_PROTOCOL_DESCRIPTOR_BASELINES: [(&str, &str); 24] = [
     ("1.1", "protobuf/1.1/rootlight.desc"),
@@ -367,6 +370,7 @@ fn validate_storage_compatibility(workspace_root: &Path) -> Result<(), SchemaErr
             != [
                 (1, 0),
                 (1, 1),
+                (1, 2),
                 (1, 2),
                 (1, 2),
                 (1, 2),
@@ -3943,6 +3947,13 @@ mod tests {
         expected.sort();
 
         assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn current_storage_schema_matches_the_retained_versioned_fingerprints() {
+        let root = workspace_root().expect("workspace metadata is available");
+        validate_storage_compatibility(&root)
+            .expect("current and retained schema fingerprints agree");
     }
 
     #[test]

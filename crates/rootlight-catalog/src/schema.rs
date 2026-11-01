@@ -30,7 +30,7 @@ mod macos_acl;
 const CONTROL_APPLICATION_ID: u32 = 0x524c_4354;
 const ORACLE_APPLICATION_ID: u32 = 0x524c_4f52;
 const CONTROL_SCHEMA_VERSION: u32 = 2;
-const ORACLE_SCHEMA_VERSION: u32 = 8;
+const ORACLE_SCHEMA_VERSION: u32 = 9;
 const ORACLE_SCHEMA_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
 const ORACLE_FIXED_BYTES_PER_ROW: u64 = 2 * 1024;
 const ORACLE_TEXT_REPLICATION_FACTOR: u64 = 3;
@@ -633,6 +633,7 @@ const SOURCE_REF_FILE_INDEX_SQL: &str =
     "CREATE INDEX source_refs_by_file_span ON source_refs(file_id, start_byte, end_byte, ordinal)";
 const COVERAGE_SCOPE_INDEX_SQL: &str =
     "CREATE INDEX coverage_by_scope ON coverage_records(scope_kind, scope_id, domain, coverage_id)";
+const EXTENSION_SOURCE_FILE_INDEX_SQL: &str = "CREATE INDEX extensions_by_source_file ON extensions(json_extract(payload, '$.evidence.source.span.file'), extension_id)";
 
 const CONTROL_TABLES: [NamedSql; 2] = [
     NamedSql::table("application_meta", APPLICATION_META_SQL),
@@ -683,7 +684,7 @@ const ORACLE_INDEXES: [NamedSql; 8] = [
     NamedSql::index("coverage_by_scope", COVERAGE_SCOPE_INDEX_SQL),
 ];
 
-const DEFERRED_ORACLE_INDEXES: [NamedSql; 7] = [
+const DEFERRED_ORACLE_INDEXES: [NamedSql; 8] = [
     NamedSql::index("files_by_path", FILE_PATH_INDEX_SQL),
     NamedSql::index(
         "entities_by_canonical_name",
@@ -697,9 +698,10 @@ const DEFERRED_ORACLE_INDEXES: [NamedSql; 7] = [
     NamedSql::index("relations_by_subject", RELATION_SUBJECT_INDEX_SQL),
     NamedSql::index("relations_by_object", RELATION_OBJECT_INDEX_SQL),
     NamedSql::index("coverage_by_scope", COVERAGE_SCOPE_INDEX_SQL),
+    NamedSql::index("extensions_by_source_file", EXTENSION_SOURCE_FILE_INDEX_SQL),
 ];
 
-const DEFERRED_ORACLE_INDEX_DROPS: [&str; 7] = [
+const DEFERRED_ORACLE_INDEX_DROPS: [&str; 8] = [
     "DROP INDEX files_by_path",
     "DROP INDEX entities_by_canonical_name",
     "DROP INDEX entities_by_qualified_name",
@@ -707,6 +709,7 @@ const DEFERRED_ORACLE_INDEX_DROPS: [&str; 7] = [
     "DROP INDEX relations_by_subject",
     "DROP INDEX relations_by_object",
     "DROP INDEX coverage_by_scope",
+    "DROP INDEX extensions_by_source_file",
 ];
 
 #[derive(Clone, Copy)]
@@ -883,6 +886,10 @@ pub(crate) fn validate_oracle(
     validate_integrity(connection, Some(context))
 }
 
+pub(crate) fn supports_extension_file_reads(connection: &Connection) -> Result<bool, CatalogError> {
+    Ok(pragma_u32(connection, "user_version")? == ORACLE_SCHEMA_VERSION)
+}
+
 pub(crate) fn oracle_allocated_bytes(connection: &Connection) -> Result<u64, CatalogError> {
     let page_count = pragma_nonnegative_u64(connection, "page_count")?;
     let page_size = pragma_nonnegative_u64(connection, "page_size")?;
@@ -905,6 +912,25 @@ fn control_definition() -> SchemaDefinition<'static> {
 }
 
 fn oracle_definition() -> SchemaDefinition<'static> {
+    static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
+        oracle_v8_definition()
+            .objects
+            .iter()
+            .copied()
+            .chain([NamedSql::index(
+                "extensions_by_source_file",
+                EXTENSION_SOURCE_FILE_INDEX_SQL,
+            )])
+            .collect()
+    });
+    SchemaDefinition {
+        version: ORACLE_SCHEMA_VERSION,
+        objects: &OBJECTS,
+        ..oracle_v8_definition()
+    }
+}
+
+fn oracle_v8_definition() -> SchemaDefinition<'static> {
     // The split keeps the primary table ledger readable while retaining one
     // canonical checksum order.
     static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
@@ -916,7 +942,7 @@ fn oracle_definition() -> SchemaDefinition<'static> {
     });
     SchemaDefinition {
         application_id: ORACLE_APPLICATION_ID,
-        version: ORACLE_SCHEMA_VERSION,
+        version: 8,
         kind: b"rootlight-oracle",
         allows_document_hash: true,
         objects: &OBJECTS,
@@ -925,7 +951,7 @@ fn oracle_definition() -> SchemaDefinition<'static> {
 
 fn oracle_v3_definition() -> SchemaDefinition<'static> {
     static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
-        oracle_definition()
+        oracle_v8_definition()
             .objects
             .iter()
             .copied()
@@ -941,13 +967,13 @@ fn oracle_v3_definition() -> SchemaDefinition<'static> {
     SchemaDefinition {
         version: 3,
         objects: &OBJECTS,
-        ..oracle_definition()
+        ..oracle_v8_definition()
     }
 }
 
 fn oracle_v4_definition() -> SchemaDefinition<'static> {
     static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
-        oracle_definition()
+        oracle_v8_definition()
             .objects
             .iter()
             .copied()
@@ -963,13 +989,13 @@ fn oracle_v4_definition() -> SchemaDefinition<'static> {
     SchemaDefinition {
         version: 4,
         objects: &OBJECTS,
-        ..oracle_definition()
+        ..oracle_v8_definition()
     }
 }
 
 fn oracle_v5_definition() -> SchemaDefinition<'static> {
     static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
-        oracle_definition()
+        oracle_v8_definition()
             .objects
             .iter()
             .copied()
@@ -985,13 +1011,13 @@ fn oracle_v5_definition() -> SchemaDefinition<'static> {
     SchemaDefinition {
         version: 5,
         objects: &OBJECTS,
-        ..oracle_definition()
+        ..oracle_v8_definition()
     }
 }
 
 fn oracle_v6_definition() -> SchemaDefinition<'static> {
     static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
-        oracle_definition()
+        oracle_v8_definition()
             .objects
             .iter()
             .copied()
@@ -1007,13 +1033,13 @@ fn oracle_v6_definition() -> SchemaDefinition<'static> {
     SchemaDefinition {
         version: 6,
         objects: &OBJECTS,
-        ..oracle_definition()
+        ..oracle_v8_definition()
     }
 }
 
 fn oracle_v7_definition() -> SchemaDefinition<'static> {
     static OBJECTS: std::sync::LazyLock<Vec<NamedSql>> = std::sync::LazyLock::new(|| {
-        oracle_definition()
+        oracle_v8_definition()
             .objects
             .iter()
             .copied()
@@ -1029,7 +1055,7 @@ fn oracle_v7_definition() -> SchemaDefinition<'static> {
     SchemaDefinition {
         version: 7,
         objects: &OBJECTS,
-        ..oracle_definition()
+        ..oracle_v8_definition()
     }
 }
 
@@ -1045,6 +1071,7 @@ fn oracle_reader_definition(
         5 => Ok(oracle_v5_definition()),
         6 => Ok(oracle_v6_definition()),
         7 => Ok(oracle_v7_definition()),
+        8 => Ok(oracle_v8_definition()),
         ORACLE_SCHEMA_VERSION => Ok(oracle_definition()),
         _ => Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema)),
     }
@@ -1852,6 +1879,7 @@ mod tests {
             oracle_v5_definition(),
             oracle_v6_definition(),
             oracle_v7_definition(),
+            oracle_v8_definition(),
         ] {
             #[cfg(target_os = "macos")]
             let directory = tempfile::Builder::new()
@@ -1877,6 +1905,17 @@ mod tests {
                 .expect("exact old oracle opens");
             let snapshot = reader.read(&context).expect("old payload remains readable");
             assert!(snapshot.document().files.is_empty());
+            assert!(
+                rootlight_storage::GenerationReader::extensions_for_file(
+                    &reader,
+                    rootlight_ids::FileId::from_bytes([0; 20]),
+                    None,
+                    rootlight_storage::GenerationReadLimit::default(),
+                    &context,
+                )
+                .expect("older schemas explicitly lack the file index")
+                .is_none()
+            );
             drop(reader);
             assert_eq!(
                 fs::read(&path).expect("legacy bytes remain readable"),
@@ -1893,6 +1932,7 @@ mod tests {
             oracle_v5_definition(),
             oracle_v6_definition(),
             oracle_v7_definition(),
+            oracle_v8_definition(),
             oracle_definition(),
         ] {
             let connection = Connection::open_in_memory().expect("fixture opens");
@@ -1975,8 +2015,59 @@ mod tests {
         assert_eq!(fixture["oracle"]["schema_version"], 8);
         assert_eq!(
             fixture["oracle"]["checksum"],
-            oracle_compatibility().checksum().to_string()
+            compatibility(&oracle_v8_definition())
+                .checksum()
+                .to_string()
         );
+    }
+
+    #[test]
+    fn extension_file_index_has_a_distinct_versioned_schema() {
+        let current = oracle_compatibility();
+        assert_eq!(current.schema_version(), 9);
+        assert_ne!(
+            current.checksum(),
+            compatibility(&oracle_v8_definition()).checksum()
+        );
+        let fixture = serde_json::json!({
+            "fixture_version": "1.0",
+            "generation_contract": {"major": 1, "minor": 2},
+            "catalog": {
+                "application_id": control_compatibility().application_id(),
+                "schema_version": control_compatibility().schema_version(),
+                "checksum": control_compatibility().checksum().to_string(),
+            },
+            "oracle": {
+                "application_id": current.application_id(),
+                "schema_version": current.schema_version(),
+                "checksum": current.checksum().to_string(),
+            },
+        });
+        let retained: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/compatibility/storage/1.2/oracle-9-schema-fingerprints.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture, retained);
+    }
+
+    #[test]
+    fn extension_file_index_corruption_is_rejected_by_exact_schema_validation() {
+        for changed in [
+            "DROP INDEX extensions_by_source_file",
+            "DROP INDEX extensions_by_source_file; CREATE INDEX extensions_by_source_file ON extensions(extension_id, json_extract(payload, '$.evidence.source.span.file'))",
+            "DROP INDEX extensions_by_source_file; CREATE INDEX extensions_by_source_file ON extensions(json_extract(payload, '$.payload.file'), extension_id)",
+        ] {
+            let connection = Connection::open_in_memory().unwrap();
+            initialize(&connection, &oracle_definition()).unwrap();
+            validate_schema(&connection, &oracle_definition()).unwrap();
+            connection.execute_batch(changed).unwrap();
+            assert_eq!(
+                validate_schema(&connection, &oracle_definition())
+                    .unwrap_err()
+                    .kind(),
+                CatalogErrorKind::Corrupt
+            );
+        }
     }
 
     #[test]

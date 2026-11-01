@@ -749,6 +749,32 @@ impl GenerationReader for OracleReader {
         })
     }
 
+    fn extensions_for_file(
+        &self,
+        file: FileId,
+        after: Option<FactId>,
+        limit: GenerationReadLimit,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<ReadPage<ExtensionEnvelope>>, Self::Error> {
+        context.check().map_err(CatalogError::control)?;
+        let connection = schema::open_oracle_reader(&self.path, context)?;
+        if !schema::supports_extension_file_reads(&connection)? {
+            return Ok(None);
+        }
+        require_indexed_contract(self.metadata)?;
+        let page = indexed_read::extensions_for_file(
+            &connection,
+            self.metadata,
+            self.stats.extensions(),
+            file,
+            after,
+            limit,
+            context,
+        )?;
+        context.check().map_err(CatalogError::control)?;
+        Ok(Some(page))
+    }
+
     fn read_generation(
         &self,
         context: &GenerationContext<'_>,
@@ -1070,6 +1096,30 @@ impl GenerationReader for EphemeralOracleReader {
                 limit,
                 context,
             )
+        })
+    }
+
+    fn extensions_for_file(
+        &self,
+        file: FileId,
+        after: Option<FactId>,
+        limit: GenerationReadLimit,
+        context: &GenerationContext<'_>,
+    ) -> Result<Option<ReadPage<ExtensionEnvelope>>, Self::Error> {
+        self.with_indexed_connection(context, |connection| {
+            if !schema::supports_extension_file_reads(connection)? {
+                return Ok(None);
+            }
+            indexed_read::extensions_for_file(
+                connection,
+                self.metadata,
+                self.stats.extensions(),
+                file,
+                after,
+                limit,
+                context,
+            )
+            .map(Some)
         })
     }
 

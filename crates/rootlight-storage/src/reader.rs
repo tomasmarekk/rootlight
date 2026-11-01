@@ -496,6 +496,28 @@ pub trait GenerationReader: Send + Sync {
         context: &GenerationContext<'_>,
     ) -> Result<ReadPage<ExtensionEnvelope>, Self::Error>;
 
+    /// Reads primary-source extension envelopes for one file through a backend index.
+    ///
+    /// `None` explicitly means this backend does not support indexed file reads.
+    /// A supported empty result is `Some` containing an empty complete page. Totals
+    /// include every primary-source extension in the file, independent of namespace
+    /// and the exclusive stable-ID cursor. Decoding is bounded to the limit plus
+    /// one probe, and the backend validates source ownership and file identity.
+    ///
+    /// # Errors
+    /// Returns the backend error for cancellation, budget, compatibility,
+    /// corruption, or storage failures. Implementations must not scan all extensions
+    /// as a fallback for an unavailable file index.
+    fn extensions_for_file(
+        &self,
+        _file: FileId,
+        _after: Option<FactId>,
+        _limit: GenerationReadLimit,
+        _context: &GenerationContext<'_>,
+    ) -> Result<Option<ReadPage<ExtensionEnvelope>>, Self::Error> {
+        Ok(None)
+    }
+
     /// Materializes the complete identity-verified generation.
     ///
     /// This compatibility and diagnostic path is not the indexed query path.

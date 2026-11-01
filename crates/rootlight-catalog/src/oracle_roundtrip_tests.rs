@@ -713,6 +713,472 @@ fn indexed_readers_share_bounded_stable_cursor_semantics() {
     }
 }
 
+fn interleaved_extension_snapshot() -> GenerationSnapshot {
+    let mut document = indexed_fixture_snapshot().document().clone();
+    let template = document.extensions[0].clone();
+    document.extensions.clear();
+    for byte in 150_u8..156 {
+        let file = &document.files[usize::from(byte % 2)];
+        let mut record = template.clone();
+        record.id = FactId::from_bytes([byte; 20]);
+        record.payload =
+            serde_json::json!({"other_file_text": document.files[0].id.to_string()}).to_string();
+        record.evidence.source = Some(SourceRef::new(
+            document.repository,
+            document.generation,
+            SourceSpan::new(file.id, 1, 2).unwrap(),
+            file.content_hash,
+            None,
+        ));
+        document.extensions.push(record);
+    }
+    let mut without_source = template;
+    without_source.id = FactId::from_bytes([156; 20]);
+    without_source.evidence.source = None;
+    without_source.evidence.derivation = vec![rootlight_ir::FactRef::File(document.files[0].id)];
+    document.extensions.push(without_source);
+    snapshot(document)
+}
+
+#[test]
+fn indexed_extension_file_pages_keep_interleaved_files_and_cursors_scoped() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = interleaved_extension_snapshot();
+    let path_reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let ephemeral_reader = EphemeralOracleWriter::create()
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let file = expected.document().files[0].id;
+    let selected: Vec<_> = expected
+        .document()
+        .extensions
+        .iter()
+        .filter(|record| {
+            record
+                .evidence
+                .source
+                .as_ref()
+                .is_some_and(|source| source.span().file() == file)
+        })
+        .cloned()
+        .collect();
+    assert_eq!(selected.len(), 3);
+    let limit = GenerationReadLimit::new(1).unwrap();
+    for reader in [
+        &path_reader as &dyn GenerationReader<Error = CatalogError>,
+        &ephemeral_reader,
+    ] {
+        let mut collected = Vec::new();
+        let mut after = None;
+        loop {
+            let page = reader
+                .extensions_for_file(file, after, limit, &context)
+                .unwrap()
+                .unwrap();
+            assert_eq!(page.total_available(), 3);
+            collected.extend_from_slice(page.items());
+            after = page.next_cursor();
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(collected, selected);
+        let after_other_file = reader
+            .extensions_for_file(file, Some(FactId::from_bytes([151; 20])), limit, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_other_file.total_available(), 3);
+        assert_eq!(after_other_file.items(), &selected[1..2]);
+        let exhausted = reader
+            .extensions_for_file(file, Some(FactId::from_bytes([255; 20])), limit, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exhausted.total_available(), 3);
+        assert!(exhausted.items().is_empty());
+        assert_eq!(exhausted.completeness(), ReadPageCompleteness::Complete);
+        let unknown = reader
+            .extensions_for_file(FileId::from_bytes([254; 20]), None, limit, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unknown.total_available(), 0);
+        assert!(unknown.items().is_empty());
+        assert_eq!(unknown.completeness(), ReadPageCompleteness::Complete);
+    }
+    let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+    for (sql, values) in [
+        (
+            crate::indexed_read::EXTENSIONS_FOR_FILE_COUNT_SQL,
+            vec![rusqlite::types::Value::Text(file.to_string())],
+        ),
+        (
+            crate::indexed_read::EXTENSIONS_FOR_FILE_FIRST_SQL,
+            vec![
+                rusqlite::types::Value::Text(file.to_string()),
+                rusqlite::types::Value::Integer(2),
+            ],
+        ),
+        (
+            crate::indexed_read::EXTENSIONS_FOR_FILE_NEXT_SQL,
+            vec![
+                rusqlite::types::Value::Text(file.to_string()),
+                rusqlite::types::Value::Blob(selected[0].id.as_bytes().to_vec()),
+                rusqlite::types::Value::Integer(2),
+            ],
+        ),
+    ] {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let plan = statement
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("SEARCH extensions USING")
+                    && step.contains("extensions_by_source_file")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.contains("SCAN extensions") || step.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+}
+
+#[test]
+fn indexed_extension_file_pages_validate_row_owners_sources_and_payloads() {
+    for field in [
+        "id",
+        "repository",
+        "generation",
+        "provenance",
+        "row_repository",
+        "row_generation",
+        "row_provenance",
+        "source_repository",
+        "source_generation",
+        "source_hash",
+        "source_bounds",
+        "unknown_source_file",
+        "malformed_envelope",
+    ] {
+        let directory = TempDir::new().unwrap();
+        let cancellation = Cancellation::new();
+        let context = default_context(&cancellation);
+        let expected = indexed_fixture_snapshot();
+        let reader = OracleWriter::create_in(directory.path())
+            .unwrap()
+            .seal_unverified_for_test(expected.clone(), &context)
+            .unwrap();
+        let original = &expected.document().extensions[0];
+        let source = original.evidence.source.as_ref().unwrap();
+        let mut selected = source.span().file();
+        let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        if let Some(column) = field.strip_prefix("row_") {
+            let sql = match column {
+                "repository" => {
+                    "UPDATE extensions SET repository_id = zeroblob(16) WHERE extension_id = ?1"
+                }
+                "generation" => {
+                    "UPDATE extensions SET generation_id = zeroblob(20) WHERE extension_id = ?1"
+                }
+                "provenance" => {
+                    "UPDATE extensions SET provenance_id = zeroblob(20) WHERE extension_id = ?1"
+                }
+                _ => unreachable!(),
+            };
+            connection
+                .execute(sql, [original.id.as_bytes().as_slice()])
+                .unwrap();
+        } else {
+            let mut value = serde_json::to_value(original).unwrap();
+            let wrong_fact = serde_json::json!(FactId::from_bytes([201; 20]));
+            match field {
+                "id" | "provenance" => value[field] = wrong_fact,
+                "repository" => {
+                    value[field] =
+                        serde_json::json!(rootlight_ids::RepositoryId::from_bytes([201; 16]))
+                }
+                "generation" => {
+                    value[field] =
+                        serde_json::json!(rootlight_ids::GenerationId::from_bytes([201; 20]))
+                }
+                "source_repository" => {
+                    value["evidence"]["source"]["repository"] =
+                        serde_json::json!(rootlight_ids::RepositoryId::from_bytes([201; 16]))
+                }
+                "source_generation" => {
+                    value["evidence"]["source"]["generation"] =
+                        serde_json::json!(rootlight_ids::GenerationId::from_bytes([201; 20]))
+                }
+                "source_hash" => {
+                    value["evidence"]["source"]["content_hash"] =
+                        serde_json::json!(content_hash(b"foreign source"))
+                }
+                "source_bounds" => {
+                    value["evidence"]["source"]["span"]["end_byte"] = serde_json::json!(u64::MAX)
+                }
+                "unknown_source_file" => {
+                    selected = FileId::from_bytes([254; 20]);
+                    value["evidence"]["source"]["span"]["file"] = serde_json::json!(selected);
+                }
+                "malformed_envelope" => {
+                    value.as_object_mut().unwrap().remove("namespace");
+                }
+                _ => unreachable!(),
+            }
+            connection
+                .execute(
+                    "UPDATE extensions SET payload = ?1 WHERE extension_id = ?2",
+                    rusqlite::params![value.to_string(), original.id.as_bytes().as_slice()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        assert_eq!(
+            reader
+                .extensions_for_file(
+                    selected,
+                    None,
+                    GenerationReadLimit::new(1).unwrap(),
+                    &context
+                )
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt,
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn indexed_extension_file_pages_reject_cardinality_above_sealed_total() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = indexed_fixture_snapshot();
+    let reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let mut extra = expected.document().extensions[0].clone();
+    extra.id = FactId::from_bytes([201; 20]);
+    let file = extra.evidence.source.as_ref().unwrap().span().file();
+    let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+    connection.execute(
+        "INSERT INTO extensions(extension_id, repository_id, generation_id, provenance_id, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![extra.id.as_bytes().as_slice(), extra.repository.as_bytes().as_slice(), extra.generation.as_bytes().as_slice(), extra.provenance.as_bytes().as_slice(), serde_json::to_string(&extra).unwrap()],
+    ).unwrap();
+    drop(connection);
+    for after in [None, Some(FactId::from_bytes([255; 20]))] {
+        assert_eq!(
+            reader
+                .extensions_for_file(file, after, GenerationReadLimit::new(1).unwrap(), &context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Corrupt
+        );
+    }
+}
+
+#[test]
+fn indexed_extension_file_pages_charge_budgets_and_observe_cancellation() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = indexed_fixture_snapshot();
+    let file = expected.document().extensions[0]
+        .evidence
+        .source
+        .as_ref()
+        .unwrap()
+        .span()
+        .file();
+    let path_reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let ephemeral_reader = EphemeralOracleWriter::create()
+        .unwrap()
+        .seal_unverified_for_test(expected, &context)
+        .unwrap();
+    let cancelled = Cancellation::new();
+    assert!(cancelled.cancel(CancellationReason::ClientRequest));
+    let cancelled_context = default_context(&cancelled);
+    let limit = GenerationReadLimit::new(1).unwrap();
+    for reader in [
+        &path_reader as &dyn GenerationReader<Error = CatalogError>,
+        &ephemeral_reader,
+    ] {
+        assert_eq!(
+            reader
+                .extensions_for_file(file, None, limit, &cancelled_context)
+                .unwrap_err()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+        for (budget, resource) in [
+            (
+                GenerationBudget::new(1, 100, 1000).unwrap(),
+                GenerationResource::Rows,
+            ),
+            (
+                GenerationBudget::new(100, 1, 1000).unwrap(),
+                GenerationResource::SourceReferences,
+            ),
+            (
+                GenerationBudget::new(100, 100, 1).unwrap(),
+                GenerationResource::TextBytes,
+            ),
+        ] {
+            let constrained = GenerationContext::new(&cancellation, budget);
+            assert!(
+                matches!(reader.extensions_for_file(file, None, limit, &constrained).unwrap_err().kind(), CatalogErrorKind::BudgetExceeded { resource: actual, .. } if actual == resource)
+            );
+        }
+    }
+}
+
+#[test]
+fn indexed_extension_file_pages_charge_encoded_bytes_before_malformed_decode() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = indexed_fixture_snapshot();
+    let reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let original = &expected.document().extensions[0];
+    let file = original.evidence.source.as_ref().unwrap().span().file();
+    let mut value = serde_json::to_value(original).unwrap();
+    value.as_object_mut().unwrap().remove("namespace");
+    value["payload"] = serde_json::json!("x".repeat(100_000));
+    let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+    connection
+        .execute(
+            "UPDATE extensions SET payload = ?1 WHERE extension_id = ?2",
+            rusqlite::params![value.to_string(), original.id.as_bytes().as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    let constrained =
+        GenerationContext::new(&cancellation, GenerationBudget::new(100, 100, 512).unwrap());
+    assert!(matches!(
+        reader
+            .extensions_for_file(
+                file,
+                None,
+                GenerationReadLimit::new(1).unwrap(),
+                &constrained
+            )
+            .unwrap_err()
+            .kind(),
+        CatalogErrorKind::BudgetExceeded {
+            resource: GenerationResource::EncodedTextBytes,
+            ..
+        }
+    ));
+    assert_eq!(
+        reader
+            .extensions_for_file(file, None, GenerationReadLimit::new(1).unwrap(), &context)
+            .unwrap_err()
+            .kind(),
+        CatalogErrorKind::Corrupt
+    );
+}
+
+#[test]
+fn indexed_extension_file_index_rejects_malformed_json_writes_atomically() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = indexed_fixture_snapshot();
+    let reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let record = &expected.document().extensions[0];
+    let connection = Connection::open(directory.path().join(ORACLE_FILENAME)).unwrap();
+    let error = connection
+        .execute(
+            "UPDATE extensions SET payload = ?1 WHERE extension_id = ?2",
+            rusqlite::params!["{".repeat(4096), record.id.as_bytes().as_slice()],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("malformed JSON"), "{error}");
+    drop(connection);
+    let page = reader
+        .extensions_for_file(
+            record.evidence.source.as_ref().unwrap().span().file(),
+            None,
+            GenerationReadLimit::new(1).unwrap(),
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.items(), &expected.document().extensions[..1]);
+    assert_eq!(reader.read(&context).unwrap(), expected);
+}
+
+#[test]
+fn indexed_extension_file_pages_round_trip_on_disk_and_in_memory() {
+    let directory = TempDir::new().unwrap();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let expected = indexed_fixture_snapshot();
+    let source_file = expected.document().extensions[0]
+        .evidence
+        .source
+        .as_ref()
+        .unwrap()
+        .span()
+        .file();
+    let path_reader = OracleWriter::create_in(directory.path())
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let ephemeral_reader = EphemeralOracleWriter::create()
+        .unwrap()
+        .seal_unverified_for_test(expected.clone(), &context)
+        .unwrap();
+    let limit = GenerationReadLimit::new(1).unwrap();
+    for reader in [
+        &path_reader as &dyn GenerationReader<Error = CatalogError>,
+        &ephemeral_reader,
+    ] {
+        let first = reader
+            .extensions_for_file(source_file, None, limit, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.total_available(), 2);
+        assert_eq!(first.items(), &expected.document().extensions[..1]);
+        assert_eq!(first.completeness(), ReadPageCompleteness::Truncated);
+        let second = reader
+            .extensions_for_file(source_file, first.next_cursor(), limit, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.total_available(), 2);
+        assert_eq!(second.items(), &expected.document().extensions[1..]);
+        assert_eq!(second.completeness(), ReadPageCompleteness::Complete);
+    }
+}
+
 #[test]
 fn extension_pages_enforce_encoded_text_before_decoding_malformed_payloads() {
     let directory = TempDir::new().unwrap();
@@ -728,7 +1194,7 @@ fn extension_pages_enforce_encoded_text_before_decoding_malformed_payloads() {
         .execute(
             "UPDATE extensions SET payload = ?1 WHERE extension_id = ?2",
             rusqlite::params![
-                "{".repeat(4096),
+                format!("\"{}\"", "{".repeat(4094)),
                 expected.document().extensions[0].id.as_bytes().as_slice()
             ],
         )
@@ -1591,7 +2057,7 @@ fn schema_identity_is_versioned_and_source_body_columns_are_absent() {
     let catalog = catalog_schema_compatibility();
     let oracle = oracle_schema_compatibility();
     assert_eq!(catalog.schema_version(), 2);
-    assert_eq!(oracle.schema_version(), 8);
+    assert_eq!(oracle.schema_version(), 9);
     assert_ne!(catalog.application_id(), oracle.application_id());
     assert_ne!(catalog.checksum(), oracle.checksum());
     assert_eq!(GENERATION_CONTRACT_VERSION.major(), 1);

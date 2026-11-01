@@ -453,12 +453,85 @@ pub(crate) fn extensions(
         context,
         |row| Ok(FactId::from_bytes(fixed_blob(row, 0)?)),
     )?;
+    let records = read_extension_records(connection, metadata, ids, &mut state, context, None)?;
+    ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+pub(crate) const EXTENSIONS_FOR_FILE_COUNT_SQL: &str = "SELECT count(*) FROM extensions INDEXED BY extensions_by_source_file WHERE json_extract(payload, '$.evidence.source.span.file') = ?1";
+pub(crate) const EXTENSIONS_FOR_FILE_FIRST_SQL: &str = "SELECT extension_id FROM extensions INDEXED BY extensions_by_source_file WHERE json_extract(payload, '$.evidence.source.span.file') = ?1 ORDER BY extension_id LIMIT ?2";
+pub(crate) const EXTENSIONS_FOR_FILE_NEXT_SQL: &str = "SELECT extension_id FROM extensions INDEXED BY extensions_by_source_file WHERE json_extract(payload, '$.evidence.source.span.file') = ?1 AND extension_id > ?2 ORDER BY extension_id LIMIT ?3";
+
+pub(crate) fn extensions_for_file(
+    connection: &Connection,
+    metadata: GenerationMetadata,
+    maximum_total: u64,
+    file: FileId,
+    after: Option<FactId>,
+    limit: GenerationReadLimit,
+    context: &GenerationContext<'_>,
+) -> Result<ReadPage<ExtensionEnvelope>, CatalogError> {
+    let mut state = IndexedReadState::new(context)?;
+    let selected_file = read_file(connection, metadata, file, context, &mut state)?;
+    let file_key = Value::Text(file.to_string());
+    let total = query_count(
+        connection,
+        EXTENSIONS_FOR_FILE_COUNT_SQL,
+        std::slice::from_ref(&file_key),
+        &mut state,
+        context,
+    )?;
+    require_total(total, maximum_total)?;
+    if selected_file.is_none() && total != 0 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let ids = if let Some(after) = after {
+        query_fact_ids(
+            connection,
+            EXTENSIONS_FOR_FILE_NEXT_SQL,
+            &[
+                file_key,
+                Value::Blob(after.as_bytes().to_vec()),
+                Value::Integer(limit_plus_one(limit)),
+            ],
+            &mut state,
+            context,
+        )?
+    } else {
+        query_fact_ids(
+            connection,
+            EXTENSIONS_FOR_FILE_FIRST_SQL,
+            &[file_key, Value::Integer(limit_plus_one(limit))],
+            &mut state,
+            context,
+        )?
+    };
+    let records = read_extension_records(
+        connection,
+        metadata,
+        ids,
+        &mut state,
+        context,
+        selected_file.as_ref(),
+    )?;
+    ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+fn read_extension_records(
+    connection: &Connection,
+    metadata: GenerationMetadata,
+    ids: Vec<FactId>,
+    state: &mut IndexedReadState,
+    context: &GenerationContext<'_>,
+    selected_file: Option<&FileRecord>,
+) -> Result<Vec<ExtensionEnvelope>, CatalogError> {
     let mut records = Vec::new();
     records
         .try_reserve_exact(ids.len())
         .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
     let mut encoded_bytes = 0_u64;
-    let mut sources = BTreeSet::new();
+    let mut sources = state.sources.values().cloned().collect::<BTreeSet<_>>();
     let mut statement = connection
         .prepare(
             "SELECT extension_id, repository_id, generation_id, provenance_id, payload
@@ -513,6 +586,19 @@ pub(crate) fn extensions(
         state.observe_text(&record.namespace, context)?;
         state.observe_text(&record.version, context)?;
         state.observe_text(&record.payload, context)?;
+        if let Some(file) = selected_file {
+            let source = record
+                .evidence
+                .source
+                .as_ref()
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+            if source.span().file() != file.id
+                || source.content_hash() != file.content_hash
+                || source.span().end_byte() > file.byte_length
+            {
+                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            }
+        }
         if let Some(source) = &record.evidence.source {
             require_owner(metadata, source.repository(), source.generation())?;
             if sources.insert(source.clone()) {
@@ -536,8 +622,7 @@ pub(crate) fn extensions(
         records.push(record);
     }
     context.check().map_err(CatalogError::control)?;
-    ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
-        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+    Ok(records)
 }
 
 fn fixed_blob<const N: usize>(row: &Row<'_>, column: usize) -> Result<[u8; N], CatalogError> {
