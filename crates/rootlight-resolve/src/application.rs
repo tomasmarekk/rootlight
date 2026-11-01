@@ -7,13 +7,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rootlight_cancel::Cancellation;
-use rootlight_ids::{FactId, SymbolId, content_hash};
+use rootlight_ids::{ContentHash, FactId, SymbolId, content_hash};
 use rootlight_ir::{
     AnalysisTier, BuildContextIdentity, Confidence, ContainerRef, EntityFlag, EntityKind,
     EvidenceKind, ExtensionSupport, FactEvidence, FactRef, GenerationNeutralFactIdIndex,
     IrDocumentValidationError, IrLimits, NormalizedIrDocument, NormalizedRebindError,
     OccurrenceRecord, OccurrenceRole, OccurrenceTarget, ProducerIdentity, ProducerKind,
-    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef,
+    ProvenanceRecord, RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan,
     canonicalize_ir_document, derive_occurrence_record_id, derive_provenance_record_id,
     derive_relation_record_id, validate_ir_document,
 };
@@ -160,8 +160,9 @@ impl ResolutionEngine {
     ///
     /// Sites requiring fewer same-name candidate inspections are selected
     /// first. Reusable contexts are selected together by their amortized work,
-    /// with occurrence identity as the deterministic tie-breaker. The
-    /// returned estimate always describes the complete pass, so callers can
+    /// with physical source and local scoring evidence as a generation-independent
+    /// tie-breaker. Indistinguishable equal-cost contexts are admitted together.
+    /// The returned estimate always describes the complete pass, so callers can
     /// explicitly mark facts that remain bounded.
     ///
     /// # Errors
@@ -304,8 +305,8 @@ impl ResolutionEngine {
         let mut memo = ResolutionMemo::new(&document.occurrences, &lookup, cancellation)?;
         let mut required = work.consumed();
         let mut sites = Vec::new();
-        let mut repeated_groups = BTreeMap::<ResolutionContextKey, (usize, Vec<FactId>)>::new();
-        for occurrence in &document.occurrences {
+        let mut repeated_groups = BTreeMap::<ResolutionContextKey, (usize, Vec<usize>)>::new();
+        for (index, occurrence) in document.occurrences.iter().enumerate() {
             cancellation.check()?;
             let Some(site_work) = lookup.occurrence_work(occurrence)? else {
                 continue;
@@ -319,12 +320,12 @@ impl ResolutionEngine {
                         .0
                         .checked_add(1)
                         .ok_or(ResolutionError::CountOverflow)?;
-                    group.1.push(occurrence.id);
+                    group.1.push(index);
                 } else {
-                    repeated_groups.insert(key, (site_work, vec![occurrence.id]));
+                    repeated_groups.insert(key, (site_work, vec![index]));
                 }
             } else {
-                sites.push((site_work, occurrence.id));
+                sites.push((site_work, index));
             }
         }
         let mut estimate = crate::ResolutionWorkEstimate {
@@ -340,21 +341,53 @@ impl ResolutionEngine {
                 .collect::<Vec<_>>();
             groups.extend(repeated_groups.into_values());
             for (_, occurrences) in &mut groups {
-                occurrences.sort_unstable();
+                occurrences.sort_unstable_by_key(|index| {
+                    bounded_occurrence_order(&document.occurrences[*index])
+                });
             }
+            // Generation-bound fact IDs reshuffle equally costly contexts on rebind.
+            // Compare every physical site so the bounded cutoff preserves source selection.
             groups.sort_unstable_by(|(left_cost, left), (right_cost, right)| {
                 ((*left_cost as u128) * (right.len() as u128))
                     .cmp(&((*right_cost as u128) * (left.len() as u128)))
-                    .then_with(|| left[0].cmp(&right[0]))
+                    .then_with(|| bounded_group_order(left, right, &document.occurrences, &lookup))
             });
             let mut remaining = work.remaining();
             let mut selected = BTreeSet::new();
-            for (group_work, occurrences) in groups {
-                if group_work > remaining {
-                    continue;
+            let mut first = 0;
+            while first < groups.len() {
+                cancellation.check()?;
+                let mut end = first + 1;
+                let mut cohort_work = groups[first].0;
+                while end < groups.len()
+                    && groups[end].0 == groups[first].0
+                    && bounded_group_order(
+                        &groups[first].1,
+                        &groups[end].1,
+                        &document.occurrences,
+                        &lookup,
+                    )
+                    .is_eq()
+                {
+                    cancellation.check()?;
+                    cohort_work = cohort_work
+                        .checked_add(groups[end].0)
+                        .ok_or(ResolutionError::CountOverflow)?;
+                    end += 1;
                 }
-                remaining -= group_work;
-                selected.extend(occurrences);
+                // No generation-independent choice exists inside this evidence tie.
+                if cohort_work <= remaining {
+                    remaining -= cohort_work;
+                    for (_, occurrences) in &groups[first..end] {
+                        cancellation.check()?;
+                        selected.extend(
+                            occurrences
+                                .iter()
+                                .map(|index| document.occurrences[*index].id),
+                        );
+                    }
+                }
+                first = end;
             }
             Some(selected)
         } else {
@@ -699,6 +732,79 @@ impl ResolutionEngine {
             .map_err(ResolutionError::InvalidDocument)?;
         Ok(())
     }
+}
+
+fn bounded_occurrence_order(
+    occurrence: &OccurrenceRecord,
+) -> (SourceSpan, ContentHash, OccurrenceRole, ContentHash, &str) {
+    (
+        occurrence.source.span(),
+        occurrence.source.content_hash(),
+        occurrence.role,
+        occurrence.syntactic_text_hash,
+        &occurrence.syntax_kind,
+    )
+}
+
+type BoundedEnclosingOrder<'a> = (
+    Option<(SourceSpan, ContentHash)>,
+    EntityKind,
+    &'a str,
+    &'a str,
+    &'a str,
+);
+type BoundedProvenanceOrder<'a> = (&'a str, u8, ContentHash);
+
+fn bounded_context_order<'a>(
+    occurrence: &OccurrenceRecord,
+    lookup: &CandidateIndex<'a>,
+) -> (
+    Option<BoundedEnclosingOrder<'a>>,
+    Option<BoundedProvenanceOrder<'a>>,
+) {
+    let enclosing = occurrence
+        .enclosing
+        .and_then(|id| lookup.entities.get(&id).copied())
+        .map(|entity| {
+            (
+                entity
+                    .evidence
+                    .source
+                    .as_ref()
+                    .map(|source| (source.span(), source.content_hash())),
+                entity.kind,
+                entity.language.as_str(),
+                entity.canonical_name.as_str(),
+                entity.qualified_name.as_str(),
+            )
+        });
+    let provenance = lookup.provenance.get(&occurrence.provenance).map(|record| {
+        (
+            record.language.as_str(),
+            tier_rank(record.tier),
+            record.build_context.digest(),
+        )
+    });
+    (enclosing, provenance)
+}
+
+fn bounded_group_order(
+    left: &[usize],
+    right: &[usize],
+    occurrences: &[OccurrenceRecord],
+    lookup: &CandidateIndex<'_>,
+) -> std::cmp::Ordering {
+    left.iter()
+        .map(|index| bounded_occurrence_order(&occurrences[*index]))
+        .cmp(
+            right
+                .iter()
+                .map(|index| bounded_occurrence_order(&occurrences[*index])),
+        )
+        .then_with(|| {
+            bounded_context_order(&occurrences[left[0]], lookup)
+                .cmp(&bounded_context_order(&occurrences[right[0]], lookup))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

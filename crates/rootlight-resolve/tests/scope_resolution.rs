@@ -2237,6 +2237,256 @@ fn ordinary_repeated_contexts_preserve_bounded_decisions_and_applied_identity() 
 }
 
 #[test]
+fn bounded_repeated_contexts_keep_physical_selection_across_generations() {
+    let fixture = bounded_repeated_fixture();
+    let limits = IrLimits::default();
+    let support = ExtensionSupport::default();
+    let chunk =
+        rootlight_ir::CanonicalNormalizedFileChunk::new(&fixture.document, &limits, &support)
+            .unwrap();
+    let cancellation = Cancellation::new();
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let selected_spans = |document: &NormalizedIrDocument| {
+        document
+            .occurrences
+            .iter()
+            .filter(|occurrence| !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. }))
+            .map(|occurrence| {
+                let span = occurrence.source.span();
+                (span.start_byte(), span.end_byte())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let mut expected = None;
+    for generation in 3..19u8 {
+        let rebound = chunk
+            .rebind(
+                GenerationId::from_bytes([generation; 20]),
+                &limits,
+                &support,
+            )
+            .unwrap();
+        for reverse in [false, true] {
+            let mut input = rebound.clone();
+            if reverse {
+                input.entities.reverse();
+                input.occurrences.reverse();
+                input.provenance.reverse();
+            }
+            for (budget, selected) in [(10, 0), (11, 6), (33, 18)] {
+                let engine =
+                    ResolutionEngine::new(ResolutionLimits::with_work_limit(8, budget).unwrap());
+                let (applied, estimate) = engine
+                    .apply_document_bounded(input.clone(), context, &cancellation)
+                    .unwrap();
+                assert_eq!(estimate.required, 33);
+                assert_eq!(estimate.limit, budget);
+                let spans = selected_spans(&applied);
+                assert_eq!(spans.len(), selected);
+                if budget == 11 {
+                    if let Some(expected) = &expected {
+                        assert_eq!(
+                            &spans, expected,
+                            "generation {generation}, reverse {reverse}"
+                        );
+                    } else {
+                        expected = Some(spans);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bounded_context_collisions_keep_semantic_selection_across_generations() {
+    for mode in ["enclosing", "provenance", "indistinguishable"] {
+        let mut fixture = bounded_repeated_fixture();
+        if mode != "enclosing" {
+            for group in 0..3u8 {
+                let mut provenance = fixture.document.provenance[0].clone();
+                provenance.id = FactId::from_bytes([110 + group; 20]);
+                provenance.rule = Some(format!("fixture-context-{group}"));
+                if mode == "provenance" {
+                    provenance.build_context = BuildContextIdentity::new(content_hash(&[group]));
+                }
+                fixture.document.provenance.push(provenance);
+            }
+        }
+        for (index, occurrence) in fixture.document.occurrences.iter_mut().enumerate() {
+            let start = 16 + u64::try_from(index % 6).unwrap();
+            occurrence.source = source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                start,
+                start + 1,
+            );
+            occurrence.evidence.source = Some(occurrence.source.clone());
+            if mode != "enclosing" {
+                occurrence.enclosing = None;
+                occurrence.provenance =
+                    FactId::from_bytes([110 + u8::try_from(index / 6).unwrap(); 20]);
+            }
+        }
+        fixture.validate();
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk =
+            rootlight_ir::CanonicalNormalizedFileChunk::new(&fixture.document, &limits, &support)
+                .unwrap();
+        let context = ResolverFactContext::new(fixture.content_hash);
+        let mut expected = None;
+        for generation in 3..11u8 {
+            for reverse in [false, true] {
+                let mut input = chunk
+                    .rebind(
+                        GenerationId::from_bytes([generation; 20]),
+                        &limits,
+                        &support,
+                    )
+                    .unwrap();
+                if reverse {
+                    input.occurrences.reverse();
+                    input.entities.reverse();
+                    input.provenance.reverse();
+                }
+                for budget in [11, 33] {
+                    let (applied, estimate) = ResolutionEngine::new(
+                        ResolutionLimits::with_work_limit(8, budget).unwrap(),
+                    )
+                    .apply_document_bounded(input.clone(), context, &Cancellation::new())
+                    .unwrap();
+                    assert_eq!(estimate.required, 33);
+                    let selected = applied
+                        .occurrences
+                        .iter()
+                        .filter(|occurrence| {
+                            !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        selected.len(),
+                        if budget == 33 {
+                            // Equal finalized facts at one physical site canonicalize once.
+                            if mode == "indistinguishable" { 6 } else { 18 }
+                        } else if mode == "indistinguishable" {
+                            0
+                        } else {
+                            6
+                        },
+                        "{mode}, generation {generation}, reverse {reverse}, budget {budget}"
+                    );
+                    if budget == 11 && mode != "indistinguishable" {
+                        let keys = selected
+                            .iter()
+                            .map(|occurrence| {
+                                let name = if let Some(enclosing) = occurrence.enclosing {
+                                    applied
+                                        .entities
+                                        .iter()
+                                        .find(|entity| entity.id == enclosing)
+                                        .unwrap()
+                                        .canonical_name
+                                        .clone()
+                                } else {
+                                    let provenance = applied
+                                        .provenance
+                                        .iter()
+                                        .find(|record| record.id == occurrence.provenance)
+                                        .unwrap();
+                                    format!("{:?}", provenance.build_context.digest())
+                                };
+                                let span = occurrence.source.span();
+                                (name, span.start_byte(), span.end_byte())
+                            })
+                            .collect::<std::collections::BTreeSet<_>>();
+                        if let Some(expected) = &expected {
+                            assert_eq!(&keys, expected, "{mode}, generation {generation}");
+                        } else {
+                            expected = Some(keys);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bounded_repeated_contexts_prioritize_amortized_work_before_source_order() {
+    let mut fixture = Fixture::new();
+    fixture.add_entity(
+        10,
+        "repeated",
+        fixture.primary_file,
+        EntityKind::Module,
+        None,
+    );
+    fixture.add_entity(11, "single", fixture.primary_file, EntityKind::Module, None);
+    for site in 0..6u8 {
+        fixture.add_occurrence(
+            20 + site,
+            "repeated",
+            fixture.primary_file,
+            OccurrenceRole::ImportUse,
+            None,
+        );
+        let occurrence = fixture.document.occurrences.last_mut().unwrap();
+        let start = 32 + u64::from(site);
+        occurrence.source = source_ref(
+            fixture.document.repository,
+            fixture.document.generation,
+            fixture.primary_file,
+            fixture.content_hash,
+            start,
+            start + 1,
+        );
+        occurrence.evidence.source = Some(occurrence.source.clone());
+    }
+    fixture.add_occurrence(
+        30,
+        "single",
+        fixture.primary_file,
+        OccurrenceRole::ImportUse,
+        None,
+    );
+    fixture.validate();
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let cancellation = Cancellation::new();
+    for (budget, repeated, single) in [(1, 0, 0), (6, 0, 1), (7, 6, 0), (9, 6, 1)] {
+        for reverse in [false, true] {
+            let mut document = fixture.document.clone();
+            if reverse {
+                document.entities.reverse();
+                document.occurrences.reverse();
+            }
+            let (applied, estimate) =
+                ResolutionEngine::new(ResolutionLimits::with_work_limit(8, budget).unwrap())
+                    .apply_document_bounded(document, context, &cancellation)
+                    .unwrap();
+            assert_eq!(estimate.required, 9);
+            assert_eq!(estimate.limit, budget);
+            for (spelling, expected) in [("repeated", repeated), ("single", single)] {
+                assert_eq!(
+                    applied
+                        .occurrences
+                        .iter()
+                        .filter(|occurrence| {
+                            occurrence.syntactic_text_hash == content_hash(spelling.as_bytes())
+                                && !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
+                        })
+                        .count(),
+                    expected,
+                    "budget {budget}, reverse {reverse}, spelling {spelling}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn ordinary_repeated_contexts_keep_all_scoring_inputs_distinct() {
     let mut fixture = ordinary_repeated_fixture("rust");
     let second_file = fixture.add_file(2, "src/other.rs");
@@ -3734,6 +3984,49 @@ struct Fixture {
     primary_file: FileId,
     provenance: FactId,
     content_hash: ContentHash,
+}
+
+fn bounded_repeated_fixture() -> Fixture {
+    let mut fixture = ordinary_repeated_fixture("python");
+    fixture.document.occurrences.clear();
+    for (index, entity) in fixture.document.entities.iter_mut().enumerate() {
+        entity.qualified_name = format!("fixture::{index}::shared");
+    }
+    for group in 0..3u8 {
+        let scope = fixture.add_entity(
+            50 + group,
+            &format!("scope{group}"),
+            fixture.primary_file,
+            EntityKind::Function,
+            None,
+        );
+        for site in 0..6u8 {
+            fixture.add_occurrence(
+                80 + group * 6 + site,
+                "shared",
+                fixture.primary_file,
+                OccurrenceRole::Reference,
+                Some(scope),
+            );
+            let occurrence = fixture.document.occurrences.last_mut().unwrap();
+            let start = 16 + u64::from(group) * 16 + u64::from(site);
+            occurrence.source = source_ref(
+                fixture.document.repository,
+                fixture.document.generation,
+                fixture.primary_file,
+                fixture.content_hash,
+                start,
+                start + 1,
+            );
+            occurrence.evidence.source = Some(occurrence.source.clone());
+            occurrence.syntax_kind = "python.identifier.reference".to_owned();
+        }
+    }
+    for entity in &mut fixture.document.entities[5..] {
+        entity.language = "python".to_owned();
+    }
+    fixture.validate();
+    fixture
 }
 
 fn ordinary_repeated_fixture(language: &str) -> Fixture {
