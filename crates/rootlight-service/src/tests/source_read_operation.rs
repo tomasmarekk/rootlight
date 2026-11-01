@@ -147,6 +147,242 @@ fn reserved(service: &FirstSliceService) -> u64 {
         .restored_reservation_bytes
 }
 
+fn locality_fixture(file_count: usize, medium_bytes: usize) -> Fixture {
+    let storage = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let paths =
+        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let mut service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let repository = derive_repository(b"packed-read-locality").id();
+    service
+        .restore_repository_registration(
+            repository_path_hash(&fs::canonicalize(root.path()).unwrap()).unwrap(),
+            repository,
+        )
+        .unwrap();
+    let repository_root = RepositoryRoot::open(repository, root.path()).unwrap();
+    let mut ordered: Vec<_> = (0..file_count)
+        .map(|ordinal| {
+            let path = format!("source-{ordinal:04}.rs");
+            let relative = RelativePath::parse(Path::new(&path)).unwrap();
+            (repository_root.file_id(&relative), path)
+        })
+        .collect();
+    ordered.sort_unstable_by_key(|(file, _)| *file);
+    for (ordinal, (_, path)) in ordered.iter().enumerate() {
+        let mut bytes = format!("// packed member {ordinal}\n").into_bytes();
+        if ordinal == file_count / 2 {
+            bytes.extend_from_slice(b"// ");
+            bytes.resize(medium_bytes, b'm');
+        }
+        fs::write(root.path().join(path), bytes).unwrap();
+    }
+    let receipt = service.index_repository(root.path(), &deadline()).unwrap();
+    assert_eq!(receipt.repository, repository);
+    assert_eq!(receipt.indexed_files, u64::try_from(file_count).unwrap());
+    drop(service);
+    let service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let lease = service
+        .generation_lease(receipt.generation, &deadline())
+        .unwrap();
+    let mut files: Vec<_> = lease.generation().document().files.iter().collect();
+    files.sort_unstable_by_key(|file| file.id);
+    let references = files
+        .iter()
+        .zip(&ordered)
+        .map(|(file, (expected, _))| {
+            assert_eq!(file.id, *expected);
+            file.evidence.source.clone().unwrap()
+        })
+        .collect();
+    drop(lease);
+    assert!(
+        service
+            .source_snapshots
+            .snapshots(receipt.generation)
+            .unwrap()
+            .is_empty()
+    );
+    Fixture {
+        _storage: storage,
+        root,
+        paths,
+        service,
+        receipt,
+        references,
+    }
+}
+
+#[test]
+fn cold_writer_packs_bound_unrelated_bytes_and_keep_one_slot_across_small_medium_small_reads() {
+    for medium_bytes in [1024 * 1024, 1024 * 1024 + 1] {
+        assert_cold_writer_pack_locality(257, medium_bytes);
+    }
+}
+
+#[test]
+fn small_generations_keep_packed_storage_above_the_write_target() {
+    assert_cold_writer_pack_locality(16, 1024 * 1024 + 1);
+}
+
+fn assert_cold_writer_pack_locality(file_count: usize, medium_bytes: usize) {
+    let fixture = locality_fixture(file_count, medium_bytes);
+    let cancellation = deadline();
+    let lease = fixture
+        .service
+        .generation_lease(fixture.receipt.generation, &cancellation)
+        .unwrap();
+    let mut files: Vec<_> = lease.generation().document().files.iter().collect();
+    files.sort_unstable_by_key(|file| file.id);
+    let midpoint = file_count / 2;
+    let expected_pack_bytes = [
+        files[..midpoint]
+            .iter()
+            .map(|file| file.byte_length)
+            .sum::<u64>(),
+        files[midpoint].byte_length,
+        files[midpoint + 1..]
+            .iter()
+            .map(|file| file.byte_length)
+            .sum::<u64>(),
+    ];
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(generation_path(&fixture).join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["source_storage"]["version"], 2);
+    assert_eq!(manifest["source_storage"]["packs"], 3);
+    let before = reserved(&fixture.service);
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        operation.owner.as_ref().unwrap().reader.cached_pack_bytes(),
+        None
+    );
+    for (read, (ordinal, pack)) in [(0, 0), (midpoint, 1), (0, 0), (file_count - 1, 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let selected = part(&fixture.references[ordinal], 0, 8);
+        let original = fs::read(fixture.root.path().join(&files[ordinal].path)).unwrap();
+        operation
+            .read(
+                vec![selected.clone()],
+                options(),
+                FirstSliceBudget::new(),
+                |actual| {
+                    let chunk = &actual.data.chunks[0];
+                    assert_eq!(chunk.bytes, original[..8]);
+                    assert_eq!(chunk.reference, selected);
+                    assert_eq!(chunk.path, files[ordinal].path);
+                    assert_eq!(chunk.content_hash, files[ordinal].content_hash);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let reader = &operation.owner.as_ref().unwrap().reader;
+        assert_eq!(reader.counters(), (1, u64::try_from(read + 1).unwrap(), 0));
+        assert_eq!(
+            reader.cached_pack_bytes(),
+            Some(usize::try_from(expected_pack_bytes[pack]).unwrap())
+        );
+        if pack != 1 {
+            assert!(expected_pack_bytes[pack] < files[midpoint].byte_length);
+        }
+    }
+    drop(operation);
+    assert_eq!(reserved(&fixture.service), before);
+}
+
+#[test]
+fn another_member_corruption_in_a_new_writer_pack_fails_before_callback() {
+    let fixture = locality_fixture(257, 1024 * 1024 + 1);
+    let selected = part(&fixture.references[0], 0, 8);
+    let pack = generation_path(&fixture).join("sources/pack-00000000.bin");
+    let mut bytes = fs::read(&pack).unwrap();
+    assert!(u64::try_from(bytes.len()).unwrap() > fixture.references[0].span().end_byte());
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(pack, bytes).unwrap();
+    let cancellation = deadline();
+    let before = reserved(&fixture.service);
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        operation
+            .read(vec![selected], options(), FirstSliceBudget::new(), |_| {
+                panic!("another member must be verified before the selected response")
+            })
+            .unwrap_err(),
+        FirstSliceError::CatalogCorrupt
+    );
+    assert!(operation.owner.is_none());
+    assert_eq!(reserved(&fixture.service), before);
+}
+
+#[test]
+fn cold_reopen_reads_historical_multi_member_packs_above_the_new_write_target() {
+    let Fixture {
+        _storage,
+        root,
+        paths,
+        service,
+        receipt,
+        references,
+    } = locality_fixture(257, 1024 * 1024 + 1);
+    drop(service);
+    durable::read_operation::coalesce_legacy_source_pack_for_test(paths.state_dir(), &receipt);
+    let service = FirstSliceService::new_durable(4, paths.state_dir(), &deadline()).unwrap();
+    let cancellation = deadline();
+    let lease = service
+        .generation_lease(receipt.generation, &cancellation)
+        .unwrap();
+    let payload_bytes: u64 = lease
+        .generation()
+        .document()
+        .files
+        .iter()
+        .map(|file| file.byte_length)
+        .sum();
+    let mut operation = service
+        .source_read_operation(receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    for ordinal in [0, 128, 256] {
+        let selected = part(&references[ordinal], 0, 8);
+        let file = lease
+            .generation()
+            .find_file(selected.span().file())
+            .unwrap();
+        let original = fs::read(root.path().join(&file.path)).unwrap();
+        operation
+            .read(
+                vec![selected.clone()],
+                options(),
+                FirstSliceBudget::new(),
+                |actual| {
+                    let chunk = &actual.data.chunks[0];
+                    assert_eq!(chunk.bytes, original[..8]);
+                    assert_eq!(chunk.reference, selected);
+                    assert_eq!(chunk.content_hash, file.content_hash);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let reader = &operation.owner.as_ref().unwrap().reader;
+        assert_eq!(reader.counters(), (1, 1, 0));
+        assert_eq!(
+            reader.cached_pack_bytes(),
+            Some(usize::try_from(payload_bytes).unwrap())
+        );
+    }
+}
+
 #[test]
 fn successive_source_accounting_sized_reads_reuse_one_index_and_pack_after_shedding() {
     let fixture = fixture();

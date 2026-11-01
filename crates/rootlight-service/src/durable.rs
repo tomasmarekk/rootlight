@@ -121,11 +121,13 @@ const MAX_SOURCE_FILE_CATALOG_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
 const MAX_LOGICAL_SNAPSHOT_BYTES: u64 = 4 * 1024;
 const MAX_SOURCE_POINTER_BYTES: u64 = 256;
 const MAX_SOURCE_PACK_INDEX_BYTES: u64 = MAX_INCREMENTAL_STATE_BYTES;
-// Small sources amortize durability barriers; a larger supported source owns
-// its entire pack without widening the normal aggregation target.
+// Preserve historical stored layouts and small-generation packing eligibility.
 const SOURCE_PACK_TARGET_BYTES: u64 = 8 * 1024 * 1024;
+// Narrow reads load and verify an entire pack, so new groups bound unrelated
+// payload while larger supported sources retain dedicated packs.
+const SOURCE_PACK_WRITE_TARGET_BYTES: u64 = 1024 * 1024;
 const PACKED_SOURCE_MIN_FILES: usize = 256;
-const SINGLE_PACK_MIN_FILES: usize = 16;
+const SMALL_PACKED_SOURCE_MIN_FILES: usize = 16;
 const STREAMED_SOURCE_PARTITION_FILES: usize = 4_096;
 const RECOVERY_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 const RECOVERY_SERIALIZATION_CHECKPOINT_BYTES: usize = 64 * 1024;
@@ -3799,16 +3801,17 @@ impl DurablePreparedGeneration {
                 return Err(FirstSliceError::CatalogCorrupt);
             }
         }
-        // Below the large-generation threshold, amortize per-source durability
-        // barriers only when a complete rewrite fits one bounded pack.
-        let single_pack = (SINGLE_PACK_MIN_FILES..PACKED_SOURCE_MIN_FILES).contains(&sources.len())
+        // Preserve small-generation packing admission while the writer bounds
+        // each new group independently of the complete rewrite size.
+        let small_packed_generation = (SMALL_PACKED_SOURCE_MIN_FILES..PACKED_SOURCE_MIN_FILES)
+            .contains(&sources.len())
             && sources
                 .iter()
                 .try_fold(SOURCE_PACK_TARGET_BYTES, |remaining, source| {
                     remaining.checked_sub(u64::try_from(source.snapshot.content().len()).ok()?)
                 })
                 .is_some();
-        if sources.len() >= PACKED_SOURCE_MIN_FILES || single_pack {
+        if sources.len() >= PACKED_SOURCE_MIN_FILES || small_packed_generation {
             let mut ordered = Vec::new();
             ordered
                 .try_reserve_exact(sources.len())
@@ -3902,7 +3905,7 @@ impl DurablePreparedGeneration {
             .map_err(|_| FirstSliceError::Catalog)?;
         let mut pack = Vec::new();
         pack.try_reserve_exact(
-            usize::try_from(SOURCE_PACK_TARGET_BYTES).map_err(|_| FirstSliceError::Limits)?,
+            usize::try_from(SOURCE_PACK_WRITE_TARGET_BYTES).map_err(|_| FirstSliceError::Limits)?,
         )
         .map_err(|_| FirstSliceError::Retention)?;
         Ok(DurablePackedSourceWriter {
@@ -4496,10 +4499,10 @@ impl DurablePackedSourceWriter<'_> {
             .last()
             .is_some_and(|entry| usize::try_from(entry.pack).ok() == Some(self.pack_sizes.len()));
         if pending_pack
-            && (bytes > SOURCE_PACK_TARGET_BYTES
+            && (bytes > SOURCE_PACK_WRITE_TARGET_BYTES
                 || pack_len
                     .checked_add(bytes)
-                    .is_none_or(|total| total > SOURCE_PACK_TARGET_BYTES))
+                    .is_none_or(|total| total > SOURCE_PACK_WRITE_TARGET_BYTES))
         {
             write_source_pack(&self.sources_directory, &self.pack, &mut self.pack_sizes)?;
             self.pack.clear();
@@ -4507,7 +4510,7 @@ impl DurablePackedSourceWriter<'_> {
         let offset = u64::try_from(self.pack.len()).map_err(|_| FirstSliceError::Limits)?;
         let pack_ordinal =
             u32::try_from(self.pack_sizes.len()).map_err(|_| FirstSliceError::Limits)?;
-        if bytes > SOURCE_PACK_TARGET_BYTES {
+        if bytes > SOURCE_PACK_WRITE_TARGET_BYTES {
             write_source_pack(&self.sources_directory, content, &mut self.pack_sizes)?;
         } else {
             self.pack.extend_from_slice(content);

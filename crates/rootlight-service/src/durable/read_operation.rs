@@ -426,6 +426,18 @@ impl PackedReadOperation {
             self.range_reads.get(),
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn cached_pack_bytes(&self) -> Option<usize> {
+        let PersistedSourceLayout::Packed { cached_pack, .. } = &self.reader.layout else {
+            panic!("operation requires packed storage");
+        };
+        cached_pack
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|pack| pack.bytes.len())
+    }
 }
 
 fn collect_exact(
@@ -637,6 +649,56 @@ pub(crate) fn assert_one_slot_for_records(files: &[FileRecord], content: &[Vec<u
     };
     assert_eq!(cached_pack.lock().unwrap().as_ref().unwrap().ordinal, 0);
     assert_eq!(operation.counters(), (0, 4, 0));
+}
+
+#[cfg(test)]
+pub(crate) fn coalesce_legacy_source_pack_for_test(state: &Path, receipt: &FirstSliceIndexReceipt) {
+    let directory = state
+        .join(DURABLE_DIRECTORY)
+        .join(REPOSITORIES_DIRECTORY)
+        .join(receipt.repository.to_string())
+        .join(receipt.generation.to_string());
+    let sources = directory.join(SOURCES_DIRECTORY);
+    let mut manifest: DurableGenerationManifest =
+        serde_json::from_slice(&std::fs::read(directory.join(MANIFEST_FILENAME)).unwrap()).unwrap();
+    let mut index: DurablePackedSourceIndex =
+        rmp_serde::from_slice(&std::fs::read(sources.join(SOURCE_PACK_INDEX_FILENAME)).unwrap())
+            .unwrap();
+    let mut bytes = Vec::new();
+    for ordinal in 0..index.pack_bytes.len() {
+        bytes.extend_from_slice(
+            &std::fs::read(sources.join(source_pack_name(u32::try_from(ordinal).unwrap())))
+                .unwrap(),
+        );
+    }
+    assert_eq!(u64::try_from(bytes.len()).unwrap(), index.payload_bytes);
+    assert!(index.payload_bytes > SOURCE_PACK_WRITE_TARGET_BYTES);
+    assert!(index.payload_bytes <= SOURCE_PACK_TARGET_BYTES);
+    for entry in &mut index.entries {
+        let previous_packs = index.pack_bytes[..usize::try_from(entry.pack).unwrap()]
+            .iter()
+            .sum::<u64>();
+        entry.offset += previous_packs;
+        entry.pack = 0;
+    }
+    for ordinal in 1..index.pack_bytes.len() {
+        std::fs::remove_file(sources.join(source_pack_name(u32::try_from(ordinal).unwrap())))
+            .unwrap();
+    }
+    index.pack_bytes = vec![index.payload_bytes];
+    let encoded = rmp_serde::to_vec_named(&index).unwrap();
+    let storage = manifest.source_storage.as_mut().unwrap();
+    storage.packs = Some(1);
+    storage.index_bytes = Some(u64::try_from(encoded.len()).unwrap());
+    storage.index_digest = Some(content_hash_bytes(&encoded));
+    write_test_recovery_file(&sources, &source_pack_name(0), &bytes).unwrap();
+    write_test_recovery_file(&sources, SOURCE_PACK_INDEX_FILENAME, &encoded).unwrap();
+    write_test_recovery_file(
+        &directory,
+        MANIFEST_FILENAME,
+        &serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
 }
 
 #[cfg(test)]
