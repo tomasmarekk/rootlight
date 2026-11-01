@@ -45,8 +45,9 @@ use rootlight_query::project_source_fallback_document_with_text_limit;
 use rootlight_search::{BuildBudget, EphemeralLexicalIndexBuilder, LexicalIndex};
 use rootlight_storage::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationContext, GenerationContractVersion,
-    GenerationMetadata, GenerationSnapshot, IdentityVerificationError, IdentityVerifiedGeneration,
-    SourceFileCatalog, SourceFileCatalogEntry,
+    GenerationMetadata, GenerationReader, GenerationSnapshot, GenerationStatsLayout,
+    IdentityVerificationError, IdentityVerifiedGeneration, SourceFileCatalog,
+    SourceFileCatalogEntry,
 };
 use rootlight_vfs::{
     MAX_PATH_BYTES, MAX_PATH_COMPONENTS, MAX_SNAPSHOT_BYTES, RelativePath, SourceSnapshot,
@@ -1190,6 +1191,15 @@ struct OracleRestoreExpectation {
     generation: GenerationId,
     parent: Option<GenerationId>,
     allocated_bytes: u64,
+}
+
+impl OracleRestoreExpectation {
+    fn matches(&self, metadata: GenerationMetadata, allocated_bytes: u64) -> bool {
+        metadata.repository() == self.repository
+            && metadata.generation() == self.generation
+            && metadata.parent() == self.parent
+            && allocated_bytes == self.allocated_bytes
+    }
 }
 
 struct PersistedSourceReader {
@@ -7528,6 +7538,38 @@ pub(super) fn oracle_restore_memory_limit() -> u64 {
     super::generation_memory_ceiling()
 }
 
+/// Routing authority after the complete oracle and its committed members authenticate.
+enum OracleReadCapability {
+    Canonical,
+    LogicalRdfSet,
+}
+
+impl OracleReadCapability {
+    fn for_reader(reader: &OracleReader) -> Self {
+        match reader.stats().layout() {
+            GenerationStatsLayout::CanonicalOracle => Self::Canonical,
+            GenerationStatsLayout::CanonicalOracleWithRdfV1 => Self::LogicalRdfSet,
+        }
+    }
+
+    fn require_canonical(
+        self,
+        reader: &OracleReader,
+        expectation: &OracleRestoreExpectation,
+        allocated_bytes: u64,
+    ) -> Result<(), FirstSliceError> {
+        match self {
+            Self::Canonical => Ok(()),
+            Self::LogicalRdfSet => {
+                if !expectation.matches(reader.metadata(), allocated_bytes) {
+                    return Err(FirstSliceError::CatalogCorrupt);
+                }
+                Err(FirstSliceError::LogicalGenerationRequiresReader)
+            }
+        }
+    }
+}
+
 fn restore_oracle_generation(
     generation_path: &Path,
     expectation: OracleRestoreExpectation,
@@ -7541,6 +7583,14 @@ fn restore_oracle_generation(
     let allocated_bytes = oracle
         .allocated_bytes(context)
         .map_err(|error| map_catalog_error(&error, cancellation))?;
+    // This route promises an owned complete snapshot and a canonical query lease.
+    // Keep an authenticated logical set out of recovery/cache success until its
+    // reader, source authority, and retention owner can travel together.
+    OracleReadCapability::for_reader(&oracle).require_canonical(
+        &oracle,
+        &expectation,
+        allocated_bytes,
+    )?;
     let persisted = oracle
         .read_with_admission(context, |plan| {
             check_cancellation(cancellation)?;
@@ -7562,12 +7612,7 @@ fn restore_oracle_generation(
             OracleReadAdmissionError::Catalog(error) => map_catalog_error(&error, cancellation),
             OracleReadAdmissionError::Admission(error) => error,
         })?;
-    let metadata = persisted.metadata();
-    if metadata.repository() != expectation.repository
-        || metadata.generation() != expectation.generation
-        || metadata.parent() != expectation.parent
-        || allocated_bytes != expectation.allocated_bytes
-    {
+    if !expectation.matches(persisted.metadata(), allocated_bytes) {
         return Err(FirstSliceError::CatalogCorrupt);
     }
     let persisted = persisted
@@ -7992,6 +8037,10 @@ mod source_only_tests;
 #[cfg(test)]
 #[path = "durable/restore_capacity_tests.rs"]
 mod restore_capacity_tests;
+
+#[cfg(test)]
+#[path = "durable/logical_read_tests.rs"]
+mod logical_read_tests;
 
 #[cfg(test)]
 mod tests {

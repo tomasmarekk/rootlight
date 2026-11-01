@@ -18159,6 +18159,9 @@ pub enum FirstSliceError {
     /// A retained generation uses an unsupported storage schema.
     #[error("first-slice oracle requires migration")]
     CatalogMigrationRequired,
+    /// A complete partitioned generation requires its logical reader capability.
+    #[error("first-slice generation requires a logical reader")]
+    LogicalGenerationRequiresReader,
     /// Lexical projection, construction, or validation failed.
     #[error("first-slice search failed")]
     Search,
@@ -26478,6 +26481,9 @@ fn map_catalog_error_kind(kind: CatalogErrorKind, cancellation: &Cancellation) -
         | CatalogErrorKind::InvalidGeneration
         | CatalogErrorKind::IdentityProofRequired => FirstSliceError::CatalogCorrupt,
         CatalogErrorKind::IncompatibleSchema => FirstSliceError::CatalogMigrationRequired,
+        CatalogErrorKind::PartitionedMaterializationRequired => {
+            FirstSliceError::LogicalGenerationRequiresReader
+        }
         _ => FirstSliceError::Catalog,
     }
 }

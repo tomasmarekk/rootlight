@@ -906,6 +906,7 @@ fn safe_error(error: &FirstSliceError) -> serde_json::Value {
         FirstSliceError::Catalog => "catalog",
         FirstSliceError::CatalogCorrupt => "catalog_corrupt",
         FirstSliceError::CatalogMigrationRequired => "catalog_migration_required",
+        FirstSliceError::LogicalGenerationRequiresReader => "logical_generation_requires_reader",
         FirstSliceError::Search => "search",
         FirstSliceError::Source => "source",
         FirstSliceError::SourceEncodingUnsupported => "source_encoding_unsupported",
