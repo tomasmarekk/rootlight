@@ -1401,6 +1401,125 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn assert_windows_range_open_refusal(
+        directory: &PrivateDirectory<'_>,
+        name: &str,
+        expected_win32: Option<u32>,
+    ) {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+        use cap_std::fs::{OpenOptions, OpenOptionsExt as _};
+        use windows::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        };
+
+        // Keep the original implicit no-follow path as the error-contract control.
+        let mut original = OpenOptions::new();
+        original
+            .read(true)
+            .follow(FollowSymlinks::No)
+            .access_mode(FILE_GENERIC_READ.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0);
+        let expected = directory
+            .capability()
+            .open_with(Path::new(name), &original)
+            .unwrap_err();
+        if let Some(code) = expected_win32 {
+            assert_eq!(expected.raw_os_error(), Some(i32::try_from(code).unwrap()));
+        }
+        for range in [0..0, 0..1] {
+            for observed in [false, true] {
+                let mut callbacks = 0;
+                let mut phases = Vec::new();
+                let mut visitor = |_, _: &[u8]| {
+                    callbacks += 1;
+                    Ok(())
+                };
+                let cancellation = Cancellation::new();
+                let error = if observed {
+                    directory.read_file_range_streamed_cancellable_with_observer(
+                        OsStr::new(name),
+                        7,
+                        range.clone(),
+                        &cancellation,
+                        &mut visitor,
+                        Some(&mut |phase, _| phases.push(phase)),
+                    )
+                } else {
+                    directory.read_file_range_streamed_cancellable(
+                        OsStr::new(name),
+                        7,
+                        range.clone(),
+                        &cancellation,
+                        &mut visitor,
+                    )
+                }
+                .unwrap_err();
+                match error {
+                    PlatformError::Io { operation, source } => {
+                        assert_eq!(operation, "open_file");
+                        assert_eq!(source.raw_os_error(), expected.raw_os_error());
+                        assert_eq!(source.kind(), expected.kind());
+                    }
+                    error => panic!("changed native open refusal: {error:?}"),
+                }
+                assert_eq!(callbacks, 0);
+                assert!(!phases.contains(&PrivateRangeReadPhase::InitialAccessPolicy));
+                assert!(!phases.contains(&PrivateRangeReadPhase::PayloadRead));
+                assert!(!phases.contains(&PrivateRangeReadPhase::Visitor));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn streamed_private_range_windows_symlinks_keep_original_typed_open_refusal() {
+        use std::os::windows::fs::symlink_file;
+        use windows::Win32::Foundation::ERROR_STOPPED_ON_SYMLINK;
+
+        let (temporary, directory) = private_payload(b"payload");
+        std::fs::write(temporary.path().join("outside"), b"outside").unwrap();
+        for (name, target) in [
+            ("inside-link", "payload"),
+            ("outside-link", "../outside"),
+            ("dangling-link", "missing-target"),
+        ] {
+            symlink_file(target, temporary.path().join("staging").join(name)).unwrap();
+            assert_windows_range_open_refusal(&directory, name, Some(ERROR_STOPPED_ON_SYMLINK.0));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn streamed_private_range_windows_directories_and_junctions_remain_unreadable() {
+        use std::os::windows::fs::symlink_dir;
+
+        let (temporary, directory) = private_payload(b"payload");
+        let staging = temporary.path().join("staging");
+        std::fs::create_dir(staging.join("folder")).unwrap();
+        std::fs::write(staging.join("folder/child"), b"payload").unwrap();
+        symlink_dir("folder", staging.join("directory-link")).unwrap();
+        let junction = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:ROOTLIGHT_VFS_TEST_JUNCTION_LINK -Target $env:ROOTLIGHT_VFS_TEST_JUNCTION_TARGET -ErrorAction Stop | Out-Null",
+            ])
+            .env("ROOTLIGHT_VFS_TEST_JUNCTION_LINK", staging.join("junction"))
+            .env("ROOTLIGHT_VFS_TEST_JUNCTION_TARGET", staging.join("folder"))
+            .output()
+            .unwrap();
+        assert!(
+            junction.status.success(),
+            "{}",
+            String::from_utf8_lossy(&junction.stderr)
+        );
+        for name in ["folder", "directory-link", "junction"] {
+            assert_windows_range_open_refusal(&directory, name, None);
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn streamed_private_range_checks_windows_dacl_before_and_after_visiting() {
         for change_before_read in [true, false] {

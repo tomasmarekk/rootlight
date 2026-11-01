@@ -465,17 +465,36 @@ pub(super) fn read_file_range_streamed_with_check(
             {
                 use cap_std::fs::OpenOptionsExt as _;
                 use windows::Win32::Storage::FileSystem::{
-                    FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_DELETE,
+                    FILE_SHARE_READ,
                 };
 
+                // cap-primitives already adds this flag for no-follow opens.
+                // Explicitly supplying it avoids its extra metadata query; our
+                // retained metadata preserves its symlink refusal before ACLs.
                 options
                     .access_mode(FILE_GENERIC_READ.0)
-                    .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0);
+                    .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0)
+                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
             }
             let mut file = timings.measure(PrivateRangeReadPhase::OpenFile, || {
                 parent
                     .open_with(Path::new(&name.0), &options)
                     .map_err(|source| platform_io("open_file", source))
+            })?;
+            #[cfg(windows)]
+            let before = timings.measure(PrivateRangeReadPhase::InitialMetadata, || {
+                use windows::Win32::Foundation::ERROR_STOPPED_ON_SYMLINK;
+
+                let metadata = file
+                    .metadata()
+                    .map_err(|source| platform_io("open_file", source))?;
+                if metadata.file_type().is_symlink() {
+                    let code = i32::try_from(ERROR_STOPPED_ON_SYMLINK.0)
+                        .map_err(|_| PlatformError::ResourceLimit)?;
+                    return Err(platform_io("open_file", io::Error::from_raw_os_error(code)));
+                }
+                Ok(metadata)
             })?;
             #[cfg(any(windows, target_os = "macos"))]
             timings.measure(PrivateRangeReadPhase::InitialAccessPolicy, || {
@@ -486,6 +505,7 @@ pub(super) fn read_file_range_streamed_with_check(
                 Ok(())
             })?;
             let identity = timings.measure(PrivateRangeReadPhase::InitialMetadata, || {
+                #[cfg(not(windows))]
                 let before = file
                     .metadata()
                     .map_err(|source| platform_io("inspect_file", source))?;
