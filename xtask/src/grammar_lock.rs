@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "1ec318a6d0bcac40c3b5bc7177496cfe8388880b0562fa0eedd9e9dde481b3c0";
+    "16b31d8a26045e852cf18e8efcb955d32916eef0a86507af34d204826a612955";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 69] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 70] = [
+    (
+        "rootlight-tree-sitter-nquads",
+        "0.1.0",
+        "native-grammars/nquads",
+        "8199a8155100ca98dca441fe173bd56c3e2c382bea1d6ce92f3731496a22ac17",
+    ),
     (
         "rootlight-tree-sitter-ntriples",
         "0.1.0",
@@ -232,7 +238,7 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 69] = [
         "tree-sitter-turtle",
         "0.2.0",
         "third_party/tree-sitter-turtle-0.2.0",
-        "e5b900ed1aca6b20f4f7c508d2fcba54757aa661f993843cf5eaa292dcde817e",
+        "788e4915876fc1541928aaecbc40de8c678fe819e04f1f8619c296f24da687a0",
     ),
     (
         "tree-sitter-typespec",
@@ -929,7 +935,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 110 {
+    if manifest.grammars.len() != 111 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -954,6 +960,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "nquads",
         "ntriples",
         "trig",
         "turtle",
@@ -1327,6 +1334,7 @@ fn validate_tree_sitter_dependencies(
 
 fn is_tree_sitter_package(name: &str) -> bool {
     name == "tree-sitter"
+        || name == "rootlight-tree-sitter-nquads"
         || name == "rootlight-tree-sitter-ntriples"
         || name == "dekobon-tree-sitter-groovy"
         || name.starts_with("tree-sitter-")
@@ -1906,7 +1914,9 @@ mod tests {
 
     #[test]
     fn native_manifest_rejects_missing_or_extra_languages() {
-        for language in ["ntriples", "trig", "turtle", "typespec", "n3", "sparql"] {
+        for language in [
+            "nquads", "ntriples", "trig", "turtle", "typespec", "n3", "sparql",
+        ] {
             let mut manifest: GrammarLock =
                 toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
             manifest
@@ -1914,7 +1924,7 @@ mod tests {
                 .retain(|grammar| grammar.language != language);
             assert!(matches!(
                 validate_manifest(&manifest),
-                Err(GrammarLockError::GrammarCount(109))
+                Err(GrammarLockError::GrammarCount(110))
             ));
         }
         let mut manifest: GrammarLock =

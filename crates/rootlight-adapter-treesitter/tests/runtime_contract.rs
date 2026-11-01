@@ -77,7 +77,19 @@ fn incremental_executor_accepts_optional_deadlines_and_explicit_memory_admission
 
 #[test]
 fn every_audited_grammar_parses_a_clean_representative_file() {
-    let cases: [(&str, &str, &[u8]); 102] = [
+    let cases: [(&str, &str, &[u8]); 114] = [
+        ("written.erb", "erb", b"<p><%= value %></p>\n"),
+        ("written.hbs", "handlebars", b"<p>{{value}}</p>\n"),
+        ("written.n3", "n3", b"@prefix ex: <urn:example:> . ex:s ex:p ex:o .\n"),
+        ("written.nt", "ntriples", b"<s:><p:><o:>.\n"),
+        ("written.nu", "nu", b"def written [value: string] { $value }\n"),
+        ("written.ron", "ron", b"(value: 1)\n"),
+        ("written.rq", "sparql", b"SELECT ?s WHERE { ?s ?p ?o }\n"),
+        ("written.trig", "trig", b"@prefix ex: <urn:example:> . ex:g { ex:s ex:p ex:o . }\n"),
+        ("written.ttl", "turtle", b"@prefix ex: <urn:example:> . ex:s ex:p ex:o .\n"),
+        ("written.tsp", "typespec", b"model Written { value: string; }\n"),
+        ("written.wesl", "wesl", b"fn written(value: f32) -> f32 { return value; }\n"),
+        ("written.nq", "nquads", b"<s:><p:><o:><g:>.\n"),
         ("written.cu", "cuda", b"__global__ void kernel(int value) {}\nvoid launch(int scalar) { int next = scalar * 2; kernel<<<1, 1>>>(next); }\n"),
         ("written.liquid", "liquid", b"{% for item in entries %}{{ item }}{% endfor %}"),
         ("written.idr", "idris", b"global : Type\nglobal = Type\nreader : Type\nreader = global\n"),
@@ -2049,3 +2061,6 @@ fn thrift_nested_throws_facts_keep_actual_native_depth_for_strict_admission() {
 
 #[path = "runtime_contract/sed_native.rs"]
 mod sed_native;
+
+#[path = "runtime_contract/nquads_native.rs"]
+mod nquads_native;

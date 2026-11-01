@@ -51,6 +51,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "native-grammars/nquads",
     "native-grammars/ntriples",
     "third_party/tree-sitter-sparql-0.1.0",
     "third_party/tree-sitter-n3-0.1.0",
@@ -155,6 +156,7 @@ repository = "https://github.com/tomasmarekk/rootlight"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+rootlight-tree-sitter-nquads = { path = "native-grammars/nquads", version = "=0.1.0", default-features = false }
 rootlight-tree-sitter-ntriples = { path = "native-grammars/ntriples", version = "=0.1.0", default-features = false }
 tree-sitter-sparql = { path = "third_party/tree-sitter-sparql-0.1.0", version = "=0.1.0", default-features = false }
 tree-sitter-n3 = { path = "third_party/tree-sitter-n3-0.1.0", version = "=0.1.0", default-features = false }

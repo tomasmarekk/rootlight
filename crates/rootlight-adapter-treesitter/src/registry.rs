@@ -15,6 +15,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 pub enum GrammarFamily {
     /// Native N-Triples statements; RDF graph evaluation remains separate.
     NTriples,
+    /// Native standard N-Quads roles; dataset evaluation remains separate.
+    NQuads,
     /// SPARQL written requests without query evaluation or external resource loading.
     Sparql,
     /// Notation3 written source without logical inference or external IRI loading.
@@ -335,9 +337,10 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(113);
+        let mut descriptors = Vec::with_capacity(114);
         for family in [
             GrammarFamily::NTriples,
+            GrammarFamily::NQuads,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -552,6 +555,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
         GrammarFamily::NTriples => rootlight_tree_sitter_ntriples::LANGUAGE.into(),
+        GrammarFamily::NQuads => rootlight_tree_sitter_nquads::LANGUAGE.into(),
         GrammarFamily::Sparql => tree_sitter_sparql::LANGUAGE.into(),
         GrammarFamily::N3 => tree_sitter_n3::LANGUAGE.into(),
         GrammarFamily::Trig | GrammarFamily::Turtle => tree_sitter_turtle::LANGUAGE.into(),
@@ -765,6 +769,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "e0e1564bd634125332170c9f4dde1d186f7becfe4ac458baa23429e08e7e5981",
             scanner_sha256: Some(
                 "e2a23b0c6e64929cf5243eb2846f64f30a6f0c3f5458061c08fdcf5324fc9789",
+            ),
+        },
+        GrammarFamily::NQuads => GrammarIdentity {
+            language_id: "nquads",
+            grammar_version: "0.1.0",
+            source_package_sha256: "8199a8155100ca98dca441fe173bd56c3e2c382bea1d6ce92f3731496a22ac17",
+            parser_sha256: "ac05831209cb07be7cf3e21c349f3a585b5502cc978de4c0458fb2cbde37da87",
+            scanner_sha256: Some(
+                "c19fbdb075f255928cb105291e1fe1ad9bee896bd2c0d0d9c634ab7914a349cb",
             ),
         },
         GrammarFamily::Sparql => GrammarIdentity {
@@ -1662,9 +1675,10 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 113);
+        assert_eq!(registry.descriptors().len(), 114);
         for family in [
             GrammarFamily::NTriples,
+            GrammarFamily::NQuads,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -2038,6 +2052,11 @@ mod tests {
                 "ntriples",
                 "rootlight-tree-sitter-ntriples",
             ),
+            (
+                GrammarFamily::NQuads,
+                "nquads",
+                "rootlight-tree-sitter-nquads",
+            ),
             (GrammarFamily::Sparql, "sparql", "tree-sitter-sparql"),
             (GrammarFamily::N3, "n3", "tree-sitter-n3"),
             (GrammarFamily::Trig, "trig", "tree-sitter-turtle"),
@@ -2211,10 +2230,10 @@ mod tests {
             } else {
                 // Both registry-derived overrides and unpublished bindings
                 // require xtask to verify every checked-in source byte.
-                if family == GrammarFamily::NTriples {
+                if matches!(family, GrammarFamily::NTriples | GrammarFamily::NQuads) {
                     assert_eq!(
                         quoted_field(grammar, "manifest_path"),
-                        "native-grammars/ntriples/Cargo.toml"
+                        format!("native-grammars/{language}/Cargo.toml")
                     );
                 } else {
                     assert!(quoted_field(grammar, "manifest_path").starts_with("third_party/"));
@@ -2231,6 +2250,7 @@ mod tests {
                         || matches!(
                             family,
                             GrammarFamily::NTriples
+                                | GrammarFamily::NQuads
                                 | GrammarFamily::Sparql
                                 | GrammarFamily::N3
                                 | GrammarFamily::Trig
