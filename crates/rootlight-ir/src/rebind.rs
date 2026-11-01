@@ -52,6 +52,7 @@ use crate::{
     new_groovy_value_lookup_envelope_with_encoding,
 };
 use crate::{PERL_BINDING_NAMESPACE, decode_perl_binding_envelope, new_perl_binding_envelope};
+use crate::{RDF_STATEMENT_NAMESPACE, decode_rdf_statement_envelope, new_rdf_statement_envelope};
 use crate::{
     RUST_DIRECT_CALL_NAMESPACE, decode_rust_direct_call_envelope, new_rust_direct_call_envelope,
 };
@@ -995,6 +996,7 @@ fn require_supported_extensions_with_checkpoint(
                 | FSHARP_BINDING_NAMESPACE
                 | GROOVY_BINDING_NAMESPACE
                 | RUST_DIRECT_CALL_NAMESPACE
+                | RDF_STATEMENT_NAMESPACE
                 | GROOVY_TYPE_LOOKUP_NAMESPACE
                 | GROOVY_CALLABLE_NAMESPACE
                 | GROOVY_MEMBER_NAMESPACE
@@ -1691,6 +1693,13 @@ fn rebind_extension(
             let evidence = decode_groovy_binding_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             new_groovy_binding_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        RDF_STATEMENT_NAMESPACE => {
+            let statement = decode_rdf_statement_envelope(&extension)
+                .and_then(|statement| statement.rebind(generation))
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_rdf_statement_envelope(provenance, &statement)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         RUST_DIRECT_CALL_NAMESPACE => {
@@ -2871,6 +2880,81 @@ mod tests {
         );
         assert_eq!(writer.encoded.len(), RECORD_HASH_BUFFER_BYTES);
         assert_eq!(writer.failure, Some(NormalizedRebindError::Interrupted));
+    }
+
+    #[test]
+    fn rdf_statement_rebinds_all_term_sources_and_preserves_physical_duplicates() {
+        let mut document = fixture_with_lexical_extension();
+        document.extensions.clear();
+        let file = &document.files[0];
+        let text = "<s:><p:>_:a.";
+        for offset in [0, 13] {
+            let source = SourceRef::new(
+                document.repository,
+                document.generation,
+                crate::SourceSpan::new(file.id, offset, offset + 12).unwrap(),
+                file.content_hash,
+                None,
+            );
+            let spans = [(0, 4), (4, 8), (8, 11)].map(|(start, end)| {
+                crate::SourceSpan::new(file.id, offset + start, offset + end).unwrap()
+            });
+            let statement = crate::RdfStatement::from_ntriples(source, text, spans).unwrap();
+            document
+                .extensions
+                .push(new_rdf_statement_envelope(file.provenance, &statement).unwrap());
+        }
+        let limits = IrLimits::default();
+        let support = ExtensionSupport::default();
+        let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+        let generation = GenerationId::from_bytes([87; 20]);
+        let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+        assert_eq!(rebound.extensions.len(), 2);
+        let decoded: Vec<_> = rebound
+            .extensions
+            .iter()
+            .map(|extension| decode_rdf_statement_envelope(extension).unwrap())
+            .collect();
+        for statement in &decoded {
+            assert_eq!(statement.source().generation(), generation);
+            for term in [
+                statement.subject(),
+                statement.predicate(),
+                statement.object(),
+            ] {
+                assert_eq!(term.source().generation(), generation);
+            }
+            assert_eq!(statement.source_text(), text);
+        }
+        assert!(decoded[0].object().same_blank_node(decoded[1].object()));
+        assert_ne!(rebound.extensions[0].id, rebound.extensions[1].id);
+        assert!(
+            rebound
+                .extensions
+                .iter()
+                .all(|e| !document.extensions.iter().any(|old| old.id == e.id))
+        );
+        assert_eq!(
+            chunk.digest(),
+            CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                .unwrap()
+                .digest()
+        );
+        let again = chunk.rebind(generation, &limits, &support).unwrap();
+        assert_eq!(again, rebound);
+        let mut duplicate = document.clone();
+        duplicate.extensions.push(duplicate.extensions[0].clone());
+        assert_eq!(
+            CanonicalNormalizedFileChunk::new(&duplicate, &limits, &support)
+                .unwrap()
+                .digest(),
+            chunk.digest()
+        );
+        duplicate.extensions.last_mut().unwrap().payload.push(' ');
+        assert!(CanonicalNormalizedFileChunk::new(&duplicate, &limits, &support).is_err());
+        let mut corrupted = document;
+        corrupted.extensions[0].payload.push(' ');
+        assert!(CanonicalNormalizedFileChunk::new(&corrupted, &limits, &support).is_err());
     }
 
     #[test]

@@ -33,6 +33,7 @@ mod identity;
 mod lexical;
 mod normalized;
 mod perl_binding;
+mod rdf_statement;
 mod rebind;
 mod rust_direct_call;
 mod source_projection;
@@ -130,6 +131,10 @@ pub use perl_binding::{
     MAX_PERL_BINDING_PAYLOAD_BYTES, PERL_BINDING_NAMESPACE, PERL_BINDING_VERSION, PerlBinding,
     PerlBindingError, PerlBindingEvidence, PerlCallableStorage, decode_perl_binding_envelope,
     new_perl_binding_envelope,
+};
+pub use rdf_statement::{
+    MAX_RDF_STATEMENT_PAYLOAD_BYTES, RDF_STATEMENT_NAMESPACE, RdfStatement, RdfStatementError,
+    RdfTerm, RdfTermKind, decode_rdf_statement_envelope, new_rdf_statement_envelope,
 };
 pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,
