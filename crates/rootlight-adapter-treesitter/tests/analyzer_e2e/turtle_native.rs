@@ -38,6 +38,49 @@ fn output_with_profile(source: &[u8], original: bool) -> AnalysisOutput {
 }
 
 #[test]
+fn turtle_native_file_carrier_keeps_real_rdf_gaps_without_software_declarations() {
+    for source in [
+        b"<urn:s> <urn:p> \"ordinary\" .\n".as_slice(),
+        b"<http://a.example/s> <http://a.example/p> \"\0\t\x0b\x0c\x0e&([]\x7f\" .\n".as_slice(),
+    ] {
+        let result = output(source);
+        let document = result.document();
+        assert!(document.entities.is_empty(), "{:?}", document.entities);
+        assert!(document.occurrences.is_empty());
+        assert!(document.relations.is_empty());
+        assert_eq!(
+            document.skipped_regions.len(),
+            3,
+            "{:?}",
+            document.skipped_regions
+        );
+        assert_eq!(
+            document
+                .skipped_regions
+                .iter()
+                .map(|gap| gap.domain)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                FactDomain::Entities,
+                FactDomain::Occurrences,
+                FactDomain::Relations
+            ])
+        );
+        for gap in &document.skipped_regions {
+            assert_eq!(
+                gap.detail,
+                "turtle-rdf-assertions-collections-relative-iri-and-resource-resolution-unavailable"
+            );
+            assert_eq!(gap.source.span().start_byte(), 0);
+            assert_eq!(
+                gap.source.span().end_byte(),
+                u64::try_from(source.len()).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn turtle_named_prefixes_keep_rebindings_and_default_prefix_is_context_only() {
     let source = b"@prefix ex: <https://first.example/> .\nPREFIX ex: <https://second.example/>\n@prefix : <https://default.example/> .\nex:s ex:p ex:o .\n";
     let result = output(source);

@@ -1608,7 +1608,7 @@ fn preflight_lowering_limits(
         } else if matches!(
             fact.kind(),
             SyntaxFactKind::Module | SyntaxFactKind::Declaration
-        ) && !is_native_ntriples_file_transport(fact, request.language().as_str())
+        ) && !is_native_rdf_file_transport(fact, request.language().as_str())
         {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
@@ -7374,10 +7374,8 @@ impl<'context, 'source> Lowering<'context, 'source> {
             } else if matches!(
                 fact.kind(),
                 SyntaxFactKind::Declaration | SyntaxFactKind::Module
-            ) && !is_native_ntriples_file_transport(
-                fact,
-                self.request.language().as_str(),
-            ) {
+            ) && !is_native_rdf_file_transport(fact, self.request.language().as_str())
+            {
                 if let Some(gap) = structural_entity_classification_gap(fact) {
                     let region = self.skipped_region(
                         gap.span(),
@@ -14765,11 +14763,13 @@ fn automatic_instantiation_gap(fact: &SyntaxFact) -> Option<&'static str> {
     .then_some("vba-automatic-instantiation-semantics-unavailable")
 }
 
-fn is_native_ntriples_file_transport(fact: &SyntaxFact, language: &str) -> bool {
+fn is_native_rdf_file_transport(fact: &SyntaxFact, language: &str) -> bool {
     // Native RDF requires this file carrier without promising a software declaration.
-    language == "ntriples"
-        && fact.kind() == SyntaxFactKind::Module
-        && fact.syntax_kind().as_str() == "ntriples.file.module"
+    fact.kind() == SyntaxFactKind::Module
+        && matches!(
+            (language, fact.syntax_kind().as_str()),
+            ("ntriples", "ntriples.file.module") | ("turtle", "turtle.file.module")
+        )
 }
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
@@ -16240,7 +16240,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ntriples_file_transport_requires_its_native_role_and_language() {
+    fn rdf_file_transport_requires_its_exact_native_role_and_language() {
         let fact = |kind, label| {
             SyntaxFact::new(
                 1,
@@ -16252,7 +16252,11 @@ mod tests {
             )
         };
         let native = fact(SyntaxFactKind::Module, "ntriples.file.module");
-        assert!(is_native_ntriples_file_transport(&native, "ntriples"));
+        assert!(is_native_rdf_file_transport(&native, "ntriples"));
+        assert!(is_native_rdf_file_transport(
+            &fact(SyntaxFactKind::Module, "turtle.file.module"),
+            "turtle"
+        ));
         for (candidate, language) in [
             (native, "turtle"),
             (
@@ -16271,8 +16275,19 @@ mod tests {
                 fact(SyntaxFactKind::Module, "turtle.file.module"),
                 "ntriples",
             ),
+            (fact(SyntaxFactKind::Root, "turtle.file.module"), "turtle"),
+            (
+                fact(SyntaxFactKind::Declaration, "turtle.file.module"),
+                "turtle",
+            ),
+            (
+                fact(SyntaxFactKind::Module, "turtle.other.module"),
+                "turtle",
+            ),
+            (fact(SyntaxFactKind::Module, "turtle.file.module"), "trig"),
+            (fact(SyntaxFactKind::Module, "trig.file.module"), "trig"),
         ] {
-            assert!(!is_native_ntriples_file_transport(&candidate, language));
+            assert!(!is_native_rdf_file_transport(&candidate, language));
         }
     }
 
