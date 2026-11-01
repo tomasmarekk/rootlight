@@ -2037,6 +2037,16 @@ fn verify_snapshot_identities(
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
             }
+            rootlight_ir::RDF_STATEMENT_NAMESPACE => {
+                rootlight_ir::decode_rdf_statement_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             rootlight_ir::RUST_DIRECT_CALL_NAMESPACE => {
                 rootlight_ir::decode_rust_direct_call_envelope(envelope).map_err(|_| {
                     IdentityVerificationError::IdentityMismatch(
@@ -3179,6 +3189,13 @@ mod tests {
     fn file_only_generation(
         bind_manifest_claim: bool,
     ) -> (GenerationMetadata, NormalizedIrDocument, SourceFileCatalog) {
+        file_only_generation_with_anchor(bind_manifest_claim, b"anchor")
+    }
+
+    fn file_only_generation_with_anchor(
+        bind_manifest_claim: bool,
+        anchor_text: &[u8],
+    ) -> (GenerationMetadata, NormalizedIrDocument, SourceFileCatalog) {
         let repository = RepositoryId::from_bytes([4; 16]);
         let configuration_hash = content_hash(b"configuration");
         let provider_set_hash = content_hash(b"providers");
@@ -3205,14 +3222,15 @@ mod tests {
             path_identity: &anchor_path_identity,
         })
         .id();
-        let anchor_content_hash = content_hash(b"anchor");
+        let anchor_content_hash = content_hash(anchor_text);
+        let anchor_length = u64::try_from(anchor_text.len()).unwrap();
         let anchor_claim = FileIdentityClaim {
             file: anchor_file,
             repository,
             path: anchor_path.to_owned(),
             path_identity: anchor_path_identity,
             content_hash: anchor_content_hash,
-            byte_length: 6,
+            byte_length: anchor_length,
         };
         let mut manifest_claims = vec![anchor_claim.clone()];
         if bind_manifest_claim {
@@ -3244,7 +3262,7 @@ mod tests {
         let anchor_source = SourceRef::new(
             repository,
             generation,
-            SourceSpan::new(anchor_file, 0, 6).expect("fixture span is valid"),
+            SourceSpan::new(anchor_file, 0, anchor_length).expect("fixture span is valid"),
             anchor_content_hash,
             None,
         );
@@ -3310,7 +3328,7 @@ mod tests {
                     .expect("fixture locator is valid"),
             ),
             content_hash: anchor_content_hash,
-            byte_length: 6,
+            byte_length: anchor_length,
             language: "text".to_owned(),
             encoding: "utf-8".to_owned(),
             generated: false,
@@ -4242,6 +4260,97 @@ mod tests {
             ),
             Err(IdentityVerificationError::ManifestMismatch)
         );
+    }
+
+    #[test]
+    fn rdf_statement_identity_is_verified_before_snapshot_admission() {
+        let text = "_:a<p:>_:a.";
+        let (metadata, mut document, catalog) =
+            file_only_generation_with_anchor(true, text.as_bytes());
+        let file = &document.files[0];
+        assert_eq!(file.byte_length, u64::try_from(text.len()).unwrap());
+        assert_eq!(file.content_hash, content_hash(text.as_bytes()));
+        let source = file.evidence.source.clone().unwrap();
+        let terms = [(0, 3), (3, 7), (7, 10)]
+            .map(|(start, end)| SourceSpan::new(file.id, start, end).unwrap());
+        let statement = rootlight_ir::RdfStatement::from_ntriples(source, text, terms).unwrap();
+        let envelope =
+            rootlight_ir::new_rdf_statement_envelope(file.provenance, &statement).unwrap();
+        document.extensions.push(envelope.clone());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .expect("canonical typed RDF must reach persisted generation admission");
+        assert!(verified.document().extensions.contains(&envelope));
+        let restored =
+            IdentityVerifiedGeneration::verify_snapshot(verified.snapshot().clone(), &context)
+                .expect("restored typed RDF must reauthenticate the same statement");
+        assert_eq!(restored, verified);
+        for fault in [
+            "corrupt",
+            "version",
+            "owner",
+            "generation",
+            "value",
+            "identity",
+        ] {
+            let mut changed = document.clone();
+            let item = changed
+                .extensions
+                .iter_mut()
+                .find(|e| e.id == envelope.id)
+                .unwrap();
+            match fault {
+                "corrupt" => item.payload.push(' '),
+                "version" => item.version = "2".into(),
+                "owner" => item.repository = RepositoryId::from_bytes([99; 16]),
+                "generation" => item.generation = GenerationId::from_bytes([99; 20]),
+                "value" => {
+                    item.payload = item
+                        .payload
+                        .replacen("\"label\":\"a\"", "\"label\":\"b\"", 1);
+                    assert_ne!(item.payload, envelope.payload);
+                    let identity = serde_json::to_vec(&(
+                        rootlight_ir::RDF_STATEMENT_NAMESPACE,
+                        "1",
+                        item.repository,
+                        item.generation,
+                        item.provenance,
+                        item.evidence.source.as_ref().unwrap(),
+                        &item.payload,
+                        &item.evidence.derivation,
+                    ))
+                    .unwrap();
+                    item.id =
+                        rootlight_ids::derive_fact("rootlight.rdf_statement/v1", &identity).id();
+                }
+                "identity" => item.id = FactId::from_bytes([99; 20]),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    IdentityVerifiedGeneration::verify_with_source_files(
+                        metadata,
+                        changed,
+                        catalog.clone(),
+                        &IrLimits::default(),
+                        &ExtensionSupport::default(),
+                        &context,
+                    ),
+                    Err(IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope
+                    ) | IdentityVerificationError::InvalidGeneration)
+                ),
+                "{fault}"
+            );
+        }
     }
 
     #[test]
