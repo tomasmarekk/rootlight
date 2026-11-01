@@ -201,8 +201,10 @@ struct DiagnosticFailureContext {
     index_timing: Option<serde_json::Value>,
     no_op_timing: Option<serde_json::Value>,
     failed_analysis_profile: Option<serde_json::Value>,
+    source_read_profile_enabled: Cell<bool>,
     first_source_read_pending: Cell<bool>,
     first_source_read_profile: RefCell<Option<serde_json::Value>>,
+    failed_source_read_profile: RefCell<Option<serde_json::Value>>,
 }
 
 impl DiagnosticFailureContext {
@@ -217,8 +219,10 @@ impl DiagnosticFailureContext {
             index_timing: None,
             no_op_timing: None,
             failed_analysis_profile: None,
+            source_read_profile_enabled: Cell::new(false),
             first_source_read_pending: Cell::new(false),
             first_source_read_profile: RefCell::new(None),
+            failed_source_read_profile: RefCell::new(None),
         }
     }
 
@@ -240,21 +244,34 @@ impl DiagnosticFailureContext {
         self.request.set(Some(request));
     }
 
-    fn profile_first_source_read(
+    fn profile_source_read(
         &self,
         request: SourceReadAttempt,
         read: impl FnOnce() -> Result<(), FirstSliceError>,
     ) -> Result<(), FirstSliceError> {
-        if !self.first_source_read_pending.replace(false) {
+        if !self.source_read_profile_enabled.get() {
             return read();
         }
+        let first = self.first_source_read_pending.replace(false);
         let (outcome, profile) = capture_first_slice_analysis_profile(read);
-        *self.first_source_read_profile.borrow_mut() = Some(json!({
-            "scope":"first_actual_accounting_operation_read_only",
-            "request":request,
-            "service_outcome":if outcome.is_ok() { "ok" } else { "error" },
-            "analysis_profile":analysis_profile_value(profile),
-        }));
+        let failed = outcome.is_err() && self.failed_source_read_profile.borrow().is_none();
+        // A later request can fail after the first succeeds. Successful
+        // later collectors are discarded without serializing or accumulating them.
+        if first || failed {
+            let mut observation = json!({
+                "scope":"first_actual_accounting_operation_read_only",
+                "request":request,
+                "service_outcome":if outcome.is_ok() { "ok" } else { "error" },
+                "analysis_profile":analysis_profile_value(profile),
+            });
+            if first {
+                *self.first_source_read_profile.borrow_mut() = Some(observation.clone());
+            }
+            if failed {
+                observation["scope"] = json!("first_failed_accounting_operation_read_only");
+                *self.failed_source_read_profile.borrow_mut() = Some(observation);
+            }
+        }
         outcome
     }
 }
@@ -276,6 +293,8 @@ struct DiagnosticFailureRecord<'a> {
     analysis_profile: Option<&'a serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     first_source_read_profile: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_source_read_profile: Option<&'a serde_json::Value>,
 }
 
 fn finish_diagnostic_with_writer<T, Writer: Write>(
@@ -307,6 +326,7 @@ fn finish_diagnostic_with_writer<T, Writer: Write>(
         };
         let finished = Instant::now();
         let first_source_read_profile = context.first_source_read_profile.borrow();
+        let failed_source_read_profile = context.failed_source_read_profile.borrow();
         let record = DiagnosticFailureRecord {
             schema: "rootlight-index-analysis-profile-failure/1",
             diagnostic_result: "error",
@@ -327,6 +347,7 @@ fn finish_diagnostic_with_writer<T, Writer: Write>(
             completed_no_op_timing: context.no_op_timing.as_ref(),
             analysis_profile: context.failed_analysis_profile.as_ref(),
             first_source_read_profile: first_source_read_profile.as_ref(),
+            failed_source_read_profile: failed_source_read_profile.as_ref(),
         };
         let mut errors = errors();
         // An unavailable diagnostic sink must not replace the operation's error.
@@ -543,6 +564,7 @@ impl DiagnosticSession {
             report_mode,
             analysis_profile,
         } = self;
+        context.source_read_profile_enabled.set(*analysis_profile);
         context.first_source_read_pending.set(*analysis_profile);
         if *report_mode == ReportMode::SourceAccounting && matches!(lifetime, ServiceLifetime::Warm)
         {
@@ -1166,7 +1188,7 @@ impl<'a> FileSourceVerifier<'a> {
                     )
                 };
                 let outcome = match self.failure_context {
-                    Some(context) => context.profile_first_source_read(request, read),
+                    Some(context) => context.profile_source_read(request, read),
                     None => read(),
                 };
                 // The original diagnostic error precedes its typed service bridge.
@@ -4672,169 +4694,193 @@ mod tests {
 
     #[test]
     fn accounting_callback_preserves_the_original_diagnostic_error_instead_of_its_sentinel() {
-        let directory = tempdir();
-        let repository = directory.path().join("repository");
-        fs::create_dir(&repository).unwrap();
-        fs::write(repository.join("notes.txt"), b"retained exact bytes\r\n").unwrap();
-        for index in 0..15 {
-            fs::write(
-                repository.join(format!("packed-read-padding-{index:02}.txt")),
-                b"packed read fixture padding\n",
-            )
-            .unwrap();
-        }
-        let state = directory.path().join("state");
-        let mut session =
-            DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
-        let (receipt, index_timing) = index_with_timing(&mut session.service, &repository).unwrap();
-        let (no_op, no_op_timing) = index_with_timing(&mut session.service, &repository).unwrap();
-        assert_eq!(receipt, no_op);
-        let mut context = DiagnosticFailureContext::new(DiagnosticStage::GenerationInspection);
-        context.index_timing = Some(index_timing);
-        context.no_op_timing = Some(no_op_timing);
-        context.first_source_read_pending.set(true);
-        session
-            .service
-            .inspect_generation(
-                receipt.repository,
-                Some(receipt.generation),
-                &Cancellation::new(),
-                |snapshot| {
-                    let mut files = BTreeMap::new();
-                    for file in snapshot.document().files.iter().chain(
-                        snapshot
-                            .source_files()
-                            .entries()
-                            .iter()
-                            .map(|entry| entry.file()),
-                    ) {
-                        assert!(files.insert(file.path.as_str(), file).is_none());
-                    }
-                    assert_eq!(files.len(), snapshot.file_count());
-                    assert_eq!(files.len(), 16);
-                    let valid = *files.get("notes.txt").unwrap();
-                    assert_eq!(valid.byte_length, 22);
-                    let mut substituted = valid.clone();
-                    substituted.language.push_str("-foreign");
-                    let cancellation = Cancellation::new();
-                    let limits =
-                        accounting_read_limits(std::iter::once(substituted.byte_length)).unwrap();
-                    let mut ordinary = FileSourceVerifier::new(
-                        snapshot,
-                        &session.service,
-                        &repository,
-                        receipt.generation,
-                    );
-                    let mut accounting = FileSourceVerifier::with_accounting_reads(
-                        snapshot,
-                        &session.service,
-                        &repository,
-                        receipt.generation,
-                        &cancellation,
-                        limits,
-                    )
-                    .with_failure_context(Some(&context));
-                    let expected = ordinary
-                        .verify(&substituted, None, None)
-                        .err()
-                        .unwrap()
-                        .to_string();
-                    let error = accounting.verify(&substituted, None, None).err().unwrap();
-                    let actual = error.to_string();
-                    let mut failure_output = Vec::new();
-                    let returned =
-                        finish_diagnostic_with_writer::<(), _>(Err(error), &context, || {
-                            &mut failure_output
-                        })
-                        .unwrap_err();
-                    assert_eq!(returned.to_string(), actual);
-                    assert_eq!(
-                        failure_output.iter().filter(|byte| **byte == b'\n').count(),
-                        1
-                    );
-                    let record: serde_json::Value =
-                        serde_json::from_slice(&failure_output).unwrap();
-                    assert_eq!(record["diagnostic_stage"], "source_read");
-                    assert_eq!(record["index_result"], "ok");
-                    assert_eq!(record["diagnostic_result"], "error");
-                    assert_eq!(record["file"], serde_json::to_value(valid.id).unwrap());
-                    assert_eq!(
-                        record["source_read"]["repository"],
-                        serde_json::to_value(valid.repository).unwrap()
-                    );
-                    assert_eq!(
-                        record["source_read"]["generation"],
-                        serde_json::to_value(valid.generation).unwrap()
-                    );
-                    assert_eq!(record["source_read"]["start_byte"], 0);
-                    assert_eq!(record["source_read"]["end_byte"], valid.byte_length);
-                    assert_eq!(record["source_read"]["duration_origin"], "default");
-                    let first = record["first_source_read_profile"].clone();
-                    assert_eq!(first["service_outcome"], "error");
-                    assert_eq!(first["request"], record["source_read"]);
-                    let phases = first["analysis_profile"]["phases"].as_array().unwrap();
-                    assert!(
-                        phases
-                            .iter()
-                            .any(|event| event["phase"] == "source_read_callback")
-                    );
-                    assert!(
-                        !phases
-                            .iter()
-                            .any(|event| event["phase"] == "source_read_callback_authority")
-                    );
-                    assert!(record["completed_index_timing"]["wall_micros"].is_number());
-                    assert!(record["completed_no_op_timing"]["wall_micros"].is_number());
-                    let output = String::from_utf8(failure_output).unwrap();
-                    for private in [
-                        "notes.txt",
-                        "retained exact bytes",
-                        repository.to_str().unwrap(),
-                    ] {
-                        assert!(!output.contains(private));
-                    }
-                    let explicit = SourceReadAttempt::new(
-                        valid.evidence.source.as_ref().unwrap(),
-                        FirstSliceBudget::default()
-                            .reduce_max_duration(std::time::Duration::from_millis(50)),
-                    );
-                    assert_eq!(explicit.duration_origin, "explicit");
-                    assert_eq!(
-                        explicit.requested_explicit_query_duration_micros,
-                        Some(50_000)
-                    );
-                    assert_eq!(
-                        explicit.requested_verification_duration_micros,
-                        Some(50_000)
-                    );
-                    assert!(expected.starts_with(
-                        "source retrieval differs from indexed evidence: notes.txt at "
-                    ));
-                    assert_eq!(actual, expected);
-                    assert_ne!(actual, FirstSliceError::Source.to_string());
-                    assert!(matches!(
-                        accounting.accounting_reads.as_ref().unwrap().state,
-                        AccountingReadState::Open
-                    ));
-                    assert!(
-                        accounting
-                            .accounting_reads
-                            .as_ref()
+        for first_succeeds in [false, true] {
+            let directory = tempdir();
+            let repository = directory.path().join("repository");
+            fs::create_dir(&repository).unwrap();
+            fs::write(repository.join("notes.txt"), b"retained exact bytes\r\n").unwrap();
+            for index in 0..15 {
+                fs::write(
+                    repository.join(format!("packed-read-padding-{index:02}.txt")),
+                    b"packed read fixture padding\n",
+                )
+                .unwrap();
+            }
+            let state = directory.path().join("state");
+            let mut session =
+                DiagnosticSession::open(&repository, &state, None, StateMode::Fresh).unwrap();
+            let (receipt, index_timing) =
+                index_with_timing(&mut session.service, &repository).unwrap();
+            let (no_op, no_op_timing) =
+                index_with_timing(&mut session.service, &repository).unwrap();
+            assert_eq!(receipt, no_op);
+            let mut context = DiagnosticFailureContext::new(DiagnosticStage::GenerationInspection);
+            context.index_timing = Some(index_timing);
+            context.no_op_timing = Some(no_op_timing);
+            context.source_read_profile_enabled.set(true);
+            context.first_source_read_pending.set(true);
+            session
+                .service
+                .inspect_generation(
+                    receipt.repository,
+                    Some(receipt.generation),
+                    &Cancellation::new(),
+                    |snapshot| {
+                        let mut files = BTreeMap::new();
+                        for file in snapshot.document().files.iter().chain(
+                            snapshot
+                                .source_files()
+                                .entries()
+                                .iter()
+                                .map(|entry| entry.file()),
+                        ) {
+                            assert!(files.insert(file.path.as_str(), file).is_none());
+                        }
+                        assert_eq!(files.len(), snapshot.file_count());
+                        assert_eq!(files.len(), 16);
+                        let valid = *files.get("notes.txt").unwrap();
+                        assert_eq!(valid.byte_length, 22);
+                        let mut substituted = valid.clone();
+                        substituted.language.push_str("-foreign");
+                        let cancellation = Cancellation::new();
+                        let limits = accounting_read_limits(
+                            [substituted.byte_length, valid.byte_length].into_iter(),
+                        )
+                        .unwrap();
+                        let mut ordinary = FileSourceVerifier::new(
+                            snapshot,
+                            &session.service,
+                            &repository,
+                            receipt.generation,
+                        );
+                        let mut accounting = FileSourceVerifier::with_accounting_reads(
+                            snapshot,
+                            &session.service,
+                            &repository,
+                            receipt.generation,
+                            &cancellation,
+                            limits,
+                        )
+                        .with_failure_context(Some(&context));
+                        let expected = ordinary
+                            .verify(&substituted, None, None)
+                            .err()
                             .unwrap()
-                            .operation
-                            .is_some()
-                    );
-                    assert!(
-                        accounting.verify(valid, None, None).is_err(),
-                        "callback failure cannot trigger ordinary fallback"
-                    );
-                    assert_eq!(
-                        context.first_source_read_profile.borrow().as_ref(),
-                        Some(&first)
-                    );
-                },
-            )
-            .unwrap();
+                            .to_string();
+                        if first_succeeds {
+                            assert!(accounting.verify(valid, None, None).unwrap().source_exact);
+                        }
+                        let error = accounting.verify(&substituted, None, None).err().unwrap();
+                        let actual = error.to_string();
+                        let mut failure_output = Vec::new();
+                        let returned =
+                            finish_diagnostic_with_writer::<(), _>(Err(error), &context, || {
+                                &mut failure_output
+                            })
+                            .unwrap_err();
+                        assert_eq!(returned.to_string(), actual);
+                        assert_eq!(
+                            failure_output.iter().filter(|byte| **byte == b'\n').count(),
+                            1
+                        );
+                        let record: serde_json::Value =
+                            serde_json::from_slice(&failure_output).unwrap();
+                        assert_eq!(record["diagnostic_stage"], "source_read");
+                        assert_eq!(record["index_result"], "ok");
+                        assert_eq!(record["diagnostic_result"], "error");
+                        assert_eq!(record["file"], serde_json::to_value(valid.id).unwrap());
+                        assert_eq!(
+                            record["source_read"]["repository"],
+                            serde_json::to_value(valid.repository).unwrap()
+                        );
+                        assert_eq!(
+                            record["source_read"]["generation"],
+                            serde_json::to_value(valid.generation).unwrap()
+                        );
+                        assert_eq!(record["source_read"]["start_byte"], 0);
+                        assert_eq!(record["source_read"]["end_byte"], valid.byte_length);
+                        assert_eq!(record["source_read"]["duration_origin"], "default");
+                        let first = record["first_source_read_profile"].clone();
+                        assert_eq!(
+                            first["service_outcome"],
+                            if first_succeeds { "ok" } else { "error" }
+                        );
+                        let failed = record["failed_source_read_profile"].clone();
+                        assert_eq!(failed["service_outcome"], "error");
+                        assert_eq!(failed["request"], record["source_read"]);
+                        assert_eq!(
+                            failed["scope"],
+                            "first_failed_accounting_operation_read_only"
+                        );
+                        assert_eq!(first["request"], record["source_read"]);
+                        let phases = failed["analysis_profile"]["phases"].as_array().unwrap();
+                        assert!(
+                            phases
+                                .iter()
+                                .any(|event| event["phase"] == "source_read_callback")
+                        );
+                        assert!(
+                            !phases
+                                .iter()
+                                .any(|event| event["phase"] == "source_read_callback_authority")
+                        );
+                        assert!(record["completed_index_timing"]["wall_micros"].is_number());
+                        assert!(record["completed_no_op_timing"]["wall_micros"].is_number());
+                        let output = String::from_utf8(failure_output).unwrap();
+                        for private in [
+                            "notes.txt",
+                            "retained exact bytes",
+                            repository.to_str().unwrap(),
+                        ] {
+                            assert!(!output.contains(private));
+                        }
+                        let explicit = SourceReadAttempt::new(
+                            valid.evidence.source.as_ref().unwrap(),
+                            FirstSliceBudget::default()
+                                .reduce_max_duration(std::time::Duration::from_millis(50)),
+                        );
+                        assert_eq!(explicit.duration_origin, "explicit");
+                        assert_eq!(
+                            explicit.requested_explicit_query_duration_micros,
+                            Some(50_000)
+                        );
+                        assert_eq!(
+                            explicit.requested_verification_duration_micros,
+                            Some(50_000)
+                        );
+                        assert!(expected.starts_with(
+                            "source retrieval differs from indexed evidence: notes.txt at "
+                        ));
+                        assert_eq!(actual, expected);
+                        assert_ne!(actual, FirstSliceError::Source.to_string());
+                        assert!(matches!(
+                            accounting.accounting_reads.as_ref().unwrap().state,
+                            AccountingReadState::Open
+                        ));
+                        assert!(
+                            accounting
+                                .accounting_reads
+                                .as_ref()
+                                .unwrap()
+                                .operation
+                                .is_some()
+                        );
+                        assert!(
+                            accounting.verify(valid, None, None).is_err(),
+                            "callback failure cannot trigger ordinary fallback"
+                        );
+                        assert_eq!(
+                            context.first_source_read_profile.borrow().as_ref(),
+                            Some(&first)
+                        );
+                        assert_eq!(
+                            context.failed_source_read_profile.borrow().as_ref(),
+                            Some(&failed)
+                        );
+                    },
+                )
+                .unwrap();
+        }
     }
 
     #[test]
