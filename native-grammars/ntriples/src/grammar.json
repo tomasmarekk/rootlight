@@ -1,0 +1,2351 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
+  "name": "ntriples",
+  "rules": {
+    "document": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "triple"
+                  },
+                  {
+                    "type": "BLANK"
+                  }
+                ]
+              },
+              {
+                "type": "SYMBOL",
+                "name": "_end_of_line"
+              }
+            ]
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "triple"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "triple": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "subject",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "iri_reference"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "blank_node_label"
+              }
+            ]
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "predicate",
+          "content": {
+            "type": "SYMBOL",
+            "name": "iri_reference"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "object",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "iri_reference"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "blank_node_label"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "literal"
+              }
+            ]
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "."
+        }
+      ]
+    },
+    "iri_reference": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "<"
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "PATTERN",
+                "value": "[A-Za-z]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0041"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000041"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0042"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000042"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0043"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000043"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0044"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000044"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0045"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000045"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0046"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000046"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0047"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000047"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0048"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000048"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0049"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000049"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u004[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000004[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u004[bB]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000004[bB]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u004[cC]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000004[cC]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u004[dD]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000004[dD]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u004[eE]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000004[eE]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u004[fF]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000004[fF]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0050"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000050"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0051"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000051"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0052"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000052"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0053"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000053"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0054"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000054"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0055"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000055"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0056"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000056"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0057"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000057"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0058"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000058"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0059"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000059"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u005[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000005[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0061"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000061"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0062"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000062"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0063"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000063"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0064"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000064"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0065"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000065"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0066"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000066"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0067"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000067"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0068"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000068"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0069"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000069"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u006[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000006[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u006[bB]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000006[bB]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u006[cC]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000006[cC]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u006[dD]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000006[dD]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u006[eE]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000006[eE]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u006[fF]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000006[fF]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0070"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000070"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0071"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000071"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0072"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000072"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0073"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000073"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0074"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000074"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0075"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000075"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0076"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000076"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0077"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000077"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0078"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000078"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u0079"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U00000079"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u007[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000007[aA]"
+              }
+            ]
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "PATTERN",
+                  "value": "[A-Za-z0-9+.-]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0041"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000041"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0042"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000042"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0043"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000043"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0044"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000044"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0045"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000045"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0046"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000046"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0047"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000047"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0048"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000048"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0049"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000049"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u004[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000004[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u004[bB]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000004[bB]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u004[cC]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000004[cC]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u004[dD]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000004[dD]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u004[eE]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000004[eE]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u004[fF]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000004[fF]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0050"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000050"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0051"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000051"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0052"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000052"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0053"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000053"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0054"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000054"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0055"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000055"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0056"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000056"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0057"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000057"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0058"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000058"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0059"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000059"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u005[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000005[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0061"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000061"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0062"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000062"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0063"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000063"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0064"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000064"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0065"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000065"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0066"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000066"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0067"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000067"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0068"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000068"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0069"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000069"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u006[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000006[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u006[bB]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000006[bB]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u006[cC]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000006[cC]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u006[dD]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000006[dD]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u006[eE]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000006[eE]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u006[fF]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000006[fF]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0070"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000070"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0071"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000071"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0072"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000072"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0073"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000073"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0074"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000074"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0075"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000075"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0076"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000076"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0077"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000077"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0078"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000078"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0079"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000079"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u007[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000007[aA]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0030"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000030"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0031"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000031"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0032"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000032"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0033"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000033"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0034"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000034"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0035"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000035"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0036"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000036"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0037"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000037"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0038"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000038"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u0039"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U00000039"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u002[bB]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000002[bB]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u002[eE]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000002[eE]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\u002[dD]"
+                },
+                {
+                  "type": "PATTERN",
+                  "value": "\\\\U0000002[dD]"
+                }
+              ]
+            }
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": ":"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\u003[aA]"
+              },
+              {
+                "type": "PATTERN",
+                "value": "\\\\U0000003[aA]"
+              }
+            ]
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "PATTERN",
+                  "value": "[^\\x00-\\x20<>\"{}|^`\\\\]",
+                  "flags": "u"
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "PATTERN",
+                      "value": "\\\\u(?:[0-9A-Ca-cE-Fe-f][0-9A-Fa-f]{3}|[Dd][0-7][0-9A-Fa-f]{2})"
+                    },
+                    {
+                      "type": "PATTERN",
+                      "value": "\\\\U(?:0000(?:[0-9A-Ca-cE-Fe-f][0-9A-Fa-f]{3}|[Dd][0-7][0-9A-Fa-f]{2})|000[1-9A-Fa-f][0-9A-Fa-f]{4}|0010[0-9A-Fa-f]{4})"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "STRING",
+            "value": ">"
+          }
+        ]
+      }
+    },
+    "blank_node_label": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "_:"
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "PATTERN",
+                    "value": "[A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}]",
+                    "flags": "u"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": "_"
+                  },
+                  {
+                    "type": "STRING",
+                    "value": ":"
+                  }
+                ]
+              },
+              {
+                "type": "PATTERN",
+                "value": "[0-9]"
+              }
+            ]
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SEQ",
+                "members": [
+                  {
+                    "type": "REPEAT",
+                    "content": {
+                      "type": "CHOICE",
+                      "members": [
+                        {
+                          "type": "CHOICE",
+                          "members": [
+                            {
+                              "type": "CHOICE",
+                              "members": [
+                                {
+                                  "type": "PATTERN",
+                                  "value": "[A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}]",
+                                  "flags": "u"
+                                },
+                                {
+                                  "type": "STRING",
+                                  "value": "_"
+                                },
+                                {
+                                  "type": "STRING",
+                                  "value": ":"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "STRING",
+                              "value": "-"
+                            },
+                            {
+                              "type": "PATTERN",
+                              "value": "[0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040]"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "STRING",
+                          "value": "."
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "CHOICE",
+                        "members": [
+                          {
+                            "type": "PATTERN",
+                            "value": "[A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}]",
+                            "flags": "u"
+                          },
+                          {
+                            "type": "STRING",
+                            "value": "_"
+                          },
+                          {
+                            "type": "STRING",
+                            "value": ":"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "STRING",
+                        "value": "-"
+                      },
+                      {
+                        "type": "PATTERN",
+                        "value": "[0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040]"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "BLANK"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "literal": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "value",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SEQ",
+                  "members": [
+                    {
+                      "type": "IMMEDIATE_TOKEN",
+                      "content": {
+                        "type": "STRING",
+                        "value": "^^"
+                      }
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "datatype",
+                      "content": {
+                        "type": "ALIAS",
+                        "content": {
+                          "type": "IMMEDIATE_TOKEN",
+                          "content": {
+                            "type": "SEQ",
+                            "members": [
+                              {
+                                "type": "STRING",
+                                "value": "<"
+                              },
+                              {
+                                "type": "CHOICE",
+                                "members": [
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "[A-Za-z]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0041"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000041"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0042"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000042"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0043"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000043"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0044"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000044"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0045"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000045"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0046"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000046"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0047"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000047"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0048"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000048"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0049"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000049"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u004[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000004[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u004[bB]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000004[bB]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u004[cC]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000004[cC]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u004[dD]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000004[dD]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u004[eE]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000004[eE]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u004[fF]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000004[fF]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0050"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000050"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0051"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000051"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0052"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000052"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0053"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000053"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0054"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000054"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0055"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000055"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0056"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000056"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0057"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000057"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0058"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000058"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0059"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000059"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u005[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000005[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0061"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000061"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0062"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000062"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0063"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000063"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0064"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000064"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0065"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000065"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0066"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000066"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0067"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000067"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0068"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000068"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0069"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000069"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u006[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000006[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u006[bB]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000006[bB]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u006[cC]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000006[cC]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u006[dD]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000006[dD]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u006[eE]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000006[eE]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u006[fF]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000006[fF]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0070"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000070"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0071"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000071"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0072"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000072"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0073"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000073"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0074"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000074"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0075"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000075"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0076"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000076"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0077"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000077"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0078"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000078"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u0079"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U00000079"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u007[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000007[aA]"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "REPEAT",
+                                "content": {
+                                  "type": "CHOICE",
+                                  "members": [
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "[A-Za-z0-9+.-]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0041"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000041"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0042"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000042"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0043"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000043"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0044"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000044"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0045"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000045"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0046"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000046"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0047"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000047"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0048"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000048"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0049"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000049"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u004[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000004[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u004[bB]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000004[bB]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u004[cC]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000004[cC]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u004[dD]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000004[dD]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u004[eE]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000004[eE]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u004[fF]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000004[fF]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0050"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000050"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0051"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000051"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0052"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000052"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0053"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000053"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0054"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000054"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0055"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000055"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0056"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000056"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0057"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000057"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0058"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000058"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0059"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000059"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u005[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000005[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0061"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000061"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0062"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000062"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0063"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000063"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0064"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000064"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0065"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000065"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0066"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000066"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0067"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000067"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0068"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000068"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0069"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000069"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u006[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000006[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u006[bB]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000006[bB]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u006[cC]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000006[cC]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u006[dD]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000006[dD]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u006[eE]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000006[eE]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u006[fF]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000006[fF]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0070"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000070"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0071"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000071"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0072"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000072"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0073"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000073"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0074"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000074"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0075"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000075"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0076"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000076"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0077"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000077"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0078"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000078"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0079"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000079"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u007[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000007[aA]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0030"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000030"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0031"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000031"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0032"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000032"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0033"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000033"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0034"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000034"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0035"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000035"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0036"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000036"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0037"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000037"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0038"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000038"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u0039"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U00000039"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u002[bB]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000002[bB]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u002[eE]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000002[eE]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\u002[dD]"
+                                    },
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "\\\\U0000002[dD]"
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "type": "CHOICE",
+                                "members": [
+                                  {
+                                    "type": "STRING",
+                                    "value": ":"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\u003[aA]"
+                                  },
+                                  {
+                                    "type": "PATTERN",
+                                    "value": "\\\\U0000003[aA]"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "REPEAT",
+                                "content": {
+                                  "type": "CHOICE",
+                                  "members": [
+                                    {
+                                      "type": "PATTERN",
+                                      "value": "[^\\x00-\\x20<>\"{}|^`\\\\]",
+                                      "flags": "u"
+                                    },
+                                    {
+                                      "type": "CHOICE",
+                                      "members": [
+                                        {
+                                          "type": "PATTERN",
+                                          "value": "\\\\u(?:[0-9A-Ca-cE-Fe-f][0-9A-Fa-f]{3}|[Dd][0-7][0-9A-Fa-f]{2})"
+                                        },
+                                        {
+                                          "type": "PATTERN",
+                                          "value": "\\\\U(?:0000(?:[0-9A-Ca-cE-Fe-f][0-9A-Fa-f]{3}|[Dd][0-7][0-9A-Fa-f]{2})|000[1-9A-Fa-f][0-9A-Fa-f]{4}|0010[0-9A-Fa-f]{4})"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "type": "STRING",
+                                "value": ">"
+                              }
+                            ]
+                          }
+                        },
+                        "named": true,
+                        "value": "iri_reference"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "FIELD",
+                  "name": "language",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "language_tag"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "language_tag": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "@[A-Za-z]+(-[A-Za-z0-9]+)*"
+      }
+    },
+    "_end_of_line": {
+      "type": "PATTERN",
+      "value": "[\\r\\n]+"
+    }
+  },
+  "extras": [
+    {
+      "type": "PATTERN",
+      "value": "[ \\t]"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "comment"
+    }
+  ],
+  "conflicts": [],
+  "precedences": [],
+  "externals": [
+    {
+      "type": "SYMBOL",
+      "name": "string"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "comment"
+    }
+  ],
+  "inline": [],
+  "supertypes": [],
+  "reserved": {}
+}
