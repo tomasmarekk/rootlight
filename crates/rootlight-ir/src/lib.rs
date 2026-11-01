@@ -134,7 +134,8 @@ pub use perl_binding::{
 };
 pub use rdf_statement::{
     MAX_RDF_STATEMENT_PAYLOAD_BYTES, RDF_STATEMENT_NAMESPACE, RdfStatement, RdfStatementError,
-    RdfTerm, RdfTermKind, decode_rdf_statement_envelope, new_rdf_statement_envelope,
+    RdfStatementFormat, RdfTerm, RdfTermKind, decode_rdf_statement_envelope,
+    new_rdf_statement_envelope,
 };
 pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,

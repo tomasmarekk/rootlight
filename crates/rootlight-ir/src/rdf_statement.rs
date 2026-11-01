@@ -1,4 +1,4 @@
-//! Typed RDF triples over exact physical N-Triples source.
+//! Typed RDF statements over exact physical N-Triples or N-Quads source.
 //! Canonical envelopes retain decoded term roles without inventing software
 //! declarations; generation rebinding preserves document-scoped blank nodes.
 
@@ -11,12 +11,28 @@ use crate::{
     ExtensionCriticality, ExtensionEnvelope, FactEvidence, FactRef, SourceRef, SourceSpan,
 };
 
-/// Namespace for validated source-backed RDF triple statements.
+/// Namespace for validated source-backed RDF statements.
 pub const RDF_STATEMENT_NAMESPACE: &str = "rootlight.rdf_statement";
 /// Maximum canonical RDF statement payload, matching the default IR payload limit.
 pub const MAX_RDF_STATEMENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+
+/// The standard source format authenticated by an RDF statement envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RdfStatementFormat {
+    /// A three-term N-Triples statement encoded with the original v1 contract.
+    NTriples,
+    /// An N-Quads statement in the default graph or a written named graph.
+    NQuads,
+}
+
+impl RdfStatementFormat {
+    fn is_ntriples(&self) -> bool {
+        *self == Self::NTriples
+    }
+}
 
 /// The RDF category of a validated source term.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +145,7 @@ impl RdfTerm {
     }
 }
 
-/// A physical RDF triple with typed subject, predicate and object evidence.
+/// A physical RDF statement with typed term roles and optional named-graph evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RdfStatement {
     source: SourceRef,
@@ -137,6 +153,10 @@ pub struct RdfStatement {
     subject: RdfTerm,
     predicate: RdfTerm,
     object: RdfTerm,
+    #[serde(skip_serializing_if = "RdfStatementFormat::is_ntriples")]
+    format: RdfStatementFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<RdfTerm>,
 }
 
 /// Malformed, unsupported or noncanonical RDF statement evidence.
@@ -156,6 +176,34 @@ impl RdfStatement {
         text: &str,
         spans: [SourceSpan; 3],
     ) -> Result<Self, RdfStatementError> {
+        Self::from_spans(RdfStatementFormat::NTriples, source, text, spans, None)
+    }
+
+    /// Decodes standard N-Quads roles over exact physical statement spans.
+    ///
+    /// An absent `graph` denotes the default graph without synthesizing a source
+    /// term. A written graph must be an absolute IRI or a document-scoped blank node.
+    /// The caller must bind `text` to the immutable source identified by `source`.
+    ///
+    /// # Errors
+    /// Rejects invalid ownership, order, UTF-8 boundaries, term roles or spellings;
+    /// relative IRIs, extra terms, multiline statements and missing terminators.
+    pub fn from_nquads(
+        source: SourceRef,
+        text: &str,
+        spans: [SourceSpan; 3],
+        graph: Option<SourceSpan>,
+    ) -> Result<Self, RdfStatementError> {
+        Self::from_spans(RdfStatementFormat::NQuads, source, text, spans, graph)
+    }
+
+    fn from_spans(
+        format: RdfStatementFormat,
+        source: SourceRef,
+        text: &str,
+        spans: [SourceSpan; 3],
+        graph: Option<SourceSpan>,
+    ) -> Result<Self, RdfStatementError> {
         if text.len() > MAX_RDF_STATEMENT_PAYLOAD_BYTES
             || u64::try_from(text.len()).ok()
                 != source
@@ -166,9 +214,9 @@ impl RdfStatement {
         {
             return Err(RdfStatementError);
         }
-        let mut terms = Vec::with_capacity(3);
+        let mut terms = Vec::with_capacity(if graph.is_some() { 4 } else { 3 });
         let mut previous = source.span().start_byte();
-        for span in spans {
+        for span in spans.into_iter().chain(graph) {
             if span.file() != source.span().file()
                 || span.start_byte() < previous
                 || span.start_byte() >= span.end_byte()
@@ -181,6 +229,14 @@ impl RdfStatement {
                 return Err(RdfStatementError);
             }
             let raw = source_slice(&source, text, span.start_byte(), span.end_byte())?;
+            if gap.is_empty()
+                && terms
+                    .last()
+                    .is_some_and(|term: &RdfTerm| term.kind() == RdfTermKind::BlankNode)
+                && raw.starts_with("_:")
+            {
+                return Err(RdfStatementError);
+            }
             terms.push(RdfTerm {
                 source: SourceRef::new(
                     source.repository(),
@@ -201,7 +257,13 @@ impl RdfStatement {
         let subject = terms.next().ok_or(RdfStatementError)?;
         let predicate = terms.next().ok_or(RdfStatementError)?;
         let object = terms.next().ok_or(RdfStatementError)?;
-        if subject.kind() == RdfTermKind::Literal || predicate.kind() != RdfTermKind::Iri {
+        let graph = terms.next();
+        if subject.kind() == RdfTermKind::Literal
+            || predicate.kind() != RdfTermKind::Iri
+            || graph
+                .as_ref()
+                .is_some_and(|term| term.kind() == RdfTermKind::Literal)
+        {
             return Err(RdfStatementError);
         }
         Ok(Self {
@@ -210,10 +272,12 @@ impl RdfStatement {
             subject,
             predicate,
             object,
+            format,
+            graph,
         })
     }
 
-    /// Returns the complete physical triple source, ending at its terminator.
+    /// Returns the complete physical statement source, ending at its terminator.
     #[must_use]
     pub const fn source(&self) -> &SourceRef {
         &self.source
@@ -239,6 +303,20 @@ impl RdfStatement {
         &self.object
     }
 
+    /// Returns the standard source format authenticated by this statement.
+    #[must_use]
+    pub const fn format(&self) -> RdfStatementFormat {
+        self.format
+    }
+
+    /// Returns the written named graph, or `None` for an N-Quads default graph.
+    ///
+    /// N-Triples also has no graph term; [`Self::format`] distinguishes the formats.
+    #[must_use]
+    pub const fn graph(&self) -> Option<&RdfTerm> {
+        self.graph.as_ref()
+    }
+
     /// Checks exact immutable source bytes, separately from envelope integrity.
     ///
     /// # Errors
@@ -259,7 +337,8 @@ impl RdfStatement {
             self.source.content_hash(),
             self.source.line_hint(),
         );
-        Self::from_ntriples(
+        Self::from_spans(
+            self.format,
             source,
             &self.text,
             [
@@ -267,11 +346,12 @@ impl RdfStatement {
                 self.predicate.source.span(),
                 self.object.source.span(),
             ],
+            self.graph.as_ref().map(|term| term.source.span()),
         )
     }
 }
 
-/// Encodes one canonically identified typed RDF triple.
+/// Encodes a typed statement using unchanged N-Triples v1 or explicit N-Quads v2.
 ///
 /// # Errors
 /// Rejects payloads exceeding the RDF/IR bound or allocation/encoding failures.
@@ -284,9 +364,13 @@ pub fn new_rdf_statement_envelope(
     let payload = String::from_utf8(payload.0).map_err(|_| RdfStatementError)?;
     let source = statement.source.clone();
     let derivation = vec![FactRef::File(source.span().file())];
+    let (version, identity_domain) = match statement.format {
+        RdfStatementFormat::NTriples => ("1", "rootlight.rdf_statement/v1"),
+        RdfStatementFormat::NQuads => ("2", "rootlight.rdf_statement/v2"),
+    };
     let identity = serde_json::to_vec(&(
         RDF_STATEMENT_NAMESPACE,
-        "1",
+        version,
         source.repository(),
         source.generation(),
         provenance,
@@ -296,11 +380,11 @@ pub fn new_rdf_statement_envelope(
     ))
     .map_err(|_| RdfStatementError)?;
     Ok(ExtensionEnvelope {
-        id: derive_fact("rootlight.rdf_statement/v1", &identity).id(),
+        id: derive_fact(identity_domain, &identity).id(),
         repository: source.repository(),
         generation: source.generation(),
         namespace: RDF_STATEMENT_NAMESPACE.to_owned(),
-        version: "1".to_owned(),
+        version: version.to_owned(),
         criticality: ExtensionCriticality::Noncritical,
         payload,
         provenance,
@@ -339,9 +423,17 @@ pub fn decode_rdf_statement_envelope(
         subject: Term,
         predicate: Term,
         object: Term,
+        format: Option<RdfStatementFormat>,
+        graph: Option<Term>,
     }
     let wire: Wire = serde_json::from_str(&envelope.payload).map_err(|_| RdfStatementError)?;
-    let statement = RdfStatement::from_ntriples(
+    let format = match (envelope.version.as_str(), wire.format) {
+        ("1", None) if wire.graph.is_none() => RdfStatementFormat::NTriples,
+        ("2", Some(RdfStatementFormat::NQuads)) => RdfStatementFormat::NQuads,
+        _ => return Err(RdfStatementError),
+    };
+    let statement = RdfStatement::from_spans(
+        format,
         wire.source,
         &wire.text,
         [
@@ -349,6 +441,7 @@ pub fn decode_rdf_statement_envelope(
             wire.predicate.source.span(),
             wire.object.source.span(),
         ],
+        wire.graph.as_ref().map(|term| term.source.span()),
     )?;
     if statement.subject.source != wire.subject.source
         || statement.subject.value != wire.subject.value
@@ -356,6 +449,11 @@ pub fn decode_rdf_statement_envelope(
         || statement.predicate.value != wire.predicate.value
         || statement.object.source != wire.object.source
         || statement.object.value != wire.object.value
+        || statement
+            .graph
+            .as_ref()
+            .map(|term| (&term.source, &term.value))
+            != wire.graph.as_ref().map(|term| (&term.source, &term.value))
         || new_rdf_statement_envelope(envelope.provenance, &statement)? != *envelope
     {
         return Err(RdfStatementError);
@@ -648,7 +746,7 @@ mod tests {
     use super::*;
     use rootlight_ids::{FileId, RepositoryId, content_hash};
 
-    fn triple(text: &str, raw: [&str; 3]) -> Result<RdfStatement, RdfStatementError> {
+    fn source_spans<const N: usize>(text: &str, raw: [&str; N]) -> (SourceRef, [SourceSpan; N]) {
         let file = FileId::from_bytes([3; 20]);
         let repository = RepositoryId::from_bytes([1; 16]);
         let generation = GenerationId::from_bytes([2; 20]);
@@ -670,7 +768,282 @@ mod tests {
             )
             .unwrap()
         });
+        (source, spans)
+    }
+
+    fn triple(text: &str, raw: [&str; 3]) -> Result<RdfStatement, RdfStatementError> {
+        let (source, spans) = source_spans(text, raw);
         RdfStatement::from_ntriples(source, text, spans)
+    }
+
+    fn quad(
+        text: &str,
+        raw: [&str; 3],
+        graph: Option<&str>,
+    ) -> Result<RdfStatement, RdfStatementError> {
+        if let Some(graph) = graph {
+            let (source, [subject, predicate, object, graph]) =
+                source_spans(text, [raw[0], raw[1], raw[2], graph]);
+            RdfStatement::from_nquads(source, text, [subject, predicate, object], Some(graph))
+        } else {
+            let (source, spans) = source_spans(text, raw);
+            RdfStatement::from_nquads(source, text, spans, None)
+        }
+    }
+
+    #[test]
+    fn rdf_ntriples_v1_preserves_original_payload_bytes_and_fact_identity() {
+        #[derive(Serialize)]
+        struct LegacyV1<'a> {
+            source: &'a SourceRef,
+            text: &'a str,
+            subject: &'a RdfTerm,
+            predicate: &'a RdfTerm,
+            object: &'a RdfTerm,
+        }
+        let statement = triple("_:a<p:>\"λ\"@EN.", ["_:a", "<p:>", "\"λ\"@EN"]).unwrap();
+        let payload = serde_json::to_string(&LegacyV1 {
+            source: statement.source(),
+            text: statement.source_text(),
+            subject: statement.subject(),
+            predicate: statement.predicate(),
+            object: statement.object(),
+        })
+        .unwrap();
+        let provenance = FactId::from_bytes([4; 20]);
+        let derivation = vec![FactRef::File(statement.source.span().file())];
+        let identity = serde_json::to_vec(&(
+            RDF_STATEMENT_NAMESPACE,
+            "1",
+            statement.source.repository(),
+            statement.source.generation(),
+            provenance,
+            &statement.source,
+            &payload,
+            &derivation,
+        ))
+        .unwrap();
+        let envelope = new_rdf_statement_envelope(provenance, &statement).unwrap();
+        assert_eq!(statement.format(), RdfStatementFormat::NTriples);
+        assert!(statement.graph().is_none());
+        assert_eq!(envelope.version, "1");
+        assert_eq!(envelope.payload.as_bytes(), payload.as_bytes());
+        assert_eq!(
+            envelope.id,
+            derive_fact("rootlight.rdf_statement/v1", &identity).id()
+        );
+        assert_eq!(decode_rdf_statement_envelope(&envelope).unwrap(), statement);
+    }
+
+    #[test]
+    fn rdf_nquads_v2_round_trip_preserves_default_and_named_graph_roles() {
+        for (text, raw, graph) in [
+            (
+                "<s:><p:>\"λ\\u0000\"@EN.",
+                ["<s:>", "<p:>", "\"λ\\u0000\"@EN"],
+                None,
+            ),
+            (
+                "<s:><p:><o:><urn:g#anchor>.",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<urn:g#anchor>"),
+            ),
+            ("_:a <p:> _:a _:a.", ["_:a", "<p:>", "_:a"], Some("_:a")),
+            (
+                "<s:><p:>\"λ\"^^<urn:type><urn:g>.",
+                ["<s:>", "<p:>", "\"λ\"^^<urn:type>"],
+                Some("<urn:g>"),
+            ),
+        ] {
+            let statement = quad(text, raw, graph).unwrap();
+            assert_eq!(statement.format(), RdfStatementFormat::NQuads);
+            assert_eq!(statement.graph().is_some(), graph.is_some());
+            assert_eq!(statement.source_text(), text);
+            if let Some(term) = statement.graph() {
+                let span = term.source().span();
+                assert_eq!(
+                    source_slice(statement.source(), text, span.start_byte(), span.end_byte())
+                        .unwrap(),
+                    graph.unwrap()
+                );
+                assert!(span.start_byte() >= statement.object.source.span().end_byte());
+                if term.kind() == RdfTermKind::BlankNode {
+                    assert!(term.same_blank_node(statement.subject()));
+                    assert!(term.same_blank_node(statement.object()));
+                }
+            }
+            let envelope =
+                new_rdf_statement_envelope(FactId::from_bytes([4; 20]), &statement).unwrap();
+            assert_eq!(envelope.version, "2");
+            assert_eq!(decode_rdf_statement_envelope(&envelope).unwrap(), statement);
+            assert!(statement.verify_source_text(text).is_ok());
+            if graph.is_none() {
+                assert_eq!(statement.object().literal_value(), Some("λ\0"));
+                assert_eq!(statement.object().language(), Some("en"));
+                let triple = triple(text, raw).unwrap();
+                assert_ne!(
+                    envelope.id,
+                    new_rdf_statement_envelope(envelope.provenance, &triple)
+                        .unwrap()
+                        .id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rdf_nquads_refuses_invalid_graph_roles_source_ranges_and_statement_endings() {
+        for (text, raw, graph) in [
+            ("_:a<p:>_:a_:g.", ["_:a", "<p:>", "_:a"], Some("_:g")),
+            (
+                "<s:><p:><o:>\"g\".",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("\"g\""),
+            ),
+            (
+                "<s:><p:><o:><relative>.",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<relative>"),
+            ),
+            (
+                "<s:><p:><o:><urn:g><extra:>.",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<urn:g>"),
+            ),
+            ("<s:><p:><o:><urn:g>.", ["<s:>", "<p:>", "<o:>"], None),
+            (
+                "<s:><p:><o:>\n<urn:g>.",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<urn:g>"),
+            ),
+            (
+                "<s:><p:><o:><urn:g>",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<urn:g>"),
+            ),
+            (
+                "<s:><p:><o:><urn:g>. #comment",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<urn:g>"),
+            ),
+            (
+                "<s:><p:><o:><urn:g>.\n",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<urn:g>"),
+            ),
+            (
+                "<s:><p:><o:><urn:\0g>.",
+                ["<s:>", "<p:>", "<o:>"],
+                Some("<urn:\0g>"),
+            ),
+            (
+                "<alice><follows><bob>.",
+                ["<alice>", "<follows>", "<bob>"],
+                None,
+            ),
+        ] {
+            assert!(quad(text, raw, graph).is_err(), "{text:?}");
+        }
+        let statement = quad(
+            "<s:><p:><o:><urn:λ>.",
+            ["<s:>", "<p:>", "<o:>"],
+            Some("<urn:λ>"),
+        )
+        .unwrap();
+        let graph = statement.graph().unwrap().source().span();
+        let spans = [
+            statement.subject.source.span(),
+            statement.predicate.source.span(),
+            statement.object.source.span(),
+        ];
+        for invalid in [
+            SourceSpan::new(
+                FileId::from_bytes([8; 20]),
+                graph.start_byte(),
+                graph.end_byte(),
+            )
+            .unwrap(),
+            SourceSpan::new(graph.file(), graph.start_byte(), graph.start_byte()).unwrap(),
+            statement.object.source.span(),
+            SourceSpan::new(
+                graph.file(),
+                graph.start_byte(),
+                statement.source.span().end_byte() + 1,
+            )
+            .unwrap(),
+            SourceSpan::new(graph.file(), graph.start_byte(), graph.start_byte() + 6).unwrap(),
+        ] {
+            assert!(
+                RdfStatement::from_nquads(
+                    statement.source.clone(),
+                    &statement.text,
+                    spans,
+                    Some(invalid)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn rdf_nquads_decoder_authenticates_graph_sources_values_and_version() {
+        let statement = quad("_:a<p:>_:a _:g.", ["_:a", "<p:>", "_:a"], Some("_:g")).unwrap();
+        let original = new_rdf_statement_envelope(FactId::from_bytes([4; 20]), &statement).unwrap();
+        let graph = statement.graph().unwrap();
+        let raw = serde_json::to_string(graph).unwrap();
+        for mutate in [
+            |term: &mut RdfTerm| term.source.generation = GenerationId::from_bytes([9; 20]),
+            |term: &mut RdfTerm| term.source.repository = RepositoryId::from_bytes([9; 16]),
+            |term: &mut RdfTerm| term.source.content_hash = content_hash(b"foreign"),
+            |term: &mut RdfTerm| {
+                term.source.span = SourceSpan::new(FileId::from_bytes([9; 20]), 10, 13).unwrap()
+            },
+            |term: &mut RdfTerm| {
+                term.value = TermValue::BlankNode {
+                    label: "other".into(),
+                }
+            },
+            |term: &mut RdfTerm| {
+                term.value = TermValue::Literal {
+                    value: "g".into(),
+                    language: None,
+                    datatype: None,
+                }
+            },
+        ] {
+            let mut forged = graph.clone();
+            mutate(&mut forged);
+            let mut altered = original.clone();
+            altered.payload =
+                altered
+                    .payload
+                    .replacen(&raw, &serde_json::to_string(&forged).unwrap(), 1);
+            let identity = serde_json::to_vec(&(
+                RDF_STATEMENT_NAMESPACE,
+                "2",
+                altered.repository,
+                altered.generation,
+                altered.provenance,
+                &altered.evidence.source,
+                &altered.payload,
+                &altered.evidence.derivation,
+            ))
+            .unwrap();
+            altered.id = derive_fact("rootlight.rdf_statement/v2", &identity).id();
+            assert!(decode_rdf_statement_envelope(&altered).is_err());
+        }
+        for version in ["1", "3"] {
+            let mut altered = original.clone();
+            altered.version = version.into();
+            assert!(decode_rdf_statement_envelope(&altered).is_err());
+        }
+        for format in ["n_triples", "unknown"] {
+            let mut altered = original.clone();
+            altered.payload = altered
+                .payload
+                .replace("\"n_quads\"", &format!("\"{format}\""));
+            assert!(decode_rdf_statement_envelope(&altered).is_err());
+        }
     }
 
     #[test]

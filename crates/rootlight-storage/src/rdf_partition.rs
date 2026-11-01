@@ -447,6 +447,10 @@ impl UnpublishedRdfPartition {
         let mut usage = IrDocumentUsage::default();
         for record in &records {
             context.check()?;
+            // Packed v1 reconstructs the original triple envelope and cannot carry v2 roles.
+            if record.version != "1" {
+                return Err(RdfPartitionError::InvalidRecord);
+            }
             usage =
                 usage.checked_add(IrDocumentUsage::measure_extension(record, limits)?, limits)?;
             let statement = decode_rdf_statement_envelope(record)
@@ -735,4 +739,91 @@ pub enum RdfPartitionError {
     /// Canonical encoding or checked size accounting failed.
     #[error("rdf partition encoding failed")]
     Encoding,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GENERATION_CONTRACT_VERSION, GenerationBudget};
+    use rootlight_cancel::Cancellation;
+    use rootlight_ids::{
+        FactId, GenerationIdentity, RepositoryId, content_hash, derive_generation,
+    };
+    use rootlight_ir::{RdfStatement, SourceRef, SourceSpan, new_rdf_statement_envelope};
+
+    #[test]
+    fn packed_v1_admission_refuses_named_and_default_graph_v2_statements() {
+        let repository = RepositoryId::from_bytes([1; 16]);
+        let hash = content_hash(b"metadata");
+        let generation = derive_generation(GenerationIdentity {
+            repository,
+            parent: None,
+            manifest_hash: hash,
+            config_hash: hash,
+            provider_set_hash: hash,
+            format_version: (u32::from(GENERATION_CONTRACT_VERSION.major()) << 16)
+                | u32::from(GENERATION_CONTRACT_VERSION.minor()),
+        })
+        .id();
+        let metadata =
+            GenerationMetadata::new(repository, generation, None, hash, hash, hash).unwrap();
+        let file = FileId::from_bytes([2; 20]);
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        for graph in [None, Some("<g:>"), Some("_:g")] {
+            let text = format!("<s:><p:><o:>{}.", graph.unwrap_or(""));
+            let source_bytes = u64::try_from(text.len()).unwrap();
+            let source_hash = content_hash(text.as_bytes());
+            let source = SourceRef::new(
+                repository,
+                generation,
+                SourceSpan::new(file, 0, source_bytes).unwrap(),
+                source_hash,
+                None,
+            );
+            let spans = [(0, 4), (4, 8), (8, 12)]
+                .map(|(start, end)| SourceSpan::new(file, start, end).unwrap());
+            let statement = RdfStatement::from_nquads(
+                source.clone(),
+                &text,
+                spans,
+                graph.map(|graph| {
+                    SourceSpan::new(file, 12, 12 + u64::try_from(graph.len()).unwrap()).unwrap()
+                }),
+            )
+            .unwrap();
+            let envelope =
+                new_rdf_statement_envelope(FactId::from_bytes([3; 20]), &statement).unwrap();
+            assert_eq!(decode_rdf_statement_envelope(&envelope).unwrap(), statement);
+            assert_eq!(
+                UnpublishedRdfPartition::admit(
+                    metadata,
+                    file,
+                    source_hash,
+                    source_bytes,
+                    vec![envelope],
+                    &IrLimits::default(),
+                    &context
+                ),
+                Err(RdfPartitionError::InvalidRecord)
+            );
+            if graph.is_none() {
+                let triple = RdfStatement::from_ntriples(source, &text, spans).unwrap();
+                let envelope =
+                    new_rdf_statement_envelope(FactId::from_bytes([3; 20]), &triple).unwrap();
+                assert!(
+                    UnpublishedRdfPartition::admit(
+                        metadata,
+                        file,
+                        source_hash,
+                        source_bytes,
+                        vec![envelope],
+                        &IrLimits::default(),
+                        &context
+                    )
+                    .is_ok()
+                );
+            }
+        }
+    }
 }

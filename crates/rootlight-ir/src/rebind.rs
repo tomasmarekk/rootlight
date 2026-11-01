@@ -2883,6 +2883,78 @@ mod tests {
     }
 
     #[test]
+    fn rdf_nquads_rebind_preserves_format_graph_roles_and_neutral_identity() {
+        for graph in [None, Some("<g:>"), Some("_:a")] {
+            let mut document = fixture_with_lexical_extension();
+            document.extensions.clear();
+            let file = &document.files[0];
+            let text = format!("_:a<p:>_:a {}.", graph.unwrap_or(""));
+            let source = SourceRef::new(
+                document.repository,
+                document.generation,
+                crate::SourceSpan::new(file.id, 0, u64::try_from(text.len()).unwrap()).unwrap(),
+                file.content_hash,
+                None,
+            );
+            let spans = [(0, 3), (3, 7), (7, 10)]
+                .map(|(start, end)| crate::SourceSpan::new(file.id, start, end).unwrap());
+            let graph_span = graph.map(|graph| {
+                crate::SourceSpan::new(file.id, 11, 11 + u64::try_from(graph.len()).unwrap())
+                    .unwrap()
+            });
+            let original =
+                crate::RdfStatement::from_nquads(source, &text, spans, graph_span).unwrap();
+            document
+                .extensions
+                .push(new_rdf_statement_envelope(file.provenance, &original).unwrap());
+            let limits = IrLimits::default();
+            let support = ExtensionSupport::default();
+            let chunk = CanonicalNormalizedFileChunk::new(&document, &limits, &support).unwrap();
+            let generation = GenerationId::from_bytes([87; 20]);
+            let rebound = chunk.rebind(generation, &limits, &support).unwrap();
+            let envelope = &rebound.extensions[0];
+            let decoded = decode_rdf_statement_envelope(envelope).unwrap();
+            assert_eq!(envelope.version, "2");
+            assert_ne!(envelope.id, document.extensions[0].id);
+            assert_eq!(decoded.format(), crate::RdfStatementFormat::NQuads);
+            assert_eq!(decoded.source_text(), text);
+            assert_eq!(decoded.source().generation(), generation);
+            assert_eq!(decoded.graph().is_some(), graph.is_some());
+            for term in [decoded.subject(), decoded.predicate(), decoded.object()]
+                .into_iter()
+                .chain(decoded.graph())
+            {
+                assert_eq!(term.source().generation(), generation);
+                assert_eq!(term.source().repository(), original.source().repository());
+                assert_eq!(
+                    term.source().content_hash(),
+                    original.source().content_hash()
+                );
+            }
+            if let Some(graph) = decoded.graph() {
+                assert_eq!(
+                    graph.source().span(),
+                    original.graph().unwrap().source().span()
+                );
+                if graph.kind() == crate::RdfTermKind::BlankNode {
+                    assert!(graph.same_blank_node(decoded.object()));
+                    assert!(!graph.same_blank_node(original.object()));
+                }
+            }
+            assert_eq!(
+                chunk.digest(),
+                CanonicalNormalizedFileChunk::new(&rebound, &limits, &support)
+                    .unwrap()
+                    .digest()
+            );
+            assert_eq!(
+                chunk.rebind(generation, &limits, &support).unwrap(),
+                rebound
+            );
+        }
+    }
+
+    #[test]
     fn rdf_statement_rebinds_all_term_sources_and_preserves_physical_duplicates() {
         let mut document = fixture_with_lexical_extension();
         document.extensions.clear();
