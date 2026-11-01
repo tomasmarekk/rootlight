@@ -25,8 +25,8 @@ use rootlight_query::{
 };
 use rootlight_storage::{
     GenerationBudget, GenerationContext, GenerationMetadata, GenerationReadLimit, GenerationReader,
-    GenerationStats, OccurrenceReadRequest, ReadPage, ReadPageCompleteness, RelationReadDirection,
-    RelationReadRequest,
+    GenerationStats, GenerationStatsLayout, OccurrenceReadRequest, ReadPage, ReadPageCompleteness,
+    RelationReadDirection, RelationReadRequest,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -741,7 +741,12 @@ fn metadata_json(metadata: GenerationMetadata) -> Value {
 }
 
 fn stats_json(stats: GenerationStats) -> Value {
+    let layout = match stats.layout() {
+        GenerationStatsLayout::CanonicalOracle => "canonical",
+        GenerationStatsLayout::CanonicalOracleWithRdfV1 => "canonical_with_rdf_v1",
+    };
     json!({
+        "layout":layout,
         "files":stats.files(),"entities":stats.entities(),"occurrences":stats.occurrences(),
         "relations":stats.relations(),"provenance":stats.provenance(),"source_mappings":stats.source_mappings(),
         "coverage":stats.coverage(),"skipped_regions":stats.skipped_regions(),"diagnostics":stats.diagnostics(),
@@ -839,6 +844,31 @@ mod tests {
 
     fn fact(byte: u8) -> FactId {
         FactId::from_bytes([byte; 20])
+    }
+
+    #[test]
+    fn generation_stats_report_layout_without_changing_numeric_fields() {
+        let canonical = GenerationStats::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 100, 101).unwrap();
+        let mut expected = json!({
+            "layout":"canonical",
+            "files":1,"entities":2,"occurrences":3,"relations":4,"provenance":5,
+            "source_mappings":6,"coverage":7,"skipped_regions":8,"diagnostics":9,
+            "extensions":10,"source_refs":11,"stored_rows":100,"text_bytes":101
+        });
+        assert_eq!(stats_json(canonical), expected);
+
+        let packed = canonical.checked_add_rdf_v1(3, 2, 20, 30, 10).unwrap();
+        expected["layout"] = json!("canonical_with_rdf_v1");
+        expected["extensions"] = json!(13);
+        expected["source_refs"] = json!(13);
+        expected["stored_rows"] = json!(104);
+        expected["text_bytes"] = json!(161);
+        assert_eq!(stats_json(packed), expected);
+
+        let same_counters =
+            GenerationStats::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 13, 104, 161).unwrap();
+        expected["layout"] = json!("canonical");
+        assert_eq!(stats_json(same_counters), expected);
     }
 
     fn page(ids: &[u8], total: u64) -> ReadPage<FactId> {
