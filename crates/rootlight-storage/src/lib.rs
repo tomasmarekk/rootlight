@@ -18,10 +18,11 @@ pub use generation::{
     GENERATION_CONTRACT_VERSION, GenerationBudget, GenerationBudgetError, GenerationContext,
     GenerationContractVersion, GenerationControlError, GenerationManifestRecipe,
     GenerationMetadata, GenerationNeutralDigestError, GenerationResource, GenerationSnapshot,
-    GenerationSnapshotError, GenerationStats, GenerationValidationError, GenerationWriter,
-    HARD_MAX_GENERATION_ENCODED_TEXT_BYTES, HARD_MAX_GENERATION_ROWS,
+    GenerationSnapshotError, GenerationStats, GenerationStatsLayout, GenerationValidationError,
+    GenerationWriter, HARD_MAX_GENERATION_ENCODED_TEXT_BYTES, HARD_MAX_GENERATION_ROWS,
     HARD_MAX_GENERATION_SOURCE_REFS, HARD_MAX_GENERATION_TEXT_BYTES, IdentityMismatchComponent,
-    IdentityVerificationError, IdentityVerifiedGeneration, PROPOSED_IDENTITY_CLAIM_VERSION,
+    IdentityVerificationError, IdentityVerifiedGeneration, IdentityVerifiedRdfBase,
+    PROPOSED_IDENTITY_CLAIM_VERSION,
 };
 pub use lifecycle::{
     DiskReservation, GenerationFootprint, GenerationLease, GenerationLifecycle, GenerationSequence,
@@ -43,8 +44,9 @@ pub use publication::{
     classify_recovery, verify_publication,
 };
 pub use rdf_partition::{
-    RDF_PARTITION_FORMAT_VERSION, RdfPartitionDescriptor, RdfPartitionError,
-    UnpublishedRdfPartition, VerifiedRdfPartition,
+    RDF_PARTITION_FORMAT_VERSION, RDF_PARTITION_SET_NAMESPACE, RdfPartitionDescriptor,
+    RdfPartitionError, UnpublishedRdfPartition, VerifiedRdfPartition,
+    new_rdf_partition_set_envelopes, rdf_partition_extension_support,
 };
 pub use reader::{
     CoverageReadRequest, GenerationReadLimit, GenerationReadLimitError, GenerationReader,

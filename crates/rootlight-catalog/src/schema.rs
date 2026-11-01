@@ -858,6 +858,53 @@ pub(crate) fn open_oracle_reader(
     Ok(connection)
 }
 
+const RDF_BASE_DATABASE_KIND: &[u8] = b"rootlight-oracle-rdf-base-v1";
+
+pub(crate) fn open_logical_oracle_reader(
+    path: &Path,
+    context: &GenerationContext<'_>,
+) -> Result<Connection, CatalogError> {
+    let connection = open_private_reader(path, context)?;
+    validate_schema(&connection, &logical_oracle_reader_definition(&connection)?)?;
+    install_authorizer(&connection)?;
+    Ok(connection)
+}
+
+pub(crate) fn is_rdf_base(connection: &Connection) -> Result<bool, CatalogError> {
+    let kind: Option<Vec<u8>> = connection.query_row(
+        "SELECT value FROM application_meta WHERE key = 'database_kind' AND length(value) BETWEEN 1 AND 128",
+        [], |row| row.get(0),
+    ).optional().map_err(CatalogError::sqlite)?;
+    Ok(kind.as_deref() == Some(RDF_BASE_DATABASE_KIND))
+}
+
+fn logical_oracle_reader_definition(
+    connection: &Connection,
+) -> Result<SchemaDefinition<'static>, CatalogError> {
+    let mut definition = oracle_reader_definition(connection)?;
+    if is_rdf_base(connection)? {
+        if definition.version != ORACLE_SCHEMA_VERSION {
+            return Err(CatalogError::new(CatalogErrorKind::IncompatibleSchema));
+        }
+        definition.kind = RDF_BASE_DATABASE_KIND;
+    }
+    Ok(definition)
+}
+
+pub(crate) fn mark_rdf_base(connection: &Connection) -> Result<(), CatalogError> {
+    validate_schema(connection, &oracle_definition())?;
+    let changed = connection
+        .execute(
+            "UPDATE application_meta SET value = ?1 WHERE key = 'database_kind' AND value = ?2",
+            params![RDF_BASE_DATABASE_KIND, oracle_definition().kind],
+        )
+        .map_err(CatalogError::sqlite)?;
+    if changed != 1 {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
 fn open_private_reader(
     path: &Path,
     context: &GenerationContext<'_>,
@@ -976,6 +1023,15 @@ pub(crate) fn validate_oracle(
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     validate_schema(connection, &oracle_reader_definition(connection)?)?;
+    validate_oracle_size(connection, context)?;
+    validate_integrity(connection, Some(context))
+}
+
+pub(crate) fn validate_logical_oracle(
+    connection: &Connection,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    validate_schema(connection, &logical_oracle_reader_definition(connection)?)?;
     validate_oracle_size(connection, context)?;
     validate_integrity(connection, Some(context))
 }

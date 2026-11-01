@@ -390,12 +390,75 @@ pub(crate) fn read_generation_with_admission<E>(
     context: &GenerationContext<'_>,
     admit: impl FnOnce(OracleReadMemoryPlan) -> Result<(), E>,
 ) -> Result<GenerationSnapshot, OracleReadAdmissionError<E>> {
-    let transaction = connection
+    read_generation_with_policy(
+        connection,
+        expected_metadata,
+        expected_stats,
+        context,
+        admit,
+        false,
+    )
+}
+
+pub(crate) fn has_rdf_partition_set(
+    connection: &Connection,
+    context: &GenerationContext<'_>,
+) -> Result<bool, CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let found: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM extensions WHERE json_extract(payload, '$.namespace') = ?1)",
+        [rootlight_storage::RDF_PARTITION_SET_NAMESPACE],
+        |row| row.get(0),
+    ).map_err(CatalogError::sqlite)?;
+    context.check().map_err(CatalogError::control)?;
+    Ok(found)
+}
+
+pub(crate) fn read_rdf_base(
+    connection: &Connection,
+    metadata: GenerationMetadata,
+    stats: GenerationStats,
+    context: &GenerationContext<'_>,
+) -> Result<rootlight_storage::IdentityVerifiedRdfBase, CatalogError> {
+    if !crate::schema::is_rdf_base(connection)? {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let snapshot = match read_generation_with_policy(
+        connection,
+        metadata,
+        stats,
+        context,
+        |_| Ok::<(), std::convert::Infallible>(()),
+        true,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(OracleReadAdmissionError::Catalog(error)) => return Err(error),
+        Err(OracleReadAdmissionError::Admission(never)) => match never {},
+    };
+    rootlight_storage::IdentityVerifiedRdfBase::verify_snapshot(snapshot, context)
+        .map_err(crate::identity_catalog_error)
+}
+
+fn read_generation_with_policy<E>(
+    connection: &Connection,
+    expected_metadata: GenerationMetadata,
+    expected_stats: GenerationStats,
+    context: &GenerationContext<'_>,
+    admit: impl FnOnce(OracleReadMemoryPlan) -> Result<(), E>,
+    allow_rdf_base: bool,
+) -> Result<GenerationSnapshot, OracleReadAdmissionError<E>> {
+    let mut transaction = connection
         .unchecked_transaction()
         .map_err(CatalogError::sqlite)?;
     let (metadata, stats, ir_version) = read_header(&transaction, context)?;
     if metadata != expected_metadata || stats != expected_stats {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
+    }
+    if !allow_rdf_base
+        && (crate::schema::is_rdf_base(&transaction)?
+            || has_rdf_partition_set(&transaction, context)?)
+    {
+        return Err(CatalogError::new(CatalogErrorKind::PartitionedMaterializationRequired).into());
     }
     let cardinality =
         validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
@@ -548,11 +611,16 @@ pub(crate) fn read_generation_with_admission<E>(
     }
 
     validate_document_hash(&transaction, &document, context)?;
+    let support = if allow_rdf_base {
+        rootlight_storage::rdf_partition_extension_support()
+    } else {
+        ExtensionSupport::default()
+    };
     let snapshot = GenerationSnapshot::new_with_context(
         metadata,
         document,
         &IrLimits::default(),
-        &ExtensionSupport::default(),
+        &support,
         context,
     )
     .map_err(|error| match error {
@@ -560,7 +628,11 @@ pub(crate) fn read_generation_with_admission<E>(
         GenerationSnapshotError::Validation(error) => CatalogError::corrupt_generation(error),
     })?;
     context.check().map_err(CatalogError::control)?;
-    let plan = write::measure(&snapshot, context)?;
+    let plan = if allow_rdf_base {
+        write::measure_rdf_base(&snapshot, context)?
+    } else {
+        write::measure(&snapshot, context)?
+    };
     let comparable_stats = GenerationStats::new(
         stats.files(),
         stats.entities(),
@@ -587,7 +659,13 @@ pub(crate) fn read_generation_with_admission<E>(
     }
     validate_identity_registry(&transaction, &plan.identities, context)?;
     validate_source_registry(&sources, &plan.source_ordinals, context)?;
-    transaction.commit().map_err(CatalogError::sqlite)?;
+    if allow_rdf_base {
+        // The logical reader retains this authenticated base snapshot alongside
+        // its already pinned leaves; callers release it by closing the connection.
+        transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+    } else {
+        transaction.commit().map_err(CatalogError::sqlite)?;
+    }
     Ok(snapshot)
 }
 

@@ -1576,7 +1576,7 @@ impl IdentityVerifiedGeneration {
         if snapshot.metadata().contract_version() != GENERATION_CONTRACT_VERSION {
             return Err(IdentityVerificationError::LegacyContract);
         }
-        verify_snapshot_identities(&snapshot, context)?;
+        verify_snapshot_identities(&snapshot, context, false)?;
         context
             .check()
             .map_err(IdentityVerificationError::Control)?;
@@ -1810,6 +1810,107 @@ impl IdentityVerifiedGeneration {
     }
 }
 
+/// Verified base records and exact commitments for an incomplete RDF storage set.
+///
+/// This capability cannot enter APIs requiring [`IdentityVerifiedGeneration`].
+/// It exposes raw base records for storage, never a complete canonical snapshot.
+#[derive(Debug)]
+pub struct IdentityVerifiedRdfBase {
+    snapshot: GenerationSnapshot,
+    partitions: Vec<crate::RdfPartitionDescriptor>,
+}
+
+impl IdentityVerifiedRdfBase {
+    /// Verifies the bounded base using only the explicit critical set policy.
+    ///
+    /// # Errors
+    /// Rejects unsupported extensions, missing or inconsistent root/members,
+    /// inline overlap, ordinary identity failures, or interruption.
+    pub fn verify(
+        metadata: GenerationMetadata,
+        document: NormalizedIrDocument,
+        source_files: SourceFileCatalog,
+        limits: &IrLimits,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        let snapshot = GenerationSnapshot::new_with_source_files_and_context(
+            metadata,
+            document,
+            source_files,
+            limits,
+            &crate::rdf_partition_extension_support(),
+            context,
+        )
+        .map_err(IdentityVerificationError::from_snapshot)?;
+        Self::verify_snapshot(snapshot, context)
+    }
+
+    /// Authenticates an already bounded base without granting whole-graph authority.
+    ///
+    /// # Errors
+    /// Returns the same identity and control failures as [`Self::verify`].
+    pub fn verify_snapshot(
+        snapshot: GenerationSnapshot,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, IdentityVerificationError> {
+        if snapshot.metadata().contract_version() != GENERATION_CONTRACT_VERSION {
+            return Err(IdentityVerificationError::LegacyContract);
+        }
+        require_generation_budget(
+            snapshot.metadata().contract_version(),
+            snapshot.document(),
+            snapshot.source_files(),
+            context,
+        )
+        .map_err(IdentityVerificationError::Control)?;
+        verify_snapshot_identities(&snapshot, context, true)?;
+        let partitions = crate::rdf_partition::verify_rdf_partition_set(&snapshot, context)
+            .map_err(|error| match error {
+                crate::RdfPartitionError::Control(error) => {
+                    IdentityVerificationError::Control(error)
+                }
+                _ => IdentityVerificationError::IdentityMismatch(
+                    IdentityMismatchComponent::ClaimEnvelope,
+                ),
+            })?;
+        if partitions.is_empty() {
+            return Err(IdentityVerificationError::MissingClaim);
+        }
+        Ok(Self {
+            snapshot,
+            partitions,
+        })
+    }
+
+    /// Returns the verified parent metadata, without implying member availability.
+    #[must_use]
+    pub const fn metadata(&self) -> GenerationMetadata {
+        self.snapshot.metadata()
+    }
+
+    /// Returns the exact set whose durable contents still require authentication.
+    #[must_use]
+    pub fn partitions(&self) -> &[crate::RdfPartitionDescriptor] {
+        &self.partitions
+    }
+
+    /// Returns incomplete base records for explicit storage and anchor checks.
+    #[must_use]
+    pub const fn base_document(&self) -> &NormalizedIrDocument {
+        self.snapshot.document()
+    }
+
+    /// Consumes the capability into raw base storage inputs, without a snapshot.
+    #[must_use]
+    pub fn into_base_parts(self) -> (GenerationMetadata, NormalizedIrDocument, SourceFileCatalog) {
+        (
+            self.snapshot.metadata,
+            self.snapshot.document.into_document(),
+            self.snapshot.source_files,
+        )
+    }
+}
+
 fn verify_published_digest(
     encoded: &[u8],
     expected_digest: ContentHash,
@@ -1887,6 +1988,7 @@ impl<R: Read> Read for PublishedDigestReader<'_, R> {
 fn verify_snapshot_identities(
     snapshot: &GenerationSnapshot,
     context: &GenerationContext<'_>,
+    allow_rdf_base: bool,
 ) -> Result<(), IdentityVerificationError> {
     let document = snapshot.document();
     let mut aggregate_recovery = None;
@@ -1915,6 +2017,7 @@ fn verify_snapshot_identities(
             .check()
             .map_err(IdentityVerificationError::Control)?;
         match envelope.namespace.as_str() {
+            crate::RDF_PARTITION_SET_NAMESPACE if allow_rdf_base => {}
             rootlight_ir::AGGREGATE_SOURCE_RECOVERY_NAMESPACE => {
                 let cause = rootlight_ir::decode_aggregate_source_recovery_envelope(envelope)
                     .map_err(|_| {
@@ -2589,9 +2692,19 @@ fn verify_fact_ids(
     context.check().map_err(IdentityVerificationError::Control)
 }
 
-/// Logical and physical cardinalities for one sealed generation.
+/// The physical record layout used by generation statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationStatsLayout {
+    /// One canonical oracle with normalized identity, source, and child rows.
+    CanonicalOracle,
+    /// A canonical base plus authenticated packed RDF v1 leaves.
+    CanonicalOracleWithRdfV1,
+}
+
+/// Logical cardinalities and layout-specific physical accounting for a generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenerationStats {
+    layout: GenerationStatsLayout,
     files: u64,
     entities: u64,
     occurrences: u64,
@@ -2654,6 +2767,7 @@ impl GenerationStats {
             return Err(GenerationValidationError::InvalidStatistics);
         }
         Ok(Self {
+            layout: GenerationStatsLayout::CanonicalOracle,
             files,
             entities,
             occurrences,
@@ -2668,6 +2782,69 @@ impl GenerationStats {
             stored_rows,
             text_bytes,
         })
+    }
+
+    /// Adds an authenticated packed RDF v1 leaf to a validated generation census.
+    ///
+    /// The caller authenticates the complete leaf and computes source references
+    /// absent from the base or prior leaves. Distinct references remain logical;
+    /// v1 physically embeds source JSON and stores no normalized identity rows.
+    /// Schema application-kind and migration bookkeeping are excluded, as for the
+    /// canonical census. This operation grants no generation identity capability.
+    ///
+    /// # Errors
+    /// Rejects impossible v1 counts or checked counter overflow. Existing canonical
+    /// constructor invariants are not applied to this different physical layout.
+    pub fn checked_add_rdf_v1(
+        self,
+        statements: u64,
+        new_distinct_sources: u64,
+        source_json_bytes: u64,
+        payload_utf8_bytes: u64,
+        descriptor_json_bytes: u64,
+    ) -> Result<Self, GenerationValidationError> {
+        if new_distinct_sources > statements
+            || descriptor_json_bytes == 0
+            || descriptor_json_bytes > 4096
+            || (statements == 0 && (source_json_bytes != 0 || payload_utf8_bytes != 0))
+            || source_json_bytes < statements
+            || payload_utf8_bytes < statements
+        {
+            return Err(GenerationValidationError::InvalidStatistics);
+        }
+        let rows = statements
+            .checked_add(1)
+            .ok_or(GenerationValidationError::StatisticsOverflow)?;
+        let text = source_json_bytes
+            .checked_add(payload_utf8_bytes)
+            .and_then(|bytes| bytes.checked_add(descriptor_json_bytes))
+            .ok_or(GenerationValidationError::StatisticsOverflow)?;
+        Ok(Self {
+            layout: GenerationStatsLayout::CanonicalOracleWithRdfV1,
+            extensions: self
+                .extensions
+                .checked_add(statements)
+                .ok_or(GenerationValidationError::StatisticsOverflow)?,
+            source_refs: self
+                .source_refs
+                .checked_add(new_distinct_sources)
+                .ok_or(GenerationValidationError::StatisticsOverflow)?,
+            stored_rows: self
+                .stored_rows
+                .checked_add(rows)
+                .ok_or(GenerationValidationError::StatisticsOverflow)?,
+            text_bytes: self
+                .text_bytes
+                .checked_add(text)
+                .ok_or(GenerationValidationError::StatisticsOverflow)?,
+            ..self
+        })
+    }
+
+    /// Returns the physical accounting layout; it is not a materialization capability.
+    #[must_use]
+    pub const fn layout(self) -> GenerationStatsLayout {
+        self.layout
     }
 
     /// Returns the file count.
@@ -2730,19 +2907,28 @@ impl GenerationStats {
         self.extensions
     }
 
-    /// Returns the distinct source-reference count.
+    /// Returns distinct source references enumerated by the IR record census.
+    ///
+    /// Packed RDF counts its envelope evidence source; nested term references
+    /// inside the opaque payload do not add to this logical count.
     #[must_use]
     pub const fn source_refs(self) -> u64 {
         self.source_refs
     }
 
-    /// Returns generation-owned rows, including its header, seal, and child rows.
+    /// Returns actual generation-owned physical rows in the declared layout.
+    ///
+    /// Header, seal, and child rows follow that layout; static application-kind
+    /// and migration bookkeeping are excluded.
     #[must_use]
     pub const fn stored_rows(self) -> u64 {
         self.stored_rows
     }
 
-    /// Returns encoded UTF-8 bytes owned by the persisted record representation.
+    /// Returns actual encoded UTF-8 bytes owned by persisted record values.
+    ///
+    /// Packed v1 includes descriptor/source JSON blobs and RDF payload text.
+    /// This is neither SQLite allocated bytes nor materialized heap/RSS usage.
     #[must_use]
     pub const fn text_bytes(self) -> u64 {
         self.text_bytes
@@ -3133,6 +3319,56 @@ mod tests {
         new_file_identity_claim_envelope,
     };
     use serde::ser::SerializeSeq;
+
+    #[test]
+    fn packed_rdf_census_preserves_canonical_constructor_and_physical_rows() {
+        let base = GenerationStats::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0).unwrap();
+        assert_eq!(base.layout(), GenerationStatsLayout::CanonicalOracle);
+        let packed = base.checked_add_rdf_v1(10, 10, 20, 30, 10).unwrap();
+        assert_eq!(
+            packed.layout(),
+            GenerationStatsLayout::CanonicalOracleWithRdfV1
+        );
+        assert_eq!(packed.extensions(), 10);
+        assert_eq!(packed.source_refs(), 10);
+        assert_eq!(packed.stored_rows(), 14);
+        assert_eq!(packed.text_bytes(), 60);
+        assert_eq!(
+            GenerationStats::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 10, 14, 60),
+            Err(GenerationValidationError::InvalidStatistics)
+        );
+        let empty = base.checked_add_rdf_v1(0, 0, 0, 0, 1).unwrap();
+        assert_eq!(empty.stored_rows(), 4);
+        assert_eq!(empty.text_bytes(), 1);
+    }
+
+    #[test]
+    fn packed_rdf_census_rejects_inconsistent_values_and_overflow() {
+        let base = GenerationStats::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0).unwrap();
+        for values in [
+            (1, 2, 1, 1, 1),
+            (0, 0, 1, 0, 1),
+            (1, 1, 0, 1, 1),
+            (1, 1, 1, 0, 1),
+            (1, 1, 1, 1, 0),
+            (1, 1, 1, 1, 4097),
+        ] {
+            assert_eq!(
+                base.checked_add_rdf_v1(values.0, values.1, values.2, values.3, values.4),
+                Err(GenerationValidationError::InvalidStatistics)
+            );
+        }
+        let full_rows = GenerationStats::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, u64::MAX, 0).unwrap();
+        assert_eq!(
+            full_rows.checked_add_rdf_v1(0, 0, 0, 0, 1),
+            Err(GenerationValidationError::StatisticsOverflow)
+        );
+        let full_text = GenerationStats::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, u64::MAX).unwrap();
+        assert_eq!(
+            full_text.checked_add_rdf_v1(0, 0, 0, 0, 1),
+            Err(GenerationValidationError::StatisticsOverflow)
+        );
+    }
 
     fn metadata(repository: RepositoryId) -> GenerationMetadata {
         let manifest_hash = content_hash(b"manifest");

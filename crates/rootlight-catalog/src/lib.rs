@@ -14,7 +14,9 @@ mod read;
 mod schema;
 mod write;
 pub use layout_census::{OracleLayoutCensus, OracleLayoutFragment, OracleLayoutPreview};
-pub use rdf_partition::{RdfPartitionReader, RdfPartitionStage, RdfPartitionWriter};
+pub use rdf_partition::{
+    RdfPartitionCensus, RdfPartitionReader, RdfPartitionStage, RdfPartitionWriter,
+};
 
 #[cfg(test)]
 extern crate self as rootlight_catalog;
@@ -22,6 +24,7 @@ extern crate self as rootlight_catalog;
 mod oracle_roundtrip_tests;
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt, io,
     path::{Path, PathBuf},
@@ -37,8 +40,8 @@ use rootlight_storage::{
     CoverageReadRequest, GENERATION_CONTRACT_VERSION, GenerationContext, GenerationControlError,
     GenerationMetadata, GenerationReadLimit, GenerationReader, GenerationResource,
     GenerationSnapshot, GenerationStats, GenerationValidationError, GenerationWriter,
-    IdentityVerificationError, IdentityVerifiedGeneration, OccurrenceReadRequest, ReadPage,
-    RelationReadRequest,
+    IdentityVerificationError, IdentityVerifiedGeneration, IdentityVerifiedRdfBase,
+    OccurrenceReadRequest, ReadPage, RelationReadRequest,
 };
 use rusqlite::Connection;
 
@@ -179,6 +182,41 @@ impl OracleWriter {
         let path = sqlite_database_path(generation_directory, ORACLE_FILENAME)?;
         let connection = schema::create_oracle(&path)?;
         Ok(Self { connection, path })
+    }
+
+    /// Stores a verified incomplete RDF base without granting query authority.
+    ///
+    /// All committed members must be present and authenticated by a logical
+    /// reader before this storage set can be published as a complete generation.
+    ///
+    /// # Errors
+    /// Rejects unchanged base quotas, unknown critical extensions, corruption,
+    /// storage failure, or interruption.
+    pub fn write_rdf_base(
+        mut self,
+        base: IdentityVerifiedRdfBase,
+        context: &GenerationContext<'_>,
+    ) -> Result<(), CatalogError> {
+        let (metadata, document, sources) = base.into_base_parts();
+        let snapshot = GenerationSnapshot::new_with_source_files_and_context(
+            metadata,
+            document,
+            sources,
+            &rootlight_ir::IrLimits::default(),
+            &rootlight_storage::rdf_partition_extension_support(),
+            context,
+        )
+        .map_err(|error| match error {
+            rootlight_storage::GenerationSnapshotError::Control(error) => {
+                CatalogError::control(error)
+            }
+            rootlight_storage::GenerationSnapshotError::Validation(error) => {
+                CatalogError::corrupt_generation(error)
+            }
+        })?;
+        schema::install_generation_cancellation(&self.connection, context)?;
+        write::write_rdf_base(&mut self.connection, &snapshot, context)?;
+        schema::validate_logical_oracle(&self.connection, context)
     }
 
     /// Writes a complete generation and consumes the mutable writer.
@@ -360,6 +398,9 @@ pub struct OracleReader {
     path: PathBuf,
     metadata: GenerationMetadata,
     stats: GenerationStats,
+    base_stats: GenerationStats,
+    rdf_partitions: Vec<RdfPartitionReader>,
+    base_connection: Option<Mutex<Connection>>,
 }
 
 /// Conservative materialization workspace for one validated oracle read.
@@ -521,20 +562,77 @@ impl OracleReader {
     /// Returns [`CatalogError`] for cancellation, an invalid private-file
     /// boundary, or unavailable or inconsistent page accounting.
     pub fn allocated_bytes(&self, context: &GenerationContext<'_>) -> Result<u64, CatalogError> {
-        let connection = schema::open_oracle_reader(&self.path, context)?;
-        schema::oracle_allocated_bytes(&connection)
+        context.check().map_err(CatalogError::control)?;
+        let mut bytes = if let Some(connection) = &self.base_connection {
+            let connection = connection
+                .lock()
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
+            schema::oracle_allocated_bytes(&connection)?
+        } else {
+            let connection = schema::open_oracle_reader(&self.path, context)?;
+            schema::oracle_allocated_bytes(&connection)?
+        };
+        for partition in &self.rdf_partitions {
+            context.check().map_err(CatalogError::control)?;
+            bytes = bytes
+                .checked_add(partition.allocated_bytes(context)?)
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        }
+        context.check().map_err(CatalogError::control)?;
+        Ok(bytes)
     }
 
     fn open_path(path: PathBuf, context: &GenerationContext<'_>) -> Result<Self, CatalogError> {
         context.check().map_err(CatalogError::control)?;
-        let connection = schema::open_oracle_reader(&path, context)?;
+        let connection = schema::open_logical_oracle_reader(&path, context)?;
         let (metadata, stats, _) = read::read_header(&connection, context)?;
-        schema::validate_oracle(&connection, context)?;
+        schema::validate_logical_oracle(&connection, context)?;
+        let rdf_base = schema::is_rdf_base(&connection)?;
+        if rdf_base != read::has_rdf_partition_set(&connection, context)? {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+        }
+        if rdf_base {
+            let base = read::read_rdf_base(&connection, metadata, stats, context)?;
+            let directory = path
+                .parent()
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+            let mut logical_stats = stats;
+            let mut partitions = Vec::new();
+            partitions
+                .try_reserve_exact(base.partitions().len())
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+            for descriptor in base.partitions() {
+                let partition = RdfPartitionReader::open_for_base(
+                    directory,
+                    descriptor,
+                    &base,
+                    &connection,
+                    context,
+                )?;
+                logical_stats = partition
+                    .census()
+                    .checked_add_to(logical_stats, partition.new_base_sources())
+                    .map_err(CatalogError::corrupt_generation)?;
+                partitions.push(partition);
+            }
+            drop(base);
+            return Ok(Self {
+                path,
+                metadata,
+                stats: logical_stats,
+                base_stats: stats,
+                rdf_partitions: partitions,
+                base_connection: Some(Mutex::new(connection)),
+            });
+        }
         drop(connection);
         Ok(Self {
             path,
             metadata,
             stats,
+            base_stats: stats,
+            rdf_partitions: Vec::new(),
+            base_connection: None,
         })
     }
 
@@ -548,6 +646,7 @@ impl OracleReader {
         &self,
         context: &GenerationContext<'_>,
     ) -> Result<GenerationSnapshot, CatalogError> {
+        self.require_materializable(context)?;
         let connection = schema::open_oracle_reader(&self.path, context)?;
         let snapshot = read::read_generation(&connection, self.metadata, self.stats, context)?;
         schema::validate_oracle(&connection, context)?;
@@ -571,6 +670,7 @@ impl OracleReader {
         context: &GenerationContext<'_>,
         admit: impl FnOnce(OracleReadMemoryPlan) -> Result<(), E>,
     ) -> Result<GenerationSnapshot, OracleReadAdmissionError<E>> {
+        self.require_materializable(context)?;
         let connection = schema::open_oracle_reader(&self.path, context)?;
         let snapshot = read::read_generation_with_admission(
             &connection,
@@ -598,26 +698,8 @@ impl OracleReader {
         context: &GenerationContext<'_>,
     ) -> Result<IdentityVerifiedGeneration, CatalogError> {
         let snapshot = self.read(context)?;
-        IdentityVerifiedGeneration::verify_snapshot(snapshot, context).map_err(
-            |error| match error {
-                IdentityVerificationError::Control(error) => CatalogError::control(error),
-                IdentityVerificationError::ResourceUnavailable => {
-                    CatalogError::identity_resource_unavailable()
-                }
-                IdentityVerificationError::LegacyContract
-                | IdentityVerificationError::MissingClaim => {
-                    CatalogError::new(CatalogErrorKind::IdentityProofRequired)
-                }
-                IdentityVerificationError::InvalidGeneration
-                | IdentityVerificationError::DuplicateClaim
-                | IdentityVerificationError::IdentityMismatch(_)
-                | IdentityVerificationError::ManifestMismatch
-                | IdentityVerificationError::UnsupportedExtension
-                | IdentityVerificationError::RecipeEncoding => {
-                    CatalogError::new(CatalogErrorKind::Corrupt)
-                }
-            },
-        )
+        IdentityVerifiedGeneration::verify_snapshot(snapshot, context)
+            .map_err(identity_catalog_error)
     }
 
     fn with_indexed_connection<T>(
@@ -627,10 +709,151 @@ impl OracleReader {
     ) -> Result<T, CatalogError> {
         require_indexed_contract(self.metadata)?;
         context.check().map_err(CatalogError::control)?;
+        if let Some(connection) = &self.base_connection {
+            let connection = connection
+                .lock()
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
+            schema::install_generation_cancellation(&connection, context)?;
+            let result = read(&connection)?;
+            context.check().map_err(CatalogError::control)?;
+            return Ok(result);
+        }
         let connection = schema::open_oracle_reader(&self.path, context)?;
         let result = read(&connection)?;
         context.check().map_err(CatalogError::control)?;
         Ok(result)
+    }
+
+    fn require_materializable(&self, context: &GenerationContext<'_>) -> Result<(), CatalogError> {
+        context.check().map_err(CatalogError::control)?;
+        if !self.rdf_partitions.is_empty() {
+            return Err(CatalogError::new(
+                CatalogErrorKind::PartitionedMaterializationRequired,
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_extensions(
+        &self,
+        file: Option<FileId>,
+        after: Option<FactId>,
+        limit: GenerationReadLimit,
+        context: &GenerationContext<'_>,
+    ) -> Result<ReadPage<ExtensionEnvelope>, CatalogError> {
+        self.with_indexed_connection(context, |connection| {
+            let mut state = indexed_read::IndexedReadState::new(context)?;
+            let selected_file = file
+                .map(|file| {
+                    indexed_read::read_file(connection, self.metadata, file, context, &mut state)
+                })
+                .transpose()?
+                .flatten();
+            let mut total = indexed_read::extension_count(
+                connection,
+                file,
+                self.base_stats.extensions(),
+                &mut state,
+                context,
+            )?;
+            let mut heads = BTreeMap::new();
+            if let Some(id) =
+                indexed_read::extension_ids(connection, file, after, 1, &mut state, context)?
+                    .first()
+            {
+                heads.insert(*id, 0usize);
+            }
+            for (index, partition) in self.rdf_partitions.iter().enumerate() {
+                if file.is_some_and(|file| file != partition.descriptor().file()) {
+                    continue;
+                }
+                total = total
+                    .checked_add(partition.descriptor().record_count())
+                    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+                if let Some(id) = partition.select_ids(after, 1, context)?.first() {
+                    state.observe_row(context)?;
+                    if heads.insert(*id, index + 1).is_some() {
+                        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+                    }
+                }
+            }
+            if (file.is_none() && total != self.stats.extensions())
+                || (file.is_some() && selected_file.is_none() && total != 0)
+            {
+                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            }
+            // Merge only stable IDs. No member may decode its own probe page
+            // before the single logical page and its one probe are selected.
+            let maximum = usize::from(limit.get()) + 1;
+            let mut selected = BTreeMap::<usize, Vec<FactId>>::new();
+            let mut selected_count = 0usize;
+            while let Some((id, owner)) = heads.pop_first() {
+                context.check().map_err(CatalogError::control)?;
+                selected.entry(owner).or_default().push(id);
+                selected_count += 1;
+                if selected_count == maximum {
+                    break;
+                }
+                let next = if owner == 0 {
+                    indexed_read::extension_ids(connection, file, Some(id), 1, &mut state, context)?
+                } else {
+                    let next = self.rdf_partitions[owner - 1].select_ids(Some(id), 1, context)?;
+                    if !next.is_empty() {
+                        state.observe_row(context)?;
+                    }
+                    next
+                };
+                if let Some(next) = next.first()
+                    && heads.insert(*next, owner).is_some()
+                {
+                    return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+                }
+            }
+            let mut records = Vec::new();
+            records
+                .try_reserve_exact(selected_count)
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+            for (owner, ids) in selected {
+                let decoded = if owner == 0 {
+                    indexed_read::read_extension_records(
+                        connection,
+                        self.metadata,
+                        ids,
+                        &mut state,
+                        context,
+                        selected_file.as_ref(),
+                    )?
+                } else {
+                    self.rdf_partitions[owner - 1]
+                        .read_selected_for_set(&ids, &mut state, context)?
+                };
+                records.extend(decoded);
+            }
+            records.sort_by_key(|record| record.id);
+            if records.windows(2).any(|pair| pair[0].id >= pair[1].id) {
+                return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+            }
+            ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+        })
+    }
+}
+
+fn identity_catalog_error(error: IdentityVerificationError) -> CatalogError {
+    match error {
+        IdentityVerificationError::Control(error) => CatalogError::control(error),
+        IdentityVerificationError::ResourceUnavailable => {
+            CatalogError::identity_resource_unavailable()
+        }
+        IdentityVerificationError::LegacyContract | IdentityVerificationError::MissingClaim => {
+            CatalogError::new(CatalogErrorKind::IdentityProofRequired)
+        }
+        IdentityVerificationError::InvalidGeneration
+        | IdentityVerificationError::DuplicateClaim
+        | IdentityVerificationError::IdentityMismatch(_)
+        | IdentityVerificationError::ManifestMismatch
+        | IdentityVerificationError::UnsupportedExtension
+        | IdentityVerificationError::RecipeEncoding => CatalogError::new(CatalogErrorKind::Corrupt),
     }
 }
 
@@ -739,11 +962,14 @@ impl GenerationReader for OracleReader {
         limit: GenerationReadLimit,
         context: &GenerationContext<'_>,
     ) -> Result<ReadPage<ExtensionEnvelope>, Self::Error> {
+        if !self.rdf_partitions.is_empty() {
+            return self.set_extensions(None, after, limit, context);
+        }
         self.with_indexed_connection(context, |connection| {
             indexed_read::extensions(
                 connection,
                 self.metadata,
-                self.stats.extensions(),
+                self.base_stats.extensions(),
                 after,
                 limit,
                 context,
@@ -758,6 +984,11 @@ impl GenerationReader for OracleReader {
         limit: GenerationReadLimit,
         context: &GenerationContext<'_>,
     ) -> Result<Option<ReadPage<ExtensionEnvelope>>, Self::Error> {
+        if !self.rdf_partitions.is_empty() {
+            return self
+                .set_extensions(Some(file), after, limit, context)
+                .map(Some);
+        }
         context.check().map_err(CatalogError::control)?;
         let connection = schema::open_oracle_reader(&self.path, context)?;
         if !schema::supports_extension_file_reads(&connection)? {
@@ -1170,6 +1401,8 @@ pub enum CatalogErrorKind {
     UnsupportedCriticalExtensions,
     /// The generation does not carry an accepted, validated identity proof.
     IdentityProofRequired,
+    /// The complete RDF set requires logical reads instead of base materialization.
+    PartitionedMaterializationRequired,
     /// The native boundary has no enabled private SQLite file implementation.
     UnsupportedPrivateFileBoundary,
     /// The database file is linked, non-regular, or not private.
@@ -1314,6 +1547,9 @@ impl fmt::Display for CatalogError {
                 "critical extensions are unsupported by this storage contract"
             }
             CatalogErrorKind::IdentityProofRequired => "generation identity proof is required",
+            CatalogErrorKind::PartitionedMaterializationRequired => {
+                "partitioned generation requires complete logical reads"
+            }
             CatalogErrorKind::UnsupportedPrivateFileBoundary => {
                 "private SQLite file boundary is unavailable"
             }

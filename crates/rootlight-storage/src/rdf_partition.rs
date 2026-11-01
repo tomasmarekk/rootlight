@@ -3,26 +3,335 @@
 //! The parent remains the authority for files and provenance. A partition is
 //! independently bounded and is not a published generation or coverage claim.
 
-use std::io::{self, Write};
+use std::{
+    collections::BTreeMap,
+    io::{self, Write},
+};
 
-use rootlight_ids::{ContentHash, FileId};
+use rootlight_ids::{ContentHash, FileId, derive_fact};
 use rootlight_ir::{
-    ExtensionEnvelope, IrDocumentUsage, IrDocumentUsageError, IrLimits, RDF_STATEMENT_NAMESPACE,
+    ExtensionCriticality, ExtensionEnvelope, ExtensionIdentifier, ExtensionSupport, FactEvidence,
+    FactRef, FileRecord, IrDocumentUsage, IrDocumentUsageError, IrLimits, RDF_STATEMENT_NAMESPACE,
     decode_rdf_statement_envelope,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     GenerationContext, GenerationControlError, GenerationMetadata, GenerationResource,
-    IdentityVerifiedGeneration,
+    GenerationSnapshot, IdentityVerifiedGeneration,
 };
 
 /// Exact durable RDF partition format version.
 pub const RDF_PARTITION_FORMAT_VERSION: u16 = 1;
 
-/// Trusted identity and content commitment for one independently bounded RDF file.
+/// Critical identity commitment for every member of a logical RDF partition set.
+pub const RDF_PARTITION_SET_NAMESPACE: &str = "rootlight.rdf_partition_set";
+
+/// Explicit support for the bounded critical RDF set member format.
 ///
-/// This value can only be obtained from verified admission. It does not grant
-/// publication authority; a publisher must authenticate the complete partition set.
+/// Other critical extensions retain the caller's normal rejection policy.
+#[must_use]
+pub fn rdf_partition_extension_support() -> ExtensionSupport {
+    let mut support = ExtensionSupport::default();
+    support
+        .supported_critical
+        .insert(ExtensionIdentifier::new(RDF_PARTITION_SET_NAMESPACE, "1"));
+    support
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartitionCommitment {
+    format_version: u16,
+    file: FileId,
+    source_hash: ContentHash,
+    source_bytes: u64,
+    record_count: u64,
+    payload_bytes: u64,
+    content_hash: ContentHash,
+}
+
+impl From<&RdfPartitionDescriptor> for PartitionCommitment {
+    fn from(value: &RdfPartitionDescriptor) -> Self {
+        Self {
+            format_version: value.format_version,
+            file: value.file,
+            source_hash: value.source_hash,
+            source_bytes: value.source_bytes,
+            record_count: value.record_count,
+            payload_bytes: value.payload_bytes,
+            content_hash: value.content_hash,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PartitionSetCarrier {
+    Root { members: u64, set_hash: ContentHash },
+    Member { partition: PartitionCommitment },
+}
+
+/// Commits an exact set using one bounded critical envelope per member.
+///
+/// A root envelope binds the ordered-set digest and count. Removing one member,
+/// duplicating file ownership, or mixing independently committed sets fails
+/// identity verification. No all-members extension payload is constructed.
+///
+/// # Errors
+/// Rejects foreign descriptors, repeated files, inline ownership, invalid parent
+/// anchors, encoding failure, or interruption. Empty input produces no set.
+pub fn new_rdf_partition_set_envelopes(
+    parent: &IdentityVerifiedGeneration,
+    descriptors: &[RdfPartitionDescriptor],
+    context: &GenerationContext<'_>,
+) -> Result<Vec<ExtensionEnvelope>, RdfPartitionError> {
+    let mut ordered = BTreeMap::new();
+    for descriptor in descriptors {
+        context.check()?;
+        let file = parent
+            .snapshot()
+            .find_file(descriptor.file)
+            .ok_or(RdfPartitionError::MissingFile)?;
+        validate_partition_anchor(&PartitionCommitment::from(descriptor), file)?;
+        if descriptor.metadata != parent.metadata()
+            || ordered.insert(descriptor.file, descriptor).is_some()
+        {
+            return Err(RdfPartitionError::InvalidSet);
+        }
+    }
+    for record in &parent.document().extensions {
+        context.check()?;
+        if record.namespace == RDF_STATEMENT_NAMESPACE
+            && record
+                .evidence
+                .source
+                .as_ref()
+                .is_some_and(|source| ordered.contains_key(&source.span().file()))
+        {
+            return Err(RdfPartitionError::OverlappingFile);
+        }
+    }
+    let members = u64::try_from(ordered.len()).map_err(|_| RdfPartitionError::Encoding)?;
+    if members == 0 {
+        return Ok(Vec::new());
+    }
+    context.require(
+        GenerationResource::Rows,
+        members.checked_add(1).ok_or(RdfPartitionError::Encoding)?,
+    )?;
+    let commitments = ordered
+        .values()
+        .map(|descriptor| PartitionCommitment::from(*descriptor))
+        .collect::<Vec<_>>();
+    let set_hash = partition_set_hash(&commitments, context)?;
+    let mut envelopes = Vec::new();
+    envelopes
+        .try_reserve_exact(
+            commitments
+                .len()
+                .checked_add(1)
+                .ok_or(RdfPartitionError::Encoding)?,
+        )
+        .map_err(|_| RdfPartitionError::Encoding)?;
+    let first = parent
+        .snapshot()
+        .find_file(commitments[0].file)
+        .ok_or(RdfPartitionError::MissingFile)?;
+    envelopes.push(partition_member_envelope(
+        parent.metadata(),
+        first,
+        &PartitionSetCarrier::Root { members, set_hash },
+    )?);
+    for partition in commitments {
+        context.check()?;
+        let file = parent
+            .snapshot()
+            .find_file(partition.file)
+            .ok_or(RdfPartitionError::MissingFile)?;
+        validate_partition_anchor(&partition, file)?;
+        envelopes.push(partition_member_envelope(
+            parent.metadata(),
+            file,
+            &PartitionSetCarrier::Member { partition },
+        )?);
+    }
+    Ok(envelopes)
+}
+
+fn partition_member_envelope(
+    metadata: GenerationMetadata,
+    file: &FileRecord,
+    member: &PartitionSetCarrier,
+) -> Result<ExtensionEnvelope, RdfPartitionError> {
+    let payload = serde_json::to_string(member).map_err(|_| RdfPartitionError::Encoding)?;
+    if payload.len() > 4096 {
+        return Err(RdfPartitionError::InvalidSet);
+    }
+    let evidence = FactEvidence {
+        source: file.evidence.source.clone(),
+        derivation: vec![FactRef::File(file.id)],
+    };
+    let identity = serde_json::to_vec(&(
+        RDF_PARTITION_SET_NAMESPACE,
+        "1",
+        metadata.repository(),
+        metadata.generation(),
+        file.provenance,
+        &evidence,
+        member,
+    ))
+    .map_err(|_| RdfPartitionError::Encoding)?;
+    Ok(ExtensionEnvelope {
+        id: derive_fact("rootlight.rdf_partition_set/v1", &identity).id(),
+        repository: metadata.repository(),
+        generation: metadata.generation(),
+        namespace: RDF_PARTITION_SET_NAMESPACE.to_owned(),
+        version: "1".to_owned(),
+        criticality: ExtensionCriticality::Critical,
+        provenance: file.provenance,
+        evidence,
+        payload,
+    })
+}
+
+fn validate_partition_anchor(
+    partition: &PartitionCommitment,
+    file: &FileRecord,
+) -> Result<(), RdfPartitionError> {
+    let limits = IrLimits::default();
+    if partition.format_version != RDF_PARTITION_FORMAT_VERSION
+        || partition.file != file.id
+        || partition.source_hash != file.content_hash
+        || partition.source_bytes != file.byte_length
+        || partition.record_count
+            > u64::try_from(limits.max_extensions).map_err(|_| RdfPartitionError::Encoding)?
+        || partition.payload_bytes
+            > u64::try_from(limits.max_total_extension_bytes)
+                .map_err(|_| RdfPartitionError::Encoding)?
+        || (partition.record_count == 0) != (partition.payload_bytes == 0)
+    {
+        return Err(RdfPartitionError::InvalidSet);
+    }
+    Ok(())
+}
+
+fn partition_set_hash(
+    commitments: &[PartitionCommitment],
+    context: &GenerationContext<'_>,
+) -> Result<ContentHash, RdfPartitionError> {
+    let mut writer = DigestWriter {
+        hasher: blake3::Hasher::new(),
+        bytes: 0,
+        context,
+        control: None,
+    };
+    if serde_json::to_writer(&mut writer, commitments).is_err() {
+        return Err(writer
+            .control
+            .map_or(RdfPartitionError::Encoding, RdfPartitionError::Control));
+    }
+    Ok(ContentHash::from_bytes(
+        *writer.hasher.finalize().as_bytes(),
+    ))
+}
+
+pub(crate) fn verify_rdf_partition_set(
+    snapshot: &GenerationSnapshot,
+    context: &GenerationContext<'_>,
+) -> Result<Vec<RdfPartitionDescriptor>, RdfPartitionError> {
+    let mut ordered = BTreeMap::new();
+    let mut root = None;
+    for envelope in &snapshot.document().extensions {
+        context.check()?;
+        if envelope.namespace != RDF_PARTITION_SET_NAMESPACE {
+            continue;
+        }
+        if envelope.payload.len() > 4096 {
+            return Err(RdfPartitionError::InvalidSet);
+        }
+        let carrier: PartitionSetCarrier =
+            serde_json::from_str(&envelope.payload).map_err(|_| RdfPartitionError::InvalidSet)?;
+        let PartitionSetCarrier::Member { partition } = carrier else {
+            if root.replace((envelope, carrier)).is_some() {
+                return Err(RdfPartitionError::InvalidSet);
+            }
+            continue;
+        };
+        let file = snapshot
+            .find_file(partition.file)
+            .ok_or(RdfPartitionError::MissingFile)?;
+        validate_partition_anchor(&partition, file)?;
+        if *envelope
+            != partition_member_envelope(
+                snapshot.metadata(),
+                file,
+                &PartitionSetCarrier::Member {
+                    partition: partition.clone(),
+                },
+            )?
+            || ordered.insert(partition.file, partition).is_some()
+        {
+            return Err(RdfPartitionError::InvalidSet);
+        }
+    }
+    for record in &snapshot.document().extensions {
+        context.check()?;
+        if record.namespace == RDF_STATEMENT_NAMESPACE
+            && record
+                .evidence
+                .source
+                .as_ref()
+                .is_some_and(|source| ordered.contains_key(&source.span().file()))
+        {
+            return Err(RdfPartitionError::OverlappingFile);
+        }
+    }
+    let commitments = ordered.into_values().collect::<Vec<_>>();
+    match root {
+        Some((envelope, PartitionSetCarrier::Root { members, set_hash })) => {
+            let first = commitments.first().ok_or(RdfPartitionError::InvalidSet)?;
+            let file = snapshot
+                .find_file(first.file)
+                .ok_or(RdfPartitionError::MissingFile)?;
+            if members
+                != u64::try_from(commitments.len()).map_err(|_| RdfPartitionError::Encoding)?
+                || set_hash != partition_set_hash(&commitments, context)?
+                || *envelope
+                    != partition_member_envelope(
+                        snapshot.metadata(),
+                        file,
+                        &PartitionSetCarrier::Root { members, set_hash },
+                    )?
+            {
+                return Err(RdfPartitionError::InvalidSet);
+            }
+        }
+        None if commitments.is_empty() => {}
+        _ => return Err(RdfPartitionError::InvalidSet),
+    }
+    Ok(commitments
+        .into_iter()
+        .map(|partition| RdfPartitionDescriptor {
+            metadata: snapshot.metadata(),
+            format_version: partition.format_version,
+            file: partition.file,
+            source_hash: partition.source_hash,
+            source_bytes: partition.source_bytes,
+            record_count: partition.record_count,
+            payload_bytes: partition.payload_bytes,
+            content_hash: partition.content_hash,
+            requires_parent_authentication: true,
+        })
+        .collect())
+}
+
+/// Identity and content commitment for one independently bounded RDF file.
+///
+/// Verified record admission permits standalone cold authentication. A descriptor
+/// restored from a base commitment additionally requires that final parent's
+/// provenance check. Neither origin grants publication of an incomplete set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RdfPartitionDescriptor {
     format_version: u16,
@@ -33,9 +342,17 @@ pub struct RdfPartitionDescriptor {
     record_count: u64,
     payload_bytes: u64,
     content_hash: ContentHash,
+    requires_parent_authentication: bool,
 }
 
 impl RdfPartitionDescriptor {
+    /// Returns whether this commitment still needs the final parent's anchors.
+    ///
+    /// This is runtime authority, excluded from durable v1 identity and headers.
+    #[must_use]
+    pub const fn requires_parent_authentication(&self) -> bool {
+        self.requires_parent_authentication
+    }
     /// Returns the exact durable partition format bound by this descriptor.
     #[must_use]
     pub const fn format_version(&self) -> u16 {
@@ -271,6 +588,7 @@ impl UnpublishedRdfPartition {
             payload_bytes: u64::try_from(self.usage.total_extension_bytes())
                 .map_err(|_| RdfPartitionError::Encoding)?,
             content_hash: self.content_hash,
+            requires_parent_authentication: false,
         };
         Ok(VerifiedRdfPartition {
             descriptor,
@@ -405,6 +723,9 @@ pub enum RdfPartitionError {
     /// A stable identity is duplicated within the payload or parent.
     #[error("duplicate rdf partition identity")]
     DuplicateIdentity,
+    /// A canonical logical-set commitment is incomplete or inconsistent.
+    #[error("invalid rdf partition set")]
+    InvalidSet,
     /// The unchanged IR quotas rejected the partition.
     #[error(transparent)]
     Quota(#[from] IrDocumentUsageError),

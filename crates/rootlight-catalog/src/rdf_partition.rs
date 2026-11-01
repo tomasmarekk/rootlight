@@ -4,6 +4,7 @@
 //! in for a whole oracle, a publication manifest, or a generation reader.
 
 use std::{
+    collections::BTreeSet,
     fmt,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -17,7 +18,8 @@ use rootlight_ir::{
 };
 use rootlight_storage::{
     DiskReservation, GenerationContext, GenerationControlError, GenerationMetadata,
-    GenerationReadLimit, GenerationResource, IdentityVerifiedGeneration, PublicationSpaceEstimate,
+    GenerationReadLimit, GenerationResource, GenerationStats, GenerationValidationError,
+    IdentityVerifiedGeneration, IdentityVerifiedRdfBase, PublicationSpaceEstimate,
     RDF_PARTITION_FORMAT_VERSION, RdfPartitionDescriptor, RdfPartitionError, ReadPage,
     UnpublishedRdfPartition, VerifiedRdfPartition,
 };
@@ -386,11 +388,76 @@ impl RdfPartitionWriter {
     }
 }
 
+/// Authenticated v1 physical census and distinct logical evidence references.
+///
+/// Static application-kind and migration rows are excluded. JSON BLOB bytes
+/// remain encoded UTF-8 values; binary identities and SQLite pages are separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RdfPartitionCensus {
+    statements: u64,
+    distinct_source_refs: u64,
+    source_json_bytes: u64,
+    payload_utf8_bytes: u64,
+    descriptor_json_bytes: u64,
+}
+
+impl RdfPartitionCensus {
+    /// Returns the exact authenticated RDF statement count.
+    #[must_use]
+    pub const fn statements(self) -> u64 {
+        self.statements
+    }
+    /// Returns distinct logical source references within this leaf.
+    #[must_use]
+    pub const fn distinct_source_refs(self) -> u64 {
+        self.distinct_source_refs
+    }
+    /// Returns bytes of canonical source JSON actually stored in BLOB cells.
+    #[must_use]
+    pub const fn source_json_bytes(self) -> u64 {
+        self.source_json_bytes
+    }
+    /// Returns UTF-8 bytes of RDF payload TEXT cells, without envelope re-encoding.
+    #[must_use]
+    pub const fn payload_utf8_bytes(self) -> u64 {
+        self.payload_utf8_bytes
+    }
+    /// Returns bytes of the stored authenticated descriptor JSON BLOB.
+    #[must_use]
+    pub const fn descriptor_json_bytes(self) -> u64 {
+        self.descriptor_json_bytes
+    }
+
+    /// Adds this physical census with an independently checked base-overlap count.
+    ///
+    /// # Errors
+    /// Rejects a new-reference count above this leaf's distinct references or
+    /// inconsistent/overflowing physical generation statistics.
+    pub fn checked_add_to(
+        self,
+        base: GenerationStats,
+        new_distinct_sources: u64,
+    ) -> Result<GenerationStats, GenerationValidationError> {
+        if new_distinct_sources > self.distinct_source_refs {
+            return Err(GenerationValidationError::InvalidStatistics);
+        }
+        base.checked_add_rdf_v1(
+            self.statements,
+            new_distinct_sources,
+            self.source_json_bytes,
+            self.payload_utf8_bytes,
+            self.descriptor_json_bytes,
+        )
+    }
+}
+
 /// An authenticated, bounded RDF partition pinned to one read-only SQLite snapshot.
 pub struct RdfPartitionReader {
     connection: Mutex<Connection>,
     descriptor: RdfPartitionDescriptor,
     limits: IrLimits,
+    census: RdfPartitionCensus,
+    new_base_sources: u64,
 }
 
 impl fmt::Debug for RdfPartitionReader {
@@ -407,13 +474,18 @@ impl RdfPartitionReader {
     ///
     /// # Errors
     /// Rejects schema/header/content drift, insecure files, unchanged quota
-    /// violations, malformed typed RDF, or interruption.
+    /// violations, malformed typed RDF, or interruption. Commitment-only
+    /// descriptors require the logical reader's full final-parent authentication.
     pub fn open_in(
         directory: &Path,
         expected: &RdfPartitionDescriptor,
         limits: &IrLimits,
         context: &GenerationContext<'_>,
     ) -> Result<Self, CatalogError> {
+        context.check().map_err(CatalogError::control)?;
+        if expected.requires_parent_authentication() {
+            return Err(CatalogError::new(CatalogErrorKind::IdentityProofRequired));
+        }
         Self::open_path(
             &partition_path(directory, expected)?,
             expected,
@@ -428,7 +500,39 @@ impl RdfPartitionReader {
         limits: &IrLimits,
         context: &GenerationContext<'_>,
     ) -> Result<Self, CatalogError> {
+        Self::open_with_base(path, expected, limits, context, None)
+    }
+
+    pub(super) fn open_for_base(
+        directory: &Path,
+        expected: &RdfPartitionDescriptor,
+        base: &IdentityVerifiedRdfBase,
+        connection: &Connection,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, CatalogError> {
+        if base.metadata() != expected.metadata() || !base.partitions().contains(expected) {
+            return Err(corrupt());
+        }
+        Self::open_with_base(
+            &partition_path(directory, expected)?,
+            expected,
+            &IrLimits::default(),
+            context,
+            Some((base, connection)),
+        )
+    }
+
+    fn open_with_base(
+        path: &Path,
+        expected: &RdfPartitionDescriptor,
+        limits: &IrLimits,
+        context: &GenerationContext<'_>,
+        base: Option<(&IdentityVerifiedRdfBase, &Connection)>,
+    ) -> Result<Self, CatalogError> {
         context.check().map_err(CatalogError::control)?;
+        if expected.requires_parent_authentication() && base.is_none() {
+            return Err(CatalogError::new(CatalogErrorKind::IdentityProofRequired));
+        }
         if expected.format_version() != RDF_PARTITION_FORMAT_VERSION
             || expected.record_count()
                 > u64::try_from(limits.max_extensions).map_err(|_| corrupt())?
@@ -439,12 +543,6 @@ impl RdfPartitionReader {
         }
         context
             .require(GenerationResource::Rows, expected.record_count())
-            .map_err(CatalogError::control)?;
-        context
-            .require(
-                GenerationResource::SourceReferences,
-                expected.record_count(),
-            )
             .map_err(CatalogError::control)?;
         let maximum_bytes = expected
             .payload_bytes()
@@ -487,6 +585,9 @@ impl RdfPartitionReader {
         digest.write_bytes(b"[")?;
         let mut previous = None;
         let mut usage = IrDocumentUsage::default();
+        let mut sources = BTreeSet::new();
+        let mut source_json_bytes = 0u64;
+        let mut payload_utf8_bytes = 0u64;
         while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
             context.check().map_err(CatalogError::control)?;
             let record = decode_record(
@@ -497,6 +598,20 @@ impl RdfPartitionReader {
                 expected.source_bytes(),
                 limits,
             )?;
+            if let Some((base, _)) = base
+                && (base
+                    .base_document()
+                    .provenance
+                    .binary_search_by_key(&record.provenance, |record| record.id)
+                    .is_err()
+                    || base
+                        .base_document()
+                        .extensions
+                        .binary_search_by_key(&record.id, |record| record.id)
+                        .is_ok())
+            {
+                return Err(corrupt());
+            }
             if previous.is_some_and(|id| id >= record.id) {
                 return Err(corrupt());
             }
@@ -504,6 +619,17 @@ impl RdfPartitionReader {
                 digest.write_bytes(b",")?;
             }
             previous = Some(record.id);
+            let source = record.evidence.source.as_ref().ok_or_else(corrupt)?;
+            observe_distinct_source(&mut sources, source, context)?;
+            let source_cell = row.get_ref(2).map_err(CatalogError::sqlite)?;
+            let source_bytes = u64::try_from(source_cell.as_blob().map_err(|_| corrupt())?.len())
+                .map_err(|_| corrupt())?;
+            source_json_bytes = source_json_bytes
+                .checked_add(source_bytes)
+                .ok_or_else(corrupt)?;
+            payload_utf8_bytes = payload_utf8_bytes
+                .checked_add(u64::try_from(record.payload.len()).map_err(|_| corrupt())?)
+                .ok_or_else(corrupt)?;
             usage = usage
                 .checked_add(
                     IrDocumentUsage::measure_extension(&record, limits).map_err(|_| corrupt())?,
@@ -530,17 +656,57 @@ impl RdfPartitionReader {
         drop(rows);
         drop(statement);
         context.check().map_err(CatalogError::control)?;
+        let census = RdfPartitionCensus {
+            statements: expected.record_count(),
+            distinct_source_refs: u64::try_from(sources.len()).map_err(|_| corrupt())?,
+            source_json_bytes,
+            payload_utf8_bytes,
+            descriptor_json_bytes: u64::try_from(header.len()).map_err(|_| corrupt())?,
+        };
+        let mut new_base_sources = 0u64;
+        for source in &sources {
+            context.check().map_err(CatalogError::control)?;
+            let present = if let Some((_, connection)) = base {
+                base_contains_source(connection, source)?
+            } else {
+                false
+            };
+            if !present {
+                new_base_sources = new_base_sources.checked_add(1).ok_or_else(corrupt)?;
+            }
+        }
         Ok(Self {
             connection: Mutex::new(connection),
             descriptor: expected.clone(),
             limits: limits.clone(),
+            census,
+            new_base_sources,
         })
+    }
+
+    pub(super) const fn new_base_sources(&self) -> u64 {
+        self.new_base_sources
+    }
+
+    pub(super) fn allocated_bytes(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<u64, CatalogError> {
+        context.check().map_err(CatalogError::control)?;
+        let connection = self.connection.lock().map_err(|_| corrupt())?;
+        schema::oracle_allocated_bytes(&connection)
     }
 
     /// Returns the authenticated identity and content commitment.
     #[must_use]
     pub const fn descriptor(&self) -> &RdfPartitionDescriptor {
         &self.descriptor
+    }
+
+    /// Returns the physical census measured in the authenticated read snapshot.
+    #[must_use]
+    pub const fn census(&self) -> RdfPartitionCensus {
+        self.census
     }
 
     /// Reads stable-ID pages using an indexed cursor and one bounded probe record.
@@ -616,7 +782,28 @@ impl RdfPartitionReader {
         ids: &[FactId],
         context: &GenerationContext<'_>,
     ) -> Result<Vec<ExtensionEnvelope>, CatalogError> {
+        let mut state = crate::indexed_read::IndexedReadState::new(context)?;
+        self.read_selected_with_state(ids, &mut state, context, false)
+    }
+
+    pub(super) fn read_selected_for_set(
+        &self,
+        ids: &[FactId],
+        state: &mut crate::indexed_read::IndexedReadState,
+        context: &GenerationContext<'_>,
+    ) -> Result<Vec<ExtensionEnvelope>, CatalogError> {
+        self.read_selected_with_state(ids, state, context, true)
+    }
+
+    fn read_selected_with_state(
+        &self,
+        ids: &[FactId],
+        state: &mut crate::indexed_read::IndexedReadState,
+        context: &GenerationContext<'_>,
+        count_encoded: bool,
+    ) -> Result<Vec<ExtensionEnvelope>, CatalogError> {
         context.check().map_err(CatalogError::control)?;
+        state.seed_extension_sources(context)?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -648,6 +835,20 @@ impl RdfPartitionReader {
                 self.descriptor.source_bytes(),
                 &self.limits,
             )?;
+            let encoded = if count_encoded {
+                let stored_source = row.get_ref(2).map_err(CatalogError::sqlite)?;
+                u64::try_from(
+                    stored_source
+                        .as_blob()
+                        .map_err(|_| corrupt())?
+                        .len()
+                        .checked_add(record.payload.len())
+                        .ok_or_else(corrupt)?,
+                )
+                .map_err(|_| corrupt())?
+            } else {
+                0
+            };
             if record.id != *id || rows.next().map_err(CatalogError::sqlite)?.is_some() {
                 return Err(corrupt());
             }
@@ -658,26 +859,18 @@ impl RdfPartitionReader {
                     &self.limits,
                 )
                 .map_err(|_| corrupt())?;
-            let text_bytes = usage
-                .total_string_bytes()
-                .checked_add(usage.total_extension_bytes())
-                .and_then(|bytes| u64::try_from(bytes).ok())
-                .ok_or_else(corrupt)?;
-            context
-                .require(GenerationResource::TextBytes, text_bytes)
-                .map_err(CatalogError::control)?;
-            context
-                .require(
-                    GenerationResource::SourceReferences,
-                    u64::try_from(records.len()).map_err(|_| corrupt())? + 1,
-                )
-                .map_err(CatalogError::control)?;
-            context
-                .require(
-                    GenerationResource::Rows,
-                    u64::try_from(records.len()).map_err(|_| corrupt())? + 1,
-                )
-                .map_err(CatalogError::control)?;
+            state.observe_text(&record.namespace, context)?;
+            state.observe_text(&record.version, context)?;
+            state.observe_text(&record.payload, context)?;
+            state.observe_extension_source(
+                record.evidence.source.as_ref().ok_or_else(corrupt)?,
+                false,
+                context,
+            )?;
+            if count_encoded {
+                state.observe_encoded(encoded, context)?;
+            }
+            state.observe_row(context)?;
             records
                 .try_reserve(1)
                 .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
@@ -688,10 +881,42 @@ impl RdfPartitionReader {
     }
 }
 
+fn base_contains_source(connection: &Connection, source: &SourceRef) -> Result<bool, CatalogError> {
+    let span = source.span();
+    let (first, last) = source
+        .line_hint()
+        .map_or((0, 0), |line| (line.start_line(), line.end_line()));
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM source_refs WHERE repository_id = ?1 AND generation_id = ?2 AND file_id = ?3 AND start_byte = ?4 AND end_byte = ?5 AND content_hash = ?6 AND line_start = ?7 AND line_end = ?8)",
+        params![source.repository().as_bytes().as_slice(), source.generation().as_bytes().as_slice(),
+            span.file().as_bytes().as_slice(), codec::sqlite_i64(span.start_byte())?,
+            codec::sqlite_i64(span.end_byte())?, source.content_hash().as_bytes().as_slice(),
+            codec::sqlite_i64(first)?, codec::sqlite_i64(last)?], |row| row.get(0),
+    ).map_err(CatalogError::sqlite)
+}
+
 fn require_selection_bound(maximum: usize) -> Result<(), CatalogError> {
     if maximum == 0 || maximum > usize::from(rootlight_storage::HARD_MAX_GENERATION_READ_ITEMS) + 1
     {
         return Err(corrupt());
+    }
+    Ok(())
+}
+
+fn observe_distinct_source(
+    sources: &mut BTreeSet<SourceRef>,
+    source: &SourceRef,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    if !sources.contains(source) {
+        let observed = u64::try_from(sources.len())
+            .map_err(|_| corrupt())?
+            .checked_add(1)
+            .ok_or_else(corrupt)?;
+        context
+            .require(GenerationResource::SourceReferences, observed)
+            .map_err(CatalogError::control)?;
+        sources.insert(source.clone());
     }
     Ok(())
 }

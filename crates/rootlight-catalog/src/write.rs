@@ -75,11 +75,33 @@ pub(crate) fn write_generation_with_metadata(
     generation: &GenerationSnapshot,
     context: &GenerationContext<'_>,
 ) -> Result<WrittenGeneration, CatalogError> {
-    let plan = measure(generation, context)?;
+    write_generation_with_policy(connection, generation, context, false)
+}
+
+pub(crate) fn write_rdf_base(
+    connection: &mut Connection,
+    generation: &GenerationSnapshot,
+    context: &GenerationContext<'_>,
+) -> Result<WrittenGeneration, CatalogError> {
+    write_generation_with_policy(connection, generation, context, true)
+}
+
+fn write_generation_with_policy(
+    connection: &mut Connection,
+    generation: &GenerationSnapshot,
+    context: &GenerationContext<'_>,
+    allow_rdf_base: bool,
+) -> Result<WrittenGeneration, CatalogError> {
+    let plan = measure_with_policy(generation.document().into(), context, None, allow_rdf_base)?;
     context.check().map_err(CatalogError::control)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(CatalogError::sqlite)?;
+    if allow_rdf_base {
+        // Old indexed readers reject this exact kind before exposing a base-only
+        // view. Install it atomically with the committed base records.
+        schema::mark_rdf_base(&transaction)?;
+    }
 
     // Rebuilding query-only indexes after the bulk load avoids per-row B-tree
     // maintenance while the enclosing transaction preserves exact rollback.
@@ -140,6 +162,13 @@ pub(crate) fn measure<'a>(
     context: &GenerationContext<'_>,
 ) -> Result<WritePlan<'a>, CatalogError> {
     measure_document(generation.document(), context, None)
+}
+
+pub(crate) fn measure_rdf_base<'a>(
+    generation: &'a GenerationSnapshot,
+    context: &GenerationContext<'_>,
+) -> Result<WritePlan<'a>, CatalogError> {
+    measure_with_policy(generation.document().into(), context, None, true)
 }
 
 #[derive(Default)]
@@ -219,14 +248,24 @@ pub(crate) fn measure_document<'a>(
 pub(crate) fn measure_view<'a>(
     document: DocumentView<'a>,
     context: &GenerationContext<'_>,
+    auxiliary: Option<&mut AuxiliaryCensus>,
+) -> Result<WritePlan<'a>, CatalogError> {
+    measure_with_policy(document, context, auxiliary, false)
+}
+
+fn measure_with_policy<'a>(
+    document: DocumentView<'a>,
+    context: &GenerationContext<'_>,
     mut auxiliary: Option<&mut AuxiliaryCensus>,
+    allow_rdf_base: bool,
 ) -> Result<WritePlan<'a>, CatalogError> {
     context.check().map_err(CatalogError::control)?;
-    if document
-        .extensions
-        .iter()
-        .any(|extension| extension.criticality == ExtensionCriticality::Critical)
-    {
+    if document.extensions.iter().any(|extension| {
+        extension.criticality == ExtensionCriticality::Critical
+            && !(allow_rdf_base
+                && extension.namespace == rootlight_storage::RDF_PARTITION_SET_NAMESPACE
+                && extension.version == "1")
+    }) {
         return Err(CatalogError::new(
             CatalogErrorKind::UnsupportedCriticalExtensions,
         ));

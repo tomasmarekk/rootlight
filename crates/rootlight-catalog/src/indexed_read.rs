@@ -28,25 +28,32 @@ use rusqlite::{
 
 use crate::{CatalogError, CatalogErrorKind, codec};
 
-struct IndexedReadState {
+pub(super) struct IndexedReadState {
     rows: u64,
     text_bytes: u64,
     source_ordinals: BTreeSet<i64>,
     sources: BTreeMap<i64, SourceRef>,
+    extension_sources: BTreeSet<SourceRef>,
+    encoded_bytes: u64,
 }
 
 impl IndexedReadState {
-    fn new(context: &GenerationContext<'_>) -> Result<Self, CatalogError> {
+    pub(super) fn new(context: &GenerationContext<'_>) -> Result<Self, CatalogError> {
         context.check().map_err(CatalogError::control)?;
         Ok(Self {
             rows: 0,
             text_bytes: 0,
             source_ordinals: BTreeSet::new(),
             sources: BTreeMap::new(),
+            extension_sources: BTreeSet::new(),
+            encoded_bytes: 0,
         })
     }
 
-    fn observe_row(&mut self, context: &GenerationContext<'_>) -> Result<(), CatalogError> {
+    pub(super) fn observe_row(
+        &mut self,
+        context: &GenerationContext<'_>,
+    ) -> Result<(), CatalogError> {
         self.rows = self
             .rows
             .checked_add(1)
@@ -56,7 +63,7 @@ impl IndexedReadState {
             .map_err(CatalogError::control)
     }
 
-    fn observe_text(
+    pub(super) fn observe_text(
         &mut self,
         value: &str,
         context: &GenerationContext<'_>,
@@ -70,6 +77,63 @@ impl IndexedReadState {
         context
             .require(GenerationResource::TextBytes, self.text_bytes)
             .map_err(CatalogError::control)
+    }
+
+    pub(super) fn observe_encoded(
+        &mut self,
+        bytes: u64,
+        context: &GenerationContext<'_>,
+    ) -> Result<(), CatalogError> {
+        self.encoded_bytes = self
+            .encoded_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        context
+            .require(GenerationResource::EncodedTextBytes, self.encoded_bytes)
+            .map_err(CatalogError::control)
+    }
+
+    pub(super) fn observe_extension_source(
+        &mut self,
+        source: &SourceRef,
+        physical_row: bool,
+        context: &GenerationContext<'_>,
+    ) -> Result<(), CatalogError> {
+        if !self.extension_sources.contains(source) {
+            let observed = u64::try_from(self.extension_sources.len())
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+            context
+                .require(GenerationResource::SourceReferences, observed)
+                .map_err(CatalogError::control)?;
+            if physical_row {
+                self.observe_row(context)?;
+            }
+            self.extension_sources.insert(source.clone());
+        }
+        Ok(())
+    }
+
+    pub(super) fn seed_extension_sources(
+        &mut self,
+        context: &GenerationContext<'_>,
+    ) -> Result<(), CatalogError> {
+        // A file lookup can precede a page whose envelopes all live in leaves.
+        // Its evidence remains part of the same operation's reference budget.
+        for source in self.sources.values() {
+            if !self.extension_sources.contains(source) {
+                let observed = u64::try_from(self.extension_sources.len())
+                    .ok()
+                    .and_then(|count| count.checked_add(1))
+                    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+                context
+                    .require(GenerationResource::SourceReferences, observed)
+                    .map_err(CatalogError::control)?;
+                self.extension_sources.insert(source.clone());
+            }
+        }
+        Ok(())
     }
 
     fn observe_optional_text(
@@ -437,6 +501,57 @@ pub(crate) fn extensions(
     if total != expected_total {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
+    let ids = extension_ids(
+        connection,
+        None,
+        after,
+        usize::from(limit.get()) + 1,
+        &mut state,
+        context,
+    )?;
+    let records = read_extension_records(connection, metadata, ids, &mut state, context, None)?;
+    ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+}
+
+pub(super) fn extension_ids(
+    connection: &Connection,
+    file: Option<FileId>,
+    after: Option<FactId>,
+    maximum: usize,
+    state: &mut IndexedReadState,
+    context: &GenerationContext<'_>,
+) -> Result<Vec<FactId>, CatalogError> {
+    if maximum == 0 || maximum > usize::from(rootlight_storage::HARD_MAX_GENERATION_READ_ITEMS) + 1
+    {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    let maximum =
+        i64::try_from(maximum).map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    if let Some(file) = file {
+        let file_key = Value::Text(file.to_string());
+        return if let Some(after) = after {
+            query_fact_ids(
+                connection,
+                EXTENSIONS_FOR_FILE_NEXT_SQL,
+                &[
+                    file_key,
+                    Value::Blob(after.as_bytes().to_vec()),
+                    Value::Integer(maximum),
+                ],
+                state,
+                context,
+            )
+        } else {
+            query_fact_ids(
+                connection,
+                EXTENSIONS_FOR_FILE_FIRST_SQL,
+                &[file_key, Value::Integer(maximum)],
+                state,
+                context,
+            )
+        };
+    }
     let mut parameters = Vec::new();
     let mut sql = "SELECT extension_id FROM extensions".to_owned();
     if let Some(after) = after {
@@ -444,23 +559,51 @@ pub(crate) fn extensions(
         parameters.push(Value::Blob(after.as_bytes().to_vec()));
     }
     sql.push_str(" ORDER BY extension_id LIMIT ?");
-    parameters.push(Value::Integer(limit_plus_one(limit)));
-    let ids = query_list(
+    parameters.push(Value::Integer(maximum));
+    query_list(
         connection,
         &sql,
         params_from_iter(parameters.iter()),
-        &mut state,
+        state,
         context,
         |row| Ok(FactId::from_bytes(fixed_blob(row, 0)?)),
-    )?;
-    let records = read_extension_records(connection, metadata, ids, &mut state, context, None)?;
-    ReadPage::from_limit_plus_one(records, total, limit, |record| record.id)
-        .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
+    )
 }
 
 pub(crate) const EXTENSIONS_FOR_FILE_COUNT_SQL: &str = "SELECT count(*) FROM extensions INDEXED BY extensions_by_source_file WHERE json_extract(payload, '$.evidence.source.span.file') = ?1";
 pub(crate) const EXTENSIONS_FOR_FILE_FIRST_SQL: &str = "SELECT extension_id FROM extensions INDEXED BY extensions_by_source_file WHERE json_extract(payload, '$.evidence.source.span.file') = ?1 ORDER BY extension_id LIMIT ?2";
 pub(crate) const EXTENSIONS_FOR_FILE_NEXT_SQL: &str = "SELECT extension_id FROM extensions INDEXED BY extensions_by_source_file WHERE json_extract(payload, '$.evidence.source.span.file') = ?1 AND extension_id > ?2 ORDER BY extension_id LIMIT ?3";
+
+pub(super) fn extension_count(
+    connection: &Connection,
+    file: Option<FileId>,
+    maximum_total: u64,
+    state: &mut IndexedReadState,
+    context: &GenerationContext<'_>,
+) -> Result<u64, CatalogError> {
+    let total = if let Some(file) = file {
+        query_count(
+            connection,
+            EXTENSIONS_FOR_FILE_COUNT_SQL,
+            &[Value::Text(file.to_string())],
+            state,
+            context,
+        )?
+    } else {
+        query_count(
+            connection,
+            "SELECT count(*) FROM extensions",
+            &[],
+            state,
+            context,
+        )?
+    };
+    if file.is_none() && total != maximum_total {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    require_total(total, maximum_total)?;
+    Ok(total)
+}
 
 pub(crate) fn extensions_for_file(
     connection: &Connection,
@@ -485,27 +628,14 @@ pub(crate) fn extensions_for_file(
     if selected_file.is_none() && total != 0 {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
-    let ids = if let Some(after) = after {
-        query_fact_ids(
-            connection,
-            EXTENSIONS_FOR_FILE_NEXT_SQL,
-            &[
-                file_key,
-                Value::Blob(after.as_bytes().to_vec()),
-                Value::Integer(limit_plus_one(limit)),
-            ],
-            &mut state,
-            context,
-        )?
-    } else {
-        query_fact_ids(
-            connection,
-            EXTENSIONS_FOR_FILE_FIRST_SQL,
-            &[file_key, Value::Integer(limit_plus_one(limit))],
-            &mut state,
-            context,
-        )?
-    };
+    let ids = extension_ids(
+        connection,
+        Some(file),
+        after,
+        usize::from(limit.get()) + 1,
+        &mut state,
+        context,
+    )?;
     let records = read_extension_records(
         connection,
         metadata,
@@ -518,7 +648,7 @@ pub(crate) fn extensions_for_file(
         .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
 }
 
-fn read_extension_records(
+pub(super) fn read_extension_records(
     connection: &Connection,
     metadata: GenerationMetadata,
     ids: Vec<FactId>,
@@ -530,8 +660,7 @@ fn read_extension_records(
     records
         .try_reserve_exact(ids.len())
         .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
-    let mut encoded_bytes = 0_u64;
-    let mut sources = state.sources.values().cloned().collect::<BTreeSet<_>>();
+    state.seed_extension_sources(context)?;
     let mut statement = connection
         .prepare(
             "SELECT extension_id, repository_id, generation_id, provenance_id, payload
@@ -556,15 +685,11 @@ fn read_extension_records(
         let ValueRef::Text(encoded) = row.get_ref(4).map_err(CatalogError::sqlite)? else {
             return Err(CatalogError::new(CatalogErrorKind::Corrupt));
         };
-        encoded_bytes = encoded_bytes
-            .checked_add(
-                u64::try_from(encoded.len())
-                    .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
-            )
-            .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
-        context
-            .require(GenerationResource::EncodedTextBytes, encoded_bytes)
-            .map_err(CatalogError::control)?;
+        state.observe_encoded(
+            u64::try_from(encoded.len())
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
+            context,
+        )?;
         // Borrow SQLite's encoded cell; only this bounded page's decoded envelopes survive.
         let record =
             decode_extension_envelope_with_checkpoint(encoded, &IrLimits::default(), || {
@@ -601,16 +726,7 @@ fn read_extension_records(
         }
         if let Some(source) = &record.evidence.source {
             require_owner(metadata, source.repository(), source.generation())?;
-            if sources.insert(source.clone()) {
-                state.observe_row(context)?;
-                context
-                    .require(
-                        GenerationResource::SourceReferences,
-                        u64::try_from(sources.len())
-                            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?,
-                    )
-                    .map_err(CatalogError::control)?;
-            }
+            state.observe_extension_source(source, true, context)?;
         }
         for _ in &record.evidence.derivation {
             context.check().map_err(CatalogError::control)?;
@@ -634,7 +750,7 @@ fn fixed_blob<const N: usize>(row: &Row<'_>, column: usize) -> Result<[u8; N], C
         .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))
 }
 
-fn read_file(
+pub(super) fn read_file(
     connection: &Connection,
     metadata: GenerationMetadata,
     id: FileId,
