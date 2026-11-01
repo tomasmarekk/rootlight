@@ -1,6 +1,7 @@
 //! Reads selected normalized facts directly from a sealed generation oracle.
-//! Stable-ID pagination bypasses lexical projection and public query budgets;
-//! this diagnostic does not index sources or prove whole-language completeness.
+//! Stable-ID graph reads and bounded typed RDF file reads preserve source evidence.
+//! This diagnostic bypasses lexical projection; it does not index sources or
+//! prove whole-language completeness.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -16,6 +17,10 @@ use rootlight_ids::{FactId, FileId, GenerationId, RepositoryId, SymbolId};
 use rootlight_ir::{
     EntityRecord, FactEvidence, FileRecord, OccurrenceRecord, ProvenanceRecord, RelationEndpoint,
     RelationRecord, SourceRef,
+};
+use rootlight_query::{
+    QueryBudget, RdfStatementPage, RdfStatementReadError, RdfStatementReadRequest,
+    read_rdf_statement_page,
 };
 use rootlight_storage::{
     GenerationBudget, GenerationContext, GenerationMetadata, GenerationReadLimit, GenerationReader,
@@ -33,6 +38,8 @@ const MAX_WITNESS_FILES: usize = 512;
 const MAX_OCCURRENCES: usize = 16_384;
 const MAX_RELATIONS: usize = 32_768;
 const MAX_PROVENANCE: usize = 32_768;
+const MAX_RDF_STATEMENTS: usize = 16_384;
+const MAX_RDF_EXTENSIONS: usize = 32_768;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 struct Arguments {
@@ -171,6 +178,23 @@ struct RelationRead {
 }
 
 #[derive(Serialize)]
+struct RdfStatementRead {
+    file: FileId,
+    page_size: u16,
+    total_file_extensions: u64,
+    scanned_file_extensions: u64,
+    returned_statements: u64,
+    pages: Vec<RdfStatementPage>,
+    complete: bool,
+}
+
+#[derive(Serialize)]
+struct RdfStatementOmission {
+    file: FileId,
+    reason: &'static str,
+}
+
+#[derive(Serialize)]
 struct Report {
     schema: &'static str,
     metadata: Value,
@@ -185,6 +209,10 @@ struct Report {
     provenance: Vec<ProvenanceRecord>,
     occurrence_reads: Vec<OccurrenceRead>,
     relation_reads: Vec<RelationRead>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rdf_statement_reads: Vec<RdfStatementRead>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rdf_statement_omissions: Vec<RdfStatementOmission>,
     counts: Value,
     diagnostic_limits: Value,
     qualification: Value,
@@ -380,6 +408,93 @@ impl Inspection<'_, '_> {
         }
         map_values(records)
     }
+
+    fn rdf_statements(&mut self, file: FileId) -> DiagnosticResult<Option<RdfStatementRead>> {
+        let limit = GenerationReadLimit::default();
+        let mut request = RdfStatementReadRequest::new(
+            self.metadata.repository(),
+            self.metadata.generation(),
+            file,
+            limit,
+        );
+        let mut total = None;
+        let mut scanned = 0u64;
+        let mut returned = 0u64;
+        let mut after = None;
+        let mut pages = Vec::new();
+        loop {
+            self.context.check()?;
+            let page = match read_rdf_statement_page(
+                self.reader,
+                request,
+                &self.context,
+                QueryBudget::default(),
+            ) {
+                Ok(page) => page,
+                Err(RdfStatementReadError::IndexedFileReadUnsupported) if pages.is_empty() => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if page.scope() != "file_extensions"
+                || page.total_extensions() > u64::try_from(MAX_RDF_EXTENSIONS)?
+                || total.is_some_and(|old| old != page.total_extensions())
+            {
+                return Err("RDF indexed page total or scope is inconsistent".into());
+            }
+            total = Some(page.total_extensions());
+            scanned = scanned
+                .checked_add(page.scanned_extensions())
+                .ok_or("RDF scanned count overflow")?;
+            returned = returned
+                .checked_add(u64::try_from(page.statements().len())?)
+                .ok_or("RDF statement count overflow")?;
+            if returned > u64::try_from(MAX_RDF_STATEMENTS)? || scanned > page.total_extensions() {
+                return Err("RDF diagnostic bound or page total exceeded".into());
+            }
+            for record in page.statements() {
+                let statement = record.statement();
+                self.source(statement.source())?;
+                for term in [
+                    statement.subject(),
+                    statement.predicate(),
+                    statement.object(),
+                ] {
+                    self.source(term.source())?;
+                }
+                self.provenance_ids.insert(record.provenance());
+            }
+            let complete = page.range_complete();
+            let cursor = page.next_cursor();
+            if complete {
+                if cursor.is_some() || scanned != page.total_extensions() {
+                    return Err("RDF complete pages did not conserve the file total".into());
+                }
+            } else if page.scanned_extensions() == 0
+                || scanned >= page.total_extensions()
+                || cursor.is_none()
+                || after.is_some_and(|previous| cursor.is_some_and(|cursor| cursor <= previous))
+            {
+                return Err("RDF indexed continuation did not advance".into());
+            }
+            self.charge(&page)?;
+            pages.try_reserve(1)?;
+            pages.push(page);
+            if complete {
+                return Ok(Some(RdfStatementRead {
+                    file,
+                    page_size: limit.get(),
+                    total_file_extensions: total.ok_or("RDF total missing")?,
+                    scanned_file_extensions: scanned,
+                    returned_statements: returned,
+                    pages,
+                    complete: true,
+                }));
+            }
+            after = cursor;
+            request = request.with_after(cursor.ok_or("RDF cursor missing")?);
+        }
+    }
 }
 
 fn inspect(
@@ -405,12 +520,29 @@ fn inspect(
         encoded: CountingWriter::new(MAX_OUTPUT_BYTES),
     };
     let mut occurrence_reads = Vec::new();
+    let mut rdf_statement_reads = Vec::new();
+    let mut rdf_statement_omissions = Vec::new();
     for &file in &arguments.files {
         inspection.require_file(file)?;
         let receipt = inspection.occurrences(file)?;
         inspection.charge(&receipt)?;
         occurrence_reads.try_reserve(1)?;
         occurrence_reads.push(receipt);
+        if inspection
+            .files
+            .get(&file)
+            .is_some_and(|file| file.language == "ntriples")
+        {
+            if let Some(read) = inspection.rdf_statements(file)? {
+                rdf_statement_reads.try_reserve(1)?;
+                rdf_statement_reads.push(read);
+            } else {
+                rdf_statement_omissions.push(RdfStatementOmission {
+                    file,
+                    reason: "indexed_file_extensions_unsupported",
+                });
+            }
+        }
     }
     let mut entities = Vec::new();
     let mut missing_entity_ids = Vec::new();
@@ -490,8 +622,14 @@ fn inspect(
         "unique_relations":inspection.relations.len(),
         "direct_provenance_records":provenance.len(),
         "occurrence_reads":occurrence_reads.len(),
-        "relation_reads":relation_reads.len()
+        "relation_reads":relation_reads.len(),
+        "rdf_statements":rdf_statement_reads.iter().map(|read|read.returned_statements).sum::<u64>(),
+        "rdf_statement_reads":rdf_statement_reads.len(),
+        "rdf_statement_omissions":rdf_statement_omissions.len()
     });
+    let rdf_complete =
+        rdf_statement_omissions.is_empty() && rdf_statement_reads.iter().all(|read| read.complete);
+    let rdf_executed = !rdf_statement_reads.is_empty();
     Ok(Report {
         schema: "rootlight-snapshot-facts-diagnostic/1",
         metadata: metadata_json(metadata),
@@ -506,21 +644,26 @@ fn inspect(
         provenance,
         occurrence_reads,
         relation_reads,
+        rdf_statement_reads,
+        rdf_statement_omissions,
         counts,
         diagnostic_limits: json!({
             "selected_files":MAX_SELECTED_FILES,"selected_entities":MAX_SELECTED_ENTITIES,
             "witness_files":MAX_WITNESS_FILES,"occurrences":MAX_OCCURRENCES,
             "unique_relations":MAX_RELATIONS,"provenance":MAX_PROVENANCE,
+            "rdf_statements":MAX_RDF_STATEMENTS,"rdf_file_extensions":MAX_RDF_EXTENSIONS,
             "output_bytes":MAX_OUTPUT_BYTES,"deadline_seconds":null,
             "production_limits_changed":false
         }),
         qualification: json!({
-            "selected_reads_complete":true,"metadata_unchanged":true,
+            "selected_reads_complete":rdf_complete,"metadata_unchanged":true,
             "stable_id_cursor_and_count_conservation_checked":true,
             "source_refs_checked_against_native_files":true,
             "source_bytes_read":false,"provenance_scope":"direct_selected_records_not_recursive_derivation_closure",
             "full_generation_identity_rederived":false,"database_bytes_pinned":false,
             "query_projection_executed":false,"sources_indexed":false,
+            "typed_rdf_query_executed":rdf_executed,"rdf_statement_reads_complete":rdf_complete,
+            "rdf_statement_scope":"selected_native_ntriples_files_only",
             "source_code_executed":false,"public_queries_qualified":false,
             "installed_mcp_qualified":false,"full_semantic_completeness_proven":false
         }),

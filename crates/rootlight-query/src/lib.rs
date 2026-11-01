@@ -9,6 +9,7 @@
 mod conditional_activity;
 mod model;
 mod projection;
+mod rdf_statement;
 mod service;
 mod source_metadata_quote;
 mod source_text;
@@ -58,6 +59,10 @@ pub use projection::{
     project_scoped_lexical_documents_with_source, project_source_document_with_full_terms,
     project_source_fallback_document, project_source_fallback_document_with_text_limit,
     project_source_metadata_document,
+};
+pub use rdf_statement::{
+    RdfStatementPage, RdfStatementReadError, RdfStatementReadRequest, RdfStatementReadUsage,
+    RdfStatementRecord, read_rdf_statement_global_page, read_rdf_statement_page,
 };
 pub use service::QueryService;
 pub use source_metadata_quote::{
