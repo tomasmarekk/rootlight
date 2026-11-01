@@ -5,13 +5,15 @@
 use super::*;
 use crate::source_read_operation::OperationWork;
 use crate::{
-    AnalysisProfileGuard, AnalysisProfilePhase, current_cancellation, profile_analysis_phase,
+    AnalysisProfileGuard, AnalysisProfilePhase, AnalysisProfileScopeExit, analysis_profile_enabled,
+    current_cancellation, profile_analysis_phase, record_analysis_profile_elapsed,
 };
-use rootlight_vfs::platform::PlatformFileIdentity;
+use rootlight_vfs::platform::{PlatformFileIdentity, PrivateRangeReadPhase};
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
 use std::io::Write as _;
+use std::time::Duration;
 
 pub(crate) struct ReadOperationDescriptor {
     manifest: ContentHash,
@@ -152,6 +154,7 @@ impl DurableCatalog {
             bytes,
             work,
             cancellation,
+            None,
         )?;
         work.charge(bytes, cancellation)?;
         if hash_cancellable(&encoded, cancellation)?
@@ -282,6 +285,7 @@ impl PackedReadOperation {
                     pack_bytes,
                     work,
                     cancellation,
+                    Some(file.id),
                 )
             )?;
             let profile = AnalysisProfileGuard::begin(
@@ -446,15 +450,28 @@ fn collect_exact(
     expected: u64,
     work: &OperationWork,
     cancellation: &Cancellation,
+    profile_file: Option<FileId>,
 ) -> Result<Vec<u8>, FirstSliceError> {
     work.charge(expected, cancellation)?;
     let count = usize::try_from(expected).map_err(|_| FirstSliceError::Limits)?;
     let mut bytes = Vec::new();
-    bytes
+    let allocation = profile_file.map(|file| {
+        AnalysisProfileGuard::begin(AnalysisProfilePhase::SourceReadPackedAllocation, Some(file))
+    });
+    let reserved = bytes
         .try_reserve_exact(count)
-        .map_err(|_| FirstSliceError::Retention)?;
+        .map_err(|_| FirstSliceError::Retention);
+    if let Some(allocation) = allocation {
+        allocation.finish();
+    }
+    reserved?;
+    let mut observe = |phase, elapsed| {
+        record_packed_read_phase(phase, profile_file, elapsed);
+    };
+    let observer = (profile_file.is_some() && analysis_profile_enabled())
+        .then_some(&mut observe as &mut dyn FnMut(PrivateRangeReadPhase, Duration));
     let actual = directory
-        .read_file_range_streamed_cancellable(
+        .read_file_range_streamed_cancellable_with_observer(
             name,
             expected,
             0..expected,
@@ -475,6 +492,7 @@ fn collect_exact(
                 }
                 Ok(())
             },
+            observer,
         )
         .map_err(map_private_read_error)?;
     if actual != expected || bytes.len() != count {
@@ -482,6 +500,34 @@ fn collect_exact(
     }
     check_cancellation(cancellation)?;
     Ok(bytes)
+}
+
+fn record_packed_read_phase(phase: PrivateRangeReadPhase, file: Option<FileId>, elapsed: Duration) {
+    let phase = match phase {
+        PrivateRangeReadPhase::ParentValidation => {
+            AnalysisProfilePhase::SourceReadPackedParentValidation
+        }
+        PrivateRangeReadPhase::OpenFile => AnalysisProfilePhase::SourceReadPackedOpenFile,
+        PrivateRangeReadPhase::InitialAccessPolicy => {
+            AnalysisProfilePhase::SourceReadPackedInitialAccessPolicy
+        }
+        PrivateRangeReadPhase::InitialMetadata => {
+            AnalysisProfilePhase::SourceReadPackedInitialMetadata
+        }
+        PrivateRangeReadPhase::Seek => AnalysisProfilePhase::SourceReadPackedSeek,
+        PrivateRangeReadPhase::PayloadRead => AnalysisProfilePhase::SourceReadPackedPayloadRead,
+        PrivateRangeReadPhase::Visitor => AnalysisProfilePhase::SourceReadPackedVisitor,
+        PrivateRangeReadPhase::FinalAccessPolicy => {
+            AnalysisProfilePhase::SourceReadPackedFinalAccessPolicy
+        }
+        PrivateRangeReadPhase::FinalMetadata => AnalysisProfilePhase::SourceReadPackedFinalMetadata,
+    };
+    record_analysis_profile_elapsed(
+        phase,
+        file,
+        elapsed,
+        AnalysisProfileScopeExit::ExpressionReturned,
+    );
 }
 
 fn hash_cancellable(

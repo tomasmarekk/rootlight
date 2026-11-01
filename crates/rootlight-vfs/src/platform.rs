@@ -45,6 +45,32 @@ pub fn known_user_folder(folder: KnownUserFolder) -> io::Result<std::path::PathB
 /// Maximum platform name units accepted for one private-tree entry.
 pub const MAX_PRIVATE_NAME_UNITS: usize = 255;
 
+/// Completed stages of an exact private-file range read.
+///
+/// Payload and visitor durations aggregate all chunks. Access-policy stages are
+/// emitted only on platforms with a separate retained-handle policy check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateRangeReadPhase {
+    /// Validate the retained parent directory and its private ownership.
+    ParentValidation,
+    /// Open the selected file without following links.
+    OpenFile,
+    /// Check the initial retained-handle access policy.
+    InitialAccessPolicy,
+    /// Validate initial file metadata, identity, ownership and exact length.
+    InitialMetadata,
+    /// Seek to the selected range start.
+    Seek,
+    /// Read the selected payload bytes, aggregated across chunks.
+    PayloadRead,
+    /// Deliver payload bytes to the visitor, aggregated across chunks.
+    Visitor,
+    /// Recheck the final retained-handle access policy.
+    FinalAccessPolicy,
+    /// Recheck final file metadata, identity, ownership and exact length.
+    FinalMetadata,
+}
+
 /// Exact platform object identity observed through a retained handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlatformFileIdentity {
@@ -308,6 +334,35 @@ impl<'parent> PrivateDirectory<'parent> {
         cancellation: &Cancellation,
         visitor: impl FnMut(u64, &[u8]) -> Result<(), PlatformError>,
     ) -> Result<u64, PlatformError> {
+        self.read_file_range_streamed_cancellable_with_observer(
+            name,
+            expected_file_bytes,
+            range,
+            cancellation,
+            visitor,
+            None,
+        )
+    }
+
+    /// Streams an exact range with optional diagnostic timing of attempted stages.
+    ///
+    /// This preserves [`Self::read_file_range_streamed_cancellable`] semantics.
+    /// The observer receives at most one duration per phase after the operation,
+    /// including a stage that returned an error. No clocks are read when absent.
+    /// Observation does not establish content authenticity or select read policy.
+    ///
+    /// # Errors
+    /// Returns the same typed read errors as the unobserved method. Observer
+    /// callbacks are diagnostic and run even when the read returns an error.
+    pub fn read_file_range_streamed_cancellable_with_observer(
+        &self,
+        name: &OsStr,
+        expected_file_bytes: u64,
+        range: std::ops::Range<u64>,
+        cancellation: &Cancellation,
+        visitor: impl FnMut(u64, &[u8]) -> Result<(), PlatformError>,
+        observer: Option<&mut dyn FnMut(PrivateRangeReadPhase, std::time::Duration)>,
+    ) -> Result<u64, PlatformError> {
         let name = PrivateName::parse(name)?;
         os::read_file_range_streamed_with_check(
             self.inner(),
@@ -320,6 +375,7 @@ impl<'parent> PrivateDirectory<'parent> {
                     .map_err(|cancelled| PlatformError::Cancelled(cancelled.reason()))
             },
             visitor,
+            observer,
         )
     }
 
@@ -1032,6 +1088,102 @@ mod tests {
                 payload[usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap()]
             );
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_observer_aggregates_chunks_and_authenticates_empty_ranges() {
+        let payload: Vec<_> = (0..os::PRIVATE_FILE_READ_CHUNK_BYTES * 2 + 17)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
+        let length = u64::try_from(payload.len()).unwrap();
+        let (_temporary, directory) = private_payload(&payload);
+        for range in [1..length, 0..0, length..length] {
+            let mut observed = Vec::new();
+            let mut staged = Vec::new();
+            let mut calls = 0;
+            let count = directory
+                .read_file_range_streamed_cancellable_with_observer(
+                    OsStr::new("payload"),
+                    length,
+                    range.clone(),
+                    &Cancellation::new(),
+                    |offset, bytes| {
+                        assert_eq!(offset, range.start + u64::try_from(staged.len()).unwrap());
+                        calls += 1;
+                        staged.extend_from_slice(bytes);
+                        Ok(())
+                    },
+                    Some(&mut |phase, elapsed| observed.push((phase, elapsed))),
+                )
+                .unwrap();
+            assert_eq!(count, range.end - range.start);
+            assert_eq!(
+                staged,
+                payload[usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap()]
+            );
+            let phases: Vec<_> = observed.iter().map(|(phase, _)| *phase).collect();
+            let mut expected = vec![
+                PrivateRangeReadPhase::ParentValidation,
+                PrivateRangeReadPhase::OpenFile,
+            ];
+            #[cfg(any(windows, target_os = "macos"))]
+            expected.push(PrivateRangeReadPhase::InitialAccessPolicy);
+            expected.extend([
+                PrivateRangeReadPhase::InitialMetadata,
+                PrivateRangeReadPhase::Seek,
+            ]);
+            if range.is_empty() {
+                assert_eq!(calls, 0);
+            } else {
+                assert!(calls >= 3);
+                expected.extend([
+                    PrivateRangeReadPhase::PayloadRead,
+                    PrivateRangeReadPhase::Visitor,
+                ]);
+            }
+            #[cfg(any(windows, target_os = "macos"))]
+            expected.push(PrivateRangeReadPhase::FinalAccessPolicy);
+            expected.push(PrivateRangeReadPhase::FinalMetadata);
+            assert_eq!(phases, expected);
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn streamed_private_range_observer_retains_failed_stage_and_original_error() {
+        let (_temporary, directory) = private_payload(b"payload");
+        let mut phases = Vec::new();
+        let wrong_length = directory.read_file_range_streamed_cancellable_with_observer(
+            OsStr::new("payload"),
+            8,
+            0..1,
+            &Cancellation::new(),
+            |_, _| panic!("metadata rejection precedes visitor output"),
+            Some(&mut |phase, _| phases.push(phase)),
+        );
+        assert!(matches!(wrong_length, Err(PlatformError::SecurityPolicy)));
+        assert_eq!(phases.last(), Some(&PrivateRangeReadPhase::InitialMetadata));
+        assert!(!phases.contains(&PrivateRangeReadPhase::PayloadRead));
+        phases.clear();
+        let visitor_error = directory.read_file_range_streamed_cancellable_with_observer(
+            OsStr::new("payload"),
+            7,
+            0..7,
+            &Cancellation::new(),
+            |_, _| Err(PlatformError::ResourceLimit),
+            Some(&mut |phase, _| phases.push(phase)),
+        );
+        assert!(matches!(visitor_error, Err(PlatformError::ResourceLimit)));
+        assert_eq!(phases.last(), Some(&PrivateRangeReadPhase::Visitor));
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|phase| **phase == PrivateRangeReadPhase::PayloadRead)
+                .count(),
+            1
+        );
+        assert!(!phases.contains(&PrivateRangeReadPhase::FinalMetadata));
     }
 
     #[cfg(any(unix, windows))]

@@ -8,10 +8,10 @@ use std::{fs, time::Instant};
 use tempfile::TempDir;
 
 struct Fixture {
+    service: FirstSliceService,
     _storage: TempDir,
     root: TempDir,
     paths: RuntimePaths,
-    service: FirstSliceService,
     receipt: FirstSliceIndexReceipt,
     references: Vec<SourceRef>,
 }
@@ -381,6 +381,122 @@ fn cold_reopen_reads_historical_multi_member_packs_above_the_new_write_target() 
             Some(usize::try_from(payload_bytes).unwrap())
         );
     }
+}
+
+#[test]
+fn packed_read_phase_profile_preserves_cold_cached_failed_and_lossy_reads() {
+    let fixture = fixture();
+    let cancellation = deadline();
+    let selected = part(&alpha(&fixture), 0, 8);
+    let original = fs::read(fixture.root.path().join("alpha.rs")).unwrap();
+    let mut names = vec![
+        "source_read_packed_allocation",
+        "source_read_packed_parent_validation",
+        "source_read_packed_open_file",
+    ];
+    #[cfg(any(windows, target_os = "macos"))]
+    names.push("source_read_packed_initial_access_policy");
+    names.extend([
+        "source_read_packed_initial_metadata",
+        "source_read_packed_seek",
+        "source_read_packed_payload_read",
+        "source_read_packed_visitor",
+    ]);
+    #[cfg(any(windows, target_os = "macos"))]
+    names.push("source_read_packed_final_access_policy");
+    names.push("source_read_packed_final_metadata");
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    for cold in [true, false] {
+        let (result, profile) = capture_first_slice_analysis_profile(|| {
+            operation.read(
+                vec![selected.clone()],
+                options(),
+                FirstSliceBudget::new(),
+                |actual| {
+                    assert_eq!(actual.data.chunks[0].bytes, original[..8]);
+                    assert_eq!(actual.data.chunks[0].reference, selected);
+                    Ok(())
+                },
+            )
+        });
+        result.unwrap();
+        assert!(profile.events_complete && profile.counts_complete);
+        let encoded = serde_json::to_value(profile).unwrap();
+        let events = encoded["phases"].as_array().unwrap();
+        for name in &names {
+            let matching: Vec<_> = events
+                .iter()
+                .filter(|event| event["phase"] == *name)
+                .collect();
+            assert_eq!(matching.len(), usize::from(cold), "{name}");
+            for event in matching {
+                assert_eq!(event["file"], selected.span().file().to_string());
+                assert!(event["wall_micros"].is_number());
+                assert_eq!(event["scope_exit"], "expression_returned");
+            }
+        }
+        assert_eq!(
+            operation.owner.as_ref().unwrap().reader.counters(),
+            (1, 1, 0)
+        );
+    }
+    drop(operation);
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    let (result, lossy) = capture_first_slice_analysis_profile(|| {
+        with_analysis_profile(|profile| profile.reject_event_reservation = true);
+        operation.read(
+            vec![selected.clone()],
+            options(),
+            FirstSliceBudget::new(),
+            |actual| {
+                assert_eq!(actual.data.chunks[0].bytes, original[..8]);
+                Ok(())
+            },
+        )
+    });
+    result.unwrap();
+    assert!(!lossy.events_complete);
+    assert!(lossy.dropped_events >= u64::try_from(names.len()).unwrap());
+    assert!(lossy.phases.is_empty());
+    drop(operation);
+    let mut operation = fixture
+        .service
+        .source_read_operation(fixture.receipt.generation, limits(), &cancellation)
+        .unwrap()
+        .unwrap();
+    let pack = generation_path(&fixture).join("sources/pack-00000000.bin");
+    let mut bytes = fs::read(&pack).unwrap();
+    bytes.push(0);
+    fs::write(pack, bytes).unwrap();
+    let (result, failed) = capture_first_slice_analysis_profile(|| {
+        operation.read(vec![selected], options(), FirstSliceBudget::new(), |_| {
+            panic!("wrong-length packed bytes remain provisional")
+        })
+    });
+    assert_eq!(result.unwrap_err(), FirstSliceError::CatalogCorrupt);
+    assert!(failed.events_complete && failed.counts_complete);
+    let encoded = serde_json::to_value(failed).unwrap();
+    let events = encoded["phases"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["phase"] == "source_read_packed_initial_metadata")
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|event| {
+        event["phase"] != "source_read_packed_payload_read"
+            && event["phase"] != "source_read_packed_verification"
+    }));
+    drop(operation);
 }
 
 #[test]

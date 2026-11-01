@@ -464,6 +464,16 @@ enum AnalysisProfilePhase {
     SourceReadStreamedSnapshot,
     SourceReadPackedSnapshot,
     SourceReadPackedLoad,
+    SourceReadPackedAllocation,
+    SourceReadPackedParentValidation,
+    SourceReadPackedOpenFile,
+    SourceReadPackedInitialAccessPolicy,
+    SourceReadPackedInitialMetadata,
+    SourceReadPackedSeek,
+    SourceReadPackedPayloadRead,
+    SourceReadPackedVisitor,
+    SourceReadPackedFinalAccessPolicy,
+    SourceReadPackedFinalMetadata,
     SourceReadPackedVerification,
     SourceReadPreparedUtf8,
     SourceReadQueryOpen,
@@ -915,21 +925,30 @@ impl AnalysisProfileGuard {
         let Some(started) = self.started.take() else {
             return;
         };
-        let event = AnalysisProfileEvent {
-            phase: self.phase,
-            file: self.file,
-            wall_micros: started.elapsed().as_micros(),
-            scope_exit,
-        };
-        with_analysis_profile(|profile| {
-            if !profile.reserve_event() {
-                profile.events_complete = false;
-                increment_profile_count(&mut profile.dropped_events, &mut profile.counts_complete);
-            } else {
-                profile.phases.push(event);
-            }
-        });
+        record_analysis_profile_elapsed(self.phase, self.file, started.elapsed(), scope_exit);
     }
+}
+
+fn record_analysis_profile_elapsed(
+    phase: AnalysisProfilePhase,
+    file: Option<FileId>,
+    elapsed: Duration,
+    scope_exit: AnalysisProfileScopeExit,
+) {
+    let event = AnalysisProfileEvent {
+        phase,
+        file,
+        wall_micros: elapsed.as_micros(),
+        scope_exit,
+    };
+    with_analysis_profile(|profile| {
+        if !profile.reserve_event() {
+            profile.events_complete = false;
+            increment_profile_count(&mut profile.dropped_events, &mut profile.counts_complete);
+        } else {
+            profile.phases.push(event);
+        }
+    });
 }
 
 impl Drop for AnalysisProfileGuard {
