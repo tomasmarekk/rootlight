@@ -8,7 +8,7 @@
 use std::{
     collections::BTreeSet,
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
 };
@@ -18,8 +18,9 @@ use rootlight_ids::{GenerationId, RepositoryId, SymbolId};
 use rootlight_query::{QueryResponse, SymbolExplainResult, SymbolRelationshipsResult};
 use rootlight_runtime::RuntimePaths;
 use rootlight_service::{
-    FirstSliceBudget, FirstSliceDeferredRestore, FirstSliceService, LocateMode, RelationDirection,
-    RelationFamily, SourceEncoding, SourceReadOptions, with_first_slice_locate_profile,
+    FirstSliceBudget, FirstSliceDeferredRestore, FirstSliceService, FirstSliceStoragePolicy,
+    LocateMode, RelationDirection, RelationFamily, SourceEncoding, SourceReadOptions,
+    with_first_slice_locate_profile,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -156,20 +157,85 @@ fn run_batch(
     result.and(footer)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let (args, mut profile) = if args.first().is_some_and(|arg| arg == "--profile") {
-        if args.len() != 6 || args.get(2).is_none_or(|arg| arg != "--batch") {
-            return Err("usage: reopen_query --profile OBSERVATIONS_JSONL --batch STATE_DIRECTORY REPOSITORY REQUESTS_JSONL".into());
+struct Arguments<'a> {
+    positional: &'a [OsString],
+    config: Option<&'a OsStr>,
+    profile: Option<&'a OsStr>,
+}
+
+fn arguments(mut args: &[OsString]) -> Result<Arguments<'_>, &'static str> {
+    let mut config = None;
+    let mut profile = None;
+    // Options stop at the mode/state argument, preserving flag-like query text.
+    while let Some(option) = args
+        .first()
+        .filter(|arg| *arg == "--config" || *arg == "--profile")
+    {
+        let value = args
+            .get(1)
+            .filter(|value| {
+                !value.is_empty()
+                    && (option == "--profile"
+                        || (*value != "--config" && *value != "--profile" && *value != "--batch"))
+            })
+            .ok_or("config/profile option requires a file path")?;
+        let slot = if option == "--config" {
+            &mut config
+        } else {
+            &mut profile
+        };
+        if slot.replace(value.as_os_str()).is_some() {
+            return Err("config/profile option must not be repeated");
         }
-        let output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(PathBuf::from(&args[1]))?;
-        (&args[2..], Some(output))
+        args = &args[2..];
+    }
+    if args.first().is_some_and(|arg| arg == "--batch") {
+        if args.len() != 4 {
+            return Err(
+                "usage: reopen_query [--config CONFIG_FILE] [--profile OBSERVATIONS_JSONL] --batch STATE_DIRECTORY REPOSITORY REQUESTS_JSONL",
+            );
+        }
     } else {
-        (&args[..], None)
-    };
+        if profile.is_some() {
+            return Err("profile requires batch mode");
+        }
+        paged_source_mode(args)?;
+    }
+    Ok(Arguments {
+        positional: args,
+        config,
+        profile,
+    })
+}
+
+fn read_config_policy(path: &OsStr) -> Result<FirstSliceStoragePolicy, Box<dyn Error>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(PathBuf::from(path))?
+        .take(u64::try_from(rootlight_config::MAX_CONFIG_LAYER_BYTES)? + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > rootlight_config::MAX_CONFIG_LAYER_BYTES {
+        return Err("configuration exceeds its read bound".into());
+    }
+    let contents = String::from_utf8(bytes)?;
+    Ok(FirstSliceStoragePolicy::resolve_user_config(
+        Some(&contents),
+        2,
+    )?)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let raw_args: Vec<_> = std::env::args_os().skip(1).collect();
+    let options = arguments(&raw_args)?;
+    let args = options.positional;
+    let mut profile = options
+        .profile
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(PathBuf::from(path))
+        })
+        .transpose()?;
     if args.first().is_some_and(|arg| arg == "--batch") {
         if args.len() != 4 {
             return Err(
@@ -180,7 +246,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let cancellation = Cancellation::new();
         let (mut service, repository, mut deferred) = if let Some(output) = profile.as_mut() {
             let started = std::time::Instant::now();
-            let result = open_service(&args[1], &args[2], &cancellation);
+            let result =
+                open_service_with_config(&args[1], &args[2], options.config, &cancellation);
             serde_json::to_writer(
                 &mut *output,
                 &json!({
@@ -193,7 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             output.flush()?;
             result?
         } else {
-            open_service(&args[1], &args[2], &cancellation)?
+            open_service_with_config(&args[1], &args[2], options.config, &cancellation)?
         };
         let mut stdout = std::io::stdout().lock();
         let mut attempted = 0_u64;
@@ -251,7 +318,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     request.validate()?;
     let cancellation = Cancellation::new();
-    let (mut service, repository, mut deferred) = open_service(&args[0], &args[1], &cancellation)?;
+    let (mut service, repository, mut deferred) =
+        open_service_with_config(&args[0], &args[1], options.config, &cancellation)?;
     let result = query_reopened(
         &mut service,
         &mut deferred,
@@ -264,6 +332,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(test)]
 fn open_service(
     state: &OsString,
     repository_root: &OsString,
@@ -276,6 +345,23 @@ fn open_service(
     ),
     Box<dyn Error>,
 > {
+    open_service_with_config(state, repository_root, None, cancellation)
+}
+
+fn open_service_with_config(
+    state: &OsString,
+    repository_root: &OsString,
+    config: Option<&OsStr>,
+    cancellation: &Cancellation,
+) -> Result<
+    (
+        FirstSliceService,
+        RepositoryId,
+        Option<FirstSliceDeferredRestore>,
+    ),
+    Box<dyn Error>,
+> {
+    let policy = config.map(read_config_policy).transpose()?;
     let state = std::fs::canonicalize(PathBuf::from(state))?;
     let repository_root = std::fs::canonicalize(PathBuf::from(repository_root))?;
     let paths = RuntimePaths::new(state.join("state"), state.join("runtime"))?;
@@ -283,7 +369,11 @@ fn open_service(
         return Err("durable state directory does not exist".into());
     }
     cancellation.check()?;
-    let (service, deferred) = FirstSliceService::open_durable_deferred(2, paths.state_dir())?;
+    let (service, deferred) = if let Some(policy) = policy {
+        FirstSliceService::open_durable_deferred_with_policy(policy, paths.state_dir())?
+    } else {
+        FirstSliceService::open_durable_deferred(2, paths.state_dir())?
+    };
     let repository = service
         .registered_repository_for_root(&repository_root, cancellation)?
         .ok_or("repository is not registered in the durable state")?;
@@ -547,7 +637,7 @@ fn query_existing(
 fn paged_source_mode(args: &[OsString]) -> Result<bool, &'static str> {
     if !(3..=5).contains(&args.len()) || (args.len() == 5 && args[4] != "--paged-source") {
         return Err(
-            "usage: reopen_query STATE_DIRECTORY REPOSITORY QUERY [PATH_PREFIX [--paged-source]]",
+            "usage: reopen_query [--config CONFIG_FILE] STATE_DIRECTORY REPOSITORY QUERY [PATH_PREFIX [--paged-source]]",
         );
     }
     if args.len() == 5 && args[3].is_empty() {
@@ -746,9 +836,275 @@ mod tests {
     use std::io::{self, BufRead, Read, Write};
 
     use super::{
-        QueryMode, QueryRequest, checked_call_evidence_total, next_batch_request,
-        paged_source_mode, plan_paged_source, query_existing, read_all_call_evidence, run_batch,
+        QueryMode, QueryRequest, arguments, checked_call_evidence_total, next_batch_request,
+        open_service_with_config, paged_source_mode, plan_paged_source, query_existing,
+        query_reopened, read_all_call_evidence, read_config_policy, run_batch,
     };
+
+    #[test]
+    fn config_options_preserve_normal_batch_profile_and_literal_query_arguments() {
+        for raw in [
+            "state repository --config",
+            "--config settings.toml state repository --config",
+            "--batch state repository requests.jsonl",
+            "--config settings.toml --batch state repository requests.jsonl",
+            "--profile observations.jsonl --batch state repository requests.jsonl",
+            "--profile observations.jsonl --config settings.toml --batch state repository requests.jsonl",
+            "--config settings.toml --profile observations.jsonl --batch state repository requests.jsonl",
+        ] {
+            let raw: Vec<_> = raw.split(' ').map(std::ffi::OsString::from).collect();
+            let options = arguments(&raw).unwrap();
+            assert_eq!(
+                options.config.is_some(),
+                raw.iter().any(|arg| arg == "settings.toml")
+            );
+            assert_eq!(
+                options.profile.is_some(),
+                raw.iter().any(|arg| arg == "observations.jsonl")
+            );
+            if options.positional[0] == "state" {
+                assert_eq!(options.positional[2], "--config");
+            } else {
+                assert_eq!(options.positional[0], "--batch");
+                assert_eq!(options.positional.len(), 4);
+            }
+        }
+        let raw = [
+            "--config",
+            "settings with spaces.toml",
+            "state",
+            "repository",
+            "query",
+        ]
+        .map(std::ffi::OsString::from);
+        assert_eq!(
+            arguments(&raw).unwrap().config.unwrap(),
+            "settings with spaces.toml"
+        );
+        let raw = [
+            "--profile",
+            "--observations.jsonl",
+            "--batch",
+            "state",
+            "repository",
+            "requests.jsonl",
+        ]
+        .map(std::ffi::OsString::from);
+        assert_eq!(
+            arguments(&raw).unwrap().profile.unwrap(),
+            "--observations.jsonl"
+        );
+        let raw = [
+            "--profile",
+            "--batch",
+            "--batch",
+            "state",
+            "repository",
+            "requests.jsonl",
+        ]
+        .map(std::ffi::OsString::from);
+        let options = arguments(&raw).unwrap();
+        assert_eq!(options.profile.unwrap(), "--batch");
+        assert_eq!(options.positional[0], "--batch");
+        for raw in [
+            "",
+            "--config",
+            "--config ",
+            "--config --batch state repository requests.jsonl",
+            "--config a --config b state repository query",
+            "--profile a --profile b --batch state repository requests.jsonl",
+            "--profile observations.jsonl state repository query",
+            "--config settings.toml --batch state repository",
+            "state repository query --config settings.toml",
+        ] {
+            let raw: Vec<_> = raw.split(' ').map(std::ffi::OsString::from).collect();
+            assert!(arguments(&raw).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_config_errors_never_fall_back_to_default_policy() {
+        let fixture = tempfile::tempdir().unwrap();
+        let config = fixture.path().join("settings.toml");
+        let cancellation = rootlight_cancel::Cancellation::new();
+        let state = fixture.path().as_os_str().to_os_string();
+        let missing = read_config_policy(config.as_os_str()).err().unwrap();
+        assert_eq!(
+            missing.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+        for bytes in [
+            b"version = [".to_vec(),
+            b"version = '1.3'\n\xff".to_vec(),
+            vec![b' '; rootlight_config::MAX_CONFIG_LAYER_BYTES + 1],
+        ] {
+            std::fs::write(&config, bytes).unwrap();
+            assert!(read_config_policy(config.as_os_str()).is_err());
+            assert!(
+                open_service_with_config(&state, &state, Some(config.as_os_str()), &cancellation)
+                    .is_err()
+            );
+        }
+        let contents = "version = '1.3'\n";
+        let mut bounded = contents.as_bytes().to_vec();
+        bounded.resize(rootlight_config::MAX_CONFIG_LAYER_BYTES, b' ');
+        std::fs::write(&config, bounded).unwrap();
+        assert!(read_config_policy(config.as_os_str()).is_ok());
+    }
+
+    #[test]
+    fn configured_custom_python_is_queryable_with_exact_source_after_reopen() {
+        use rootlight_cancel::Cancellation;
+        use rootlight_runtime::RuntimePaths;
+        use rootlight_service::{FirstSliceService, SourceEncoding, SourceReadOptions};
+
+        let storage = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let repository_root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let configuration = tempfile::tempdir().unwrap();
+        let config = configuration.path().join("settings.toml");
+        std::fs::write(
+            &config,
+            "version = '1.3'\n[storage]\nmaximum_repositories = 1\n[extensions.source-languages]\nversion = '1.0'\ncritical = true\n[extensions.source-languages.data.paths]\n'module.custom' = 'python'\n",
+        )
+        .unwrap();
+        let source = b"# configured source\ndef lantern():\n    return 7\n";
+        std::fs::write(repository_root.path().join("module.custom"), source).unwrap();
+        let paths = RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime"))
+            .unwrap();
+        paths.prepare_owner().unwrap();
+        let cancellation = Cancellation::new();
+        let request: QueryRequest = serde_json::from_value(serde_json::json!({
+            "query":"lantern", "path_prefix":"module.custom"
+        }))
+        .unwrap();
+        let (receipt, reference) = {
+            let mut service = FirstSliceService::new_durable_with_policy(
+                read_config_policy(config.as_os_str()).unwrap(),
+                paths.state_dir(),
+                &cancellation,
+            )
+            .unwrap();
+            let receipt = service
+                .index_repository(repository_root.path(), &cancellation)
+                .unwrap();
+            let reference = service
+                .inspect_generation(
+                    receipt.repository,
+                    Some(receipt.generation),
+                    &cancellation,
+                    |snapshot| {
+                        let files = &snapshot.document().files;
+                        assert_eq!(files.len(), 1);
+                        assert_eq!(files[0].path, "module.custom");
+                        assert_eq!(files[0].language, "python");
+                        files[0].evidence.source.clone().unwrap()
+                    },
+                )
+                .unwrap();
+            let located =
+                query_existing(&service, receipt.repository, &request, false, &cancellation)
+                    .unwrap();
+            assert!(!located["details"].as_array().unwrap().is_empty());
+            let read = service
+                .source_read(receipt.generation, vec![reference.clone()], &cancellation)
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, source);
+            (receipt, reference)
+        };
+        for batch in [false, true] {
+            let mut raw = vec!["--config".into(), config.clone().into_os_string()];
+            if batch {
+                raw.push("--batch".into());
+            }
+            raw.push(storage.path().as_os_str().to_os_string());
+            raw.push(repository_root.path().as_os_str().to_os_string());
+            raw.push(if batch { "requests.jsonl" } else { "lantern" }.into());
+            let options = arguments(&raw).unwrap();
+            let positional = options.positional;
+            let start = usize::from(batch);
+            let (mut service, repository, mut deferred) = open_service_with_config(
+                &positional[start],
+                &positional[start + 1],
+                options.config,
+                &cancellation,
+            )
+            .unwrap();
+            assert_eq!(repository, receipt.repository);
+            assert_eq!(
+                service
+                    .support_inventory_snapshot_without_storage_scan()
+                    .unwrap()
+                    .repository_capacity
+                    .configured_maximum_repositories,
+                1
+            );
+            assert!(deferred.is_some());
+            if batch {
+                let raw = serde_json::to_vec(&request).unwrap();
+                let mut output = Vec::new();
+                run_batch(&mut std::io::Cursor::new(raw), &mut output, |request| {
+                    query_reopened(
+                        &mut service,
+                        &mut deferred,
+                        repository,
+                        request,
+                        false,
+                        &cancellation,
+                    )
+                })
+                .unwrap();
+                let rows = output_records(&output);
+                assert!(!rows[0]["result"]["details"].as_array().unwrap().is_empty());
+                assert_eq!(rows[1]["complete"], true);
+                assert_eq!(rows[1]["completed_requests"], 1);
+            } else {
+                let result = query_reopened(
+                    &mut service,
+                    &mut deferred,
+                    repository,
+                    &request,
+                    false,
+                    &cancellation,
+                )
+                .unwrap();
+                assert!(!result["details"].as_array().unwrap().is_empty());
+            }
+            assert!(deferred.is_none());
+            assert_eq!(
+                service
+                    .resolve_generation(repository, None)
+                    .unwrap()
+                    .generation,
+                receipt.generation
+            );
+            assert_eq!(
+                service
+                    .source_file_language_until(
+                        receipt.generation,
+                        reference.span().file(),
+                        &cancellation
+                    )
+                    .unwrap()
+                    .as_str(),
+                "python"
+            );
+            let read = service
+                .source_read_with_options_and_budget(
+                    receipt.generation,
+                    vec![reference.clone()],
+                    SourceReadOptions::new()
+                        .with_context_lines_before(0)
+                        .with_context_lines_after(0)
+                        .with_encoding(SourceEncoding::Bytes),
+                    rootlight_service::FirstSliceBudget::default(),
+                    &cancellation,
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks.len(), 1);
+            assert_eq!(read.data.chunks[0].reference, reference);
+            assert_eq!(read.data.chunks[0].bytes, source);
+        }
+    }
 
     fn output_records(output: &[u8]) -> Vec<serde_json::Value> {
         output
